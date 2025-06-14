@@ -1,0 +1,216 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="OpcUaMethodCallRequestItem" Id="{1ce9736d-a860-43ea-b628-99cef6edb8d1}" SpecialFunc="None">
+    <Declaration><![CDATA[{attribute 'enable_dynamic_creation'}	
+FUNCTION_BLOCK OpcUaMethodCallRequestItem EXTENDS OpcUaRequestItem
+VAR
+	_ClassName : STRING := __POUNAME();
+
+	_ObjectNamespaceUri : STRING(Tc2_System.MAX_STRING_LENGTH);
+	_ObjectNodeId: Tc3_PLCopen_OpcUa.ST_UANodeID;		
+	_ObjectNamespaceIndexValid : BOOL;
+
+	_MethodNamespaceUri : STRING(Tc2_System.MAX_STRING_LENGTH);
+	_MethodNodeId: Tc3_PLCopen_OpcUa.ST_UANodeID;		
+	_MethodNamespaceIndexValid : BOOL;
+
+	_NumberOfReceivedBytesCount : POINTER TO UDINT;
+	
+	_GetMethodHandle : Tc3_PLCopen_OpcUa.UA_MethodGetHandle;
+	_MethodCall : Tc3_PLCopen_OpcUa.UA_MethodCall;
+	_ReleaseMethodHandle : Tc3_PLCopen_OpcUa.UA_MethodReleaseHandle;	
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[]]></ST>
+    </Implementation>
+    <Property Name="ClassName" Id="{0367600d-2c3d-4938-b800-22a3e07d4ddc}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+PROPERTY ClassName : STRING]]></Declaration>
+      <Get Name="Get" Id="{2e212076-844e-48a3-a008-0569d42bd65a}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ClassName := _ClassName;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="GetHandle" Id="{dcea29b7-b286-4c8e-9bda-1ac4ca8b53fa}">
+      <Declaration><![CDATA[METHOD GetHandle : OPC_UA_ACTION_EXECUTION_STATE
+VAR_INPUT
+	connectionHandle : DWORD;
+END_VAR
+VAR_OUTPUT
+	exception : Exception;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_ConnectionHandle := connectionHandle;
+
+GetHandle := OPC_UA_ACTION_EXECUTION_STATE.DONE;
+	
+IF NOT _ObjectNamespaceIndexValid THEN
+	ExceptionHelper.Throw(0, WStringHelper.Concat3("UA__GetMethodHandle error: invalid object namespace index for namespace '", TO_WSTRING(_ObjectNamespaceUri), "'"), __POUNAME(), ClassName, CurrentNamespace.Name, __POSITION());				
+	GetHandle := OPC_UA_ACTION_EXECUTION_STATE.ERROR;				
+	AdsLogger.LogMessage(LOGGING_LEVEL.INFORMATION, WStringHelper.Concat3("---OpcUaRequest GetNodeHandle error: invalid object namespace index for namespace '", TO_WSTRING(_ObjectNamespaceUri), "'"));
+ELSIF NOT _MethodNamespaceIndexValid THEN
+	ExceptionHelper.Throw(0, WStringHelper.Concat3("UA__GetMethodHandle error: invalid method namespace index for namespace '", TO_WSTRING(_MethodNamespaceUri), "'"), __POUNAME(), ClassName, CurrentNamespace.Name, __POSITION());				
+	GetHandle := OPC_UA_ACTION_EXECUTION_STATE.ERROR;				
+	AdsLogger.LogMessage(LOGGING_LEVEL.INFORMATION, WStringHelper.Concat3("---OpcUaRequest GetMethodHandle error: invalid method namespace index for namespace '", TO_WSTRING(_MethodNamespaceUri), "'"));
+ELSE
+	_GetMethodHandle(Execute := TRUE, ConnectionHdl := _ConnectionHandle, ObjectNodeID := _ObjectNodeId, MethodNodeID := _MethodNodeId);
+
+	IF _GetMethodHandle.Error THEN
+		ExceptionHelper.Throw(_GetMethodHandle.ErrorID, WStringHelper.Concat7("UA_GetMethodHandle error ", TO_WSTRING(_GetMethodHandle.ErrorID), " (ObjectNodeID='", TO_WSTRING(_ObjectNodeId.sIdentifier), "', MethodNodeID='", TO_WSTRING(_MethodNodeId.sIdentifier), "')"), __POUNAME(), ClassName, CurrentNamespace.Name, __POSITION());					
+		GetHandle := OPC_UA_ACTION_EXECUTION_STATE.ERROR;					
+		AdsLogger.LogMessage(LOGGING_LEVEL.INFORMATION, WStringHelper.Concat3("---OpcUaRequest GetMethodHandle error: ", "UA_GetMethodHandle error ", TO_WSTRING(_GetMethodHandle.ErrorID)));
+	ELSIF _GetMethodHandle.Busy THEN
+		GetHandle := OPC_UA_ACTION_EXECUTION_STATE.BUSY;			
+	END_IF
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="Initialize" Id="{8c789994-1dce-4457-a3d0-e13a3ea4b2b6}">
+      <Declaration><![CDATA[METHOD Initialize
+VAR_INPUT
+	objectNamespaceUri : STRING(Tc2_System.MAX_STRING_LENGTH); // empty string if index used
+	objectNamespaceIndex : UINT; // zero if namespace uri used
+	objectIdentifierType : Tc3_PLCopen_OpcUa.E_UAIdentifierType;
+	objectIdentifier : STRING(Tc2_System.MAX_STRING_LENGTH);	
+	methodNamespaceUri : STRING(Tc2_System.MAX_STRING_LENGTH); // empty string if index used
+	methodNamespaceIndex : UINT; // zero if namespace uri used
+	methodIdentifierType : Tc3_PLCopen_OpcUa.E_UAIdentifierType;
+	methodIdentifier : STRING(Tc2_System.MAX_STRING_LENGTH);
+	inputArgumentInfosAddress : POINTER TO ST_UAMethodArgInfo;
+	inputArgumentInfosSize : UDINT;
+	inputConstantArgumentsAddress : PVOID;
+	inputConstantArgumentsSize : UDINT;
+	inputDynamicArgumentsAddress : PVOID;
+	inputDynamicArgumentsSize : UDINT;
+	outputArgumentInfosAddress : POINTER TO ST_UAMethodArgInfo;
+	outputArgumentInfosSize : UDINT;
+	outputArgumentsInfoAndDataAddress : POINTER TO OPC_UA_OUTPUT_ARGUMENT_INFO_AND_DATA;
+	outputArgumentsInfoAndDataSize : UDINT;
+	numberOfReceivedBytesCount : POINTER TO UDINT;
+	operationTimeout : TIME := Tc2_System.DEFAULT_ADS_TIMEOUT;
+END_VAR
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF objectNamespaceUri <> '' THEN
+	_ObjectNamespaceUri := objectNamespaceUri;
+	_ObjectNodeId.nNamespaceIndex := 0;
+	_ObjectNamespaceIndexValid := FALSE;
+ELSE
+	_ObjectNamespaceUri := '';
+	_ObjectNodeId.nNamespaceIndex := objectNamespaceIndex;
+	_ObjectNamespaceIndexValid := TRUE;
+END_IF
+
+_ObjectNodeId.eIdentifierType := objectIdentifierType;
+_ObjectNodeId.sIdentifier := objectIdentifier;
+
+IF methodNamespaceUri <> '' THEN
+	_MethodNamespaceUri := methodNamespaceUri;
+	_MethodNodeId.nNamespaceIndex := 0;
+	_MethodNamespaceIndexValid := FALSE;
+ELSE
+	_MethodNamespaceUri := '';
+	_MethodNodeId.nNamespaceIndex := methodNamespaceIndex;
+	_MethodNamespaceIndexValid := TRUE;
+END_IF
+
+_MethodNodeId.eIdentifierType := methodIdentifierType;
+_MethodNodeId.sIdentifier := methodIdentifier;
+_MethodCall.nNumberOfInputArguments := inputArgumentInfosSize / SIZEOF(ST_UAMethodArgInfo);
+_MethodCall.pInputArgInfo := inputArgumentInfosAddress;
+_MethodCall.cbInputArgInfo := inputArgumentInfosSize;
+_MethodCall.pInputArgData := inputConstantArgumentsAddress;
+_MethodCall.cbInputArgData := inputConstantArgumentsSize;
+_MethodCall.pInputWriteData := inputDynamicArgumentsAddress;
+_MethodCall.cbInputWriteData := inputDynamicArgumentsSize;
+_MethodCall.nNumberOfOutputArguments := outputArgumentInfosSize / SIZEOF(ST_UAMethodArgInfo);
+_MethodCall.pOutputArgInfo := outputArgumentInfosAddress;
+_MethodCall.cbOutputArgInfo := outputArgumentInfosSize;
+_MethodCall.pOutputArgInfoAndData := outputArgumentsInfoAndDataAddress;
+_MethodCall.cbOutputArgInfoAndData := outputArgumentsInfoAndDataSize;
+
+_NumberOfReceivedBytesCount := numberOfReceivedBytesCount;
+
+_GetMethodHandle.Timeout := operationTimeout;
+_MethodCall.Timeout := operationTimeout;
+_ReleaseMethodHandle.Timeout := operationTimeout;
+]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="PerformAction" Id="{c63aaae3-f356-41fa-b31c-fc78704b0a15}">
+      <Declaration><![CDATA[METHOD PerformAction : OPC_UA_ACTION_EXECUTION_STATE
+VAR_OUTPUT
+	exception : Exception;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[PerformAction := OPC_UA_ACTION_EXECUTION_STATE.DONE;
+
+_MethodCall(Execute := TRUE, ConnectionHdl := _ConnectionHandle, MethodHdl := _GetMethodHandle.MethodHdl);
+		
+IF _MethodCall.Error THEN
+	ExceptionHelper.Throw(_GetMethodHandle.ErrorID, WStringHelper.Concat7("UA_MethodCall error ", TO_WSTRING(_MethodCall.ErrorID), " (ObjectNodeID='", TO_WSTRING(_ObjectNodeId.sIdentifier), "', MethodNodeID='", TO_WSTRING(_MethodNodeId.sIdentifier), "')"), __POUNAME(), ClassName, CurrentNamespace.Name, __POSITION());					
+	PerformAction := OPC_UA_ACTION_EXECUTION_STATE.ERROR;			
+	AdsLogger.LogMessage(LOGGING_LEVEL.INFORMATION, WStringHelper.Concat3("---OpcUaRequest PerformAction error: ", "UA_MethodCall error ", TO_WSTRING(_MethodCall.ErrorID)));
+ELSIF _MethodCall.Busy THEN
+	PerformAction := OPC_UA_ACTION_EXECUTION_STATE.BUSY;
+ELSIF _GetMethodHandle.Done AND_THEN _NumberOfReceivedBytesCount <> 0 THEN
+ 	_NumberOfReceivedBytesCount^ := _MethodCall.cbRead_R;
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="ReleaseHandle" Id="{8bc2bf16-99bf-488f-8bbf-846088c501ac}">
+      <Declaration><![CDATA[METHOD ReleaseHandle : OPC_UA_ACTION_EXECUTION_STATE
+VAR_OUTPUT
+	exception : Exception;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[ReleaseHandle := OPC_UA_ACTION_EXECUTION_STATE.DONE;
+	
+_ReleaseMethodHandle(Execute := TRUE, ConnectionHdl := _ConnectionHandle, MethodHdl := _GetMethodHandle.MethodHdl);
+
+IF _ReleaseMethodHandle.Error THEN
+	ExceptionHelper.Throw(_ReleaseMethodHandle.ErrorID, WCONCAT("UA_ReleaseMethodHandle error ", TO_WSTRING(_ReleaseMethodHandle.ErrorID)), __POUNAME(), ClassName, CurrentNamespace.Name, __POSITION());
+	ReleaseHandle := OPC_UA_ACTION_EXECUTION_STATE.ERROR;			
+	AdsLogger.LogMessage(LOGGING_LEVEL.INFORMATION, WStringHelper.Concat3("---OpcUaRequest ReleaseMethodHandle error: ", "UA_ReleaseMethodHandle error ", TO_WSTRING(_ReleaseMethodHandle.ErrorID)));
+ELSIF _ReleaseMethodHandle.Busy THEN
+	ReleaseHandle := OPC_UA_ACTION_EXECUTION_STATE.BUSY;			
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="Reset" Id="{1da02c69-4ec4-4da2-94d5-c953bf4b9a76}">
+      <Declaration><![CDATA[METHOD Reset ]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_GetMethodHandle(Execute := FALSE);
+ResetAction();
+_ReleaseMethodHandle(Execute := FALSE);
+]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="ResetAction" Id="{9e553769-2b03-4812-9c99-a1b35979b0ed}">
+      <Declaration><![CDATA[METHOD ResetAction ]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_MethodCall(Execute := FALSE);]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="SetNamespaceIndexForNamespaceUri" Id="{b904cfec-751c-4a67-94ed-ab556a660a02}">
+      <Declaration><![CDATA[METHOD SetNamespaceIndexForNamespaceUri
+VAR_INPUT
+	namespaceUri : STRING(Tc2_System.MAX_STRING_LENGTH);
+	namespaceIndex : UINT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF NOT _ObjectNamespaceIndexValid AND_THEN _ObjectNamespaceUri = namespaceUri THEN
+	_ObjectNodeId.nNamespaceIndex := namespaceIndex;
+	_ObjectNamespaceIndexValid := TRUE;					
+END_IF
+
+IF NOT _MethodNamespaceIndexValid AND_THEN _MethodNamespaceUri = namespaceUri THEN
+	_MethodNodeId.nNamespaceIndex := namespaceIndex;
+	_MethodNamespaceIndexValid := TRUE;					
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+  </POU>
+</TcPlcObject>

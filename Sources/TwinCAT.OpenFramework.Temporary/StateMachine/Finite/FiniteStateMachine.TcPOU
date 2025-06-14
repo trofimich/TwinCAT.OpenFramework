@@ -1,0 +1,268 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="FiniteStateMachine" Id="{46a42630-d590-4c61-a936-ff24f6fe15b0}" SpecialFunc="None">
+    <Declaration><![CDATA[{attribute 'no_explicit_call' := 'do not call this function block directly'} 
+FUNCTION_BLOCK ABSTRACT FiniteStateMachine EXTENDS ToolkitObject
+VAR_INPUT
+	{attribute 'OPC.UA.DA' := '0'}
+	RequestedCause : STRING;	
+
+	{attribute 'OPC.UA.DA.Access' := '1'}
+	CurrentState : REFERENCE TO ProgramState;
+	
+	{attribute 'OPC.UA.DA.Access' := '1'}
+	LastTransition : REFERENCE TO ProgramTransition;
+END_VAR
+VAR	
+	{attribute 'OPC.UA.DA' := '0'}
+	_AvailableStates : ARRAY [0..ProgramConstants.MaxStateCount - 1] OF POINTER TO ProgramState;
+
+	{attribute 'OPC.UA.DA' := '0'}
+	_AvailableTransitions : ARRAY [0..ProgramConstants.MaxTransitionCount - 1] OF POINTER TO ProgramTransition;
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[]]></ST>
+    </Implementation>
+    <Property Name="AvailableStateCount" Id="{7f82f0b1-1a38-44dd-8fcb-81e554b0bd8f}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+{attribute 'OPC.UA.DA.Property' := '1'}
+{attribute 'OPC.UA.DA.Access' := '1'}
+PROPERTY ABSTRACT AvailableStateCount : INT(0..ProgramConstants.MaxStateCount - 1)]]></Declaration>
+      <Get Name="Get" Id="{d621492e-0834-45ad-88da-0def6d8c680b}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="AvailableTransitionCount" Id="{e4058509-1760-4e88-8c5c-56a4afc7ea86}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+{attribute 'OPC.UA.DA.Property' := '1'}
+{attribute 'OPC.UA.DA.Access' := '1'}
+PROPERTY ABSTRACT AvailableTransitionCount : INT(0..ProgramConstants.MaxTransitionCount - 1)]]></Declaration>
+      <Get Name="Get" Id="{63b89544-6707-4fb6-b9e5-bc5e6c4022db}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="Clear" Id="{22f39385-f42e-422f-a8fc-8c9949c0fb8b}">
+      <Declaration><![CDATA[METHOD INTERNAL Clear]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[CurrentState REF= 0;
+LastTransition REF= 0;
+
+LastException.Clear();]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="CurrentStateName" Id="{a61af876-c532-43ab-8172-79dc679537c6}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+PROPERTY CurrentStateName : STRING]]></Declaration>
+      <Get Name="Get" Id="{2ce179fd-89b9-4c1e-83a0-477af5afc162}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[IF __ISVALIDREF(CurrentState) THEN
+	CurrentStateName := CurrentState.Name;
+END_IF]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="Execute" Id="{af01cb93-ef55-4cfa-a10b-02b09425e3d5}">
+      <Declaration><![CDATA[METHOD Execute
+VAR
+	newState : POINTER TO ProgramState;
+	newTransition : POINTER TO ProgramTransition;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[(*IF InTransition THEN
+	LastTransition.Execute();
+		
+	IF LastTransition.Error THEN
+		LastException := LastTransition.LastException;
+		exceptionSet.AddExisting(LastException);
+		RETURN;
+	ELSIF LastTransition.Busy THEN
+		Execute := TRUE;
+		RETURN;
+	ELSIF LastTransition.Done THEN
+		IF newState := GetStateByName(LastTransition.ToState) THEN
+			CurrentState REF= newState^;			
+			CurrentState.Enable();
+			
+			IF CurrentState.Error THEN				
+				LastException := CurrentState.LastException;
+				exceptionSet.AddExisting(LastException);
+				RETURN;
+			END_IF
+		ELSE
+			exceptionSet.AddExisting(LastException);
+			RETURN;
+		END_IF
+	ELSE
+		Last//exceptionFactory.ThrowException(__POSITION(), 0, WStringHelper.Concat3("CurrentTransition ", TO_WSTRING(LastTransition.Name), " is not in busy, done or error state"));
+		exceptionSet.AddExisting(LastException);
+		RETURN;		
+	END_IF
+END_IF
+
+IF NOT __ISVALIDREF(CurrentState) THEN
+	Last//exceptionFactory.ThrowException(__POSITION(), 0, "CurrentState is null");
+	exceptionSet.AddExisting(LastException);
+	RETURN;
+END_IF
+
+IF RequestedCause <> '' THEN
+	IF FindTransitionByCause(RequestedCause, transition => newTransition, exception => LastException) THEN
+		RequestedCause := '';
+		
+		IF CurrentState.Busy THEN
+			CurrentState.Disable();			
+		END_IF
+		
+		LastTransition REF= newTransition^;
+		LastTransition.Start();
+
+		IF NOT LastTransition.Error THEN
+			Execute := TRUE;
+		ELSE				
+			LastException := LastTransition.LastException;
+			exceptionSet.AddExisting(LastException);
+		END_IF
+		
+		RETURN;		
+	ELSE
+		RequestedCause := '';
+		exceptionSet.AddExisting(LastException);
+		RETURN;
+	END_IF
+END_IF
+
+IF CurrentState.Busy THEN 
+	CurrentState.Execute();
+	
+	IF CurrentState.Error THEN
+		LastException := CurrentState.LastException;
+		exceptionSet.AddExisting(LastException);
+		RETURN;
+	ELSIF NOT CurrentState.Busy THEN
+		Last//exceptionFactory.ThrowException(__POSITION(), 0, WStringHelper.Concat3("CurrentState ", TO_WSTRING(CurrentState.Name), " is not in busy or error state"));
+		exceptionSet.AddExisting(LastException);
+		RETURN;		
+	END_IF
+END_IF
+
+Execute := TRUE;*)]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="FindTransitionByCause" Id="{280c57d6-2c63-400e-afbd-9da7994fe626}">
+      <Declaration><![CDATA[METHOD PROTECTED FINAL FindTransitionByCause : POINTER TO ProgramTransition
+VAR_INPUT
+	cause : STRING;
+END_VAR
+VAR
+	i : INT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF NOT __ISVALIDREF(CurrentState) THEN
+	//exceptionFactory.ThrowException(__POSITION(), WStringHelper.Concat4("Unsupported cause ", TO_WSTRING(cause), " to make transition from state ", TO_WSTRING(CurrentState.Name)));
+END_IF
+
+FOR i := 0 TO AvailableTransitionCount - 1 DO
+	IF _AvailableTransitions[i]^.FromState = CurrentState.Name AND_THEN _AvailableTransitions[i]^.Cause = cause THEN
+		FindTransitionByCause := _AvailableTransitions[i];
+		RETURN;
+	END_IF
+END_FOR
+
+//exceptionFactory.ThrowException(__POSITION(), WStringHelper.Concat4("Unsupported cause ", TO_WSTRING(cause), " to make transition from state ", TO_WSTRING(CurrentState.Name)));]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="GetStateByName" Id="{11ace1cf-0786-4eb3-a388-b591bca7c4b5}">
+      <Declaration><![CDATA[METHOD PROTECTED FINAL GetStateByName : POINTER TO ProgramState
+VAR_INPUT
+	name : STRING;
+END_VAR
+VAR
+	i : INT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[FOR i := 0 TO AvailableStateCount - 1 DO
+	IF _AvailableStates[i]^.Name = name THEN
+		GetStateByName := _AvailableStates[i];
+		RETURN;
+	END_IF
+END_FOR
+
+//exceptionFactory.ThrowException(__POSITION(), WStringHelper.Concat2("Unknown state with name ", TO_WSTRING(name)));]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="Initialize" Id="{0570fa10-64e0-4818-a22c-ec914340fb23}">
+      <Declaration><![CDATA[METHOD Initialize 
+VAR
+	i, j : INT;
+	defaultState : POINTER TO ProgramState;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[InternalInitialize(states => _AvailableStates, transitions => _AvailableTransitions, defaultState => defaultState);
+
+IF AvailableStateCount <= 0 OR_ELSE AvailableStateCount > ProgramConstants.MaxStateCount - 1 THEN
+	//exceptionFactory.ThrowException(__POSITION(), WStringHelper.Concat2("Invalid state count  ", TO_WSTRING(AvailableStateCount)));
+END_IF
+
+IF AvailableTransitionCount <= 0 OR_ELSE AvailableTransitionCount > ProgramConstants.MaxTransitionCount - 1 THEN
+	//exceptionFactory.ThrowException(__POSITION(), WStringHelper.Concat2("Invalid transition count  ", TO_WSTRING(AvailableTransitionCount)));
+END_IF
+
+IF defaultState = 0 THEN
+	//exceptionFactory.ThrowException(__POSITION(), "Default state is not specified");
+END_IF
+
+FOR i := 0 TO AvailableStateCount - 1 DO
+	FOR j := 0 TO AvailableTransitionCount - 1 DO
+		IF _AvailableStates[i]^.Name = _AvailableTransitions[j]^.FromState OR_ELSE _AvailableStates[i]^.Name = _AvailableTransitions[j]^.ToState THEN
+			_AvailableStates[i]^.RegisterTransition(_AvailableTransitions[j]^);
+		END_IF
+	END_FOR	
+END_FOR
+
+CurrentState REF= defaultState^;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="InternalInitialize" Id="{35349d83-8565-4e1f-8463-b8b16d2ec76f}">
+      <Declaration><![CDATA[METHOD PROTECTED ABSTRACT InternalInitialize 
+VAR_OUTPUT
+	states : ARRAY [0..ProgramConstants.MaxStateCount - 1] OF POINTER TO ProgramState;
+	transitions : ARRAY [0..ProgramConstants.MaxTransitionCount - 1] OF POINTER TO ProgramTransition;
+	defaultState : POINTER TO ProgramState;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="InTransition" Id="{3f5ee321-d5b5-4e20-ac9e-a36dc0f92c8e}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+{attribute 'OPC.UA.DA.Property' := '1'}
+{attribute 'OPC.UA.DA.Access' := '1'}
+PROPERTY InTransition : BOOL]]></Declaration>
+      <Get Name="Get" Id="{96c55031-9796-4db6-a272-df2c166691ae}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[InTransition := __ISVALIDREF(LastTransition) AND_THEN LastTransition.Busy;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="LastTransitionName" Id="{0c71a466-471b-4add-b779-f05559dbff82}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+PROPERTY LastTransitionName : STRING]]></Declaration>
+      <Get Name="Get" Id="{60059c0e-4d35-4c28-9f99-6de711e73746}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[IF __ISVALIDREF(LastTransition) THEN
+	LastTransitionName := LastTransition.Name;
+END_IF]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+  </POU>
+</TcPlcObject>
