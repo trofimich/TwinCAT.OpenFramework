@@ -69,7 +69,7 @@ That's why we enforce inheritance from our own base class — `Object`.
 ## 🗂 Why this library structure?
 
 There’s a joke among developers:  
-> “Rule #1 of framework development — don’t build a framework.”
+> “Rule #1 of framework development — don’t create a framework.”
 
 Designing one involves hard tradeoffs: architectural purity vs. usability.  
 The current structure is the result of many iterations and refactorings.  
