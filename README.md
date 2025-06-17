@@ -1,4 +1,4 @@
-!!!!! This si PreAlpha version. Some conceps reimplemented at this time !!!!!
+!!!!! This is PreAlpha version. Some conceps reimplemented at this time !!!!!
 
 # TwinCAT Framework
 
