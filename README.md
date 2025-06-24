@@ -115,7 +115,7 @@ Also, if you're experienced in software architecture and have suggestions, I'd l
 2. Create a local folder (e.g. `D:\TwinCAT Framework`)  
 3. Visit [my GitHub page](https://github.com/trofimich?tab=repositories)  
 4. Clone [TwinCAT.OpenFramework repository](https://github.com/trofimich/TwinCAT.OpenFramework.git)
-5. Open the solution in `TwinCAT.OpenFramework.XAESolution`
+5. Open the solution in `TwinCAT.OpenFramework`
 
 ---
 
