@@ -128,6 +128,6 @@ Check the project **`TwinCAT.OpenFramework.Tests`** — it contains unit tests a
 
 ## 📄 License
 
-This project is open-source and licensed under the **GPL-3.0**.  
+This project is open-source and licensed under the **EUPL-1.1**.  
 See [LICENSE](./LICENSE) for details.
 
