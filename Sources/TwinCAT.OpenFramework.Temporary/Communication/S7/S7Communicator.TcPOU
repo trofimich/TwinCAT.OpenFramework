@@ -1,0 +1,641 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="S7Communicator" Id="{b46cd479-9bae-406a-84a0-03b1e8c4d2b6}" SpecialFunc="None">
+    <Declaration><![CDATA[{attribute 'no_explicit_call' := 'do not call this function block directly'} 
+FUNCTION_BLOCK S7Communicator EXTENDS Communicator
+VAR
+	{attribute 'OPC.UA.DA' := '0'}	
+	_ClassName : STRING := __POUNAME();
+
+	{attribute 'OPC.UA.DA' := '0'}	
+	_Connection : REFERENCE TO Tc3_S7Comm.FB_S7CommConnection;
+
+	{attribute 'OPC.UA.DA' := '0'}	
+	_State : S7_COMMUNICATOR_STATE;
+	{attribute 'OPC.UA.DA' := '0'}	
+	_DataProcessed : BOOL;
+	{attribute 'OPC.UA.DA' := '0'}	
+	_Error : BOOL;
+	
+	{attribute 'OPC.UA.DA' := '0'}	
+	_Request : Tc3_S7Comm.FB_S7CommSingleRequest;
+	
+	{attribute 'OPC.UA.DA' := '0'}	
+	_Variables : List(POINTER_TYPE.BYTE_POINTER); // of S7_VARIABLE
+	
+	{attribute 'OPC.UA.DA' := '0'}	
+	_RrequestTimer : Timer;	
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[]]></ST>
+    </Implementation>
+    <Folder Name="Deprecated" Id="{95fbc9db-a321-0d70-3ecb-ccdd28cc76c0}" />
+    <Folder Name="Internal overrides" Id="{5d5fd2ad-6dbe-0ee3-1986-434a3abba142}" />
+    <Folder Name="Service members" Id="{485330f9-9ff9-057b-231a-c908468a2496}" />
+    <Method Name="AddRead" Id="{2f681ca4-b415-4f68-a890-85f6facf6a28}">
+      <Declaration><![CDATA[METHOD AddRead : BOOL
+VAR_INPUT
+    targetVariable : ANY;
+    byteOffset : WORD;
+	bitOffset : BYTE; // ignored for __SYSTEM.__SYSTEM.TYPE_CLASS.TYPE_CLASS.__SYSTEM.TYPE_CLASS.TYPEs other than BOOL
+    dataArea : E_S7COMM_DATAAREA;
+    dataBlockNumber : WORD;
+END_VAR
+VAR_OUTPUT
+	exception : Exception;
+END_VAR
+VAR
+	result : HRESULT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[CASE targetVariable.TypeClass OF
+	__SYSTEM.TYPE_CLASS.TYPE_BOOL:
+		result := _Request.AddReadBit(targetVariable.pValue, byteOffset, bitOffset, dataArea, dataBlockNumber);
+
+    __SYSTEM.TYPE_CLASS.TYPE_BIT:
+		ExceptionHelper.Throw(0, "BIT data type is not supported. Use BOOL instead", __POUNAME(), ClassName, CurrentNamespace.Name, __POSITION());
+		RETURN;
+	
+    __SYSTEM.TYPE_CLASS.TYPE_BYTE, 
+	__SYSTEM.TYPE_CLASS.TYPE_WORD,
+    __SYSTEM.TYPE_CLASS.TYPE_DWORD,
+    __SYSTEM.TYPE_CLASS.TYPE_LWORD,
+    __SYSTEM.TYPE_CLASS.TYPE_SINT,
+    __SYSTEM.TYPE_CLASS.TYPE_INT,
+    __SYSTEM.TYPE_CLASS.TYPE_DINT,
+    __SYSTEM.TYPE_CLASS.TYPE_LINT,
+    __SYSTEM.TYPE_CLASS.TYPE_USINT,
+    __SYSTEM.TYPE_CLASS.TYPE_UINT,
+    __SYSTEM.TYPE_CLASS.TYPE_UDINT,
+    __SYSTEM.TYPE_CLASS.TYPE_ULINT,
+    __SYSTEM.TYPE_CLASS.TYPE_REAL,
+    __SYSTEM.TYPE_CLASS.TYPE_LREAL,
+    __SYSTEM.TYPE_CLASS.TYPE_TIME,
+    __SYSTEM.TYPE_CLASS.TYPE_DATE,
+    __SYSTEM.TYPE_CLASS.TYPE_DATEANDTIME,
+    __SYSTEM.TYPE_CLASS.TYPE_TIMEOFDAY,
+    __SYSTEM.TYPE_CLASS.TYPE_ENUM,
+    __SYSTEM.TYPE_CLASS.TYPE_LTIME:
+		result := _Request.AddReadVar(targetVariable.pValue, TO_WORD(targetVariable.diSize), byteOffset, dataArea, dataBlockNumber);
+
+    __SYSTEM.TYPE_CLASS.TYPE_STRING:
+		IF targetVariable.diSize < 255 THEN
+			result := _Request.AddReadString(targetVariable.pValue, TO_WORD(targetVariable.diSize), byteOffset, dataArea, dataBlockNumber);
+		ELSE
+			result := _Request.AddReadString(targetVariable.pValue, TO_WORD(targetVariable.diSize - 1), byteOffset, dataArea, dataBlockNumber);
+		END_IF
+	
+    __SYSTEM.TYPE_CLASS.TYPE_WSTRING:
+		ExceptionHelper.Throw(0, "WSTRING data type is not supported. Use STRING instead", __POUNAME(), ClassName, CurrentNamespace.Name, __POSITION());
+		RETURN;
+	
+	__SYSTEM.TYPE_CLASS.TYPE_ARRAY:
+		result := _Request.AddReadByteArray(targetVariable.pValue, TO_WORD(targetVariable.diSize), byteOffset, dataArea, dataBlockNumber);
+	
+    ELSE
+		ExceptionHelper.Throw(0, WStringHelper.Concat3("Data type ", TO_WSTRING(targetVariable.TypeClass), " is not supported"), __POUNAME(), ClassName, CurrentNamespace.Name, __POSITION());
+		RETURN;
+END_CASE
+
+CASE result OF
+	Tc2_System.E_HRESULTAdsErr.HRESULT_ADS_NOERROR:
+		addVariable(targetVariable.pValue, FALSE);
+		AddRead := TRUE;
+	
+	Tc2_System.E_HRESULTAdsErr.NOTINIT:
+		ExceptionHelper.Throw(0, "Tc3_S7Comm.FB_S7CommSingleRequest is not initialized correctly", __POUNAME(), ClassName, CurrentNamespace.Name, __POSITION());
+	
+	Tc2_System.E_HRESULTAdsErr.BUSY:
+		ExceptionHelper.Throw(0, "Request is active", __POUNAME(), ClassName, CurrentNamespace.Name, __POSITION());
+	
+	Tc2_System.E_HRESULTAdsErr.INVALIDDATA:
+		ExceptionHelper.Throw(0, "A transfer parameter has been defined incorrectly", __POUNAME(), ClassName, CurrentNamespace.Name, __POSITION());
+	
+	Tc2_System.E_HRESULTAdsErr.INVALIDSIZE:
+		ExceptionHelper.Throw(0, "The frame length is greater than the PDU length", __POUNAME(), ClassName, CurrentNamespace.Name, __POSITION());
+		
+	ELSE
+		ExceptionHelper.Throw(0, WStringHelper.Concat6("Tc3_S7Comm.FB_S7CommSingleRequest method returned HRESULT = ", TO_WSTRING(result), " for byte offset ", TO_WSTRING(byteOffset), " and bit offset ", TO_WSTRING(bitOffset)), __POUNAME(), ClassName, CurrentNamespace.Name, __POSITION());
+END_CASE
+]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="AddReadBit" Id="{f1245444-341d-4a8d-b680-fdcfd95041a8}" FolderPath="Deprecated\">
+      <Declaration><![CDATA[METHOD AddReadBit : HRESULT // Try to use AddRead instead
+VAR_INPUT
+    pVar : PVOID;
+    nByteOff : WORD;
+    nBitOff : BYTE;
+    nArea : E_S7COMM_DATAAREA;
+    nDatablock : WORD;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[AddReadBit := _Request.AddReadBit(pVar, nByteOff, nBitOff, nArea, nDatablock);
+
+IF AddReadBit = E_HRESULTAdsErr.HRESULT_ADS_NOERROR THEN
+	addVariable(pVar, FALSE);
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="AddReadByteArray" Id="{21a3ab7e-4f40-4a89-aadd-52450e04771b}" FolderPath="Deprecated\">
+      <Declaration><![CDATA[METHOD AddReadByteArray : HRESULT // Try to use AddRead instead
+VAR_INPUT
+    pVar : PVOID;
+    nByteSize : WORD;
+    nByteOff : WORD;
+    nArea : E_S7COMM_DATAAREA;
+    nDatablock : WORD;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[AddReadByteArray := _Request.AddReadByteArray(pVar, nByteSize, nByteOff, nArea, nDatablock);
+
+IF AddReadByteArray = E_HRESULTAdsErr.HRESULT_ADS_NOERROR THEN
+	addVariable(pVar, FALSE);
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="AddReadString" Id="{6a409610-0103-486e-840c-6376f6c227d7}" FolderPath="Deprecated\">
+      <Declaration><![CDATA[METHOD AddReadString : HRESULT // Try to use AddRead instead
+VAR_INPUT
+    pVar : PVOID;
+    nByteSize : WORD;
+    nByteOff : WORD;
+    nArea : E_S7COMM_DATAAREA;
+    nDatablock : WORD;
+END_VAR
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[AddReadString := _Request.AddReadString(pVar, nByteSize, nByteOff, nArea, nDatablock);
+
+IF AddReadString = E_HRESULTAdsErr.HRESULT_ADS_NOERROR THEN
+	addVariable(pVar, FALSE);
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="AddReadVar" Id="{7078001f-871f-4cf2-8d13-f5ef796eab2a}" FolderPath="Deprecated\">
+      <Declaration><![CDATA[METHOD AddReadVar : HRESULT // Try to use AddRead instead
+VAR_INPUT
+    pVar : PVOID;
+    nByteSize : WORD;
+    nByteOff : WORD;
+    nArea : E_S7COMM_DATAAREA;
+    nDatablock : WORD;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[AddReadVar := _Request.AddReadVar(pVar, nByteSize, nByteOff, nArea, nDatablock);
+
+IF AddReadVar = E_HRESULTAdsErr.HRESULT_ADS_NOERROR THEN
+	addVariable(pVar, FALSE);
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="addVariable" Id="{de1efd3c-8546-4a98-bb85-4d287c089194}" FolderPath="Service members\">
+      <Declaration><![CDATA[METHOD PRIVATE addVariable
+VAR_INPUT
+	address : PVOID;
+	write : BOOL;
+END_VAR
+VAR
+	variable : POINTER TO S7_VARIABLE;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[variable := __NEW(S7_VARIABLE);
+
+variable^.Address := address;
+variable^.Write := write;
+
+_Variables.Append(variable);]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="AddWrite" Id="{944294f9-5190-441f-9d76-f24efd4ece42}">
+      <Declaration><![CDATA[METHOD AddWrite : BOOL
+VAR_INPUT
+    sourceVariable : ANY;
+    byteOffset : WORD;
+	bitOffset : BYTE; // ignored for __SYSTEM.__SYSTEM.TYPE_CLASS.TYPE_CLASS.__SYSTEM.TYPE_CLASS.TYPEs other than BOOL
+    dataArea : E_S7COMM_DATAAREA;
+    dataBlockNumber : WORD;
+END_VAR
+VAR_OUTPUT
+	exception : Exception;
+END_VAR
+VAR
+	result : HRESULT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[CASE sourceVariable.TypeClass OF
+	__SYSTEM.TYPE_CLASS.TYPE_BOOL:
+		result := _Request.AddWriteBit(sourceVariable.pValue, byteOffset, bitOffset, dataArea, dataBlockNumber);
+	
+    __SYSTEM.TYPE_CLASS.TYPE_BIT:
+		ExceptionHelper.Throw(0, "BIT data type is not supported. Use BOOL instead", __POUNAME(), ClassName, CurrentNamespace.Name, __POSITION());
+		RETURN;
+	
+    __SYSTEM.TYPE_CLASS.TYPE_BYTE, 
+	__SYSTEM.TYPE_CLASS.TYPE_WORD,
+    __SYSTEM.TYPE_CLASS.TYPE_DWORD,
+    __SYSTEM.TYPE_CLASS.TYPE_LWORD,
+    __SYSTEM.TYPE_CLASS.TYPE_SINT,
+    __SYSTEM.TYPE_CLASS.TYPE_INT,
+    __SYSTEM.TYPE_CLASS.TYPE_DINT,
+    __SYSTEM.TYPE_CLASS.TYPE_LINT,
+    __SYSTEM.TYPE_CLASS.TYPE_USINT,
+    __SYSTEM.TYPE_CLASS.TYPE_UINT,
+    __SYSTEM.TYPE_CLASS.TYPE_UDINT,
+    __SYSTEM.TYPE_CLASS.TYPE_ULINT,
+    __SYSTEM.TYPE_CLASS.TYPE_REAL,
+    __SYSTEM.TYPE_CLASS.TYPE_LREAL,
+    __SYSTEM.TYPE_CLASS.TYPE_TIME,
+    __SYSTEM.TYPE_CLASS.TYPE_DATE,
+    __SYSTEM.TYPE_CLASS.TYPE_DATEANDTIME,
+    __SYSTEM.TYPE_CLASS.TYPE_TIMEOFDAY,
+    __SYSTEM.TYPE_CLASS.TYPE_ENUM,
+    __SYSTEM.TYPE_CLASS.TYPE_LTIME:
+		result := _Request.AddWriteVar(sourceVariable.pValue, TO_WORD(sourceVariable.diSize), byteOffset, dataArea, dataBlockNumber);
+
+    __SYSTEM.TYPE_CLASS.TYPE_STRING:
+		IF sourceVariable.diSize < 255 THEN
+			result := _Request.AddWriteString(sourceVariable.pValue, TO_WORD(sourceVariable.diSize), byteOffset, dataArea, dataBlockNumber);
+		ELSE
+			result := _Request.AddWriteString(sourceVariable.pValue, TO_WORD(sourceVariable.diSize - 1), byteOffset, dataArea, dataBlockNumber);
+		END_IF
+	
+    __SYSTEM.TYPE_CLASS.TYPE_WSTRING:
+		ExceptionHelper.Throw(0, "WSTRING data type is not supported. Use STRING instead", __POUNAME(), ClassName, CurrentNamespace.Name, __POSITION());
+		RETURN;
+	
+	__SYSTEM.TYPE_CLASS.TYPE_ARRAY:
+		result := _Request.AddWriteByteArray(sourceVariable.pValue, TO_WORD(sourceVariable.diSize), byteOffset, dataArea, dataBlockNumber);
+	
+    ELSE
+		ExceptionHelper.Throw(0, WStringHelper.Concat3("Data type ", TO_WSTRING(sourceVariable.TypeClass), " is not supported"), __POUNAME(), ClassName, CurrentNamespace.Name, __POSITION());
+		RETURN;
+END_CASE
+
+CASE result OF
+	Tc2_System.E_HRESULTAdsErr.HRESULT_ADS_NOERROR:
+		addVariable(sourceVariable.pValue, TRUE);
+		AddWrite := TRUE;
+	
+	Tc2_System.E_HRESULTAdsErr.NOTINIT:
+		ExceptionHelper.Throw(0, "Tc3_S7Comm.FB_S7CommSingleRequest is not initialized correctly", __POUNAME(), ClassName, CurrentNamespace.Name, __POSITION());
+	
+	Tc2_System.E_HRESULTAdsErr.BUSY:
+		ExceptionHelper.Throw(0, "Request is active", __POUNAME(), ClassName, CurrentNamespace.Name, __POSITION());
+	
+	Tc2_System.E_HRESULTAdsErr.INVALIDDATA:
+		ExceptionHelper.Throw(0, "A transfer parameter has been defined incorrectly", __POUNAME(), ClassName, CurrentNamespace.Name, __POSITION());
+	
+	Tc2_System.E_HRESULTAdsErr.INVALIDSIZE:
+		ExceptionHelper.Throw(0, "The frame length is greater than the PDU length", __POUNAME(), ClassName, CurrentNamespace.Name, __POSITION());
+		
+	ELSE
+		ExceptionHelper.Throw(0, WStringHelper.Concat6("Tc3_S7Comm.FB_S7CommSingleRequest method returned HRESULT = ", TO_WSTRING(result), " for byte offset ", TO_WSTRING(byteOffset), " and bit offset ", TO_WSTRING(bitOffset)), __POUNAME(), ClassName, CurrentNamespace.Name, __POSITION());
+END_CASE]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="AddWriteBit" Id="{5a4f67b0-e8cf-49e4-8314-2e79004a4876}" FolderPath="Deprecated\">
+      <Declaration><![CDATA[METHOD AddWriteBit : HRESULT // try to use AddWrite instead
+VAR_INPUT
+    pVar : PVOID;
+    nByteOff : WORD;
+    nBitOff : BYTE;
+    nArea : E_S7COMM_DATAAREA;
+    nDatablock : WORD;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[AddWriteBit := _Request.AddWriteBit(pVar, nByteOff, nBitOff, nArea, nDatablock);
+
+IF AddWriteBit = E_HRESULTAdsErr.HRESULT_ADS_NOERROR THEN
+	addVariable(pVar, TRUE);
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="AddWriteByteArray" Id="{3bcfaccb-bed3-45ae-bd6e-8571ebce7d5e}" FolderPath="Deprecated\">
+      <Declaration><![CDATA[METHOD AddWriteByteArray : HRESULT
+VAR_INPUT
+    pVar : PVOID;
+    nByteSize : WORD;
+    nByteOff : WORD;
+    nArea : E_S7COMM_DATAAREA;
+    nDatablock : WORD;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[AddWriteByteArray := _Request.AddWriteByteArray(pVar, nByteSize, nByteOff, nArea, nDatablock);
+
+IF AddWriteByteArray = E_HRESULTAdsErr.HRESULT_ADS_NOERROR THEN
+	addVariable(pVar, TRUE);
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="AddWriteString" Id="{677c0545-00bd-4f77-b3ce-9e3fe3747e1e}" FolderPath="Deprecated\">
+      <Declaration><![CDATA[METHOD AddWriteString : HRESULT
+VAR_INPUT
+    pVar : PVOID;
+    nByteSize : WORD;
+    nByteOff : WORD;
+    nArea : E_S7COMM_DATAAREA;
+    nDatablock : WORD;
+END_VAR
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[AddWriteString := _Request.AddWriteString(pVar, nByteSize, nByteOff, nArea, nDatablock);
+
+IF AddWriteString = E_HRESULTAdsErr.HRESULT_ADS_NOERROR THEN
+	addVariable(pVar, TRUE);
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="AddWriteVar" Id="{a6a74ac9-c285-4dc3-9174-25b94c8d1435}" FolderPath="Deprecated\">
+      <Declaration><![CDATA[METHOD AddWriteVar : HRESULT
+VAR_INPUT
+    pVar : PVOID;
+    nByteSize : WORD;
+    nByteOff : WORD;
+    nArea : E_S7COMM_DATAAREA;
+    nDatablock : WORD;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[AddWriteVar := _Request.AddWriteVar(pVar, nByteSize, nByteOff, nArea, nDatablock);
+
+IF AddWriteVar = E_HRESULTAdsErr.HRESULT_ADS_NOERROR THEN
+	addVariable(pVar, TRUE);
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="Busy" Id="{d97c3c17-228c-44b8-a00b-20201269dac5}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+{attribute 'OPC.UA.DA' := '1'}
+{attribute 'OPC.UA.DA.Property' := '1'}
+PROPERTY Busy : BOOL]]></Declaration>
+      <Get Name="Get" Id="{3d67af55-64e1-4420-9f0d-c86d7b029d62}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[Busy := _State <> S7_COMMUNICATOR_STATE.IDLE_OR_DONE;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="ClassName" Id="{edd56929-3112-4033-8edf-8e81fcced7dc}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+PROPERTY ClassName : STRING]]></Declaration>
+      <Get Name="Get" Id="{b9d67291-26f3-422c-a6df-78926fea37ac}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ClassName := _ClassName;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="CommunicationTypeName" Id="{dca0c461-529e-4c36-825e-3bbf98f56585}">
+      <Declaration><![CDATA[PROPERTY CommunicationTypeName : STRING]]></Declaration>
+      <Get Name="Get" Id="{da71da14-84af-4cb6-9616-e96610741d0b}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[CommunicationTypeName := 'S7';]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="DataProcessed" Id="{2a6eedc8-5827-4407-9903-9ed1865384fb}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+{attribute 'OPC.UA.DA' := '1'}
+{attribute 'OPC.UA.DA.Property' := '1'}
+PROPERTY DataProcessed : BOOL]]></Declaration>
+      <Get Name="Get" Id="{bad2dea6-a413-42bb-840a-ace069bd5306}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[DataProcessed := _DataProcessed;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="Error" Id="{42c744d6-eecb-43ee-baa5-fb2c0ef251e9}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+{attribute 'OPC.UA.DA' := '1'}
+{attribute 'OPC.UA.DA.Property' := '1'}
+PROPERTY Error : BOOL]]></Declaration>
+      <Get Name="Get" Id="{28a9db3b-7bcd-425d-b879-d058e06bb651}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[Error := _Error;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="Execute" Id="{a2443fd3-c902-4ad1-8817-55c8aff654f5}">
+      <Declaration><![CDATA[METHOD Execute]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_DataProcessed := FALSE;
+
+_RrequestTimer.Execute();
+_Connection();
+
+StateMachine:
+
+CASE _State OF
+	S7_COMMUNICATOR_STATE.DATA_PROCESSING:		
+		IF _Connection.bIsConnected THEN
+			_Request(bExecute := TRUE);
+			
+			IF _Request.bError THEN
+				_State := S7_COMMUNICATOR_STATE.IDLE_OR_DONE;
+				_Error := TRUE;
+				_LastExceptionHelper.Throw(_Request.nErrorId, TO_WSTRING(_Request.sErrorTxt), __POUNAME(), ClassName, CurrentNamespace.Name, __POSITION());
+				
+				_Request(bExecute := FALSE);
+				_Connection(bExecute := FALSE);
+			ELSE
+				_DataProcessed := NOT _Request.bBusy;
+				_Request(bExecute := FALSE);
+				
+				IF CyclicMode THEN
+					_State := S7_COMMUNICATOR_STATE.WAIT_FOR_NEXT_CYCLE;
+					JMP StateMachine;
+				ELSE
+					_State := S7_COMMUNICATOR_STATE.IDLE_OR_DONE;
+				END_IF
+			END_IF		
+		ELSIF _Connection.bError THEN
+			_State := S7_COMMUNICATOR_STATE.IDLE_OR_DONE;
+			_Error := TRUE;
+			_LastExceptionHelper.Throw(0, TO_WSTRING(_Connection.sErrorTxt), __POUNAME(), ClassName, CurrentNamespace.Name, __POSITION()); 
+			
+			_Request(bExecute := FALSE);
+			_Connection(bExecute := FALSE);
+		END_IF	
+		
+	S7_COMMUNICATOR_STATE.WAIT_FOR_NEXT_CYCLE:
+		IF _RrequestTimer.ElapsedTime >= CycleInterval THEN
+			_State := S7_COMMUNICATOR_STATE.DATA_PROCESSING;
+			JMP StateMachine;			
+		END_IF
+END_CASE]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="FB_init" Id="{c1540c95-cf51-4c25-ad2a-230e99d20072}">
+      <Declaration><![CDATA[METHOD FB_init : BOOL
+VAR_INPUT
+	bInitRetains : BOOL; // if TRUE, the retain variables are initialized (warm start / cold start)
+	bInCopyCode : BOOL;  // if TRUE, the instance afterwards gets moved into the copy code (online change)
+	connection : REFERENCE TO Tc3_S7Comm.FB_S7CommConnection;
+END_VAR
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_Connection REF= connection;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="InternalClear" Id="{be8c88d0-2cc5-4692-8047-010e4978325c}" FolderPath="Internal overrides\">
+      <Declaration><![CDATA[METHOD PROTECTED InternalClear : BOOL
+VAR_OUTPUT
+	exception : Exception;
+END_VAR
+VAR 
+	i : DINT;	
+	variable : POINTER TO S7_VARIABLE;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[FOR i := 0 TO _Variables.Count - 1 DO
+	variable := _Variables.Get(i);
+	
+	IF variable^.Write THEN
+		RemoveWrite(variable^.Address);
+	ELSE
+		RemoveRead(variable^.Address);
+	END_IF
+END_FOR
+
+_Variables.Clear(TRUE);
+
+_Error := FALSE;
+
+InternalClear := TRUE;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="InternalConfigure" Id="{d028ac9a-4328-487e-b8ef-e65738e2a978}" FolderPath="Internal overrides\">
+      <Declaration><![CDATA[METHOD PROTECTED InternalConfigure : BOOL
+VAR_INPUT
+	settings : REFERENCE TO CommunicationSettings;
+END_VAR
+VAR_OUTPUT
+	exception : Exception;
+END_VAR
+VAR
+	s7Settings : POINTER TO S7CommunicationSettings;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF NOT __ISVALIDREF(_Connection) THEN
+	ExceptionHelper.Throw(0, "Connection is null", __POUNAME(), ClassName, CurrentNamespace.Name, __POSITION());
+	RETURN;	
+END_IF
+
+_RrequestTimer.Interval := T#1H;
+
+//todo: reimplement communication, don't use standard cyclic request
+(*IF Configured AND_THEN settings.CyclicMode <> CyclicMode THEN
+	ExceptionHelper.Throw(0, "CyclicMode can't be changed fro S7Communicator", "InternalConfigure", ClassName, CurrentNamespace.Name);
+	RETURN;		
+END_IF*)
+
+s7Settings := ADR(settings);
+
+IF s7Settings^.IpAddrres = '' THEN
+	ExceptionHelper.Throw(0, "settings.IpAddrres is empty", __POUNAME(), ClassName, CurrentNamespace.Name, __POSITION());
+	RETURN;	
+END_IF
+
+_Connection.sIpAddr := s7Settings^.IpAddrres;
+_Connection.eCpuType := s7Settings^.CpuType;
+_Connection.nRack := s7Settings^.Rack;
+_Connection.nSlot := s7Settings^.Slot;
+
+IF NOT Configured THEN
+	_Connection.AddRequest(_Request);
+END_IF
+
+InternalConfigure := TRUE;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="InternalStart" Id="{3ed075f8-1462-4a9d-986c-ae180424f858}" FolderPath="Internal overrides\">
+      <Declaration><![CDATA[METHOD PROTECTED InternalStart : BOOL
+VAR_OUTPUT
+	exception : Exception;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[InternalStop();
+
+_Connection(bExecute := TRUE);
+_RrequestTimer.Start();
+
+_State := S7_COMMUNICATOR_STATE.DATA_PROCESSING;
+
+InternalStart := TRUE;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="InternalStop" Id="{1ed6cfd7-ed8c-4c69-8cdc-65906716ee7f}" FolderPath="Internal overrides\">
+      <Declaration><![CDATA[METHOD PROTECTED InternalStop]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_Request(bExecute := FALSE);
+_Connection(bExecute := FALSE);
+
+_RrequestTimer.Stop();
+
+_State := S7_COMMUNICATOR_STATE.IDLE_OR_DONE;
+_Error := FALSE;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="RemoveRead" Id="{4e76ab87-aee2-42e9-ba8d-44904f312fd8}">
+      <Declaration><![CDATA[METHOD RemoveRead : HRESULT
+VAR_INPUT
+    pVar : PVOID;
+END_VAR
+VAR
+	i : DINT;
+	variable : POINTER TO S7_VARIABLE;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[RemoveRead := _Request.RemoveRead(pVar);
+
+IF RemoveRead = Tc2_System.E_HRESULTAdsErr.HRESULT_ADS_NOERROR THEN
+	FOR i := 0 TO _Variables.Count - 1 DO
+		variable := _Variables.Get(i);
+		
+		IF variable^.Address = pVar AND_THEN NOT variable^.Write THEN
+			_Variables.Remove(variable, TRUE);		
+			RETURN;
+		END_IF 
+	END_FOR
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="RemoveWrite" Id="{49d53d02-bc5c-42a3-8e7a-2d831b72e867}">
+      <Declaration><![CDATA[METHOD RemoveWrite : HRESULT
+VAR_INPUT
+    pVar : PVOID;
+END_VAR
+VAR
+	i : DINT;
+	variable : POINTER TO S7_VARIABLE;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[RemoveWrite := _Request.RemoveWrite(pVar);
+
+IF RemoveWrite = Tc2_System.E_HRESULTAdsErr.HRESULT_ADS_NOERROR THEN
+	FOR i := 0 TO _Variables.Count - 1 DO
+		variable := _Variables.Get(i);
+		
+		IF variable^.Address = pVar AND_THEN variable^.Write THEN
+			_Variables.Remove(variable, TRUE);		
+			RETURN;
+		END_IF 
+	END_FOR
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="VariablesCount" Id="{edbbef8c-4bdb-4f4b-84c0-0ffba71a3741}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+PROPERTY VariablesCount : DINT]]></Declaration>
+      <Get Name="Get" Id="{e8a83397-dab0-4fe1-8262-65d70996d453}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[VariablesCount := _Variables.Count;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+  </POU>
+</TcPlcObject>

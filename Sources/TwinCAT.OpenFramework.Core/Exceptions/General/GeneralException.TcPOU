@@ -1,0 +1,141 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="GeneralException" Id="{7f5ca553-bdd4-40a8-958c-577250bcb3f1}" SpecialFunc="None">
+    <Declaration><![CDATA[{attribute 'enable_dynamic_creation'}	
+{attribute 'no_explicit_call' := 'do not call this function block directly'} 
+FUNCTION_BLOCK ABSTRACT GeneralException EXTENDS Exception
+VAR_OUTPUT
+	ErrorCode : UDINT;
+	
+	InnerException : IException;
+END_VAR
+VAR
+	_Message : ERROR_MESSAGE;
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[]]></ST>
+    </Implementation>
+    <Property Name="Empty" Id="{2c487122-2631-4c9e-81c7-74c59235aeea}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+PROPERTY Empty : BOOL]]></Declaration>
+      <Get Name="Get" Id="{55a012e2-d7b7-48ff-8ce7-8cc112477a4e}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[Empty := ErrorCode = 0 AND_THEN _Message = "";]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="FB_exit" Id="{ee5e41cb-0e7d-4754-9c76-dff0c8b98430}">
+      <Declaration><![CDATA[METHOD FB_exit : BOOL
+VAR_INPUT
+	(* if TRUE, the exit method is called for exiting an instance that is copied afterwards (online change).*)
+	bInCopyCode	: BOOL;
+END_VAR
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF InnerException <> 0 THEN 
+	InnerException.Dispose();
+	InnerException := 0;
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="GetMessage" Id="{3db2de1b-8880-4652-a131-08e8d78488a3}">
+      <Declaration><![CDATA[METHOD GetMessage : ERROR_MESSAGE
+VAR_INPUT
+	showTimestamp : BOOL := FALSE;
+	showSource : BOOL := FALSE;
+END_VAR
+VAR
+	stringBuilder : WideStringBuilder;
+
+	innerExceptionMessage : ERROR_MESSAGE;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[stringBuilder
+	.Append(_Message)
+	.AppendStringIf(ERROR_CODE_PREFIX, ErrorCode > 0)
+	.AppendIf(ErrorCode, ErrorCode > 0);	
+
+IF showTimestamp THEN
+	stringBuilder.AppendString(TIME_PREFIX);
+	AppendTimestampDescription(stringBuilder, _LocalTimestamp, _UtcTimestamp);
+END_IF
+
+IF showSource THEN
+	stringBuilder.AppendString(SOURCE_PREFIX);
+	AppendSourceDescription(stringBuilder, _SourceNamespaceName, _SourceClassName, _SourceMethodName, _SourcePosition);
+END_IF
+
+IF InnerException <> 0 THEN
+	innerExceptionMessage := InnerException.GetMessage(showTimestamp, showSource);
+END_IF
+
+IF innerExceptionMessage <> "" THEN
+	stringBuilder
+		.AppendString(INNER_MESSAGE_PREFIX)
+		.AppendString(innerExceptionMessage);	
+END_IF
+
+stringBuilder.AssignToString(GetMessage);]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="InternalClone" Id="{00e99485-7cf2-47c4-96ca-14a9de96b271}">
+      <Declaration><![CDATA[METHOD PROTECTED InternalClone : IObject
+VAR_INPUT
+	exceptionClone : POINTER TO GeneralException;
+END_VAR
+VAR
+	innerExceptionClone : IObject;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[exceptionClone^.ErrorCode := ErrorCode;
+exceptionClone^._Message := _Message;
+exceptionClone^.Fatal := Fatal;
+exceptionClone^.SourceNamespaceName := SourceNamespaceName;
+exceptionClone^.SourceClassName := SourceClassName;
+exceptionClone^.SourceMethodName := SourceMethodName;
+exceptionClone^.SourcePosition := SourcePosition;
+exceptionClone^.LocalTimestamp := LocalTimestamp;	
+exceptionClone^.UtcTimestamp := UtcTimestamp;	
+
+IF InnerException <> 0 THEN
+	__QUERYINTERFACE(InnerException.Clone(), exceptionClone^.InnerException);
+END_IF
+
+InternalClone := exceptionClone^;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="InternalThrow" Id="{106035ff-80e4-499c-8c2e-6479af0d1e6a}">
+      <Declaration><![CDATA[METHOD PROTECTED InternalThrow
+VAR_IN_OUT CONSTANT
+	sourceNamespaceName : STRING;
+	sourceClassName : STRING;
+	sourceMethodName : STRING;
+	sourcePosition : STRING;
+	message : ERROR_MESSAGE;
+	errorCode : UDINT;
+	fatal : BOOL;
+	innerException : Exception;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[THIS^.SourceNamespaceName := sourceNamespaceName;	
+THIS^.SourceClassName := sourceClassName;
+THIS^.SourceMethodName := GetNormalizedMethodName(sourceClassName, sourceMethodName); 
+THIS^.SourcePosition := sourcePosition;
+THIS^._Message := message;
+THIS^.ErrorCode := errorCode;
+THIS^.Fatal := fatal;
+THIS^.LocalTimestamp := SystemDateTimeManager.SystemLocalDateTime;
+THIS^.UtcTimestamp := SystemDateTimeManager.SystemUtcDateTime;
+
+IF __ISVALIDREF(innerException) THEN
+	__QUERYINTERFACE(innerException.Clone(), THIS^.InnerException); 
+ELSE
+	THIS^.InnerException := 0;
+END_IF
+
+ExceptionManager.Throw(THIS^);]]></ST>
+      </Implementation>
+    </Method>
+  </POU>
+</TcPlcObject>

@@ -1,0 +1,384 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="PointerList" Id="{ca3b4ecb-7400-0a89-3213-28a913dacb6c}" SpecialFunc="None">
+    <Declaration><![CDATA[{attribute 'no_explicit_call' := 'do not call this function block directly'} 
+// Dynamic list of value pointers
+FUNCTION_BLOCK PointerList EXTENDS Object IMPLEMENTS IReadOnlyPointerList
+VAR_INPUT
+	DefaultAllocationElemetsCount : BYTE := 10;	
+END_VAR
+VAR
+	_ClassName : STRING := __POUNAME();
+	_Array : POINTER TO PVOID;
+	_ArrayLength : DINT;
+	_ElementCount : DINT;
+	_ElementType : POINTER_TYPE := POINTER_TYPE.BYTE_POINTER;
+	_DefaultComparer : IPointerComparer;
+	_DefaultEnumerator : PointerListEnumerator;
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[]]></ST>
+    </Implementation>
+    <Method Name="AllocateMemory" Id="{5eeb0e07-564f-03a6-0b59-c4af6d7f9f99}">
+      <Declaration><![CDATA[METHOD AllocateMemory
+VAR_INPUT
+	elementsCount : DINT;
+END_VAR
+VAR
+	
+	newMemory : POINTER TO PVOID;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[newMemory := __NEW(PVOID, TO_UDINT(_ArrayLength + elementsCount));
+
+IF _ElementCount > 0 THEN
+	Tc2_System.MEMCPY(newMemory, _Array, TO_UDINT(SIZEOF(POINTER TO BYTE) * _ElementCount));
+END_IF
+ 
+IF _Array <> 0 THEN
+	__DELETE(_Array);
+END_IF
+
+_ArrayLength := _ArrayLength + elementsCount;
+
+_Array := newMemory;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="Append" Id="{579e1b4c-846a-0bc6-1387-4b4839d656ce}">
+      <Declaration><![CDATA[METHOD Append : DINT
+VAR_INPUT
+	element : PVOID;
+END_VAR
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[Append := _ElementCount;
+
+Insert(element, Append);]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="ClassName" Id="{f800aec1-be60-0f71-06f0-fb7e047571fd}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+PROPERTY ClassName : STRING]]></Declaration>
+      <Get Name="Get" Id="{cf6a97f9-9f97-059a-2b74-e16f56af56c9}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ClassName := _ClassName;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="Clear" Id="{5af44d51-4f15-0ef9-1019-e0b98a608f74}">
+      <Declaration><![CDATA[METHOD Clear
+VAR_INPUT
+	delete : BOOL;
+END_VAR
+VAR
+	i : DINT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF delete AND_THEN _ElementCount > 0 THEN
+	FOR i := _ElementCount - 1 TO 0 BY -1 DO 
+		TwinCAT_OpenFramework_Core.DynamicMemoryManager.ReleaseDynamicMemory(_Array[i], _ElementType = POINTER_TYPE.OBJECT_POINTER);						
+	END_FOR	
+END_IF
+
+_ElementCount := 0;
+_ArrayLength := 0;
+
+IF _Array <> 0 THEN
+	__DELETE(_Array);	
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="Count" Id="{766ade4a-93d3-0d29-309d-377c07762906}">
+      <Declaration><![CDATA[{attribute 'OPC.UA.DA.Property' := '1'}
+{attribute 'monitoring' := 'call'}
+PROPERTY Count : DINT]]></Declaration>
+      <Get Name="Get" Id="{ebfea1d2-a986-01a6-3592-321119e03580}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[Count := _ElementCount;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="ElementType" Id="{a55296b1-da87-0dd9-1768-66adf21db527}">
+      <Declaration><![CDATA[{attribute 'OPC.UA.DA.Property' := '1'}
+{attribute 'monitoring' := 'call'}
+PROPERTY ElementType : POINTER_TYPE]]></Declaration>
+      <Get Name="Get" Id="{d36f9e60-4628-03ef-0046-b70ca00b817d}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ElementType := _ElementType;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="FB_exit" Id="{dd608653-8374-05fe-0b59-bc3a1acb4912}">
+      <Declaration><![CDATA[METHOD FB_exit : BOOL
+VAR_INPUT
+	bInCopyCode : BOOL; // if TRUE, the exit method is called for exiting an instance that is copied afterwards (online change).
+END_VAR
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[Clear(FALSE);]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="FB_init" Id="{fe4bdcd7-0fa5-030c-3447-0cd09ac11c31}">
+      <Declaration><![CDATA[METHOD FB_init : BOOL
+VAR_INPUT
+	bInitRetains : BOOL; // if TRUE, the retain variables are initialized (warm start / cold start)
+	bInCopyCode : BOOL; // if TRUE, the instance afterwards gets moved into the copy code (online change)
+	elementType : POINTER_TYPE;
+END_VAR
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_DefaultEnumerator.Initialize(THIS^);
+
+_ElementType := elementType;
+
+_DefaultComparer := StandardPointerComparers.GetForType(elementType);]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="Find" Id="{909d9942-2e04-0f0c-22d4-5317685ef14b}">
+      <Declaration><![CDATA[METHOD Find : BOOL
+VAR_INPUT
+	pattern : PVOID;
+	comparer : IPointerComparer;
+	skip : DINT;
+END_VAR
+VAR_OUTPUT
+	element : PVOID;
+	index : DINT;
+END_VAR
+VAR
+	i : DINT;
+	skiped : DINT := 0;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[element := 0;
+index := 0;
+	
+IF skip >= _ElementCount THEN
+	RETURN;
+END_IF
+
+IF comparer = 0 THEN
+	comparer := StandardPointerComparers.GetForType(_ElementType);
+END_IF
+
+IF _ElementCount > 0 THEN
+	FOR i := 0 TO _ElementCount - 1 DO
+		IF comparer.Compare(_Array[i], pattern) = COMPARISION_RESULT.FIRST_EQUAL_TO_SECOND THEN
+			IF skip = skiped THEN
+				element := _Array[i];
+				index := i;
+				Find := TRUE;
+				RETURN;
+			ELSE
+				skiped := skiped + 1;
+			END_IF
+		END_IF
+	END_FOR
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="Get" Id="{eb6afbf0-1076-0e8c-057c-38ccbde0ae85}">
+      <Declaration><![CDATA[METHOD Get : PVOID
+VAR_INPUT
+	index : DINT;
+END_VAR
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF index >= 0 AND index < _ElementCount THEN
+	Get := _Array[index];
+ELSE
+	Get := 0;
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="GetDefaultEnumerator" Id="{9adaf87a-f413-0e9f-3e1c-244c40f8c0fd}">
+      <Declaration><![CDATA[METHOD GetDefaultEnumerator : IPointerEnumerator]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[GetDefaultEnumerator := _DefaultEnumerator;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="Insert" Id="{4e3d699e-5fb2-0943-279a-90fea728f208}">
+      <Declaration><![CDATA[METHOD Insert
+VAR_INPUT
+	element : PVOID;
+	index : DINT;
+END_VAR
+VAR
+	i : DINT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF index > Count THEN
+	index := _ElementCount;
+END_IF
+
+IF _ElementCount >= _ArrayLength THEN
+	AllocateMemory(DefaultAllocationElemetsCount);
+END_IF
+
+_ElementCount := _ElementCount + 1;
+
+i := _ElementCount - 1;
+
+WHILE i > index DO
+	_Array[i] := _Array[i - 1];
+	
+	i := i - 1;
+END_WHILE
+
+_Array[i] := element;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="Remove" Id="{7b39fc8d-8c3d-0576-3a4b-e1c362e8b5c5}">
+      <Declaration><![CDATA[METHOD Remove : BOOL
+VAR_INPUT
+	element : PVOID;
+	delete : BOOL;
+END_VAR
+VAR
+	i : DINT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF _ElementCount > 0 THEN
+	FOR i := 0 TO _ElementCount - 1 DO
+		IF _Array[i] = element THEN
+			RemoveAt(i, delete);
+			Remove := TRUE;
+			RETURN;
+		END_IF
+	END_FOR
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="RemoveAt" Id="{4658e2f3-8105-09f9-29ca-333a42bc562f}">
+      <Declaration><![CDATA[METHOD RemoveAt : BOOL
+VAR_INPUT
+	index : DINT;
+	delete : BOOL;
+END_VAR
+VAR
+	i : DINT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF index < _ElementCount THEN
+	IF delete THEN
+		TwinCAT_OpenFramework_Core.DynamicMemoryManager.ReleaseDynamicMemory(_Array[index], _ElementType = POINTER_TYPE.OBJECT_POINTER);			
+	END_IF	
+
+	IF index + 2 <= _ElementCount THEN
+		FOR	i := index TO _ElementCount - 2 DO
+			_Array[i] := _Array[i + 1];
+		END_FOR			
+	END_IF
+		
+	_Array[_ElementCount - 1] := 0;
+	_ElementCount := _ElementCount - 1;
+	
+	RemoveAt := TRUE;
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="Set" Id="{151d08b0-a87c-086e-0281-b58912fdc2ad}">
+      <Declaration><![CDATA[METHOD Set : BOOL
+VAR_INPUT
+	element : PVOID;
+	index : DINT;
+	deleteReplaced : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF index >= 0 AND_THEN index < _ElementCount THEN
+	IF _Array[index] <> element THEN
+		IF deleteReplaced THEN
+			TwinCAT_OpenFramework_Core.DynamicMemoryManager.ReleaseDynamicMemory(_Array[index], _ElementType = POINTER_TYPE.OBJECT_POINTER);
+		END_IF
+	
+		_Array[index] := element;
+	END_IF
+	
+	Set := TRUE;
+ELSE
+	Set := FALSE;
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="Size" Id="{2ed226c2-7f96-4c40-868d-45b446da54ac}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+PROPERTY Size : ULINT]]></Declaration>
+      <Get Name="Get" Id="{6a23592c-93d3-4eee-86e4-99a9995c2ddc}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[Size := XSIZEOF(THIS^);]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="Sort" Id="{d4acc93f-e036-0b14-18d2-9cc20f9ccf51}">
+      <Declaration><![CDATA[METHOD Sort
+VAR_INPUT
+	comparer : IPointerComparer;
+	direction : SORT_DIRECTION;
+END_VAR
+VAR
+	//exceptionFactory : ExceptionFactory(__POUNAME(), ClassName, CurrentNamespace.Name);
+	replaced : BOOL;
+	i : DINT;
+	comparisionResult : COMPARISION_RESULT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF comparer = 0 THEN
+	IF _DefaultComparer = 0 THEN
+		//exceptionFactory.ThrowException(__POSITION(), WStringHelper.Concat2("Can't find comparer for POINTER TO ", TO_WSTRING(_ElementType)));
+	ELSE
+		comparer := _DefaultComparer;
+	END_IF
+END_IF
+
+REPEAT
+	replaced := FALSE;
+	
+	IF _ElementCount > 1 THEN
+		FOR i := 0 TO _ElementCount - 2 DO
+			comparisionResult := comparer.Compare(_Array[i], _Array[i + 1]);
+			
+			IF direction = SORT_DIRECTION.ASCENDING THEN
+				IF comparisionResult = COMPARISION_RESULT.FIRST_GREATER_THAN_SECOND THEN
+					Swap(i, i + 1);
+					replaced := TRUE;
+				END_IF
+			ELSE
+				IF comparisionResult = COMPARISION_RESULT.FIRST_LESS_THAN_SECOND THEN
+					Swap(i, i + 1);
+					replaced := TRUE;
+				END_IF			
+			END_IF
+		END_FOR		
+	END_IF
+UNTIL
+	NOT replaced
+END_REPEAT]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="Swap" Id="{a4a339eb-851e-01fa-3770-30664025d802}">
+      <Declaration><![CDATA[METHOD Swap : BOOL
+VAR_INPUT
+	index1 : DINT;
+	index2 : DINT;
+END_VAR
+VAR
+	tmp : PVOID;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF index1 = index2 OR_ELSE index1 < 0 OR_ELSE index1 >= _ElementCount OR_ELSE index2 < 0 OR_ELSE index2 >= _ElementCount THEN
+	RETURN;
+END_IF
+
+tmp := _Array[index1];
+_Array[index1] := _Array[index2];
+_Array[index2] := tmp;
+
+Swap := TRUE;]]></ST>
+      </Implementation>
+    </Method>
+  </POU>
+</TcPlcObject>

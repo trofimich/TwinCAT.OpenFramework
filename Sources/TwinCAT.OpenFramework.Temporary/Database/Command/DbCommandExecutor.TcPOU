@@ -1,0 +1,325 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="DbCommandExecutor" Id="{b8786d4b-cbec-42c8-9590-fcb2a735b1f5}" SpecialFunc="None">
+    <Declaration><![CDATA[{attribute 'no_explicit_call' := 'do not call this function block directly'} 
+FUNCTION_BLOCK DbCommandExecutor EXTENDS TC.ToolkitObject IMPLEMENTS TC.IAction
+VAR	
+	_ClassName : STRING := __POUNAME();
+
+	_DbConnection : Tc3_Database.FB_SQLDatabaseEvt(sNetID := '', tTimeout := T#10S);	
+
+	_ExecutionParameters : DB_COMMAND_EXECUTION_PARAMETERS;
+
+	_Command : Tc3_Database.FB_SQLCommandEvt(sNetID:='', tTimeout := T#10S);
+	_SQLResult: Tc3_Database.FB_SQLResultEvt(sNetID := '', tTimeout := T#10S);
+	
+	_Done : BOOL;
+	_State : DB_COMMAND_EXECUTION_STATE;
+	_GetError : BOOL;
+	_Logger : Tc3_EventLogger.I_TcMessage;	
+	_Connected : BOOL;
+	_DataSetLoaded : BOOL;
+	_DisconnectingState : DB_COMMAND_DISCONNECTING_STATE;
+	_LastException : Exception;
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[]]></ST>
+    </Implementation>
+    <Property Name="Busy" Id="{69cfdf24-312d-4a00-a5bd-36194b8d777f}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+{attribute 'OPC.UA.DA.Property' := '1'}
+{attribute 'OPC.UA.DA.Access' := '1'}
+PROPERTY Busy : BOOL]]></Declaration>
+      <Get Name="Get" Id="{b3e5ece8-3d19-419d-9048-3f0b6df1be6d}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[Busy := State <> DB_COMMAND_EXECUTION_STATE.IDLING;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="ClassName" Id="{964e6330-455d-456e-be42-d798ea810a97}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+PROPERTY ClassName : STRING]]></Declaration>
+      <Get Name="Get" Id="{92e1e1c6-3ebd-42b1-8617-9d2236104292}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ClassName := _ClassName;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="CommandText" Id="{8c1946a8-ade3-4fb2-8e01-286ae5565ff7}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+{attribute 'OPC.UA.DA.Property' := '1'}
+{attribute 'OPC.UA.DA.Access' := '1'}
+PROPERTY CommandText : REFERENCE TO Tc2_System.T_MaxString]]></Declaration>
+      <Get Name="Get" Id="{0a9c937d-5555-480d-8bfa-0c2714754f06}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[CommandText REF= _ExecutionParameters.CommandText;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="Done" Id="{aed53cbe-ffb7-40ee-a58f-9a664932a0f2}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+{attribute 'OPC.UA.DA.Property' := '1'}
+{attribute 'OPC.UA.DA.Access' := '1'}
+PROPERTY Done : BOOL]]></Declaration>
+      <Get Name="Get" Id="{7023c8b7-2844-4dbc-9e69-d0dbc380c34b}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[Done := _Done;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="Error" Id="{304aace7-3d7d-4c29-b65e-218008d0d003}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+{attribute 'OPC.UA.DA.Property' := '1'}
+{attribute 'OPC.UA.DA.Access' := '1'}
+PROPERTY Error : BOOL]]></Declaration>
+      <Get Name="Get" Id="{e91fd81d-31b6-4fbb-b20a-2ea29ebdbba3}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[Error := State = DB_COMMAND_EXECUTION_STATE.IDLING AND_THEN NOT _LastException.Empty;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="Execute" Id="{45480e64-00b0-442b-bfaf-47150ff2f2fb}">
+      <Declaration><![CDATA[METHOD Execute
+VAR
+	requestEventTextError : BOOL;	
+	requestEventTextErrorCode : HRESULT;
+END_VAR
+VAR_INST
+	errorMessage : STRING(255);	
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[START:
+
+IF NOT _LastException.Empty THEN
+	_GetError := FALSE;
+END_IF
+
+IF _GetError THEN
+	IF _Logger <> 0 THEN 
+		IF _Logger.RequestEventText(1033, errorMessage, SIZEOF(errorMessage), bError => requestEventTextError, hrErrorCode => requestEventTextErrorCode) THEN
+			IF requestEventTextError THEN					
+				errorMessage := StringHelper.Concat2('_Logger.RequestEventText() call error. Error code is ', TO_STRING(requestEventTextErrorCode));
+			END_IF
+		ELSE
+			RETURN;
+		END_IF			
+	ELSE
+		errorMessage :=  'Logger is not specified';
+	END_IF				
+	
+	_LastExceptionHelper.Throw(0, TO_WSTRING(errorMessage), __POUNAME(), ClassName, CurrentNamespace.Name, __POSITION());
+	JMP START;	
+END_IF
+
+CASE State OF
+	DB_COMMAND_EXECUTION_STATE.STARTING:
+		MEMSET(_ExecutionParameters.TargetBuffer, 0, _ExecutionParameters.TargetBufferSize);	
+		_State := DB_COMMAND_EXECUTION_STATE.CONNECTING;		
+		JMP START;		
+	
+	DB_COMMAND_EXECUTION_STATE.CONNECTING:
+		IF _DbConnection.Connect(hDBID := _ExecutionParameters.DBID) THEN
+			IF _DbConnection.bError THEN
+				_GetError := TRUE;
+				_Logger := _DbConnection.ipTcResult;
+				_State := DB_COMMAND_EXECUTION_STATE.DISCONNECTING;				
+			ELSE
+				_Connected := TRUE;
+				_State := DB_COMMAND_EXECUTION_STATE.PREPARING;
+			END_IF
+			
+			JMP START;
+		END_IF
+	
+	DB_COMMAND_EXECUTION_STATE.PREPARING:
+		IF _DbConnection.CreateCmd(ADR(_Command)) THEN
+			IF _DbConnection.bError THEN
+				_GetError := TRUE;
+				_Logger := _DbConnection.ipTcResult;
+				_State := DB_COMMAND_EXECUTION_STATE.DISCONNECTING;				
+			ELSE
+				_State := DB_COMMAND_EXECUTION_STATE.EXECUTING;
+			END_IF
+			
+			JMP START;
+		END_IF
+	
+	DB_COMMAND_EXECUTION_STATE.EXECUTING:
+		IF _ExecutionParameters.MaxRecordsToReadAtTime = 0 THEN
+			IF _Command.Execute(ADR(_ExecutionParameters.CommandText), SIZEOF(_ExecutionParameters.CommandText)) THEN
+				IF _Command.bError THEN
+					_GetError := TRUE;
+					_Logger := _Command.ipTcResult;
+				END_IF
+				
+				_State := DB_COMMAND_EXECUTION_STATE.DISCONNECTING;
+				
+				JMP START;			
+			END_IF
+		ELSE
+			IF _Command.ExecuteDataReturn(ADR(_ExecutionParameters.CommandText), SIZEOF(_ExecutionParameters.CommandText), ADR(_SQLResult)) THEN
+				IF _Command.bError THEN
+					_GetError := TRUE;
+					_Logger := _Command.ipTcResult;
+					_State := DB_COMMAND_EXECUTION_STATE.DISCONNECTING;
+				ELSE
+					_State := DB_COMMAND_EXECUTION_STATE.LOADING_RESULT_DATA_SET;
+				END_IF
+				
+				JMP START;			
+			END_IF
+		END_IF
+		
+	DB_COMMAND_EXECUTION_STATE.LOADING_RESULT_DATA_SET:
+		IF _SQLResult.Read(0, _ExecutionParameters.MaxRecordsToReadAtTime, _ExecutionParameters.TargetBuffer, _ExecutionParameters.TargetBufferSize, TRUE, TRUE) THEN			
+			IF _SQLResult.bError THEN
+				_GetError := TRUE;
+				_SQLResult.Release();
+				_Logger := _SQLResult.ipTcResult;
+			ELSE
+				_DataSetLoaded := TRUE;
+			END_IF
+
+			_State := DB_COMMAND_EXECUTION_STATE.DISCONNECTING;
+			
+			JMP START;			
+		END_IF
+
+	DB_COMMAND_EXECUTION_STATE.DISCONNECTING:
+		CASE _DisconnectingState OF
+			DB_COMMAND_DISCONNECTING_STATE.IDLING:
+				IF _DataSetLoaded THEN
+					_DisconnectingState := DB_COMMAND_DISCONNECTING_STATE.DATA_SET_RELEASING;
+				ELSIF _Connected THEN
+					_DisconnectingState := DB_COMMAND_DISCONNECTING_STATE.DISCONNECTING;					
+				ELSE
+					_State := DB_COMMAND_EXECUTION_STATE.IDLING;	
+					_Done := _LastException.Empty;	
+				END_IF
+				
+				JMP START;
+				
+			DB_COMMAND_DISCONNECTING_STATE.DATA_SET_RELEASING:
+				IF _SQLResult.Release() THEN
+					_DataSetLoaded := FALSE;
+					_DisconnectingState := DB_COMMAND_DISCONNECTING_STATE.DISCONNECTING;
+					JMP START;										
+				END_IF
+				
+			DB_COMMAND_DISCONNECTING_STATE.DISCONNECTING:
+				IF _DbConnection.Disconnect() THEN
+					_Connected := FALSE;
+					_DisconnectingState := DB_COMMAND_DISCONNECTING_STATE.IDLING;
+					JMP START;										
+				END_IF
+		END_CASE	
+END_CASE]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="LastException" Id="{ee4f7f13-95ff-478a-9942-6726b1d6dc97}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+{attribute 'OPC.UA.DA.Property' := '1'}
+{attribute 'OPC.UA.DA.Access' := '1'}
+PROPERTY LastException : REFERENCE TO Exception
+]]></Declaration>
+      <Get Name="Get" Id="{6224a1bb-bad7-46a1-854e-0d38d6332a04}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[LastException REF= _LastException;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="Reset" Id="{6a7dd0e9-613d-4ea5-a868-44bd79840e81}">
+      <Declaration><![CDATA[METHOD Reset
+VAR_OUTPUT
+	exception : Exception;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF Busy THEN
+	_LastExceptionHelper.Throw(0, "Previous command execution is not finished", __POUNAME(), ClassName, CurrentNamespace.Name, __POSITION()); 
+	RETURN;
+END_IF
+
+_Done := FALSE;
+_State := DB_COMMAND_EXECUTION_STATE.STARTING;
+_GetError := FALSE;
+_Logger := 0;	
+_Connected := FALSE;
+_DataSetLoaded := FALSE;
+_DisconnectingState := DB_COMMAND_DISCONNECTING_STATE.IDLING;
+_LastException.Clear();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="Start" Id="{a3576e48-d749-4834-b448-dc06555218e4}">
+      <Declaration><![CDATA[METHOD Start 
+VAR_INPUT
+	dbId : UDINT;
+	commandText : Tc2_System.T_MaxString;
+	targetBuffer : PVOID;
+	targetBufferSize : UDINT;
+	maxRecordsToReadAtTime : UINT;
+END_VAR
+VAR_OUTPUT
+	exception : Exception;
+END_VAR
+VAR
+	executionParameters : POINTER TO DB_COMMAND_EXECUTION_PARAMETERS;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF Busy THEN
+	_LastExceptionHelper.Throw(0, "Previous command execution is not finished", __POUNAME(), ClassName, CurrentNamespace.Name, __POSITION()); 
+	RETURN;
+END_IF
+
+IF maxRecordsToReadAtTime > 0 AND_THEN (targetBuffer = 0 OR_ELSE targetBufferSize = 0) THEN
+	_LastExceptionHelper.Throw(0, "Parameter 'maxRecordsToReadAtTime' is greater then zero, but 'targetBuffer' or 'targetBufferSize' has incorrect values", __POUNAME(), ClassName, CurrentNamespace.Name, __POSITION()); 
+	RETURN;
+END_IF
+
+_ExecutionParameters.DbId := dbId;
+_ExecutionParameters.CommandText := commandText;
+_ExecutionParameters.TargetBuffer := targetBuffer; 
+_ExecutionParameters.TargetBufferSize := targetBufferSize;
+_ExecutionParameters.MaxRecordsToReadAtTime := maxRecordsToReadAtTime;
+
+Reset();]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="State" Id="{2ec50a38-cfe8-4bf8-a7d0-15c380f38c10}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+{attribute 'OPC.UA.DA.Property' := '1'}
+{attribute 'OPC.UA.DA.Access' := '1'}
+PROPERTY State : DB_COMMAND_EXECUTION_STATE]]></Declaration>
+      <Get Name="Get" Id="{086c3e5e-e5c0-447d-b4de-fcb939222dd1}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[State := _State; ]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="Timeout" Id="{16a4b80e-f36d-4842-af8d-b17e8349dabe}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+{attribute 'OPC.UA.DA.Property' := '1'}
+{attribute 'OPC.UA.DA.Access' := '1'}
+PROPERTY Timeout : TIME]]></Declaration>
+      <Get Name="Get" Id="{1332ec43-4d03-4e06-ac1c-a89ed9b24f02}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[Timeout := _Command.tTimeout;]]></ST>
+        </Implementation>
+      </Get>
+      <Set Name="Set" Id="{89eb2109-b8b7-4dff-b590-b329d3224c40}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[_Command.tTimeout := Timeout;
+_SQLResult.tTimeout := Timeout;]]></ST>
+        </Implementation>
+      </Set>
+    </Property>
+  </POU>
+</TcPlcObject>

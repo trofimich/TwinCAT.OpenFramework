@@ -1,0 +1,92 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="OpcUaDAReadRequestItem" Id="{a0b7573f-9e28-4f8f-b6b5-96a049099a55}" SpecialFunc="None">
+    <Declaration><![CDATA[{attribute 'enable_dynamic_creation'}	
+FUNCTION_BLOCK OpcUaDAReadRequestItem EXTENDS OpcUaDARequestItem
+VAR
+	_ClassName : STRING := __POUNAME();
+
+	_Read : Tc3_PLCopen_OpcUa.UA_Read;
+	_NumberOfReceivedBytesCount : POINTER TO UDINT;
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[]]></ST>
+    </Implementation>
+    <Property Name="ClassName" Id="{dfac8c75-3193-498f-baaa-5ee72862b7a9}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+PROPERTY ClassName : STRING]]></Declaration>
+      <Get Name="Get" Id="{fadeeb25-fb64-46ec-9c89-820c213ed7e5}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ClassName := _ClassName;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="Initialize" Id="{36e7afc4-5742-4c89-9e54-098ce4924009}">
+      <Declaration><![CDATA[METHOD Initialize
+VAR_INPUT
+	namespaceUri : STRING(Tc2_System.MAX_STRING_LENGTH); // empty string if index used
+	namespaceIndex : UINT; // zero if namespace uri used
+	identifierType : Tc3_PLCopen_OpcUa.E_UAIdentifierType;
+	identifier : STRING(Tc2_System.MAX_STRING_LENGTH);
+	nodeAdditionalInfo : Tc3_PLCopen_OpcUa.ST_UANodeAdditionalInfo;
+	targetVariable : __SYSTEM.AnyType;
+	numberOfReceivedBytesCount : POINTER TO UDINT;
+	operationTimeout : TIME := Tc2_System.DEFAULT_ADS_TIMEOUT;
+END_VAR
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF namespaceUri <> '' THEN
+	_NamespaceUri := namespaceUri;
+	_NodeId.nNamespaceIndex := 0;
+	_NamespaceIndexValid := FALSE;
+ELSE
+	_NamespaceUri := '';
+	_NodeId.nNamespaceIndex := namespaceIndex;
+	_NamespaceIndexValid := TRUE;
+END_IF
+
+_NodeId.eIdentifierType := identifierType;
+_NodeId.sIdentifier := identifier;
+
+_Read.stNodeAddInfo := nodeAdditionalInfo;
+_Read.pVariable := targetVariable.pValue;
+_Read.cbData := TO_UDINT(targetVariable.diSize);
+
+_NumberOfReceivedBytesCount := numberOfReceivedBytesCount;
+
+_GetNodeHandle.Timeout := operationTimeout;
+_Read.Timeout := operationTimeout;
+_ReleaseNodeHandle.Timeout := operationTimeout;
+]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="PerformAction" Id="{8f9d7d15-2db9-4b6b-9ad0-97cf9a620062}">
+      <Declaration><![CDATA[METHOD PerformAction : OPC_UA_ACTION_EXECUTION_STATE
+VAR_OUTPUT
+	exception : Exception;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[PerformAction := OPC_UA_ACTION_EXECUTION_STATE.DONE;
+
+_Read(Execute := TRUE, ConnectionHdl := _ConnectionHandle, NodeHdl := _GetNodeHandle.NodeHdl);
+		
+IF _Read.Error THEN
+	ExceptionHelper.Throw(_Read.ErrorID, WStringHelper.Concat5("UA_Read error ", TO_WSTRING(_Read.ErrorID), " (Node identifier = '", TO_WSTRING(_NodeId.sIdentifier), "')"), __POUNAME(), ClassName, CurrentNamespace.Name, __POSITION());					
+	PerformAction := OPC_UA_ACTION_EXECUTION_STATE.ERROR;			
+	AdsLogger.LogMessage(LOGGING_LEVEL.INFORMATION, WStringHelper.Concat3("---OpcUaRequest PerformAction error: ", "UA_Read error ", TO_WSTRING(_Read.ErrorID)));
+ELSIF _Read.Busy THEN
+	PerformAction := OPC_UA_ACTION_EXECUTION_STATE.BUSY;
+ELSIF _Read.Done AND_THEN _NumberOfReceivedBytesCount <> 0 THEN
+ 	_NumberOfReceivedBytesCount^ := _Read.cbData_R;
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="ResetAction" Id="{939fbbfb-0208-434c-9e5b-ab89a088d5cf}">
+      <Declaration><![CDATA[METHOD ResetAction ]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_Read(Execute := FALSE);]]></ST>
+      </Implementation>
+    </Method>
+  </POU>
+</TcPlcObject>

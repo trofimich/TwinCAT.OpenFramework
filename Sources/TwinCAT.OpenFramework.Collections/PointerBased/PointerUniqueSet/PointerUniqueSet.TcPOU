@@ -1,0 +1,301 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="PointerUniqueSet" Id="{4e784e7c-d596-06e4-0c0d-e2d302ae0ad1}" SpecialFunc="None">
+    <Declaration><![CDATA[{attribute 'no_explicit_call' := 'do not call this function block directly'} 
+// Dynamic set of value pointers
+FUNCTION_BLOCK PointerUniqueSet EXTENDS Object IMPLEMENTS IReadOnlyPointerUniqueSet
+VAR
+	_ClassName : STRING := __POUNAME();
+	_Elements : POINTER TO PVOID;
+	_ArrayLength : DINT;
+	_ElementCount : DINT;
+	_DefaultAllocationElemetsCount : BYTE := 10;
+	_ElementType : POINTER_TYPE := POINTER_TYPE.BYTE_POINTER;
+	_ElementComparer : IPointerComparer;
+	_DefaultEnumerator : PointerUniqueSetEnumerator;
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[]]></ST>
+    </Implementation>
+    <Method Name="AllocateMemory" Id="{b566a040-b911-029c-1743-b1632d7e7fa8}">
+      <Declaration><![CDATA[METHOD AllocateMemory
+VAR_INPUT
+	elementsCount : DINT;
+END_VAR
+VAR
+	newElements : POINTER TO PVOID;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[newElements := __NEW(PVOID, TO_UDINT(_ArrayLength + elementsCount));
+
+IF _ElementCount > 0 THEN
+	Tc2_System.MEMCPY(newElements, _Elements, SIZEOF(POINTER TO BYTE) * TO_UDINT(_ElementCount)); 
+END_IF
+
+IF _Elements <> 0 THEN
+	__DELETE(_Elements);
+END_IF
+ 
+_Elements := newElements;
+ 
+_ArrayLength := _ArrayLength + elementsCount;]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="ClassName" Id="{3eb8a871-d38f-007c-0044-c6a1360ed547}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+PROPERTY ClassName : STRING]]></Declaration>
+      <Get Name="Get" Id="{f1ac7b05-932f-0b98-31f3-8d0d5fbda0ad}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ClassName := _ClassName;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="Clear" Id="{9473bdea-8414-0bfd-1590-06a00c4c9ecb}">
+      <Declaration><![CDATA[METHOD Clear
+VAR_INPUT
+	deleteElements : BOOL;
+END_VAR
+VAR
+	i : DINT;
+	value : PVOID;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF deleteElements AND_THEN _ElementCount > 0 THEN
+	FOR i := 0 TO _ElementCount - 1 DO
+		TwinCAT_OpenFramework_Core.DynamicMemoryManager.ReleaseDynamicMemory(_Elements[i], _ElementType = POINTER_TYPE.OBJECT_POINTER);						
+	END_FOR	
+END_IF
+
+IF _Elements <> 0 THEN
+	__DELETE(_Elements);
+END_IF
+
+_ElementCount := 0;
+_ArrayLength := 0;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="Contains" Id="{2c55cb7a-0fb3-0c43-2224-40275e9da0df}">
+      <Declaration><![CDATA[METHOD Contains : BOOL
+VAR_INPUT
+	element : PVOID;
+END_VAR
+VAR
+	index : DINT; 
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[Contains := SearchPosition(element, supposedIndex => index);]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="Count" Id="{98d6c422-6085-0a00-06a2-5fd5a2fde234}">
+      <Declaration><![CDATA[{attribute 'OPC.UA.DA.Property' := '1'}
+{attribute 'monitoring' := 'call'}
+PROPERTY Count : DINT]]></Declaration>
+      <Get Name="Get" Id="{35c48edc-0490-0b2f-1265-e0a3a08c6c56}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[Count := _ElementCount;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="ElementType" Id="{283f7331-86f2-0b9c-19c4-3f451e1e3a8b}">
+      <Declaration><![CDATA[{attribute 'OPC.UA.DA.Property' := '1'}
+{attribute 'monitoring' := 'call'}
+PROPERTY ElementType : POINTER_TYPE]]></Declaration>
+      <Get Name="Get" Id="{b8beba89-46c2-07d1-29f1-d6046cb4c600}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ElementType := _ElementType;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="FB_exit" Id="{156ea94f-ab12-0a02-0f1f-e8e3c147b001}">
+      <Declaration><![CDATA[METHOD FB_exit : BOOL
+VAR_INPUT
+	bInCopyCode : BOOL; // if TRUE, the exit method is called for exiting an instance that is copied afterwards (online change).
+END_VAR
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[Clear(FALSE);]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="FB_init" Id="{fd9b3ecb-a3dd-04d6-1c05-32ee8a84a5d9}">
+      <Declaration><![CDATA[METHOD FB_init : BOOL
+VAR_INPUT
+	bInitRetains : BOOL; // if TRUE, the retain variables are initialized (warm start / cold start)
+	bInCopyCode : BOOL; // if TRUE, the instance afterwards gets moved into the copy code (online change)
+	keyType : POINTER_TYPE;
+	keyComparer : IPointerComparer;
+END_VAR
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_DefaultEnumerator.Initialize(THIS^);
+
+_ElementType := keyType;
+
+IF keyComparer = 0 THEN
+	_ElementComparer := StandardPointerComparers.GetForType(keyType);
+ELSE
+	_ElementComparer := keyComparer;
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="GetByIndex" Id="{3a89aacd-8a66-03c0-11d7-2a481c3884cd}">
+      <Declaration><![CDATA[METHOD GetByIndex : PVOID
+VAR_INPUT
+	index : DINT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF index >= 0 AND index < _ElementCount THEN
+	GetByIndex := _Elements[index];
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="GetDefaultEnumerator" Id="{8c0fcdff-f53b-021e-15d4-a3c5148d5412}">
+      <Declaration><![CDATA[METHOD GetDefaultEnumerator : IPointerEnumerator]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[GetDefaultEnumerator := _DefaultEnumerator;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="Remove" Id="{a3becb70-0104-0c6e-3a0d-2b1a1fea7f76}">
+      <Declaration><![CDATA[METHOD Remove : BOOL
+VAR_INPUT
+	element : PVOID;
+	delete : BOOL;
+END_VAR
+VAR
+	index : DINT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF SearchPosition(element, supposedIndex => index) THEN
+	RemoveAt(index, delete);
+	Remove := TRUE;
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="RemoveAt" Id="{5db56bd3-43ff-0fb0-2e66-ee8d7fee27cc}">
+      <Declaration><![CDATA[METHOD RemoveAt : BOOL
+VAR_INPUT
+	index : DINT;
+	delete : BOOL;
+END_VAR
+VAR
+	i : DINT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF index < _ElementCount THEN
+	IF delete THEN
+		TwinCAT_OpenFramework_Core.DynamicMemoryManager.ReleaseDynamicMemory(_Elements[index], _ElementType = POINTER_TYPE.OBJECT_POINTER);			
+	END_IF
+	
+	IF index + 2 <= _ElementCount THEN
+		FOR	i := index TO _ElementCount - 2 DO
+			_Elements[i] := _Elements[i + 1];
+		END_FOR
+	END_IF	
+		
+	_Elements[_ElementCount - 1] := 0;
+	_ElementCount := _ElementCount - 1;
+	
+	RemoveAt := TRUE;
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="SearchPosition" Id="{3fd4d5c1-bed6-0eec-1576-b1aefd671eca}">
+      <Declaration><![CDATA[METHOD PROTECTED SearchPosition : BOOL
+VAR_INPUT
+	element : PVOID;
+END_VAR
+VAR_OUTPUT
+	supposedIndex : DINT; 
+END_VAR
+VAR
+	currentElement : PVOID;
+	lastIndex : DINT;
+	minIndex : DINT;
+	maxIndex : DINT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF _ElementCount = 0 THEN
+	RETURN;
+END_IF
+
+lastIndex := _ElementCount - 1;
+maxIndex := lastIndex;
+supposedIndex := maxIndex / 2;
+
+WHILE minIndex <= maxIndex DO
+	currentElement := _Elements[supposedIndex];
+	
+	CASE _ElementComparer.Compare(currentElement, element) OF
+		// assumed key equals to seached 
+		COMPARISION_RESULT.FIRST_EQUAL_TO_SECOND:
+			SearchPosition := TRUE;
+			RETURN;
+
+		// assumed key less than searched, move range to right
+		COMPARISION_RESULT.FIRST_LESS_THAN_SECOND:
+			minIndex := supposedIndex + 1;
+			
+		// assumed key greater than searched, move range to left	
+		COMPARISION_RESULT.FIRST_GREATER_THAN_SECOND:
+			maxIndex := supposedIndex - 1;
+	END_CASE
+	
+	supposedIndex := minIndex + (maxIndex - minIndex) / 2;
+END_WHILE]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="Set" Id="{47f44348-eab0-0a4e-21d4-f7fa5324cac3}">
+      <Declaration><![CDATA[METHOD Set : DINT
+VAR_INPUT
+	element : PVOID;
+	deleteReplacedElement : BOOL;
+END_VAR
+VAR
+	index, i : DINT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[// if equal key found then we need to replace it
+IF SearchPosition(element, supposedIndex => index) THEN	
+	// old and new keys show to diffirent address, then we need to replace existing key 
+	IF _Elements[index] <> element THEN
+		IF deleteReplacedElement THEN
+			TwinCAT_OpenFramework_Core.DynamicMemoryManager.ReleaseDynamicMemory(_Elements[index], _ElementType = POINTER_TYPE.OBJECT_POINTER);
+		END_IF
+		
+		_Elements[index] := element;
+	END_IF
+// if equal key not found than we need to insert it
+ELSE
+	IF _ElementCount >= _ArrayLength THEN
+		AllocateMemory(_DefaultAllocationElemetsCount);
+	END_IF
+	
+	i := _ElementCount;	
+	_ElementCount := _ElementCount + 1;
+		
+	WHILE i > index DO
+		_Elements[i] := _Elements[i - 1];
+		
+		i := i - 1;
+	END_WHILE
+	
+	_Elements[index] := element;
+END_IF
+
+Set := index;]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="Size" Id="{53cce3ca-4bbe-4df2-a64f-736cbd2cf439}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+PROPERTY Size : ULINT]]></Declaration>
+      <Get Name="Get" Id="{01b6ec09-40a3-4aa6-9d89-8d4475982a37}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[Size := XSIZEOF(THIS^);]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+  </POU>
+</TcPlcObject>
