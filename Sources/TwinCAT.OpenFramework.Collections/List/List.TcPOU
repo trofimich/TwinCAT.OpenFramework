@@ -1,0 +1,409 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="List" Id="{423efb90-4c6a-41e3-8889-647ff943b33e}" SpecialFunc="None">
+    <Declaration><![CDATA[{attribute 'no_explicit_call' := 'do not call this function block directly'} 
+FUNCTION_BLOCK List EXTENDS Core.Object IMPLEMENTS IList
+VAR_INPUT
+	DefaultAllocationElemetCount : BYTE := 10;	
+END_VAR
+VAR
+	_ClassName : STRING := __POUNAME();
+
+	_Array : POINTER TO Core.GENERIC_VALUE;
+	_ArrayLength : DINT;
+	_ValueCount : DINT;
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[]]></ST>
+    </Implementation>
+    <Method Name="AllocateMemory" Id="{7805ad4a-1088-4228-99dd-d8b7fe4579c3}">
+      <Declaration><![CDATA[METHOD AllocateMemory
+VAR_INPUT
+	elementCount : DINT;
+END_VAR
+VAR	
+	newMemory : POINTER TO GENERIC_VALUE;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[newMemory := __NEW(BYTE, TO_UDINT(SIZEOF(GENERIC_VALUE) * (_ArrayLength + elementCount)));
+
+IF _ValueCount > 0 THEN
+	Tc2_System.MEMCPY(newMemory, _Array, TO_UDINT(SIZEOF(GENERIC_VALUE) * _ValueCount));
+END_IF
+ 
+IF _Array <> 0 THEN
+	__DELETE(_Array);
+END_IF
+
+_ArrayLength := _ArrayLength + elementCount;
+
+_Array := newMemory;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="Append" Id="{c48f84f5-3206-4f8e-a06b-95fdd5877efa}">
+      <Declaration><![CDATA[METHOD Append : DINT
+VAR_INPUT
+	value : ANY;
+	isObject : BOOL := FALSE;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[Append := AppendGeneric(GenericValueFactory.FromAnyType(value, isObject, TRUE));]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="AppendGeneric" Id="{f1ff6a71-50a0-45d9-ae86-164a44b67bf8}">
+      <Declaration><![CDATA[METHOD AppendGeneric : DINT
+VAR_INPUT
+	value : GENERIC_VALUE;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[AppendGeneric := _ValueCount;
+
+InsertGeneric(value, AppendGeneric);]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="ClassName" Id="{33e07dae-fed5-4e1d-8f43-eee6214a3816}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+PROPERTY ClassName : STRING]]></Declaration>
+      <Get Name="Get" Id="{f6501ffd-91a8-433d-945c-613d26b30c47}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ClassName := _ClassName;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="Clear" Id="{6eeb2dd8-b2fb-4bd3-af28-3d4655f329b4}">
+      <Declaration><![CDATA[METHOD Clear
+VAR
+	i : DINT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[FOR i := 0 TO _ValueCount - 1 DO
+	_Array[i].Release();						
+END_FOR	
+
+_ValueCount := 0;
+_ArrayLength := 0;
+
+IF _Array <> 0 THEN
+	__DELETE(_Array);	
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="Count" Id="{8b78c4a9-2b51-4df9-a89b-35d75f4063d7}">
+      <Declaration><![CDATA[{attribute 'OPC.UA.DA.Property' := '1'}
+{attribute 'monitoring' := 'call'}
+PROPERTY Count : DINT]]></Declaration>
+      <Get Name="Get" Id="{40434b4f-ac59-4ed2-adb0-38a6ead17ebd}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[Count := _ValueCount;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="CreateEnumerator" Id="{9c229dd9-393b-46ff-976f-739fe26eedc5}">
+      <Declaration><![CDATA[METHOD CreateEnumerator : IEnumerator
+VAR
+	enumerator : POINTER TO ListEnumerator;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[enumerator := __NEW(ListEnumerator(list := THIS^));
+
+CreateEnumerator := enumerator^;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="FB_exit" Id="{8d8b7b19-3218-490a-a08e-e708f6895db1}">
+      <Declaration><![CDATA[METHOD FB_exit : BOOL
+VAR_INPUT
+	bInCopyCode : BOOL; // if TRUE, the exit method is called for exiting an instance that is copied afterwards (online change).
+END_VAR
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[Clear();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="FindSingle" Id="{5bd8df97-f8f3-46ed-97e0-2baa71205501}">
+      <Declaration><![CDATA[METHOD FindSingle : BOOL
+VAR_INPUT
+	predicate : IPredicate;
+	skip : UDINT := 0;
+	searchDirection : SEARCH_DIRECTION := SEARCH_DIRECTION.FROM_BEGINNING;
+END_VAR
+VAR_OUTPUT
+	value : GENERIC_VALUE;
+	index : DINT;
+END_VAR
+VAR
+	startSearchIndex : DINT;
+	maxSearchIndex : DINT;
+	indexStep : DINT;
+	i : DINT;
+	skiped : UDINT := 0;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[index := 0;
+	
+IF TO_DINT(skip) >= _ValueCount OR_ELSE predicate = 0 THEN
+	RETURN;
+END_IF
+
+startSearchIndex := SEL(searchDirection = SEARCH_DIRECTION.FROM_BEGINNING, _ValueCount - 1, 0);
+maxSearchIndex := SEL(searchDirection = SEARCH_DIRECTION.FROM_BEGINNING, 0, _ValueCount - 1);
+indexStep := SEL(searchDirection = SEARCH_DIRECTION.FROM_BEGINNING, -1, 1);
+
+FOR i := startSearchIndex TO maxSearchIndex BY indexStep DO
+	IF predicate.Check(_Array[i].AsAnyType()) THEN
+		IF skip = skiped THEN
+			value := _Array[i];
+			index := i;
+			FindSingle := TRUE;
+			RETURN;
+		ELSE
+			skiped := skiped + 1;
+		END_IF
+	END_IF
+END_FOR]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="Get" Id="{35156606-e33f-4fd7-a3f8-50e4c6feea06}">
+      <Declaration><![CDATA[METHOD Get : REFERENCE TO GENERIC_VALUE
+VAR_INPUT
+	index : DINT;
+END_VAR
+VAR
+	argumentOutOfRangeException : ArgumentOutOfRangeException;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF index < 0 OR_ELSE index >= _ValueCount THEN
+	argumentOutOfRangeException.Throw(CurrentNamespace.Name, ClassName, __POUNAME(), __POSITION(), 'index', index);
+END_IF
+
+Get REF= _Array[index];]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="Insert" Id="{7c5e7ea9-1602-45c2-9555-47aa08559820}">
+      <Declaration><![CDATA[METHOD Insert
+VAR_INPUT
+	value : ANY;
+	index : DINT;
+	isObject : BOOL := FALSE;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[InsertGeneric(GenericValueFactory.FromAnyType(value, isObject, TRUE), index);]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="InsertGeneric" Id="{2dcf43ab-5d4d-40f0-ba4f-54f191c32509}">
+      <Declaration><![CDATA[METHOD InsertGeneric
+VAR_INPUT
+	value : GENERIC_VALUE;	
+	index : DINT;
+END_VAR
+VAR
+	argumentOutOfRangeException : ArgumentOutOfRangeException;
+	i : DINT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF index < 0 OR index > _ValueCount THEN
+	argumentOutOfRangeException.Throw(CurrentNamespace.Name, ClassName, __POUNAME(), __POSITION(), 'index', index);
+END_IF
+
+IF _ValueCount >= _ArrayLength THEN
+	AllocateMemory(DefaultAllocationElemetCount);
+END_IF
+
+_ValueCount := _ValueCount + 1;
+
+i := _ValueCount - 1;
+
+WHILE i > index DO
+	_Array[i] := _Array[i - 1];	
+	i := i - 1;
+END_WHILE
+
+_Array[i] := value;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="RemoveAt" Id="{0e28301b-e63b-49ca-a697-ef9528fc2481}">
+      <Declaration><![CDATA[METHOD RemoveAt
+VAR_INPUT
+	index : DINT;
+END_VAR
+VAR
+	argumentOutOfRangeException : ArgumentOutOfRangeException;
+
+	i : DINT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF index < 0 OR index >= _ValueCount THEN
+	argumentOutOfRangeException.Throw(CurrentNamespace.Name, ClassName, __POUNAME(), __POSITION(), 'index', index);
+END_IF
+
+_Array[index].Release();			
+
+FOR	i := index TO _ValueCount - 2 DO
+	_Array[i] := _Array[i + 1];
+END_FOR			
+
+_Array[_ValueCount - 1].Reset();	
+
+_ValueCount := _ValueCount - 1;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="RemoveFirst" Id="{ab28382f-e74f-44a6-bee2-f905f3030356}">
+      <Declaration><![CDATA[METHOD RemoveFirst : BOOL
+VAR_INPUT
+	value : ANY;
+	isObject : BOOL := FALSE;
+END_VAR
+VAR
+	i : DINT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF _ValueCount > 0 THEN
+	FOR i := 0 TO _ValueCount - 1 DO
+		IF _Array[i].Equals(GenericValueFactory.FromAnyType(value, isObject, FALSE)) THEN
+			RemoveAt(i);
+			RemoveFirst := TRUE;
+			RETURN;
+		END_IF
+	END_FOR
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="RemoveMatched" Id="{e5cc38ae-8b20-4e35-acc9-fcd84e9d10bd}">
+      <Declaration><![CDATA[METHOD RemoveMatched : DINT
+VAR_INPUT
+	predicate : IPredicate;
+	skip : UDINT := 0;
+	maxRemoved : UDINT := 16#FFFFFFFF;
+END_VAR
+VAR
+	i : DINT;
+	skiped : UDINT := 0;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF TO_DINT(skip) >= _ValueCount OR_ELSE predicate = 0 OR_ELSE maxRemoved = 0 THEN
+	RETURN;
+END_IF
+
+FOR i := _ValueCount - 1 TO 0 BY -1 DO
+	IF predicate.Check(_Array[i].AsAnyType()) THEN
+		IF skip <= skiped THEN
+			RemoveAt(i);
+			RemoveMatched := RemoveMatched + 1;
+		ELSE
+			skiped := skiped + 1;
+		END_IF
+	END_IF
+END_FOR]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="Set" Id="{e9638d43-e88c-48cb-a07f-937c5e87c232}">
+      <Declaration><![CDATA[METHOD Set
+VAR_INPUT
+	value : ANY;
+	index : DINT;
+	isObject : BOOL := FALSE;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[SetGeneric(GenericValueFactory.FromAnyType(value, isObject, TRUE), index);]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="SetGeneric" Id="{28fb4746-7d53-4b08-a432-54d437f989bb}">
+      <Declaration><![CDATA[METHOD SetGeneric 
+VAR_INPUT
+	value : GENERIC_VALUE;	
+	index : DINT;
+END_VAR
+VAR
+	argumentOutOfRangeException : ArgumentOutOfRangeException;
+	predicate : IdenticalDataPredicate;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF index < 0 OR index >= _ValueCount THEN
+	argumentOutOfRangeException.Throw(CurrentNamespace.Name, ClassName, __POUNAME(), __POSITION(), 'index', index);
+END_IF
+
+IF _Array[index].DataType <> value.DataType OR_ELSE _Array[index].Address <> value.Address OR_ELSE _Array[index].Size <> value.Size OR_ELSE _Array[index].IsMemoryOwner <> value.IsMemoryOwner THEN
+	_Array[index].Release();	
+	_Array[index] := value;
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="Size" Id="{b8f1c23e-6bde-4d17-b77f-f3d1373a6f6b}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+PROPERTY Size : ULINT]]></Declaration>
+      <Get Name="Get" Id="{0c60dbce-56ff-4644-ae28-c3c705772b31}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[Size := XSIZEOF(THIS^);]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="Sort" Id="{cd2a8a15-72bb-44f7-9e5d-ecb76fed56a8}">
+      <Declaration><![CDATA[METHOD Sort
+VAR_INPUT
+	comparer : IComparer;
+	direction : SORT_DIRECTION := SORT_DIRECTION.ASCENDING;
+END_VAR
+VAR
+	argumentNullException : ArgumentNullException;
+	replaced : BOOL;
+	i : DINT;
+	comparisionResult : COMPARISION_RESULT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF comparer = 0 THEN
+	argumentNullException.Throw(CurrentNamespace.Name, ClassName, __POUNAME(), __POSITION(), 'comparer');
+END_IF
+
+REPEAT
+	replaced := FALSE;
+	
+	IF _ValueCount > 1 THEN
+		FOR i := 0 TO _ValueCount - 2 DO
+			comparisionResult := comparer.Compare(_Array[i].AsAnyType(), _Array[i + 1].AsAnyType());
+			
+			IF direction = SORT_DIRECTION.ASCENDING THEN
+				IF comparisionResult = COMPARISION_RESULT.FIRST_GREATER_THAN_SECOND THEN
+					Swap(i, i + 1);
+					replaced := TRUE;
+				END_IF
+			ELSE
+				IF comparisionResult = COMPARISION_RESULT.FIRST_LESS_THAN_SECOND THEN
+					Swap(i, i + 1);
+					replaced := TRUE;
+				END_IF			
+			END_IF
+		END_FOR		
+	END_IF
+UNTIL
+	NOT replaced
+END_REPEAT]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="Swap" Id="{eb0e8297-edd7-472f-a573-82e2ae740339}">
+      <Declaration><![CDATA[METHOD Swap
+VAR_INPUT
+	index1 : DINT;
+	index2 : DINT;
+END_VAR
+VAR
+	argumentOutOfRangeException : ArgumentOutOfRangeException;
+	tmp : GENERIC_VALUE;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF index1 = index2 THEN
+	RETURN;
+ELSIF index1 < 0 OR_ELSE index1 >= _ValueCount THEN
+	argumentOutOfRangeException.Throw(CurrentNamespace.Name, ClassName, __POUNAME(), __POSITION(), 'index1', index1);
+ELSIF index2 < 0 OR_ELSE index2 >= _ValueCount THEN
+	argumentOutOfRangeException.Throw(CurrentNamespace.Name, ClassName, __POUNAME(), __POSITION(), 'index2', index2);
+END_IF
+
+tmp := _Array[index1];
+_Array[index1] := _Array[index2];
+_Array[index2] := tmp;]]></ST>
+      </Implementation>
+    </Method>
+  </POU>
+</TcPlcObject>
