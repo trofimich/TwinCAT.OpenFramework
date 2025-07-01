@@ -40,11 +40,11 @@ PROPERTY ClassName : STRING]]></Declaration>
       <Declaration><![CDATA[METHOD FromAny : GENERIC_VALUE
 VAR_INPUT
 	value : ANY;
-	owningMemory : BOOL;
 	isObject : BOOL := FALSE;
+	isMemoryOwner : BOOL := TRUE;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[FromAny := FromAnyType(value, isObject, owningMemory);]]></ST>
+        <ST><![CDATA[FromAny := FromAnyType(value, isObject, isMemoryOwner);]]></ST>
       </Implementation>
     </Method>
     <Method Name="FromAnyType" Id="{58f5fed2-ee58-4bb7-b5fb-7380db0fc95f}">
@@ -52,35 +52,29 @@ END_VAR]]></Declaration>
 VAR_INPUT
 	value : __System.AnyType;
 	isObject : BOOL;
-	owningMemory : BOOL;
+	isMemoryOwner : BOOL;
 END_VAR
 VAR
-	object : POINTER TO Object;
+	stringPointer : POINTER TO STRING;
+	wideStringPointer : POINTER TO WSTRING;
 	
-	dataType : DATA_TYPE;
-	address : POINTER TO BYTE;
 	size : ULINT;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[dataType := DataTypeConvertor.GetDataTypeBySystemAnyType(value, isObject);
+        <ST><![CDATA[CASE value.TypeClass OF
+	__SYSTEM.TYPE_CLASS.TYPE_STRING:
+		stringPointer := value.pValue;
+		size := StringHelper.GetActualSize(stringPointer^);
+		
+	__SYSTEM.TYPE_CLASS.TYPE_WSTRING:
+		wideStringPointer := value.pValue;
+		size := WideStringHelper.GetActualSize(wideStringPointer^);
+	
+	ELSE
+		size := TO_ULINT(value.diSize);
+END_CASE
 
-IF owningMemory THEN
-	IF value.pValue <> 0 AND_THEN value.diSize > 0 THEN
-		address := __NEW(BYTE, TO_UDINT(value.diSize));	
-		Tc2_System.MEMCPY(address, value.pValue, TO_UDINT(value.diSize));
-	END_IF
-ELSE
-	address := value.pValue;	
-END_IF
-
-IF dataType = DATA_TYPE.TYPE_OBJECT THEN
-	object := value.pValue;
-	size := object^.Size;
-ELSE
-	size := TO_ULINT(value.diSize);
-END_IF
-
-FromAnyType.FromParts(dataType, address, size, owningMemory);]]></ST>
+FromAnyType := FromParts(DataTypeConvertor.GetDataTypeBySystemAnyType(value, isObject), value.pValue, size, isMemoryOwner);]]></ST>
       </Implementation>
     </Method>
     <Method Name="FromBoolReference" Id="{d27b6912-bb8f-448c-b703-74f93763bb2a}" FolderPath="FromTypedReferences\">
@@ -358,34 +352,13 @@ VAR_INPUT
 END_VAR
 VAR
 	instanceNullException : ArgumentNullException;
-
-	dataType : DATA_TYPE;
-	address : POINTER TO BYTE;
-	size : ULINT;
-
-	cloneable : ICloneable;
-	clone : IObject;
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[IF instance = 0 THEN
 	instanceNullException.Throw(CurrentNamespace.Name, ClassName, __POUNAME(), __POSITION(), 'instance');
 END_IF
 
-dataType := DATA_TYPE.TYPE_OBJECT;
-
-IF __QUERYINTERFACE(instance, cloneable) THEN
-	clone := cloneable.Clone();
-	address := clone.Address;	
-ELSE
-	address := __NEW(BYTE, TO_UDINT(instance.Size));	
-	Tc2_System.MEMCPY(address, instance.Address, TO_UDINT(instance.Size));
-END_IF
-
-size := instance.Size;
-
-FromObjectValue.FromParts(dataType, address, size, TRUE);
-
-]]></ST>
+FromObjectValue.Assign(DATA_TYPE.TYPE_OBJECT, instance.Address, instance.Size, TRUE);]]></ST>
       </Implementation>
     </Method>
     <Method Name="FromParts" Id="{759e0037-660d-404f-8404-ca0ffa255f71}">
@@ -397,14 +370,34 @@ VAR_INPUT
 	isMemoryOwner : BOOL;
 END_VAR
 VAR
-	addressNullException : ArgumentNullException;
+	newAddress : POINTER TO BYTE;
+
+	objectPointer : POINTER TO Object;
+	cloneable : ICloneable;
+	clone : IObject;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[IF address = 0 THEN
-	addressNullException.Throw(CurrentNamespace.Name, ClassName, __POUNAME(), __POSITION(), 'address');
+        <ST><![CDATA[IF address = 0 OR_ELSE size <= 0 THEN
+	RETURN;
 END_IF
 
-FromParts.FromParts(dataType, address, size, isMemoryOwner);]]></ST>
+IF isMemoryOwner THEN
+	IF dataType = DATA_TYPE.TYPE_OBJECT THEN
+		objectPointer := address;		
+	END_IF
+	
+	IF dataType = DATA_TYPE.TYPE_OBJECT AND_THEN __QUERYINTERFACE(objectPointer^, cloneable) THEN
+		clone := cloneable.Clone();
+		address := clone.Address;	
+	ELSE
+		newAddress := __NEW(BYTE, TO_UDINT(size));	
+		Tc2_System.MEMCPY(newAddress, address, TO_UDINT(size));
+	END_IF
+ELSE
+	newAddress := address;	
+END_IF
+
+FromParts.Assign(dataType, newAddress, size, isMemoryOwner);]]></ST>
       </Implementation>
     </Method>
     <Method Name="FromRealReference" Id="{3b55838d-58fe-4935-bf92-dcc94945943e}" FolderPath="FromTypedReferences\Floating point\">
@@ -449,7 +442,7 @@ VAR_IN_OUT
 	value : STRING;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[FromStringReference := FromParts(DATA_TYPE.TYPE_STRING, ADR(value), StringHelper.GetSize(value), FALSE);]]></ST>
+        <ST><![CDATA[FromStringReference := FromParts(DATA_TYPE.TYPE_STRING, ADR(value), StringHelper.GetActualSize(value), FALSE);]]></ST>
       </Implementation>
     </Method>
     <Method Name="FromStringValue" Id="{a2ca4991-d75a-4278-817b-66b69acc26fd}" FolderPath="FromTypedValues\Strings\">
@@ -458,7 +451,7 @@ VAR_IN_OUT CONSTANT
 	value : STRING;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[FromStringValue := FromParts(DATA_TYPE.TYPE_STRING, ADR(value), StringHelper.GetSize(value), TRUE);]]></ST>
+        <ST><![CDATA[FromStringValue := FromParts(DATA_TYPE.TYPE_STRING, ADR(value), StringHelper.GetActualSize(value), TRUE);]]></ST>
       </Implementation>
     </Method>
     <Method Name="FromTimeOfDayReference" Id="{16667815-ae24-4a2e-bb7e-13b02852bf9b}" FolderPath="FromTypedReferences\Date and time\">
@@ -593,7 +586,7 @@ VAR_IN_OUT
 	value : WSTRING;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[FromWStringReference := FromParts(DATA_TYPE.TYPE_WSTRING, ADR(value), WideStringHelper.GetSize(value), FALSE);]]></ST>
+        <ST><![CDATA[FromWStringReference := FromParts(DATA_TYPE.TYPE_WSTRING, ADR(value), WideStringHelper.GetActualSize(value), FALSE);]]></ST>
       </Implementation>
     </Method>
     <Method Name="FromWStringValue" Id="{7495b560-9d45-42dd-b7ac-cea5caf03cd8}" FolderPath="FromTypedValues\Strings\">
@@ -602,7 +595,7 @@ VAR_IN_OUT CONSTANT
 	value : WSTRING;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[FromWStringValue := FromParts(DATA_TYPE.TYPE_WSTRING, ADR(value), WideStringHelper.GetSize(value), TRUE);]]></ST>
+        <ST><![CDATA[FromWStringValue := FromParts(DATA_TYPE.TYPE_WSTRING, ADR(value), WideStringHelper.GetActualSize(value), TRUE);]]></ST>
       </Implementation>
     </Method>
   </POU>
