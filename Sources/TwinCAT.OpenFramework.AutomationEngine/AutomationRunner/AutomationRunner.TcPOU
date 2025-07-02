@@ -2,42 +2,86 @@
 <TcPlcObject Version="1.1.0.1">
   <POU Name="AutomationRunner" Id="{142225ba-ead8-4c1c-a7bd-6f13f6bbc05e}" SpecialFunc="None">
     <Declaration><![CDATA[{attribute 'no_explicit_call' := 'do not call this function block directly'} 
-FUNCTION_BLOCK FINAL AutomationRunner EXTENDS Core.Object
-VAR_OUTPUT
-	{attribute 'OPC.UA.DA' := '0'}
-	CodeExecutionPhase : BOOL;
-	
-	{attribute 'OPC.UA.DA' := '1'}
-	{attribute 'OPC.UA.DA.Access' := '1'}
-	CycleCounter : LWORD;
-	
-	{attribute 'OPC.UA.DA' := '1'}
-	{attribute 'OPC.UA.DA.Access' := '1'}
-	State : AUTOMATION_RUNNER_STATE;
-	
-	{attribute 'OPC.UA.DA' := '1'}
-	{attribute 'OPC.UA.DA.Access' := '1'}
-	Diagnostics : AUTOMATION_RUNNER_DIAGNOSTICS;
+FUNCTION_BLOCK ABSTRACT AutomationRunner
+// compiler bug with this
+VAR_GENERIC CONSTANT
+    AutomationUnitCount : WORD := 1;
 END_VAR
+EXTENDS Core.Object IMPLEMENTS IAutomationRunner
 VAR
-	_ClassName : STRING := __POUNAME();
+	_State : AUTOMATION_RUNNER_STATE;
+
+	_SimulationMode : BOOL;
+
+	_Diagnostics : AUTOMATION_RUNNER_DIAGNOSTICS;
 	
-	_AdsLogger : AutomationRunnerAdsLogger(THIS^);
+	_AdsLogger : AutomationRunnerAdsLogger;
+END_VAR
+VAR_STAT
+    _InstanceCounter : BYTE := 0;
 END_VAR]]></Declaration>
     <Implementation>
       <ST><![CDATA[]]></ST>
     </Implementation>
     <Folder Name="Service members" Id="{136ed185-96f6-42da-bd14-292cf8568f8a}" />
-    <Property Name="ClassName" Id="{45e17d81-1043-4231-bd85-90f34397c6bb}">
+    <Property Name="AutomationUnits" Id="{325ae228-5756-4b17-873e-19d9a331e20c}">
       <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
-PROPERTY ClassName : STRING]]></Declaration>
-      <Get Name="Get" Id="{f0f490d4-8600-4ae1-a5ee-744086bccb2f}">
+// not used, compiler bug here
+PROPERTY ABSTRACT AutomationUnits : PVOID//REFERENCE TO ARRAY [0..AutomationUnitCount - 1] OF IAutomationUnit]]></Declaration>
+      <Get Name="Get" Id="{0492cebc-97ac-4e1e-939c-a48bd4f46730}">
         <Declaration><![CDATA[]]></Declaration>
         <Implementation>
-          <ST><![CDATA[ClassName := _ClassName; ]]></ST>
+          <ST><![CDATA[]]></ST>
         </Implementation>
       </Get>
     </Property>
+    <Property Name="CodeExecutionPhase" Id="{c4f37de1-c494-4e98-bff8-e5a29ee70657}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+{attribute 'OPC.UA.DA' := '0'}
+PROPERTY FINAL CodeExecutionPhase : BOOL]]></Declaration>
+      <Get Name="Get" Id="{cca78e62-5e2b-457e-91fc-ec64208d7a39}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[CodeExecutionPhase := GlobalState.CodeExecutionPhase;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="CycleCounter" Id="{b44e2d41-8633-4c1c-ad38-18becdb27866}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+{attribute 'OPC.UA.DA' := '1'}
+{attribute 'OPC.UA.DA.Access' := '1'}
+PROPERTY FINAL CycleCounter : LWORD]]></Declaration>
+      <Get Name="Get" Id="{3b2c949f-bedb-4db8-bff6-1b934597b8a9}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[CycleCounter := GlobalState.CycleCounter;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="Diagnostics" Id="{8d5d1cb6-fbf7-445b-bf3b-946f6e4d2f7d}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+{attribute 'OPC.UA.DA' := '1'}
+{attribute 'OPC.UA.DA.Access' := '1'}
+PROPERTY FINAL Diagnostics : REFERENCE TO AUTOMATION_RUNNER_DIAGNOSTICS]]></Declaration>
+      <Get Name="Get" Id="{ff612338-7273-4025-bfe7-69ef45fb7440}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[Diagnostics REF= _Diagnostics;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="FB_init" Id="{d9dc6fd8-04ec-4586-b655-20027fb1c3eb}">
+      <Declaration><![CDATA[METHOD FB_init : BOOL
+VAR_INPUT
+	(* if TRUE, the retain variables are initialized (warm start / cold start)*)
+	bInitRetains	: BOOL;
+	(* if TRUE, the instance afterwards gets moved into the copy code (online change)*)
+	bInCopyCode	: BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_InstanceCounter := _InstanceCounter + 1;]]></ST>
+      </Implementation>
+    </Method>
     <Method Name="fillErrorLog" Id="{d055dd31-f097-4bbe-8c3e-fd4d4c6e2672}" FolderPath="Service members\">
       <Declaration><![CDATA[METHOD PRIVATE fillErrorLog
 VAR_IN_OUT
@@ -55,8 +99,9 @@ targetErrorLog.UtcTimestamp := sourceException.UtcTimestamp;]]></ST>
     </Method>
     <Method Name="Run" Id="{cddfd6b6-d698-4df7-b955-3cc076d37dea}">
       <Declaration><![CDATA[METHOD Run
+// workaround for compiler bug with generics
 VAR_IN_OUT CONSTANT
-	automationUnits : ARRAY [*] OF IAutomationUnit;
+	AutomationUnits : ARRAY [*] OF IAutomationUnit;
 END_VAR
 VAR
 	i : DINT;
@@ -64,34 +109,40 @@ VAR
 	totalUnitCount : DINT;
 	initializedUnitCount : DINT;
 	
+	singletonCheck : Core.StandardException;
+	
 	exceptionCode : __SYSTEM.ExceptionCode;
 	exception : IException;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[CodeExecutionPhase := TRUE;
+        <ST><![CDATA[GlobalState.CodeExecutionPhase := TRUE;
 
 Core.SystemDateTimeManager.Execute();		
 _AdsLogger.Execute(CodeExecutionPhase);
 
 IF Core.SystemDateTimeManager.SystemTimeValid THEN
-	CASE State OF
+	CASE _State OF
 		AUTOMATION_RUNNER_STATE.INITIALIZING:
 			__TRY
-				FOR i := LOWER_BOUND(automationUnits, 1) TO UPPER_BOUND(automationUnits, 1) DO
-					IF automationUnits[i].Initialize() THEN
+				IF _InstanceCounter > 1 THEN
+					singletonCheck.Throw(CurrentNamespace.Name, ClassName, __POUNAME(), __POSITION(), "More then one AutomationRunner instance is not allowed", 0, TRUE);
+				END_IF
+				
+				FOR i := LOWER_BOUND(AutomationUnits, 1) TO UPPER_BOUND(AutomationUnits, 1) DO
+					IF AutomationUnits[i].Initialize() THEN
 						initializedUnitCount := initializedUnitCount + 1;
 					END_IF
 				END_FOR
 				
-				totalUnitCount := UPPER_BOUND(automationUnits, 1) - LOWER_BOUND(automationUnits, 1) + 1; 
+				totalUnitCount := UPPER_BOUND(AutomationUnits, 1) - LOWER_BOUND(AutomationUnits, 1) + 1; 
 	
 				IF initializedUnitCount = totalUnitCount THEN
-					State := AUTOMATION_RUNNER_STATE.RUNNING;
+					_State := AUTOMATION_RUNNER_STATE.RUNNING;
 				END_IF						
 			__CATCH(exceptionCode)
 				exception := ExceptionManager.GetLastException(exceptionCode);
 
-				State := AUTOMATION_RUNNER_STATE.FAULT;
+				_State := AUTOMATION_RUNNER_STATE.FAULT;
 													
 				fillErrorLog(Diagnostics.InitializationError, exception);
 				
@@ -99,20 +150,20 @@ IF Core.SystemDateTimeManager.SystemTimeValid THEN
 			__ENDTRY
 						
 		AUTOMATION_RUNNER_STATE.RUNNING, AUTOMATION_RUNNER_STATE.EMERGENCY:		
-			FOR i := LOWER_BOUND(automationUnits, 1) TO UPPER_BOUND(automationUnits, 1) DO
+			FOR i := LOWER_BOUND(AutomationUnits, 1) TO UPPER_BOUND(AutomationUnits, 1) DO
 				__TRY
-					IF automationUnits[i].EmergencyStopRequest THEN					
-						State := AUTOMATION_RUNNER_STATE.EMERGENCY;					
-						automationUnits[i].EmergncyStop();
+					IF AutomationUnits[i].EmergencyStopRequest THEN					
+						_State := AUTOMATION_RUNNER_STATE.EMERGENCY;					
+						AutomationUnits[i].EmergncyStop();
 					ELSE			
-						State := AUTOMATION_RUNNER_STATE.RUNNING;					
-						automationUnits[i].Run();			
+						_State := AUTOMATION_RUNNER_STATE.RUNNING;					
+						AutomationUnits[i].Run();			
 					END_IF
 				__CATCH(exceptionCode)
 					exception := ExceptionManager.GetLastException(exceptionCode);
 					
 					IF exception.Fatal THEN
-						State := AUTOMATION_RUNNER_STATE.FAULT;					
+						_State := AUTOMATION_RUNNER_STATE.FAULT;					
 						fillErrorLog(Diagnostics.CriticalError, exception);
 					ELSIF NOT exception.Empty THEN
 						fillErrorLog(Diagnostics.LastNonCriticalError, exception);
@@ -127,9 +178,9 @@ IF Core.SystemDateTimeManager.SystemTimeValid THEN
 			END_FOR
 						
 		AUTOMATION_RUNNER_STATE.FAULT:		
-			FOR i := LOWER_BOUND(automationUnits, 1) TO UPPER_BOUND(automationUnits, 1) DO
+			FOR i := LOWER_BOUND(AutomationUnits, 1) TO UPPER_BOUND(AutomationUnits, 1) DO
 				__TRY
-					automationUnits[i].HandleFault();			
+					AutomationUnits[i].HandleFault();			
 				__CATCH
 					exception := ExceptionManager.GetLastException(exceptionCode);
 					
@@ -143,10 +194,22 @@ IF Core.SystemDateTimeManager.SystemTimeValid THEN
 	Core.ExceptionManager.Cleanup();
 END_IF
 
-CycleCounter := CycleCounter + 1;
-CodeExecutionPhase := FALSE;]]></ST>
+GlobalState.CycleCounter := GlobalState.CycleCounter + 1;
+GlobalState.CodeExecutionPhase := FALSE;]]></ST>
       </Implementation>
     </Method>
+    <Property Name="SimulationMode" Id="{7d432578-acb4-4dd3-acc6-8dd7c5d8c6c5}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+{attribute 'OPC.UA.DA' := '1'}
+{attribute 'OPC.UA.DA.Access' := '1'}
+PROPERTY FINAL SimulationMode : BOOL]]></Declaration>
+      <Get Name="Get" Id="{5238d38e-a178-4a48-817f-b0e7b9afc466}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[SimulationMode := _SimulationMode;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
     <Property Name="Size" Id="{a27aa6e5-c889-4bcd-9a9a-1a312fc7b20e}">
       <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
 PROPERTY Size : ULINT]]></Declaration>
@@ -154,6 +217,18 @@ PROPERTY Size : ULINT]]></Declaration>
         <Declaration><![CDATA[]]></Declaration>
         <Implementation>
           <ST><![CDATA[Size := XSIZEOF(THIS^);]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="State" Id="{f2dce25c-3e10-4ca3-baf9-9dc113064c6d}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+{attribute 'OPC.UA.DA' := '1'}
+{attribute 'OPC.UA.DA.Access' := '1'}
+PROPERTY FINAL State : AUTOMATION_RUNNER_STATE]]></Declaration>
+      <Get Name="Get" Id="{62ee6d12-cc93-4e49-aed3-a8cc7d8a5a22}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[State := _State;]]></ST>
         </Implementation>
       </Get>
     </Property>
