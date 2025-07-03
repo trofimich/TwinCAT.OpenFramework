@@ -8,17 +8,34 @@ VAR
 
 	_Exception : POINTER TO Exception;
 	_EmptyException : EmptyException;
-	_SystemException : SystemException;	
+	_SystemException : SystemException;
+
+	_ExceptionsToDelete : POINTER TO Exception;	
+	_ExceptionsToDeleteCount : DWORD;
 END_VAR
 ]]></Declaration>
     <Implementation>
       <ST><![CDATA[]]></ST>
     </Implementation>
+    <Folder Name="Service memebers" Id="{9351a9c9-de8b-47f9-8fdd-413111221208}" />
     <Method Name="Cleanup" Id="{9439ecc4-f37f-44e7-803e-1ee8d39cff59}">
-      <Declaration><![CDATA[METHOD Cleanup]]></Declaration>
+      <Declaration><![CDATA[METHOD Cleanup
+VAR
+	i : ULINT;
+	exceptionToDelete : POINTER TO Exception;
+END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[IF _Exception <> 0 THEN
 	__DELETE(_Exception);		
+END_IF
+
+IF _ExceptionsToDeleteCount > 0 THEN
+	FOR i := 0 TO _ExceptionsToDeleteCount - 1 DO
+		exceptionToDelete := _ExceptionsToDelete + XSIZEOF(POINTER TO Exception) * i;
+		__DELETE(exceptionToDelete);
+	END_FOR
+	
+	__DELETE(_ExceptionsToDelete);
 END_IF]]></ST>
       </Implementation>
     </Method>
@@ -37,8 +54,8 @@ ELSE
 END_IF]]></ST>
       </Implementation>
     </Method>
-    <Method Name="ReThrow" Id="{7ea9eaf2-899d-4c20-8cad-4853167d967f}">
-      <Declaration><![CDATA[METHOD ReThrow
+    <Method Name="ReThrowLastException" Id="{7ea9eaf2-899d-4c20-8cad-4853167d967f}">
+      <Declaration><![CDATA[METHOD ReThrowLastException
 VAR
 	fakeVariable : INT := 0;
 END_VAR]]></Declaration>
@@ -47,6 +64,33 @@ END_VAR]]></Declaration>
 	// fake devision by zero
 	fakeVariable := fakeVariable / fakeVariable;
 END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="scheduleLastExceptionToDelete" Id="{48a28801-5116-44bd-a9c6-25c220932013}" FolderPath="Service memebers\">
+      <Declaration><![CDATA[METHOD PRIVATE scheduleLastExceptionToDelete
+VAR
+	newExceptionsToDelete : POINTER TO Exception;
+	addressToAddLastException : POINTER TO Exception;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF _Exception = 0 THEN
+	RETURN;
+END_IF
+
+newExceptionsToDelete := __NEW(POINTER TO Exception, _ExceptionsToDeleteCount);
+
+IF _ExceptionsToDeleteCount > 0 THEN
+	Tc2_System.MEMCPY(newExceptionsToDelete, _ExceptionsToDelete, TO_UDINT(XSIZEOF(POINTER TO Exception) * _ExceptionsToDeleteCount));
+	
+	__DELETE(_ExceptionsToDelete);
+END_IF
+
+addressToAddLastException := newExceptionsToDelete + XSIZEOF(POINTER TO Exception) * _ExceptionsToDeleteCount;
+addressToAddLastException := _Exception;
+
+_Exception := 0;
+_ExceptionsToDelete := newExceptionsToDelete;
+_ExceptionsToDeleteCount := _ExceptionsToDeleteCount + 1;]]></ST>
       </Implementation>
     </Method>
     <Method Name="Throw" Id="{75adab3e-0cb1-497b-afc4-6a0aa273ac06}">
@@ -58,9 +102,7 @@ VAR
 	fakeVariable : INT := 0;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[IF _Exception <> 0 THEN
-	__DELETE(_Exception);
-END_IF
+        <ST><![CDATA[scheduleLastExceptionToDelete();
 
 __QUERYPOINTER(exception.Clone(), _Exception);
 

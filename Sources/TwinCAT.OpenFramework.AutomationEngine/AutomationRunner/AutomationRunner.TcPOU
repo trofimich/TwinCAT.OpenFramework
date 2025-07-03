@@ -4,11 +4,11 @@
     <Declaration><![CDATA[{attribute 'no_explicit_call' := 'do not call this function block directly'} 
 FUNCTION_BLOCK ABSTRACT AutomationRunner
 VAR_GENERIC CONSTANT
-    AutomationUnitCount : BYTE := 1;
+    _AutomationUnitCount : BYTE := 1;
 END_VAR
 EXTENDS Core.Object IMPLEMENTS IAutomationRunner
 VAR
-	_State : AUTOMATION_RUNNER_STATE;
+	_ExecutionContext : AUTOMATION_EXECUTION_CONTEXT;
 
 	_SimulationMode : BOOL;
 
@@ -23,9 +23,21 @@ END_VAR]]></Declaration>
       <ST><![CDATA[]]></ST>
     </Implementation>
     <Folder Name="Service members" Id="{136ed185-96f6-42da-bd14-292cf8568f8a}" />
+    <Property Name="AutomationUnitCount" Id="{b763fe3e-ac45-40f7-8e0a-80bac18bc801}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+{attribute 'OPC.UA.DA' := '1'}
+{attribute 'OPC.UA.DA.Access' := '1'}
+PROPERTY AutomationUnitCount : BYTE]]></Declaration>
+      <Get Name="Get" Id="{41fb60e1-30ec-4999-8fd3-d29a9cdfc0bd}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[AutomationUnitCount := _AutomationUnitCount;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
     <Property Name="AutomationUnits" Id="{d916e7c7-2f82-41ab-b518-da33d8b6a0ac}">
       <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
-PROPERTY ABSTRACT AutomationUnits : REFERENCE TO ARRAY [0..AutomationUnitCount - 1] OF IAutomationUnit]]></Declaration>
+PROPERTY ABSTRACT AutomationUnits : REFERENCE TO ARRAY [0.._AutomationUnitCount - 1] OF IAutomationUnit]]></Declaration>
       <Get Name="Get" Id="{bbac70c1-0c12-4a6e-b63c-959272410e00}">
         <Declaration><![CDATA[]]></Declaration>
         <Implementation>
@@ -97,10 +109,6 @@ targetErrorLog.UtcTimestamp := sourceException.UtcTimestamp;]]></ST>
     </Method>
     <Method Name="Run" Id="{cddfd6b6-d698-4df7-b955-3cc076d37dea}">
       <Declaration><![CDATA[METHOD Run
-(*// workaround for compiler bug with generics
-VAR_IN_OUT CONSTANT
-	AutomationUnits : ARRAY [*] OF IAutomationUnit;
-END_VAR*)
 VAR
 	i : DINT;
 	
@@ -119,52 +127,55 @@ Core.SystemDateTimeManager.Execute();
 _AdsLogger.Execute(CodeExecutionPhase);
 
 IF Core.SystemDateTimeManager.SystemTimeValid THEN
-	CASE _State OF
-		AUTOMATION_RUNNER_STATE.INITIALIZING:
+	_ExecutionContext.CycleLocalStartTime := Core.SystemDateTimeManager.SystemLocalDateTime;
+	_ExecutionContext.CycleUtcStartTime := Core.SystemDateTimeManager.SystemUtcDateTime;
+	
+	CASE _ExecutionContext.AutomationRunnerState OF
+		Automation.AUTOMATION_RUNNING_STATE.INITIALIZING:
 			__TRY
 				IF _InstanceCounter > 1 THEN
 					singletonCheck.Throw(CurrentNamespace.Name, ClassName, __POUNAME(), __POSITION(), "More then one AutomationRunner instance is not allowed", 0, TRUE);
 				END_IF
 				
 				//FOR i := LOWER_BOUND(AutomationUnits, 1) TO UPPER_BOUND(AutomationUnits, 1) DO
-				FOR i := 0 TO AutomationUnitCount - 1 DO
-					IF AutomationUnits[i].Initialize() THEN
+				FOR i := 0 TO _AutomationUnitCount - 1 DO
+					IF AutomationUnits[i].Initialize(_ExecutionContext) THEN
 						initializedUnitCount := initializedUnitCount + 1;
 					END_IF
 				END_FOR
 				
 				//totalUnitCount := UPPER_BOUND(AutomationUnits, 1) - LOWER_BOUND(AutomationUnits, 1) + 1; 
-				totalUnitCount := TO_DINT(AutomationUnitCount); 
+				totalUnitCount := TO_DINT(_AutomationUnitCount); 
 	
 				IF initializedUnitCount = totalUnitCount THEN
-					_State := AUTOMATION_RUNNER_STATE.RUNNING;
+					_ExecutionContext.AutomationRunnerState := Automation.AUTOMATION_RUNNING_STATE.RUNNING;
 				END_IF						
 			__CATCH(exceptionCode)
 				exception := ExceptionManager.GetLastException(exceptionCode);
 
-				_State := AUTOMATION_RUNNER_STATE.FAULT;
+				_ExecutionContext.AutomationRunnerState := Automation.AUTOMATION_RUNNING_STATE.FAULT;
 													
 				fillErrorLog(Diagnostics.InitializationError, exception);
 				
 				_AdsLogger.LogException(exception);				
 			__ENDTRY
 						
-		AUTOMATION_RUNNER_STATE.RUNNING, AUTOMATION_RUNNER_STATE.EMERGENCY:		
+		Automation.AUTOMATION_RUNNING_STATE.RUNNING, Automation.AUTOMATION_RUNNING_STATE.EMERGENCY:		
 			//FOR i := LOWER_BOUND(AutomationUnits, 1) TO UPPER_BOUND(AutomationUnits, 1) DO
-			FOR i := 0 TO AutomationUnitCount - 1 DO
+			FOR i := 0 TO _AutomationUnitCount - 1 DO
 				__TRY
 					IF AutomationUnits[i].EmergencyStopRequest THEN					
-						_State := AUTOMATION_RUNNER_STATE.EMERGENCY;					
-						AutomationUnits[i].EmergncyStop();
+						_ExecutionContext.AutomationRunnerState := Automation.AUTOMATION_RUNNING_STATE.EMERGENCY;					
+						AutomationUnits[i].EmergencyStop(_ExecutionContext);
 					ELSE			
-						_State := AUTOMATION_RUNNER_STATE.RUNNING;					
-						AutomationUnits[i].Run();			
+						_ExecutionContext.AutomationRunnerState := Automation.AUTOMATION_RUNNING_STATE.RUNNING;					
+						AutomationUnits[i].Run(_ExecutionContext);			
 					END_IF
 				__CATCH(exceptionCode)
 					exception := ExceptionManager.GetLastException(exceptionCode);
 					
 					IF exception.Fatal THEN
-						_State := AUTOMATION_RUNNER_STATE.FAULT;					
+						_ExecutionContext.AutomationRunnerState := Automation.AUTOMATION_RUNNING_STATE.FAULT;					
 						fillErrorLog(Diagnostics.CriticalError, exception);
 					ELSIF NOT exception.Empty THEN
 						fillErrorLog(Diagnostics.LastNonCriticalError, exception);
@@ -178,11 +189,11 @@ IF Core.SystemDateTimeManager.SystemTimeValid THEN
 				END_IF
 			END_FOR
 						
-		AUTOMATION_RUNNER_STATE.FAULT:		
+		Automation.AUTOMATION_RUNNING_STATE.FAULT:		
 			//FOR i := LOWER_BOUND(AutomationUnits, 1) TO UPPER_BOUND(AutomationUnits, 1) DO
-			FOR i := 0 TO AutomationUnitCount - 1 DO
+			FOR i := 0 TO _AutomationUnitCount - 1 DO
 				__TRY
-					AutomationUnits[i].HandleFault();			
+					AutomationUnits[i].HandleFault(_ExecutionContext);			
 				__CATCH
 					exception := ExceptionManager.GetLastException(exceptionCode);
 					
@@ -226,13 +237,38 @@ PROPERTY Size : ULINT]]></Declaration>
       <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
 {attribute 'OPC.UA.DA' := '1'}
 {attribute 'OPC.UA.DA.Access' := '1'}
-PROPERTY FINAL State : AUTOMATION_RUNNER_STATE]]></Declaration>
+PROPERTY FINAL State : Automation.AUTOMATION_RUNNING_STATE]]></Declaration>
       <Get Name="Get" Id="{62ee6d12-cc93-4e49-aed3-a8cc7d8a5a22}">
         <Declaration><![CDATA[]]></Declaration>
         <Implementation>
-          <ST><![CDATA[State := _State;]]></ST>
+          <ST><![CDATA[State := _ExecutionContext.AutomationRunnerState;]]></ST>
         </Implementation>
       </Get>
     </Property>
+    <Method Name="TryGetAutomationUnitByIndex" Id="{24622356-d6c8-4a30-a975-e7a7aa358d86}">
+      <Declaration><![CDATA[METHOD FINAL TryGetAutomationUnitByIndex : IAutomationUnit
+VAR_INPUT
+	index : BYTE;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF index < 0 OR_ELSE index >= _AutomationUnitCount OR_ELSE NOT __ISVALIDREF(AutomationUnits) THEN
+	RETURN;
+END_IF
+
+TryGetAutomationUnitByIndex := AutomationUnits[index];]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="TrySetSimulationMode" Id="{de36a7a4-4bd3-4af6-8a6f-716c0a8b3ec9}">
+      <Declaration><![CDATA[METHOD TrySetSimulationMode : BOOL
+VAR_INPUT
+	value : BOOL;
+END_VAR
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_SimulationMode := value; 
+
+TrySetSimulationMode := TRUE;]]></ST>
+      </Implementation>
+    </Method>
   </POU>
 </TcPlcObject>

@@ -3,7 +3,7 @@
   <POU Name="AutomationUnit" Id="{715bcab9-6d21-43bf-ac33-fb2affdac1da}" SpecialFunc="None">
     <Declaration><![CDATA[FUNCTION_BLOCK ABSTRACT AutomationUnit 
 VAR_GENERIC CONSTANT
-    DeviceCount : INT := 0;
+    _DeviceCount : INT(0..1000) := 0;
 END_VAR
 EXTENDS Core.Object IMPLEMENTS IAutomationUnit
 VAR
@@ -14,9 +14,23 @@ END_VAR]]></Declaration>
     <Implementation>
       <ST><![CDATA[]]></ST>
     </Implementation>
+    <Folder Name="Methods to override" Id="{18713aca-9c47-4769-936e-cd3be2ed069c}" />
+    <Folder Name="Service memebers" Id="{5df4ad11-a7ac-4049-8c04-41c0497c7559}" />
+    <Property Name="DeviceCount" Id="{612962ce-4a03-4dcb-a1ce-f9e94eefa0eb}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+{attribute 'OPC.UA.DA' := '1'}
+{attribute 'OPC.UA.DA.Access' := '1'}
+PROPERTY DeviceCount : INT]]></Declaration>
+      <Get Name="Get" Id="{cc518b3a-e440-4848-8075-189e5ee4e093}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[DeviceCount := _DeviceCount;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
     <Property Name="Devices" Id="{f1c94009-408f-4558-836f-c0ffe07e995d}">
       <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
-PROPERTY ABSTRACT Devices : REFERENCE TO ARRAY [0..DeviceCount - 1] OF IAutomationUnit]]></Declaration>
+PROPERTY ABSTRACT Devices : REFERENCE TO ARRAY [0.._DeviceCount - 1] OF Automation.IDevice]]></Declaration>
       <Get Name="Get" Id="{3053aa14-2407-42d1-bc4d-bd38e5a9f72c}">
         <Declaration><![CDATA[]]></Declaration>
         <Implementation>
@@ -24,6 +38,39 @@ PROPERTY ABSTRACT Devices : REFERENCE TO ARRAY [0..DeviceCount - 1] OF IAutomati
         </Implementation>
       </Get>
     </Property>
+    <Method Name="EmergencyStop" Id="{ef005615-2d66-46a1-8783-315700ef3d6a}">
+      <Declaration><![CDATA[METHOD FINAL EmergencyStop
+VAR_IN_OUT CONSTANT
+	executionContext : AUTOMATION_EXECUTION_CONTEXT;
+END_VAR
+VAR
+	aggregateException : Core.AggregateException;
+	
+	exceptionCode : __SYSTEM.ExceptionCode;
+	exception : IException;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[ProcessInputDevices(executionContext, aggregateException);
+
+__TRY
+	OnEmergencyStop(executionContext);
+__CATCH(exceptionCode)
+	exception := ExceptionManager.GetLastException(exceptionCode);
+				
+	IF NOT exception.Fatal THEN
+		aggregateException.AddInnerException(exception);
+	ELSE
+		ExceptionManager.ReThrowLastException();
+	END_IF		
+__ENDTRY 
+
+ProcessOutputDevices(executionContext, aggregateException);
+
+IF NOT aggregateException.Empty THEN
+	aggregateException.Throw(CurrentNamespace.Name, ClassName, __POUNAME(), __POSITION());
+END_IF]]></ST>
+      </Implementation>
+    </Method>
     <Property Name="EmergencyStopRequest" Id="{608fa160-a1ee-4b42-a40b-f54246a9eaa1}">
       <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
 PROPERTY EmergencyStopRequest : BOOL]]></Declaration>
@@ -34,12 +81,6 @@ PROPERTY EmergencyStopRequest : BOOL]]></Declaration>
         </Implementation>
       </Get>
     </Property>
-    <Method Name="EmergncyStop" Id="{ef005615-2d66-46a1-8783-315700ef3d6a}">
-      <Declaration><![CDATA[METHOD EmergncyStop]]></Declaration>
-      <Implementation>
-        <ST><![CDATA[]]></ST>
-      </Implementation>
-    </Method>
     <Method Name="FB_init" Id="{46ebd59e-7068-435f-99df-fef2ff312630}">
       <Declaration><![CDATA[METHOD FB_init : BOOL
 VAR_INPUT
@@ -61,15 +102,59 @@ _AutomationRunner := automationRunner;]]></ST>
       </Implementation>
     </Method>
     <Method Name="HandleFault" Id="{5df2316a-8fd1-40c4-8c74-2bd8dd1e2dbf}">
-      <Declaration><![CDATA[METHOD HandleFault]]></Declaration>
+      <Declaration><![CDATA[METHOD FINAL HandleFault
+VAR_IN_OUT CONSTANT
+	executionContext : AUTOMATION_EXECUTION_CONTEXT;
+END_VAR
+VAR
+	aggregateException : Core.AggregateException;
+	
+	exceptionCode : __SYSTEM.ExceptionCode;
+	exception : IException;
+END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[]]></ST>
+        <ST><![CDATA[ProcessInputDevices(executionContext, aggregateException);
+
+__TRY
+	OnHandleFault(executionContext);
+__CATCH(exceptionCode)
+	exception := ExceptionManager.GetLastException(exceptionCode);
+				
+	IF NOT exception.Fatal THEN
+		aggregateException.AddInnerException(exception);
+	ELSE
+		ExceptionManager.ReThrowLastException();
+	END_IF		
+__ENDTRY 
+
+ProcessOutputDevices(executionContext, aggregateException);
+
+IF NOT aggregateException.Empty THEN
+	aggregateException.Throw(CurrentNamespace.Name, ClassName, __POUNAME(), __POSITION());
+END_IF]]></ST>
       </Implementation>
     </Method>
     <Method Name="Initialize" Id="{1b5cfeb5-a4c4-49db-8b34-eb001c2926ca}">
-      <Declaration><![CDATA[METHOD Initialize : BOOL]]></Declaration>
+      <Declaration><![CDATA[METHOD FINAL Initialize : BOOL
+VAR_IN_OUT CONSTANT
+	executionContext : AUTOMATION_EXECUTION_CONTEXT;
+END_VAR
+VAR
+	i : INT;
+		
+	exceptionCode : __SYSTEM.ExceptionCode;
+	exception : IException;
+END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[Initialize := TRUE;]]></ST>
+        <ST><![CDATA[Initialize := TRUE;
+
+IF __ISVALIDREF(Devices) THEN
+	FOR i := 0 TO _DeviceCount - 1 DO
+		Initialize := Initialize AND Devices[i].Initialize();
+	END_FOR
+END_IF
+
+Initialize := Initialize AND OnInitialize();]]></ST>
       </Implementation>
     </Method>
     <Property Name="LocalSimulationMode" Id="{bef27b77-29d7-4729-ae00-5f308c7e5257}">
@@ -84,50 +169,146 @@ PROPERTY FINAL LocalSimulationMode : BOOL]]></Declaration>
         </Implementation>
       </Get>
     </Property>
-    <Method Name="ProcessInputDevices" Id="{2a706850-e1f1-476b-bd78-85f574de650b}">
-      <Declaration><![CDATA[METHOD FINAL ProcessInputDevices
-VAR
-	i : INT;
-	inputDevice : IInputDevice;
+    <Method Name="OnEmergencyStop" Id="{e9a7087e-9b95-447b-8bf1-2d25488d5f40}" FolderPath="Methods to override\">
+      <Declaration><![CDATA[METHOD PROTECTED OnEmergencyStop
+VAR_IN_OUT CONSTANT
+	executionContext : AUTOMATION_EXECUTION_CONTEXT;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[IF NOT __ISVALIDREF(Devices) THEN
+        <ST><![CDATA[]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="OnHandleFault" Id="{47b787a0-74db-428e-a805-17453cf9f9ee}" FolderPath="Methods to override\">
+      <Declaration><![CDATA[METHOD PROTECTED OnHandleFault
+VAR_IN_OUT CONSTANT
+	executionContext : AUTOMATION_EXECUTION_CONTEXT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="OnInitialize" Id="{f30a4c4a-7966-446f-95b6-a1ce70efb536}" FolderPath="Methods to override\">
+      <Declaration><![CDATA[METHOD PROTECTED OnInitialize : BOOL]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[OnInitialize := TRUE;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="OnRun" Id="{f7f57440-8e03-4827-9c8c-4741292bf658}" FolderPath="Methods to override\">
+      <Declaration><![CDATA[METHOD PROTECTED ABSTRACT OnRun
+VAR_IN_OUT CONSTANT
+	executionContext : AUTOMATION_EXECUTION_CONTEXT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="processInputDevices" Id="{2a706850-e1f1-476b-bd78-85f574de650b}" FolderPath="Service memebers\">
+      <Declaration><![CDATA[METHOD PRIVATE FINAL processInputDevices
+VAR_IN_OUT CONSTANT
+	executionContext : AUTOMATION_EXECUTION_CONTEXT;
+	aggregateException : Core.AggregateException;
+END_VAR
+VAR
+	i : INT;
+	
+	inputDevice : IInputDevice;
+	
+	exceptionCode : __SYSTEM.ExceptionCode;
+	exception : IException;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF NOT __ISVALIDREF(Devices) OR_ELSE _DeviceCount = 0 THEN
 	RETURN;
 END_IF
 
-FOR i := 0 TO DeviceCount - 1 DO
+FOR i := 0 TO _DeviceCount - 1 DO
 	IF NOT __QUERYINTERFACE(Devices[i], inputDevice) THEN
 		CONTINUE;
 	END_IF
 	
-	inputDevice.UpdateStateFromInputs(); 
+	__TRY
+		inputDevice.UpdateStateFromInputs(executionContext, aggregateException);
+	__CATCH(exceptionCode)
+		exception := ExceptionManager.GetLastException(exceptionCode);
+					
+		IF NOT exception.Fatal THEN
+			aggregateException.AddInnerException(exception);
+		ELSE
+			ExceptionManager.ReThrowLastException();
+		END_IF		
+	__ENDTRY 
 END_FOR]]></ST>
       </Implementation>
     </Method>
-    <Method Name="ProcessOutputDevices" Id="{bd8d51f1-abdb-4a43-b7de-c5e6e60ddaf2}">
-      <Declaration><![CDATA[METHOD FINAL ProcessOutputDevices
+    <Method Name="processOutputDevices" Id="{bd8d51f1-abdb-4a43-b7de-c5e6e60ddaf2}" FolderPath="Service memebers\">
+      <Declaration><![CDATA[METHOD PRIVATE FINAL processOutputDevices
+VAR_IN_OUT CONSTANT
+	executionContext : AUTOMATION_EXECUTION_CONTEXT;
+	aggregateException : Core.AggregateException;
+END_VAR
 VAR
 	i : INT;
+	
 	outputDevice : IOutputDevice;
+	
+	exceptionCode : __SYSTEM.ExceptionCode;
+	exception : IException;	
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[IF NOT __ISVALIDREF(Devices) THEN
+        <ST><![CDATA[IF NOT __ISVALIDREF(Devices) OR_ELSE _DeviceCount = 0 THEN
 	RETURN;
 END_IF
 
-FOR i := 0 TO DeviceCount - 1 DO
+FOR i := 0 TO _DeviceCount - 1 DO
 	IF NOT __QUERYINTERFACE(Devices[i], outputDevice) THEN
 		CONTINUE;
 	END_IF
 	
-	outputDevice.UpdateOutputsFromState(); 
+	__TRY
+		outputDevice.UpdateOutputsFromState(executionContext, aggregateException); 
+	__CATCH(exceptionCode)
+		exception := ExceptionManager.GetLastException(exceptionCode);
+					
+		IF NOT exception.Fatal THEN
+			aggregateException.AddInnerException(exception);
+		ELSE
+			ExceptionManager.ReThrowLastException();
+		END_IF		
+	__ENDTRY 
 END_FOR]]></ST>
       </Implementation>
     </Method>
     <Method Name="Run" Id="{edf960fe-6c94-4ace-a7be-524e71aafd2a}">
-      <Declaration><![CDATA[METHOD ABSTRACT Run]]></Declaration>
+      <Declaration><![CDATA[METHOD FINAL Run
+VAR_IN_OUT CONSTANT
+	executionContext : AUTOMATION_EXECUTION_CONTEXT;
+END_VAR
+VAR
+	aggregateException : Core.AggregateException;
+	
+	exceptionCode : __SYSTEM.ExceptionCode;
+	exception : IException;
+END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[]]></ST>
+        <ST><![CDATA[ProcessInputDevices(executionContext, aggregateException);
+
+__TRY
+	OnRun(executionContext);
+__CATCH(exceptionCode)
+	exception := ExceptionManager.GetLastException(exceptionCode);
+				
+	IF NOT exception.Fatal THEN
+		aggregateException.AddInnerException(exception);
+	ELSE
+		ExceptionManager.ReThrowLastException();
+	END_IF		
+__ENDTRY 
+
+ProcessOutputDevices(executionContext, aggregateException);
+
+IF NOT aggregateException.Empty THEN
+	aggregateException.Throw(CurrentNamespace.Name, ClassName, __POUNAME(), __POSITION());
+END_IF]]></ST>
       </Implementation>
     </Method>
     <Property Name="SimulationMode" Id="{d06903e4-ea01-42fc-a468-b432f4fc159b}">
@@ -142,5 +323,18 @@ PROPERTY FINAL SimulationMode : BOOL]]></Declaration>
         </Implementation>
       </Get>
     </Property>
+    <Method Name="TryGetDeviceByIndex" Id="{822b2535-548b-4af3-814e-271dc3e4c03f}">
+      <Declaration><![CDATA[METHOD FINAL TryGetDeviceByIndex : Automation.IDevice
+VAR_INPUT
+	index : BYTE;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF index < 0 OR_ELSE index >= _DeviceCount OR_ELSE NOT __ISVALIDREF(Devices) THEN
+	RETURN;
+END_IF
+
+TryGetDeviceByIndex := Devices[index];]]></ST>
+      </Implementation>
+    </Method>
   </POU>
 </TcPlcObject>
