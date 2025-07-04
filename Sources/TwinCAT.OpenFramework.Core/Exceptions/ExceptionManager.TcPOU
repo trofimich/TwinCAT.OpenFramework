@@ -6,12 +6,12 @@ PROGRAM ExceptionManager
 VAR
 	_ClassName : STRING := __POUNAME();
 
-	_Exception : POINTER TO Exception;
+	_Exception : IException;
 	_EmptyException : EmptyException;
 	_SystemException : SystemException;
 
-	_ExceptionsToDelete : POINTER TO Exception;	
-	_ExceptionsToDeleteCount : DWORD;
+	_DynamicExceptions : POINTER TO IException;	
+	_DynamicExceptionCount : DWORD;
 END_VAR
 ]]></Declaration>
     <Implementation>
@@ -22,20 +22,18 @@ END_VAR
       <Declaration><![CDATA[METHOD Cleanup
 VAR
 	i : ULINT;
-	exceptionToDelete : POINTER TO Exception;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[IF _Exception <> 0 THEN
-	__DELETE(_Exception);		
-END_IF
+        <ST><![CDATA[_Exception := 0;
 
-IF _ExceptionsToDeleteCount > 0 THEN
-	FOR i := 0 TO _ExceptionsToDeleteCount - 1 DO
-		exceptionToDelete := _ExceptionsToDelete + XSIZEOF(POINTER TO Exception) * i;
-		__DELETE(exceptionToDelete);
+IF _DynamicExceptionCount > 0 THEN
+	FOR i := 0 TO _DynamicExceptionCount - 1 DO
+		_DynamicExceptions[i].Dispose();
 	END_FOR
 	
-	__DELETE(_ExceptionsToDelete);
+	__DELETE(_DynamicExceptions);
+	
+	_DynamicExceptionCount := 0;
 END_IF]]></ST>
       </Implementation>
     </Method>
@@ -47,11 +45,38 @@ VAR_IN_OUT CONSTANT
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[IF exceptionCode = __SYSTEM.ExceptionCode.RTSEXCPT_DIVIDEBYZERO AND_THEN _Exception <> 0 THEN
-	GetLastException := _Exception^;
+	GetLastException := _Exception;
 ELSE
 	_SystemException.SetExceptionCode(exceptionCode);
 	GetLastException := _SystemException;
 END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="RegisterDynamicException" Id="{48a28801-5116-44bd-a9c6-25c220932013}" FolderPath="Service memebers\">
+      <Declaration><![CDATA[METHOD INTERNAL RegisterDynamicException
+VAR_INPUT
+	exception : IException;
+END_VAR
+VAR
+	newExceptionsToDelete : POINTER TO IException;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF exception = 0 THEN
+	RETURN;
+END_IF
+
+newExceptionsToDelete := __NEW(POINTER TO IException, (_DynamicExceptionCount + 1));
+
+IF _DynamicExceptionCount > 0 THEN
+	Tc2_System.MEMCPY(newExceptionsToDelete, _DynamicExceptions, TO_UDINT(XSIZEOF(POINTER TO Exception) * _DynamicExceptionCount));
+	
+	__DELETE(_DynamicExceptions);
+END_IF
+
+newExceptionsToDelete[_DynamicExceptionCount] := exception;
+
+_DynamicExceptions := newExceptionsToDelete;
+_DynamicExceptionCount := _DynamicExceptionCount + 1;]]></ST>
       </Implementation>
     </Method>
     <Method Name="ReThrowLastException" Id="{7ea9eaf2-899d-4c20-8cad-4853167d967f}">
@@ -66,45 +91,20 @@ END_VAR]]></Declaration>
 END_IF]]></ST>
       </Implementation>
     </Method>
-    <Method Name="scheduleLastExceptionToDelete" Id="{48a28801-5116-44bd-a9c6-25c220932013}" FolderPath="Service memebers\">
-      <Declaration><![CDATA[METHOD PRIVATE scheduleLastExceptionToDelete
-VAR
-	newExceptionsToDelete : POINTER TO Exception;
-	addressToAddLastException : POINTER TO Exception;
-END_VAR]]></Declaration>
-      <Implementation>
-        <ST><![CDATA[IF _Exception = 0 THEN
-	RETURN;
-END_IF
-
-newExceptionsToDelete := __NEW(POINTER TO Exception, _ExceptionsToDeleteCount);
-
-IF _ExceptionsToDeleteCount > 0 THEN
-	Tc2_System.MEMCPY(newExceptionsToDelete, _ExceptionsToDelete, TO_UDINT(XSIZEOF(POINTER TO Exception) * _ExceptionsToDeleteCount));
-	
-	__DELETE(_ExceptionsToDelete);
-END_IF
-
-addressToAddLastException := newExceptionsToDelete + XSIZEOF(POINTER TO Exception) * _ExceptionsToDeleteCount;
-addressToAddLastException := _Exception;
-
-_Exception := 0;
-_ExceptionsToDelete := newExceptionsToDelete;
-_ExceptionsToDeleteCount := _ExceptionsToDeleteCount + 1;]]></ST>
-      </Implementation>
-    </Method>
     <Method Name="Throw" Id="{75adab3e-0cb1-497b-afc4-6a0aa273ac06}">
       <Declaration><![CDATA[METHOD Throw
-VAR_INPUT
+VAR_INPUT CONSTANT
 	exception : IException;
 END_VAR
 VAR
 	fakeVariable : INT := 0;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[scheduleLastExceptionToDelete();
+        <ST><![CDATA[IF exception = 0 THEN
+	RETURN;
+END_IF
 
-__QUERYPOINTER(exception.Clone(), _Exception);
+__QUERYINTERFACE(exception.Clone(), _Exception);
 
 // fake devision by zero
 fakeVariable := fakeVariable / fakeVariable;]]></ST>
