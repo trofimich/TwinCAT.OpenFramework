@@ -27,19 +27,17 @@ It enables:
 
 ## 💡 What does the framework offer today?
 
-- ✅ Core logic is based on an **exception-handling mechanism**
-- ✅ Support for **dynamic collections**: lists, dictionaries, unique lists
-- ✅ Utilities for working with **long strings**
-- ✅ JSON support classes
-- ✅ An automation scaffold: `AutomationEngine` managing a collection of `AutomationUnits`
+- ✅ Core logic is based on an **exception-handling mechanism**. Many type of exceptions supported: Standard, NotSupported, NotImplemented, ArgumentNull, ArgumentoutofRange, ArgumentValueNotSupported, Aggregate, etc...
+- ✅ Support for **dynamic collections**: ByteList, List, Dictionary, UniqueSet
+- ✅ Utilities for working with **long strings**: StringHelper/WideStringHelper, StringBuilder/WideStringBuilder
+- ✅ An **automation engine**: AutomationRunner manages 1..* AutomationUnits. Each Automationunit manages 0..* hierarchical devices
 - 🔧 Many other components — either already ported or pending adaptation
 
 ---
 
 ## 📈 What are the future plans?
 
-- 🧱 Wrap more standard libraries in OOP-style interfaces
-- ⚠️ Full support for exception generation and propagation
+- 🧱 Add new possibilities and wrap more standard libraries in OOP-style interfaces
 - 🧪 Broaden **unit test** coverage (TcUnit-based)
 - 📚 Improve documentation and examples
 
@@ -49,7 +47,7 @@ It enables:
 
 - Partially covered by **unit tests** using [TcUnit](https://github.com/tcunit/TcUnit)
 - That said, the framework should be considered **experimental** at this stage
-- Note: TwinCAT itself still has **minor quirks** related to exception handling
+- Note: TwinCAT itself still has issues related to exception handling
 - These issues aren't critical, and Beckhoff is aware and investigating solutions
 
 ---
@@ -97,11 +95,11 @@ Development speed depends on:
 
 > “Two heads are better than one.”
 
-There’s plenty to do:
+Currently you can:
 
-- Core framework development  
-- Writing tests  
-- Improving documentation  
+- Share your remarks and ideas
+- Help to write tests
+- Help to create documentation  
 - Project visibility and outreach
 
 If you're a fan of OOP, TwinCAT, or just want to help — get in touch!  
@@ -121,8 +119,9 @@ Also, if you're experienced in software architecture and have suggestions, I'd l
 
 ## 🧪 Are there examples?
 
-Yes!  
-Check the project **`TwinCAT.OpenFramework.Tests`** — it contains unit tests and examples for specific classes.
+Yes, there are two projects:  
+- **`TwinCAT.OpenFramework.Tests`** — it contains unit tests and examples for specific classes.
+- **`TwinCAT.OpenFramework.Samples`** — it contains demo application with simple visualization.
 
 ---
 
