@@ -8,6 +8,7 @@ VAR
 
 	_DeferredLoggingRecords : Collections.List();
 	_LastMessage : ERROR_MESSAGE;
+	_NextMessageDelay : Timers.Timer;
 END_VAR]]></Declaration>
     <Implementation>
       <ST><![CDATA[]]></ST>
@@ -24,22 +25,44 @@ PROPERTY ClassName : STRING]]></Declaration>
     </Property>
     <Method Name="Execute" Id="{4ca73342-3129-4db1-bfe8-ce9f31717da5}">
       <Declaration><![CDATA[METHOD Execute : BOOL
-VAR_INPUT
-	codeExecutionPhase : BOOL;
-END_VAR
 VAR
 	_Record : DeferredLoggingRecord;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[WHILE _DeferredLoggingRecords.Count > 0 DO
+        <ST><![CDATA[_NextMessageDelay.Execute();
+
+IF NOT _NextMessageDelay.Busy AND_THEN _DeferredLoggingRecords.Count > 0 THEN
 	_DeferredLoggingRecords.Get(0).CopyTo(_Record);
 
-	IF codeExecutionPhase THEN
-		LogMessage(_Record.Level, WideStringHelper.ConcatStrings255("~", _Record.Message));		
+	// check for message flood
+	IF _LastMessage <> _Record.Message THEN
+		CASE _Record.Level OF
+			LOGGING_LEVEL.INFORMATION:
+				IF _Record.Level >= LoggingSettings.MinLoggingLevel THEN
+					Tc2_System.ADSLOGSTR(Tc2_System.Global_Variables.ADSLOG_MSGTYPE_HINT, WSTRING_TO_STRING(_Record.Message), '');					
+				END_IF
+				
+			LOGGING_LEVEL.WARNING:
+				IF _Record.Level >= LoggingSettings.MinLoggingLevel THEN
+					Tc2_System.ADSLOGSTR(Tc2_System.Global_Variables.ADSLOG_MSGTYPE_WARN, WSTRING_TO_STRING(_Record.Message), '');					
+				END_IF
+				
+			LOGGING_LEVEL.ERROR:
+				IF _Record.Level >= LoggingSettings.MinLoggingLevel THEN
+					Tc2_System.ADSLOGSTR(Tc2_System.Global_Variables.ADSLOG_MSGTYPE_ERROR, WSTRING_TO_STRING(_Record.Message), '');
+				END_IF
+	
+			LOGGING_LEVEL.FATAL_ERROR:
+				Tc2_System.ADSLOGSTR(Tc2_System.Global_Variables.ADSLOG_MSGTYPE_ERROR, WSTRING_TO_STRING(_Record.Message), '');
+		END_CASE
+		
+		_LastMessage := _Record.Message;
 	END_IF
 		
 	_DeferredLoggingRecords.RemoveAt(0);
-END_WHILE]]></ST>
+	
+	_NextMessageDelay.TryStart();
+END_IF]]></ST>
       </Implementation>
     </Method>
     <Method Name="FB_exit" Id="{65b9e85b-cb70-4901-bf73-3fd94ecc6145}">
@@ -52,65 +75,17 @@ END_VAR
         <ST><![CDATA[_DeferredLoggingRecords.Clear();]]></ST>
       </Implementation>
     </Method>
-    <Method Name="LogException" Id="{faf433b2-0e52-4cd4-a411-728b0125685c}">
-      <Declaration><![CDATA[METHOD LogException
-VAR_IN_OUT CONSTANT
-	exception : IException;
-END_VAR]]></Declaration>
-      <Implementation>
-        <ST><![CDATA[IF exception.Fatal THEN
-	LogMessage(LOGGING_LEVEL.FATAL_ERROR, exception.GetMessage(TRUE, TRUE));
-ELSE
-	LogMessage(LOGGING_LEVEL.ERROR, exception.GetMessage(TRUE, TRUE));
-END_IF]]></ST>
-      </Implementation>
-    </Method>
-    <Method Name="LogMessage" Id="{0709925d-8c1e-4a16-8695-6c58268bf6fc}">
-      <Declaration><![CDATA[METHOD LogMessage
+    <Method Name="FB_init" Id="{dedeb601-bba1-4edc-94d8-db9da6c7da29}">
+      <Declaration><![CDATA[METHOD FB_init : BOOL
 VAR_INPUT
-	level : LOGGING_LEVEL;	
-	message : ERROR_MESSAGE;
+	(* if TRUE, the retain variables are initialized (warm start / cold start)*)
+	bInitRetains	: BOOL;
+	(* if TRUE, the instance afterwards gets moved into the copy code (online change)*)
+	bInCopyCode	: BOOL;
 END_VAR
-VAR
-	loggingRecord : DeferredLoggingRecord;
-END_VAR]]></Declaration>
+]]></Declaration>
       <Implementation>
-        <ST><![CDATA[IF GlobalState.CodeExecutionPhase THEN
-	// check for message flood
-	IF _LastMessage = message THEN
-		RETURN;
-	END_IF
-
-	CASE level OF
-		LOGGING_LEVEL.INFORMATION:
-			IF level >= LoggingSettings.MinLoggingLevel THEN
-				Tc2_System.ADSLOGSTR(ADSLOG_MSGTYPE_HINT AND ADSLOG_MSGTYPE_LOG, WSTRING_TO_STRING(message), '');					
-			END_IF
-			
-		LOGGING_LEVEL.WARNING:
-			IF level >= LoggingSettings.MinLoggingLevel THEN
-				Tc2_System.ADSLOGSTR(ADSLOG_MSGTYPE_WARN AND ADSLOG_MSGTYPE_LOG, WSTRING_TO_STRING(message), '');					
-			END_IF
-			
-		LOGGING_LEVEL.ERROR:
-			IF level >= LoggingSettings.MinLoggingLevel THEN
-				Tc2_System.ADSLOGSTR(ADSLOG_MSGTYPE_ERROR AND ADSLOG_MSGTYPE_LOG, WSTRING_TO_STRING(message), '');
-			END_IF
-
-		LOGGING_LEVEL.FATAL_ERROR:
-			Tc2_System.ADSLOGSTR(ADSLOG_MSGTYPE_ERROR AND ADSLOG_MSGTYPE_LOG, WSTRING_TO_STRING(message), '');
-	END_CASE
-	
-	_LastMessage := message;
-ELSE
-	// prevent memory leaking
-	IF _DeferredLoggingRecords.Count < 100 THEN	
-		loggingRecord.Level := level;
-		loggingRecord.Message := message;
-		
-		_DeferredLoggingRecords.Append(loggingRecord);		
-	END_IF
-END_IF]]></ST>
+        <ST><![CDATA[_NextMessageDelay.Interval := T#100MS;]]></ST>
       </Implementation>
     </Method>
     <Property Name="Size" Id="{695541b8-e73b-4c08-b887-91a6e80a6878}">
@@ -123,5 +98,64 @@ PROPERTY Size : ULINT]]></Declaration>
         </Implementation>
       </Get>
     </Property>
+    <Method Name="TryLogException" Id="{faf433b2-0e52-4cd4-a411-728b0125685c}">
+      <Declaration><![CDATA[METHOD TryLogException : BOOL
+VAR_IN_OUT CONSTANT
+	exception : IException;
+END_VAR
+VAR
+	loggingLevel : LOGGING_LEVEL;
+	aggregateException : Core.IAggregateException;
+	innerException : Core.IException;
+	i : DINT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF exception = 0 THEN
+	RETURN;
+END_IF
+
+IF NOT __QUERYINTERFACE(exception, aggregateException) OR_ELSE aggregateException.InnerExceptionCount = 0 THEN
+	TryLogException := TryLogMessage(LOGGING_LEVEL.ERROR, exception.GetMessage(TRUE, FALSE, TRUE));
+ELSE
+	IF aggregateException.InnerExceptionCount > 1 THEN
+		// reverce order
+		TryLogException := TryLogMessage(LOGGING_LEVEL.ERROR, "<<< aggregate exception end <<<");
+		
+		FOR i := TO_DINT(aggregateException.InnerExceptionCount) - 1 TO 0 BY -1 DO
+			innerException := aggregateException.GetInnerException(i);
+			
+			TryLogException := TryLogException AND TryLogMessage(LOGGING_LEVEL.ERROR, WideStringHelper.ConcatStrings255("  ", innerException.GetMessage(TRUE, FALSE, TRUE)));		
+		END_FOR
+		
+		TryLogException := TryLogException AND TryLogMessage(LOGGING_LEVEL.ERROR, ">>> aggregate exception start >>>");
+	ELSE		
+		innerException := aggregateException.GetInnerException(0);
+		
+		TryLogException := TryLogMessage(LOGGING_LEVEL.ERROR, innerException.GetMessage(TRUE, FALSE, TRUE));
+	END_IF
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="TryLogMessage" Id="{0709925d-8c1e-4a16-8695-6c58268bf6fc}">
+      <Declaration><![CDATA[METHOD TryLogMessage : BOOL
+VAR_INPUT
+	level : LOGGING_LEVEL;	
+	message : ERROR_MESSAGE;
+END_VAR
+VAR
+	loggingRecord : DeferredLoggingRecord;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[// prevent memory leaking
+IF _DeferredLoggingRecords.Count < 100 THEN	
+	loggingRecord.Level := level;
+	loggingRecord.Message := message;
+	
+	_DeferredLoggingRecords.Append(loggingRecord);		
+	
+	TryLogMessage := TRUE;
+END_IF]]></ST>
+      </Implementation>
+    </Method>
   </POU>
 </TcPlcObject>
