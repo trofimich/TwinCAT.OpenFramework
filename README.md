@@ -1,4 +1,4 @@
-!!!!! This is PreAlpha version. Some conceps reimplemented at this time !!!!!
+This is Alpha version: some conceps can be changed.
 
 # TwinCAT Framework
 
@@ -27,9 +27,9 @@ It enables:
 
 ## 💡 What does the framework offer today?
 
-- ✅ Core logic is based on an **exception-handling mechanism**. Many type of exceptions supported: Standard, NotSupported, NotImplemented, ArgumentNull, ArgumentoutofRange, ArgumentValueNotSupported, Aggregate, etc...
-- ✅ Support for **dynamic collections**: ByteList, List, Dictionary, UniqueSet
-- ✅ Utilities for working with **long strings**: StringHelper/WideStringHelper, StringBuilder/WideStringBuilder
+- ✅ Core logic is based on an **exception-handling mechanism**. Many type of exceptions supported: Standard, NotSupported, NotImplemented, ArgumentNull, ArgumentOutOfRange, ArgumentValueNotSupported, Aggregate, etc...
+- ✅ Support for **dynamic collections** with automatic memory management: ListOfBytes, List, Dictionary, UniqueSet
+- ✅ Utilities for working with **long strings**: StringHelper/WideStringHelper, StringBuilder/WideStringBuilder. Strings with more then 255 characters are also supported.
 - ✅ An **automation engine**: AutomationRunner manages 1..* AutomationUnits. Each Automationunit manages 0..* hierarchical devices
 - 🔧 Many other components — either already ported or pending adaptation
 
