@@ -85,8 +85,6 @@ Development speed depends on:
 
 ## 🤝 I want to help — how?
 
-> “Two heads are better than one.”
-
 Currently you can:
 
 - Share your remarks and ideas
