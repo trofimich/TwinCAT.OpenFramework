@@ -128,6 +128,7 @@ Core.SystemDateTimeManager.Execute();
 IF Core.SystemDateTimeManager.SystemTimeValid THEN
 	_ExecutionContext.CycleLocalStartTime := Core.SystemDateTimeManager.SystemLocalDateTime;
 	_ExecutionContext.CycleUtcStartTime := Core.SystemDateTimeManager.SystemUtcDateTime;
+	_ExecutionContext.PreviousAutomationRunnerState := _ExecutionContext.AutomationRunnerState;
 	
 	CASE _ExecutionContext.AutomationRunnerState OF
 		Automation.AUTOMATION_RUNNING_STATE.INITIALIZING:
@@ -147,7 +148,7 @@ IF Core.SystemDateTimeManager.SystemTimeValid THEN
 				totalUnitCount := TO_DINT(_AutomationUnitCount); 
 	
 				IF initializedUnitCount = totalUnitCount THEN
-					_ExecutionContext.AutomationRunnerState := Automation.AUTOMATION_RUNNING_STATE.RUNNING;
+					_ExecutionContext.AutomationRunnerState := Automation.AUTOMATION_RUNNING_STATE.STOPPING;
 				END_IF						
 			__CATCH(exceptionCode)
 				exception := ExceptionManager.GetLastException(exceptionCode);
@@ -159,13 +160,42 @@ IF Core.SystemDateTimeManager.SystemTimeValid THEN
 				_AdsLogger.TryLogException(exception);				
 			__ENDTRY
 						
-		Automation.AUTOMATION_RUNNING_STATE.RUNNING, Automation.AUTOMATION_RUNNING_STATE.EMERGENCY:		
+		Automation.AUTOMATION_RUNNING_STATE.STOPPING:		
 			//FOR i := LOWER_BOUND(AutomationUnits, 1) TO UPPER_BOUND(AutomationUnits, 1) DO
 			FOR i := 0 TO _AutomationUnitCount - 1 DO
 				__TRY
-					IF AutomationUnits[i].EmergencyStopRequest THEN					
-						_ExecutionContext.AutomationRunnerState := Automation.AUTOMATION_RUNNING_STATE.EMERGENCY;					
-						AutomationUnits[i].EmergencyStop(_ExecutionContext);
+					IF AutomationUnits[i].StartRequest THEN					
+						_ExecutionContext.AutomationRunnerState := Automation.AUTOMATION_RUNNING_STATE.RUNNING;					
+						AutomationUnits[i].Run(_ExecutionContext);			
+					ELSE			
+						_ExecutionContext.AutomationRunnerState := Automation.AUTOMATION_RUNNING_STATE.STOPPING;					
+						AutomationUnits[i].Stop(_ExecutionContext);
+					END_IF
+				__CATCH(exceptionCode)
+					exception := ExceptionManager.GetLastException(exceptionCode);
+					
+					IF exception.Fatal THEN
+						_ExecutionContext.AutomationRunnerState := Automation.AUTOMATION_RUNNING_STATE.FAULT;					
+						fillErrorLog(Diagnostics.CriticalError, exception);
+					ELSIF NOT exception.Empty THEN
+						fillErrorLog(Diagnostics.LastNonCriticalError, exception);
+					END_IF
+					
+					_AdsLogger.TryLogException(exception);					
+				__ENDTRY
+				
+				IF exception <> 0 AND_THEN exception.Fatal THEN
+					EXIT;
+				END_IF
+			END_FOR
+						
+		Automation.AUTOMATION_RUNNING_STATE.RUNNING:		
+			//FOR i := LOWER_BOUND(AutomationUnits, 1) TO UPPER_BOUND(AutomationUnits, 1) DO
+			FOR i := 0 TO _AutomationUnitCount - 1 DO
+				__TRY
+					IF AutomationUnits[i].StopRequest THEN					
+						_ExecutionContext.AutomationRunnerState := Automation.AUTOMATION_RUNNING_STATE.STOPPING;					
+						AutomationUnits[i].Stop(_ExecutionContext);
 					ELSE			
 						_ExecutionContext.AutomationRunnerState := Automation.AUTOMATION_RUNNING_STATE.RUNNING;					
 						AutomationUnits[i].Run(_ExecutionContext);			
