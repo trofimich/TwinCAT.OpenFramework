@@ -66,9 +66,6 @@ That's why we enforce inheritance from our own base class — `Object`.
 
 ## 🗂 Why this library structure?
 
-There’s a joke among developers:  
-> “Rule #1 of framework development — don’t create a framework.”
-
 Designing one involves hard tradeoffs: architectural purity vs. usability.  
 The current structure is the result of many iterations and refactorings.  
 If you have suggestions — I’m all ears.
@@ -76,11 +73,6 @@ If you have suggestions — I’m all ears.
 ---
 
 ## ⏱ What’s the development pace?
-
-Unfortunately: **irregular**.
-
-> I live in a frontline city in Ukraine.  
-> I work on this in my spare time — between day job tasks and the challenges of daily life here.
 
 Development speed depends on:
 
