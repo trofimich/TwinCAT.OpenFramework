@@ -12,6 +12,7 @@ END_VAR]]></Declaration>
     <Implementation>
       <ST><![CDATA[]]></ST>
     </Implementation>
+    <Folder Name="Service memebers" Id="{ac3ba484-d0b1-4d7e-b557-cd243c8b8997}" />
     <Property Name="ClassName" Id="{0ef034e0-c59c-400d-8910-5199a1e43c28}">
       <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
 PROPERTY ClassName : STRING
@@ -24,57 +25,211 @@ PROPERTY ClassName : STRING
       </Get>
     </Property>
     <Method Name="CreateJsonFromStructure" Id="{defd30bb-3636-4b3d-a29d-4ee5f3966212}">
-      <Declaration><![CDATA[{attribute 'TcRpcEnable':='1'}
-METHOD CreateJsonFromStructure
+      <Declaration><![CDATA[METHOD CreateJsonFromStructure
 VAR_INPUT
-	structureAddress : PVOID;
-	structureSize : UDINT;
+	sourceStructure : ANY;
 	extender : IJsonExtender := 0;
 END_VAR
 VAR_IN_OUT CONSTANT
-    targetString : JSON_DOCUMENT;
+    targetJson : JSON_DOCUMENT;
+END_VAR
+VAR_OUTPUT
+	jsonSize : UDINT; 
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[InternalCreateJsonFromStructure(sourceStructure, extender, targetJson, jsonSize => jsonSize);]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="CreateJsonFromStructureByVarInfo" Id="{d6f652b9-17a4-4ec4-936c-676a73e01a2d}">
+      <Declaration><![CDATA[METHOD CreateJsonFromStructureByVarInfo
+VAR_INPUT
+	sourceStructureVarInfo : __SYSTEM.VAR_INFO;
+	extender : IJsonExtender := 0;
+END_VAR
+VAR_IN_OUT CONSTANT
+    targetJson : JSON_DOCUMENT;
 END_VAR
 VAR_OUTPUT
 	jsonSize : UDINT; 
 END_VAR
 VAR
-	//exceptionFactory : ExceptionFactory(__POUNAME(), ClassName, CurrentNamespace.Name);
-	structureTypeName : STRING;	 
+	argumentNullException : Core.ArgumentNullException;
+	argumentTypeNotSupportedException : Core.ArgumentTypeNotSupportedException;
+	standardException : Core.StandardException;
+	
 	errorCode : HRESULT;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[IF structureAddress = 0 THEN
-	//exceptionFactory.ThrowException(__POSITION(), "Structure address is not specified");
+        <ST><![CDATA[IF sourceStructureVarInfo.ByteAddress = 0 THEN
+	argumentNullException.Throw(CurrentNamespace.Name, ClassName, __POUNAME(), __POSITION(), 'sourceStructureVarInfo');
 END_IF
 
-IF structureSize = 0 THEN
-	//exceptionFactory.ThrowException(__POSITION(), "Structure size is not specified");
+IF sourceStructureVarInfo.TypeClass <> __SYSTEM.TYPE_CLASS.TYPE_USERDEF THEN
+	argumentTypeNotSupportedException.Throw(CurrentNamespace.Name, ClassName, __POUNAME(), __POSITION(), 'sourceStructureVarInfo', sourceStructureVarInfo.TypeClass);
 END_IF
 
 _JsonSaxWriter.ResetDocument();
-
-structureTypeName := _JsonDataTypeWriter.GetDatatypeNameByAddress(structureSize, structureAddress, hrErrorCode => errorCode);
-
-IF errorCode <> 0 THEN
-	//exceptionFactory.ThrowException(__POSITION(), "Can't get structure type name of transfered symbol (structure instance address and size)", TO_UDINT(errorCode));
-END_IF
 
 IF extender <> 0 THEN
 	extender.ExtendAtStart(_JsonSaxWriter);
 END_IF
 
-IF NOT _JsonDataTypeWriter.AddJsonValueFromSymbol(_JsonSaxWriter, structureTypeName, structureSize, structureAddress, hrErrorCode => errorCode) THEN
-	//exceptionFactory.ThrowException(__POSITION(), WStringHelper.Concat3("Can't generate JSON representation from the symbol of type '", TO_WSTRING(structureTypeName), "'"), TO_UDINT(errorCode));
+IF NOT _JsonDataTypeWriter.AddJsonValueFromSymbol(_JsonSaxWriter, sourceStructureVarInfo.TypeName, TO_UDINT(sourceStructureVarInfo.BitSize / 8), sourceStructureVarInfo.ByteAddress, hrErrorCode => errorCode) THEN
+	standardException.Throw(CurrentNamespace.Name, ClassName, __POUNAME(), __POSITION(), WideStringHelper.ConcatStrings255("Can't generate JSON representation from the symbol of type '", TO_WSTRING(sourceStructureVarInfo.TypeName), "'"), TO_UDINT(errorCode));
 END_IF
 
 IF extender <> 0 THEN
 	extender.ExtendAtFinish(_JsonSaxWriter);
 END_IF
 
-jsonSize := _JsonSaxWriter.CopyDocument(targetString, SIZEOF(targetString), hrErrorCode => errorCode);
+jsonSize := _JsonSaxWriter.CopyDocument(targetJson, SIZEOF(targetJson), hrErrorCode => errorCode);
 
 IF errorCode <> 0 THEN
-	//exceptionFactory.ThrowException(__POSITION(), WStringHelper.Concat3("Can't generate JSON representation from the symbol of type '", TO_WSTRING(structureTypeName), "'"), TO_UDINT(errorCode));
+	standardException.Throw(CurrentNamespace.Name, ClassName, __POUNAME(), __POSITION(), WideStringHelper.ConcatStrings255("Can't fill JSON from the symbol of type '", TO_WSTRING(sourceStructureVarInfo.TypeName), "'"), TO_UDINT(errorCode));
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="FillStructureByVarInfoFromJson" Id="{3b0559f7-3cc9-4407-b03c-9992acf72583}">
+      <Declaration><![CDATA[METHOD FillStructureByVarInfoFromJson
+VAR_IN_OUT CONSTANT
+	json : JSON_DOCUMENT;	
+END_VAR
+VAR_INPUT
+	targetStructureVarInfo : __SYSTEM.VAR_INFO;
+END_VAR
+VAR
+	argumentNullException : Core.ArgumentNullException;
+	argumentTypeNotSupportedException : Core.ArgumentTypeNotSupportedException;
+	standardException : Core.StandardException;
+	
+	structureTypeName : STRING;	 
+	errorCode : HRESULT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF targetStructureVarInfo.ByteAddress = 0 THEN
+	argumentNullException.Throw(CurrentNamespace.Name, ClassName, __POUNAME(), __POSITION(), 'targetStructureVarInfo');
+END_IF
+
+IF targetStructureVarInfo.TypeClass <> __SYSTEM.TYPE_CLASS.TYPE_USERDEF THEN
+	argumentTypeNotSupportedException.Throw(CurrentNamespace.Name, ClassName, __POUNAME(), __POSITION(), 'targetStructureVarInfo', targetStructureVarInfo.TypeClass);
+END_IF
+
+structureTypeName := _JsonDataTypeWriter.GetDatatypeNameByAddress(TO_UDINT(targetStructureVarInfo.BitSize / 8), targetStructureVarInfo.ByteAddress, hrErrorCode => errorCode);
+
+IF errorCode <> 0 THEN
+	standardException.Throw(CurrentNamespace.Name, ClassName, __POUNAME(), __POSITION(), "Can't get structure type of the target structure", TO_UDINT(errorCode));
+END_IF
+
+_JsonDataTypeWriter.SetSymbolFromJson(json, structureTypeName, TO_UDINT(targetStructureVarInfo.BitSize / 8), targetStructureVarInfo.ByteAddress, hrErrorCode => errorCode);
+
+IF errorCode <> 0 THEN
+	standardException.Throw(CurrentNamespace.Name, ClassName, __POUNAME(), __POSITION(), "Can't fill target structure by specified json document", TO_UDINT(errorCode));
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="FillStructureFromJson" Id="{b53042c3-1eea-4151-a973-f56939241dea}">
+      <Declaration><![CDATA[METHOD FillStructureFromJson
+VAR_IN_OUT CONSTANT
+	json : JSON_DOCUMENT;	
+END_VAR
+VAR_INPUT
+	targetStructure : ANY;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[InternalFillStructureFromJson(json, targetStructure);]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="InternalCreateJsonFromStructure" Id="{828ddc06-4e4b-4f22-bd8f-3234f73fd728}" FolderPath="Service memebers\">
+      <Declaration><![CDATA[METHOD PROTECTED InternalCreateJsonFromStructure
+VAR_INPUT
+	sourceStructure : __SYSTEM.AnyType;
+	extender : IJsonExtender := 0;
+END_VAR
+VAR_IN_OUT CONSTANT
+    targetJson : JSON_DOCUMENT;
+END_VAR
+VAR_OUTPUT
+	jsonSize : UDINT; 
+END_VAR
+VAR
+	argumentNullException : Core.ArgumentNullException;
+	argumentTypeNotSupportedException : Core.ArgumentTypeNotSupportedException;
+	standardException : Core.StandardException;
+	
+	structureTypeName : STRING;	 
+	errorCode : HRESULT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF sourceStructure.pValue = 0 THEN
+	argumentNullException.Throw(CurrentNamespace.Name, ClassName, __POUNAME(), __POSITION(), 'sourceStructure');
+END_IF
+
+IF sourceStructure.TypeClass <> __SYSTEM.TYPE_CLASS.TYPE_USERDEF THEN
+	argumentTypeNotSupportedException.Throw(CurrentNamespace.Name, ClassName, __POUNAME(), __POSITION(), 'sourceStructure', sourceStructure.TypeClass);
+END_IF
+
+_JsonSaxWriter.ResetDocument();
+
+structureTypeName := _JsonDataTypeWriter.GetDatatypeNameByAddress(TO_UDINT(sourceStructure.diSize), sourceStructure.pValue, hrErrorCode => errorCode);
+
+IF errorCode <> 0 THEN
+	standardException.Throw(CurrentNamespace.Name, ClassName, __POUNAME(), __POSITION(), "Can't get structure type of the source structure", TO_UDINT(errorCode));
+END_IF
+
+IF extender <> 0 THEN
+	extender.ExtendAtStart(_JsonSaxWriter);
+END_IF
+
+IF NOT _JsonDataTypeWriter.AddJsonValueFromSymbol(_JsonSaxWriter, structureTypeName, TO_UDINT(sourceStructure.diSize), sourceStructure.pValue, hrErrorCode => errorCode) THEN
+	standardException.Throw(CurrentNamespace.Name, ClassName, __POUNAME(), __POSITION(), WideStringHelper.ConcatStrings255("Can't generate JSON representation from the symbol of type '", TO_WSTRING(structureTypeName), "'"), TO_UDINT(errorCode));
+END_IF
+
+IF extender <> 0 THEN
+	extender.ExtendAtFinish(_JsonSaxWriter);
+END_IF
+
+jsonSize := _JsonSaxWriter.CopyDocument(targetJson, SIZEOF(targetJson), hrErrorCode => errorCode);
+
+IF errorCode <> 0 THEN
+	standardException.Throw(CurrentNamespace.Name, ClassName, __POUNAME(), __POSITION(), WideStringHelper.ConcatStrings255("Can't fill JSON from the symbol of type '", TO_WSTRING(structureTypeName), "'"), TO_UDINT(errorCode));
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="InternalFillStructureFromJson" Id="{cd668581-fbff-4bb3-b0d3-914c47132fdf}" FolderPath="Service memebers\">
+      <Declaration><![CDATA[METHOD PROTECTED InternalFillStructureFromJson
+VAR_IN_OUT CONSTANT
+	json : JSON_DOCUMENT;	
+END_VAR
+VAR_INPUT
+	targetStructure : __SYSTEM.AnyType;
+END_VAR
+VAR
+	argumentNullException : Core.ArgumentNullException;
+	argumentTypeNotSupportedException : Core.ArgumentTypeNotSupportedException;
+	standardException : Core.StandardException;
+	
+	structureTypeName : STRING;	 
+	errorCode : HRESULT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF targetStructure.pValue = 0 THEN
+	argumentNullException.Throw(CurrentNamespace.Name, ClassName, __POUNAME(), __POSITION(), 'targetStructure');
+END_IF
+
+IF targetStructure.TypeClass <> __SYSTEM.TYPE_CLASS.TYPE_USERDEF THEN
+	argumentTypeNotSupportedException.Throw(CurrentNamespace.Name, ClassName, __POUNAME(), __POSITION(), 'targetStructure', targetStructure.TypeClass);
+END_IF
+
+structureTypeName := _JsonDataTypeWriter.GetDatatypeNameByAddress(TO_UDINT(targetStructure.diSize), targetStructure.pValue, hrErrorCode => errorCode);
+
+IF errorCode <> 0 THEN
+	standardException.Throw(CurrentNamespace.Name, ClassName, __POUNAME(), __POSITION(), "Can't get structure type of the target structure", TO_UDINT(errorCode));
+END_IF
+
+_JsonDataTypeWriter.SetSymbolFromJson(json, structureTypeName, TO_UDINT(targetStructure.diSize), targetStructure.pValue, hrErrorCode => errorCode);
+
+IF errorCode <> 0 THEN
+	standardException.Throw(CurrentNamespace.Name, ClassName, __POUNAME(), __POSITION(), "Can't fill target structure by specified json document", TO_UDINT(errorCode));
 END_IF]]></ST>
       </Implementation>
     </Method>
@@ -92,42 +247,6 @@ _JsonSaxWriter.SetFormatOptions(formatOptions);
 _JsonSaxWriter.SetIndent(identChar, identCharCount);]]></ST>
       </Implementation>
     </Method>
-    <Method Name="SetStructureFromJson" Id="{b53042c3-1eea-4151-a973-f56939241dea}">
-      <Declaration><![CDATA[METHOD SetStructureFromJson
-VAR_IN_OUT CONSTANT
-	json : JSON_DOCUMENT;	
-END_VAR
-VAR_INPUT
-	structureAddress : PVOID;
-	structureSize : UDINT;
-END_VAR
-VAR
-	//exceptionFactory : ExceptionFactory(__POUNAME(), ClassName, CurrentNamespace.Name);
-	structureTypeName : STRING;	 
-	errorCode : HRESULT;
-END_VAR]]></Declaration>
-      <Implementation>
-        <ST><![CDATA[IF structureAddress = 0 THEN
-	//exceptionFactory.ThrowException(__POSITION(), "Structure address is not specified");
-END_IF
-
-IF structureSize = 0 THEN
-	//exceptionFactory.ThrowException(__POSITION(), "Structure size is not specified");
-END_IF
-
-structureTypeName := _JsonDataTypeWriter.GetDatatypeNameByAddress(structureSize, structureAddress, hrErrorCode => errorCode);
-
-IF errorCode <> 0 THEN
-	//exceptionFactory.ThrowException(__POSITION(), "Can't get structure type name of transfered symbol (structure instance address and size)", TO_UDINT(errorCode));
-END_IF
-
-_JsonDataTypeWriter.SetSymbolFromJson(json, structureTypeName, structureSize, structureAddress, hrErrorCode => errorCode);
-
-IF errorCode <> 0 THEN
-	//exceptionFactory.ThrowException(__POSITION(), "Can't set structure by specified json document", TO_UDINT(errorCode));
-END_IF]]></ST>
-      </Implementation>
-    </Method>
     <Property Name="Size" Id="{4e2cc4a2-86a6-48cc-a757-58f1b82e3903}">
       <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
 PROPERTY Size : ULINT]]></Declaration>
@@ -138,5 +257,82 @@ PROPERTY Size : ULINT]]></Declaration>
         </Implementation>
       </Get>
     </Property>
+    <Method Name="TryCreateJsonFromStructure" Id="{35373f3b-1087-4a79-950c-0b141211bf99}">
+      <Declaration><![CDATA[{attribute 'TcRpcEnable':='1'}
+METHOD TryCreateJsonFromStructure : BOOL
+VAR_INPUT
+	sourceStructure : ANY;
+	extender : IJsonExtender := 0;
+END_VAR
+VAR_IN_OUT CONSTANT
+    targetJson : JSON_DOCUMENT;
+END_VAR
+VAR_OUTPUT
+	jsonSize : UDINT; 
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[__TRY
+	InternalCreateJsonFromStructure(sourceStructure, extender, targetJson, jsonSize => jsonSize);
+
+	TryCreateJsonFromStructure := TRUE;
+__CATCH
+__ENDTRY]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="TryCreateJsonFromStructureByVarInfo" Id="{486e285a-fcfe-44f3-9023-743f121d8975}">
+      <Declaration><![CDATA[METHOD TryCreateJsonFromStructureByVarInfo : BOOL
+VAR_INPUT
+	sourceStructureVarInfo : __SYSTEM.VAR_INFO;
+	extender : IJsonExtender := 0;
+END_VAR
+VAR_IN_OUT CONSTANT
+    targetJson : JSON_DOCUMENT;
+END_VAR
+VAR_OUTPUT
+	jsonSize : UDINT; 
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[__TRY
+	CreateJsonFromStructureByVarInfo(sourceStructureVarInfo, extender, targetJson, jsonSize => jsonSize);
+	
+	TryCreateJsonFromStructureByVarInfo := TRUE;
+__CATCH
+__ENDTRY]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="TryFillStructureByVarInfoFromJson" Id="{25972cd3-eceb-4afa-aeb2-ef7585c39b37}">
+      <Declaration><![CDATA[METHOD TryFillStructureByVarInfoFromJson : BOOL
+VAR_IN_OUT CONSTANT
+	json : JSON_DOCUMENT;	
+END_VAR
+VAR_INPUT
+	targetStructureVarInfo : __SYSTEM.VAR_INFO;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[__TRY
+	FillStructureByVarInfoFromJson(json, targetStructureVarInfo);
+	
+	TryFillStructureByVarInfoFromJson := TRUE;
+__CATCH	
+__ENDTRY]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="TryFillStructureFromJson" Id="{b5b62249-7ff4-4c95-ba2a-e43e9757d053}">
+      <Declaration><![CDATA[METHOD TryFillStructureFromJson : BOOL
+VAR_IN_OUT CONSTANT
+	json : JSON_DOCUMENT;	
+END_VAR
+VAR_INPUT
+	targetStructure : ANY;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[__TRY
+	InternalFillStructureFromJson(json, targetStructure);
+	
+	TryFillStructureFromJson := TRUE;
+__CATCH
+__ENDTRY]]></ST>
+      </Implementation>
+    </Method>
   </POU>
 </TcPlcObject>
