@@ -1,236 +1,92 @@
-```markdown
+# Signal-Controlled Intersection Automation – Technical Guide
 
-\# Signal-Controlled Intersection Automation – Technical Guide
+## 1. Enumeration Definitions
 
+### 1.1. SIGNAL_CONTROLLED_INTERSECTION_MODE  
+Defines the general control mode of the intersection.
 
+### 1.2. SIGNAL_CONTROLLED_INTERSECTION_STATE  
+Defines the current state of the intersection. Based on this state, the logic activates appropriate signals on four traffic lights. 
+The values `ALL_YELLOW`, `_1_3_YELLOW_AND_2_4_YELLOW`, and `_2_4_YELLOW_AND_1_3_YELLOW` are similar because they turn on yellow on all traffic lights, but carry additional information to determine the next state transition.
 
-\## 1. Enumeration Definitions
+### 1.3. TRAFFIC_LIGHT_COLOR  
+Defines the state of a single traffic light.
 
-```
+---
 
+## 2. Implement the TrafficLight Device
 
-
-```
-
-1.1. SIGNAL\_CONTROLLED\_INTERSECTION\_MODE – defines the general control mode of the intersection.
-
-
-
-1.2. SIGNAL\_CONTROLLED\_INTERSECTION\_STATE – defines the current state of the intersection.
-
-&nbsp;    Based on this state, the logic activates appropriate signals on four traffic lights.
-
-&nbsp;    The values ALL\_YELLOW, \_1\_3\_YELLOW\_AND\_2\_4\_YELLOW, and \_2\_4\_YELLOW\_AND\_1\_3\_YELLOW are similar because
-
-&nbsp;    they turn on yellow on all traffic lights, but they carry additional information to determine
-
-&nbsp;    the next state transition.
-
-
-
-1.3. TRAFFIC\_LIGHT\_COLOR – defines the state of a single traffic light.
-
-```
-
-
-
-\## 2. Implement the TrafficLight Device
-
-
-
-```
-
-The TrafficLight device consists of three standard internal DigitalOutput devices (for red, yellow, and green).
-
-It inherits from the abstract class TOF\_Automation.OutputDevice<3>, indicating that it includes 3 internal subdevices.
-
-
+The TrafficLight device consists of three standard internal `DigitalOutput` devices (for red, yellow, and green). It inherits from the abstract class `TOF_Automation.OutputDevice<3>`, indicating that it includes 3 internal subdevices.
 
 Inheritance requires implementation of:
+- Three abstract properties: `ClassName`, `Size`, `SubDevices`
+- One abstract method: `OnUpdateOutputsFromState`
+- One custom method: `SetLight`
 
-\- three abstract properties: ClassName, Size, SubDevices
+#### 2.1. ClassName  
+Required by the framework, returns the name of the current class (function block). Used for exception reporting.
 
-\- one abstract method: OnUpdateOutputsFromState
+#### 2.2. Size  
+Used by the framework to manage dynamic memory.
 
+#### 2.3. SubDevices  
+Returns a reference to the array containing actual internal devices (digital outputs for turning on the light indicators).
 
+#### 2.4. OnUpdateOutputsFromState  
+Responsible for passing internal virtual device data to terminals or external objects. At the traffic light level, this does nothing. Actions are already implemented in `Devices.IO` library.
 
-Also implemented: SetLight (custom method).
+#### 2.5. SetLight  
+Method to control the traffic light by passing a color to activate.
 
+---
 
-
-2.1. ClassName – required by the framework, returns the name of the current class (function block).
-
-&nbsp;    Used for exception reporting.
-
-
-
-2.2. Size – used by the framework to manage dynamic memory.
-
-
-
-2.3. SubDevices – returns a reference to the array containing actual internal devices
-
-&nbsp;    (digital outputs for turning on the light indicators in this case).
-
-
-
-2.4. OnUpdateOutputsFromState – responsible for passing internal virtual device data to terminals or external objects.
-
-&nbsp;    At the traffic light level, this does nothing.
-
-&nbsp;    On the DigitalOutput level, these actions are already implemented in Devices.IO library.
-
-
-
-2.5. SetLight – method to control the traffic light by passing a color to activate.
-
-```
-
-
-
-\## 3. Implement the Automation Module: SignalControlledIntersectionAutomationUnit
-
-
-
-```
+## 3. Implement the Automation Module: `SignalControlledIntersectionAutomationUnit`
 
 This module contains logic for interaction between six devices:
+  - ON/OFF input
+  - Mode switch (standard vs blinking yellow)
+  - Four traffic lights
+It inherits from `TOF_AutomationEngine.AutomationUnit<6>`.
+It Implements abstract members: `ClassName`, `Size`, `Devices`, `StartRequest`
+Overrides: `StopRequest`, `OnInitialize`, `OnStop`, `OnRun`
 
-\- ON/OFF input
+#### 3.1. StartRequest  
+Signals the engine to enter RUN state. Returns the value of the ON/OFF switch.
 
-\- Mode switch (standard vs blinking yellow)
+#### 3.2. StopRequest  
+Signals the engine to enter STOPPED state. Returns the inverted value of the ON/OFF switch.
 
-\- Four traffic lights
+#### 3.3. OnRun  
+Method called cyclically while in RUN state. Contains core traffic light logic.
 
+#### 3.4. OnInitialize  
+Used during initialization phase. Returns `TRUE` once initialization is complete. In this case, sets timer values in one cycle.
 
+#### 3.5. OnStop  
+Called cyclically in STOPPED state. Turns off all traffic lights.
 
-It inherits from TOF\_AutomationEngine.AutomationUnit<6>.
+---
 
+## 4. Implement the Automation Runner: `SignalControlledIntersectionAutomationRunner`
 
-
-The class must implement:
-
-\- ClassName
-
-\- Size
-
-\- Devices
-
-\- StartRequest
-
-
-
-Additionally, overrides:
-
-\- StopRequest
-
-\- OnInitialize
-
-\- OnStop
-
-
-
-3.1. ClassName – see section 2.1.
-
-
-
-3.2. Size – see section 2.2.
-
-
-
-3.3. Devices – returns a reference to an array filled with real devices
-
-&nbsp;    (2 digital inputs and 4 traffic light instances).
-
-
-
-3.4. StartRequest – signals the engine to enter RUN state.
-
-&nbsp;    Simply returns the value of the ON/OFF switch.
-
-
-
-3.5. StopRequest – signals the engine to enter STOPPED state.
-
-&nbsp;    Simply returns the inverted value of the ON/OFF switch.
-
-
-
-3.6. OnRun – method called by the engine cyclically while in RUN state.
-
-&nbsp;    Contains core traffic light logic.
-
-
-
-3.7. OnInitialize – used during initialization phase.
-
-&nbsp;    Returns TRUE once initialization is complete.
-
-&nbsp;    In our case, it sets timer values in one cycle. In other cases, may take several cycles.
-
-
-
-3.8. OnStop – called cyclically in STOPPED state. Turns off all traffic lights.
-
-```
-
-
-
-\## 4. Implement the Automation Runner: SignalControlledIntersectionAutomationRunner
-
-
-
-```
-
-The runner manages automation modules.
-
-In our case, it controls one instance of SignalControlledIntersectionAutomationUnit.
-
-Inherits from TOF\_AutomationEngine.AutomationRunner<1>.
-
-
+This runner manages automation modules. It controls one instance of `SignalControlledIntersectionAutomationUnit` and inherits from `TOF_AutomationEngine.AutomationRunner<1>`.
 
 Implements:
+- `ClassName`
+- `Size`
+- `AutomationUnits` – returns array of controlled automation units (1 element)
+- `FB_Init` – enables simulation mode (for demo project without real terminals)
 
-\- ClassName (see 2.1)
+---
 
-\- Size (see 2.2)
+## 5. MAIN Program Setup
 
-\- AutomationUnits – returns array of controlled automation units (1 element in our case)
+In the `MAIN` program:
+- Create instance of `SignalControlledIntersectionAutomationRunner`
+- Call its `Run` method
 
-\- FB\_Init – used to enable simulation mode (since this is a demo project without real terminals)
+---
 
-```
+## Conclusion
 
-
-
-\## 5. MAIN Program Setup
-
-
-
-```
-
-In the MAIN program:
-
-\- Create instance of SignalControlledIntersectionAutomationRunner
-
-\- Call its Run method
-
-```
-
-
-
-\## Conclusion
-
-
-
-```
-
-That's all you need.
-
-As you can see, everything is simple – once you understand the framework ideology.
-
-Visualizations are just auxiliary components for demonstration and verification.
-
-```
-
+That’s all you need. Everything is straightforward once you understand the framework ideology. Visualizations are just auxiliary components for demonstration and verification.
