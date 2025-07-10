@@ -47,7 +47,7 @@ To automate a signal-controlled intersection, the following steps were implement
 		abstract properties: ClassName, Size, Devices, StartRequest
 		abstract method: OnRun
 		overriden property: StopRequest
-		overriden methods: OnInitialize, OnStop (default implementations do nothing)
+		overriden methods: OnInitialize, OnStop, OnFault (default implementations do nothing)
 
 	3.1. ClassName – see 2.1
 
@@ -62,15 +62,18 @@ To automate a signal-controlled intersection, the following steps were implement
 	3.5. StopRequest
 		A base property that signals the engine to enter stopped mode. Returns the negated state of the ON/OFF switch.
 
-	3.6. OnRun
-		Executed cyclically while the engine is in operational mode. Contains the main logic for controlling the traffic lights.
-
-	3.7. OnInitialize
+	3.6. OnInitialize
 		Called during the initialization phase. Returns TRUE once initialization is complete.
 		In this case, it sets timing values and completes in a single cycle (though in other cases, it may span multiple cycles).
 
+	3.7. OnRun
+		Executed cyclically while the engine is in operational mode. Contains the main logic for controlling the traffic lights.
+
 	3.8. OnStop
 		Called cyclically when the engine is in stopped mode. Ensures that all traffic lights are turned off.
+
+	3.9. OnFault
+		Called cyclically when the engine is in faulted mode. Ensures that all traffic lights are turned off.
 
 4. Implement the SignalControlledIntersectionAutomationRunner
 	This is the automation engine that manages one or more automation units.

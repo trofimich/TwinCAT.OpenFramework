@@ -48,7 +48,7 @@ This module contains logic for interaction between six devices:
   - Four traffic lights
 It inherits from `TOF_AutomationEngine.AutomationUnit<6>`.
 It Implements abstract members: `ClassName`, `Size`, `Devices`, `StartRequest`
-Overrides: `StopRequest`, `OnInitialize`, `OnStop`, `OnRun`
+Overrides: `StopRequest`, `OnInitialize`, `OnStop`, `OnRun`, `OnFault`
 
 #### 3.1. StartRequest  
 Signals the engine to enter RUN state. Returns the value of the ON/OFF switch.
@@ -56,14 +56,17 @@ Signals the engine to enter RUN state. Returns the value of the ON/OFF switch.
 #### 3.2. StopRequest  
 Signals the engine to enter STOPPED state. Returns the inverted value of the ON/OFF switch.
 
-#### 3.3. OnRun  
-Method called cyclically while in RUN state. Contains core traffic light logic.
-
-#### 3.4. OnInitialize  
+#### 3.3. OnInitialize  
 Used during initialization phase. Returns `TRUE` once initialization is complete. In this case, sets timer values in one cycle.
+
+#### 3.4. OnRun  
+Method called cyclically while in RUN state. Contains core traffic light logic.
 
 #### 3.5. OnStop  
 Called cyclically in STOPPED state. Turns off all traffic lights.
+
+#### 3.6. OnFault
+Called cyclically in FAULTED state. Turns off all traffic lights.
 
 ---
 
