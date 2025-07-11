@@ -6,9 +6,15 @@ VAR
 	_ClassName : STRING := __POUNAME();
 	
 	_AutoDisposedObjects : POINTER TO IObject;	
+	_AutoDisposedPointerCount : DWORD;
 	_AutoDisposedObjectCount : DWORD;
 
-	_LastSystemTaskCycleCount : UDINT;	
+	_LastSystemTaskCycleCount : UDINT;
+
+	_MemoryCleanupHelper : MemoryCleanupHelper;	
+END_VAR
+VAR CONSTANT
+	ALLOCATE_POINTER_COUNT : BYTE := 10;
 END_VAR]]></Declaration>
     <Implementation>
       <ST><![CDATA[]]></ST>
@@ -24,24 +30,11 @@ PROPERTY ClassName : STRING]]></Declaration>
         </Implementation>
       </Get>
     </Property>
-    <Method Name="cooperativeMemoryCleanup" Id="{5754b7a5-6f2f-49c9-a633-b4906595d6ba}" FolderPath="Service memebers\">
-      <Declaration><![CDATA[METHOD PRIVATE cooperativeMemoryCleanup
-VAR
-	systemTaskInfo : Global.PlcTaskSystemInfo;
+    <Method Name="CleanupMemory" Id="{a080fe6a-f539-4ac0-9048-10f8d3587c3b}">
+      <Declaration><![CDATA[METHOD CleanupMemory
+VAR_INPUT
+	releaseBuffer : BOOL := FALSE;
 END_VAR
-]]></Declaration>
-      <Implementation>
-        <ST><![CDATA[systemTaskInfo := F_GetTaskInfo();
-
-IF systemTaskInfo.CycleCount <> _LastSystemTaskCycleCount THEN
-	_LastSystemTaskCycleCount := systemTaskInfo.CycleCount;
-	
-	DisposeAutoDisposedObjects();
-END_IF]]></ST>
-      </Implementation>
-    </Method>
-    <Method Name="DisposeAutoDisposedObjects" Id="{a080fe6a-f539-4ac0-9048-10f8d3587c3b}">
-      <Declaration><![CDATA[METHOD DisposeAutoDisposedObjects
 VAR
 	i : ULINT;
 	objectToDispose : IObject;
@@ -52,10 +45,30 @@ END_VAR]]></Declaration>
 		objectToDispose := _AutoDisposedObjects[i];
 		objectToDispose.Dispose();
 	END_FOR
-	
+			
+	_AutoDisposedObjectCount := 0;
+END_IF
+
+IF _AutoDisposedPointerCount > 0 AND_THEN releaseBuffer THEN
 	__DELETE(_AutoDisposedObjects);
 	
-	_AutoDisposedObjectCount := 0;
+	_AutoDisposedPointerCount := 0;
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="cooperativeCleanupMemory" Id="{5754b7a5-6f2f-49c9-a633-b4906595d6ba}" FolderPath="Service memebers\">
+      <Declaration><![CDATA[METHOD PRIVATE cooperativeCleanupMemory
+VAR
+	systemTaskInfo : Global.PlcTaskSystemInfo;
+END_VAR
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[systemTaskInfo := F_GetTaskInfo();
+
+IF systemTaskInfo.CycleCount <> _LastSystemTaskCycleCount THEN
+	_LastSystemTaskCycleCount := systemTaskInfo.CycleCount;
+	
+	CleanupMemory(FALSE);
 END_IF]]></ST>
       </Implementation>
     </Method>
@@ -79,24 +92,28 @@ VAR
 	newAutoDisposedObjects : POINTER TO IObject;	
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[cooperativeMemoryCleanup();
+        <ST><![CDATA[cooperativeCleanupMemory();
 
 IF NOT __ISVALIDREF(autoDisposedObject) OR_ELSE NOT IsDynamicData(autoDisposedObject.Address) THEN
 	RETURN;
 END_IF
 
-newAutoDisposedObjects := __NEW(POINTER TO IObject, (_AutoDisposedObjectCount + 1));
-
-IF _AutoDisposedObjectCount > 0 THEN
-	Tc2_System.MEMCPY(newAutoDisposedObjects, _AutoDisposedObjects, TO_UDINT(XSIZEOF(POINTER TO IObject) * _AutoDisposedObjectCount));
+IF _AutoDisposedObjectCount + 1 > _AutoDisposedPointerCount THEN
+	_AutoDisposedPointerCount := _AutoDisposedPointerCount + ALLOCATE_POINTER_COUNT;
 	
-	__DELETE(_AutoDisposedObjects);
+	newAutoDisposedObjects := __NEW(POINTER TO IObject, _AutoDisposedPointerCount);
+	
+	IF _AutoDisposedObjectCount > 0 THEN
+		Tc2_System.MEMCPY(newAutoDisposedObjects, _AutoDisposedObjects, TO_UDINT(XSIZEOF(POINTER TO IObject) * _AutoDisposedObjectCount));
+		
+		__DELETE(_AutoDisposedObjects);
+	END_IF
+	
+	_AutoDisposedObjects := newAutoDisposedObjects;
 END_IF
 
-newAutoDisposedObjects[_AutoDisposedObjectCount] := autoDisposedObject;
-
-_AutoDisposedObjects := newAutoDisposedObjects;
-_AutoDisposedObjectCount := _AutoDisposedObjectCount + 1;]]></ST>
+_AutoDisposedObjects[_AutoDisposedObjectCount] := autoDisposedObject;
+_AutoDisposedObjectCount := _AutoDisposedObjectCount + 1;	]]></ST>
       </Implementation>
     </Method>
     <Method Name="ReleaseDynamicMemory" Id="{5fe5bc2a-b608-418e-9ff0-e9c1a91c92f5}">
