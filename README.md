@@ -1,8 +1,7 @@
 # TwinCAT Framework
 
 Dear friends,  
-I'm happy to present first **exception-based open-source object-oriented framework for TwinCAT 3.1.4026**, featuring several unique capabilities.  
-If you're interested — below you'll find a Q&A-style overview.
+I'm happy to present first **exception-based open-source object-oriented framework for TwinCAT 3.1.4026**, featuring several unique capabilities. If you're interested — below you'll find a Q&A-style overview.
 
 ---
 
