@@ -27,7 +27,7 @@ It enables:
 - ✅ Core logic is based on an **exception-handling mechanism**. Many type of exceptions supported: Standard, NotSupported, NotImplemented, ArgumentNull, ArgumentOutOfRange, ArgumentValueNotSupported, Aggregate, etc...
 - ✅ Support for **dynamic collections** with automatic memory management: ListOfBytes, List, Dictionary, UniqueSet
 - ✅ Utilities for working with **long strings**: StringHelper/WideStringHelper, StringBuilder/WideStringBuilder. Strings with more then 255 characters are also supported.
-- ✅ An **automation engine**: AutomationRunner manages 1..* AutomationUnits. Each Automationunit manages 0..* hierarchical devices
+- ✅ An **automation engine**: AutomationRunner manages 1..* AutomationControllers. Each AutomationController manages 0..* hierarchical devices
 - 🔧 Many other components — either already ported or pending adaptation
 
 ---

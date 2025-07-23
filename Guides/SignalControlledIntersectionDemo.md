@@ -40,13 +40,13 @@ Method to control the traffic light by passing a color to activate.
 
 ---
 
-## 3. Implement the Automation Module: `SignalControlledIntersectionAutomationUnit`
+## 3. Implement the Automation Module: `SignalControlledIntersectionAutomationController`
 
 This module contains logic for interaction between six devices:
   - ON/OFF input
   - Mode switch (standard vs blinking yellow)
   - Four traffic lights
-It inherits from `TOF_AutomationEngine.AutomationUnit<6>`.
+It inherits from `TOF_AutomationEngine.AutomationController<6>`.
 It Implements abstract members: `ClassName`, `Size`, `Devices`, `StartRequest`
 Overrides: `StopRequest`, `OnInitialize`, `OnStop`, `OnRun`, `OnFault`
 
@@ -72,7 +72,7 @@ Called cyclically in FAULTED state. Turns off all traffic lights.
 
 ## 4. Implement the Automation Runner: `SignalControlledIntersectionAutomationRunner`
 
-This runner manages automation modules. It controls one instance of `SignalControlledIntersectionAutomationUnit` and inherits from `TOF_AutomationEngine.AutomationRunner<1>`.
+This runner manages automation modules. It controls one instance of `SignalControlledIntersectionAutomationController` and inherits from `TOF_AutomationEngine.AutomationRunner<1>`.
 
 Implements:
 - `ClassName`
