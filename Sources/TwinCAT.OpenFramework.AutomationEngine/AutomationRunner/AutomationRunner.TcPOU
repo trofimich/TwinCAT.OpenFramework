@@ -107,16 +107,204 @@ targetErrorLog.LocalTimestamp := sourceException.LocalTimestamp;
 targetErrorLog.UtcTimestamp := sourceException.UtcTimestamp;]]></ST>
       </Implementation>
     </Method>
-    <Method Name="Run" Id="{cddfd6b6-d698-4df7-b955-3cc076d37dea}">
-      <Declaration><![CDATA[METHOD Run
+    <Method Name="handleEnabledState" Id="{3b0b117f-8f51-4362-b2d6-ba145bb1154e}" FolderPath="Service members\">
+      <Declaration><![CDATA[METHOD PRIVATE handleEnabledState
 VAR
-	i : DINT;
+	i : INT;
+	
+	exceptionCode : __SYSTEM.ExceptionCode;
+	exception : IException;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[__TRY
+	//FOR i := LOWER_BOUND(AutomationUnits, 1) TO UPPER_BOUND(AutomationUnits, 1) DO
+	FOR i := 0 TO _AutomationUnitCount - 1 DO
+		AutomationUnits[i].HandleEnabledState();
+	END_FOR
+__CATCH(exceptionCode)
+	exception := ExceptionManager.GetLastException(exceptionCode);
+
+	_ExecutionContext.AutomationRunnerState := Automation.AUTOMATION_RUNNING_STATE.FAULT;
+										
+	fillErrorLog(Diagnostics.HandleEnabledStateError, exception);
+	
+	_AdsLogger.TryLogException(exception);				
+__ENDTRY]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="handleFault" Id="{b83dd39a-ee4a-40b6-b0bf-ce89f549c7b3}" FolderPath="Service members\">
+      <Declaration><![CDATA[METHOD PRIVATE handleFault
+VAR
+	i : INT;
+	
+	exceptionCode : __SYSTEM.ExceptionCode;
+	exception : IException;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[//FOR i := LOWER_BOUND(AutomationUnits, 1) TO UPPER_BOUND(AutomationUnits, 1) DO
+FOR i := 0 TO _AutomationUnitCount - 1 DO
+	__TRY
+		AutomationUnits[i].HandleFault(_ExecutionContext);			
+	__CATCH
+		exception := ExceptionManager.GetLastException(exceptionCode);
+		
+		fillErrorLog(Diagnostics.HandleFaultError, exception);
+		
+		_AdsLogger.TryLogException(exception);		
+	__ENDTRY
+END_FOR]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="handleInitializing" Id="{4f03df17-bd24-4c6c-a679-4ca860465024}" FolderPath="Service members\">
+      <Declaration><![CDATA[METHOD PRIVATE handleInitializing
+VAR
+	i : INT;
+
+	exceptionCode : __SYSTEM.ExceptionCode;
+	exception : IException;
 	
 	totalUnitCount : DINT;
 	initializedUnitCount : DINT;
 	
 	singletonCheck : Core.StandardException;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[__TRY
+	IF _InstanceCounter > 1 THEN
+		singletonCheck.Throw(CurrentNamespace.Name, ClassName, __POUNAME(), __POSITION(), "More then one AutomationRunner instance is not allowed", 0, TRUE);
+	END_IF
 	
+	//FOR i := LOWER_BOUND(AutomationUnits, 1) TO UPPER_BOUND(AutomationUnits, 1) DO
+	FOR i := 0 TO _AutomationUnitCount - 1 DO
+		IF AutomationUnits[i].Initialize(_ExecutionContext) THEN
+			initializedUnitCount := initializedUnitCount + 1;
+		END_IF
+	END_FOR
+	
+	//totalUnitCount := UPPER_BOUND(AutomationUnits, 1) - LOWER_BOUND(AutomationUnits, 1) + 1; 
+	totalUnitCount := TO_DINT(_AutomationUnitCount); 
+
+	IF initializedUnitCount = totalUnitCount THEN
+		_ExecutionContext.AutomationRunnerState := Automation.AUTOMATION_RUNNING_STATE.STOPPING;
+	END_IF						
+__CATCH(exceptionCode)
+	exception := ExceptionManager.GetLastException(exceptionCode);
+
+	_ExecutionContext.AutomationRunnerState := Automation.AUTOMATION_RUNNING_STATE.FAULT;
+										
+	fillErrorLog(Diagnostics.InitializationError, exception);
+	
+	_AdsLogger.TryLogException(exception);				
+__ENDTRY
+]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="handleRunning" Id="{a2b4cd55-6d60-4f9f-b681-13f45adf82ff}" FolderPath="Service members\">
+      <Declaration><![CDATA[METHOD PRIVATE handleRunning
+VAR
+	i : INT;
+	
+	exceptionCode : __SYSTEM.ExceptionCode;
+	exception : IException;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[//FOR i := LOWER_BOUND(AutomationUnits, 1) TO UPPER_BOUND(AutomationUnits, 1) DO
+FOR i := 0 TO _AutomationUnitCount - 1 DO
+	__TRY
+		IF AutomationUnits[i].StopRequest THEN					
+			_ExecutionContext.AutomationRunnerState := Automation.AUTOMATION_RUNNING_STATE.STOPPING;					
+			AutomationUnits[i].Stop(_ExecutionContext);
+		ELSE			
+			_ExecutionContext.AutomationRunnerState := Automation.AUTOMATION_RUNNING_STATE.RUNNING;					
+			AutomationUnits[i].Run(_ExecutionContext);			
+		END_IF
+	__CATCH(exceptionCode)
+		exception := ExceptionManager.GetLastException(exceptionCode);
+		
+		IF exception.Fatal THEN
+			_ExecutionContext.AutomationRunnerState := Automation.AUTOMATION_RUNNING_STATE.FAULT;					
+			fillErrorLog(Diagnostics.CriticalRunningOrStopingError, exception);
+		ELSIF NOT exception.Empty THEN
+			fillErrorLog(Diagnostics.LastRuningNonCriticalError, exception);
+		END_IF
+		
+		_AdsLogger.TryLogException(exception);					
+	__ENDTRY
+	
+	IF exception <> 0 AND_THEN exception.Fatal THEN
+		EXIT;
+	END_IF
+END_FOR]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="handleSimulationModeState" Id="{c8b2427a-bbd2-4f49-83b2-7ba5803f1571}" FolderPath="Service members\">
+      <Declaration><![CDATA[METHOD PRIVATE handleSimulationModeState
+VAR
+	i : INT;
+
+	exceptionCode : __SYSTEM.ExceptionCode;
+	exception : IException;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[__TRY
+	//FOR i := LOWER_BOUND(AutomationUnits, 1) TO UPPER_BOUND(AutomationUnits, 1) DO
+	FOR i := 0 TO _AutomationUnitCount - 1 DO
+		AutomationUnits[i].HandleSimulationModeState();
+	END_FOR
+__CATCH(exceptionCode)
+	exception := ExceptionManager.GetLastException(exceptionCode);
+
+	_ExecutionContext.AutomationRunnerState := Automation.AUTOMATION_RUNNING_STATE.FAULT;
+										
+	fillErrorLog(Diagnostics.HandleSimulationModeStateError, exception);
+	
+	_AdsLogger.TryLogException(exception);				
+__ENDTRY				]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="handleStopping" Id="{77f19d51-280f-41f3-bfad-3871cfb6ea33}" FolderPath="Service members\">
+      <Declaration><![CDATA[METHOD PRIVATE handleStopping
+VAR
+	i : INT;
+			
+	exceptionCode : __SYSTEM.ExceptionCode;
+	exception : IException;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[//FOR i := LOWER_BOUND(AutomationUnits, 1) TO UPPER_BOUND(AutomationUnits, 1) DO
+FOR i := 0 TO _AutomationUnitCount - 1 DO
+	__TRY
+		IF AutomationUnits[i].StartRequest THEN					
+			_ExecutionContext.AutomationRunnerState := Automation.AUTOMATION_RUNNING_STATE.RUNNING;					
+			AutomationUnits[i].Run(_ExecutionContext);			
+		ELSE			
+			_ExecutionContext.AutomationRunnerState := Automation.AUTOMATION_RUNNING_STATE.STOPPING;					
+			AutomationUnits[i].Stop(_ExecutionContext);
+		END_IF
+	__CATCH(exceptionCode)
+		exception := ExceptionManager.GetLastException(exceptionCode);
+		
+		IF exception.Fatal THEN
+			_ExecutionContext.AutomationRunnerState := Automation.AUTOMATION_RUNNING_STATE.FAULT;					
+			fillErrorLog(Diagnostics.CriticalRunningOrStopingError, exception);
+		ELSIF NOT exception.Empty THEN
+			fillErrorLog(Diagnostics.LastStopingNonCriticalError, exception);
+		END_IF
+		
+		_AdsLogger.TryLogException(exception);					
+	__ENDTRY
+	
+	IF exception <> 0 AND_THEN exception.Fatal THEN
+		EXIT;
+	END_IF
+END_FOR]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="Run" Id="{cddfd6b6-d698-4df7-b955-3cc076d37dea}">
+      <Declaration><![CDATA[METHOD Run
+VAR
+	i : INT;
+			
 	exceptionCode : __SYSTEM.ExceptionCode;
 	exception : IException;
 END_VAR]]></Declaration>
@@ -130,107 +318,24 @@ IF Core.SystemDateTimeManager.SystemTimeValid THEN
 	_ExecutionContext.CycleUtcStartTime := Core.SystemDateTimeManager.SystemUtcDateTime;
 	_ExecutionContext.PreviousAutomationRunnerState := _ExecutionContext.AutomationRunnerState;
 	
+	IF _ExecutionContext.AutomationRunnerState <> Automation.AUTOMATION_RUNNING_STATE.FAULT THEN
+		handleEnabledState();
+
+		handleSimulationModeState();			
+	END_IF
+	
 	CASE _ExecutionContext.AutomationRunnerState OF
 		Automation.AUTOMATION_RUNNING_STATE.INITIALIZING:
-			__TRY
-				IF _InstanceCounter > 1 THEN
-					singletonCheck.Throw(CurrentNamespace.Name, ClassName, __POUNAME(), __POSITION(), "More then one AutomationRunner instance is not allowed", 0, TRUE);
-				END_IF
-				
-				//FOR i := LOWER_BOUND(AutomationUnits, 1) TO UPPER_BOUND(AutomationUnits, 1) DO
-				FOR i := 0 TO _AutomationUnitCount - 1 DO
-					IF AutomationUnits[i].Initialize(_ExecutionContext) THEN
-						initializedUnitCount := initializedUnitCount + 1;
-					END_IF
-				END_FOR
-				
-				//totalUnitCount := UPPER_BOUND(AutomationUnits, 1) - LOWER_BOUND(AutomationUnits, 1) + 1; 
-				totalUnitCount := TO_DINT(_AutomationUnitCount); 
-	
-				IF initializedUnitCount = totalUnitCount THEN
-					_ExecutionContext.AutomationRunnerState := Automation.AUTOMATION_RUNNING_STATE.STOPPING;
-				END_IF						
-			__CATCH(exceptionCode)
-				exception := ExceptionManager.GetLastException(exceptionCode);
-
-				_ExecutionContext.AutomationRunnerState := Automation.AUTOMATION_RUNNING_STATE.FAULT;
-													
-				fillErrorLog(Diagnostics.InitializationError, exception);
-				
-				_AdsLogger.TryLogException(exception);				
-			__ENDTRY
+			handleInitializing();
 						
-		Automation.AUTOMATION_RUNNING_STATE.STOPPING:		
-			//FOR i := LOWER_BOUND(AutomationUnits, 1) TO UPPER_BOUND(AutomationUnits, 1) DO
-			FOR i := 0 TO _AutomationUnitCount - 1 DO
-				__TRY
-					IF AutomationUnits[i].StartRequest THEN					
-						_ExecutionContext.AutomationRunnerState := Automation.AUTOMATION_RUNNING_STATE.RUNNING;					
-						AutomationUnits[i].Run(_ExecutionContext);			
-					ELSE			
-						_ExecutionContext.AutomationRunnerState := Automation.AUTOMATION_RUNNING_STATE.STOPPING;					
-						AutomationUnits[i].Stop(_ExecutionContext);
-					END_IF
-				__CATCH(exceptionCode)
-					exception := ExceptionManager.GetLastException(exceptionCode);
-					
-					IF exception.Fatal THEN
-						_ExecutionContext.AutomationRunnerState := Automation.AUTOMATION_RUNNING_STATE.FAULT;					
-						fillErrorLog(Diagnostics.CriticalError, exception);
-					ELSIF NOT exception.Empty THEN
-						fillErrorLog(Diagnostics.LastNonCriticalError, exception);
-					END_IF
-					
-					_AdsLogger.TryLogException(exception);					
-				__ENDTRY
-				
-				IF exception <> 0 AND_THEN exception.Fatal THEN
-					EXIT;
-				END_IF
-			END_FOR
+		Automation.AUTOMATION_RUNNING_STATE.STOPPING:
+			handleStopping();		
 						
 		Automation.AUTOMATION_RUNNING_STATE.RUNNING:		
-			//FOR i := LOWER_BOUND(AutomationUnits, 1) TO UPPER_BOUND(AutomationUnits, 1) DO
-			FOR i := 0 TO _AutomationUnitCount - 1 DO
-				__TRY
-					IF AutomationUnits[i].StopRequest THEN					
-						_ExecutionContext.AutomationRunnerState := Automation.AUTOMATION_RUNNING_STATE.STOPPING;					
-						AutomationUnits[i].Stop(_ExecutionContext);
-					ELSE			
-						_ExecutionContext.AutomationRunnerState := Automation.AUTOMATION_RUNNING_STATE.RUNNING;					
-						AutomationUnits[i].Run(_ExecutionContext);			
-					END_IF
-				__CATCH(exceptionCode)
-					exception := ExceptionManager.GetLastException(exceptionCode);
-					
-					IF exception.Fatal THEN
-						_ExecutionContext.AutomationRunnerState := Automation.AUTOMATION_RUNNING_STATE.FAULT;					
-						fillErrorLog(Diagnostics.CriticalError, exception);
-					ELSIF NOT exception.Empty THEN
-						fillErrorLog(Diagnostics.LastNonCriticalError, exception);
-					END_IF
-					
-					_AdsLogger.TryLogException(exception);					
-				__ENDTRY
-				
-				IF exception <> 0 AND_THEN exception.Fatal THEN
-					EXIT;
-				END_IF
-			END_FOR
+			handleRunning();
 						
 		Automation.AUTOMATION_RUNNING_STATE.FAULT:		
-			//FOR i := LOWER_BOUND(AutomationUnits, 1) TO UPPER_BOUND(AutomationUnits, 1) DO
-			FOR i := 0 TO _AutomationUnitCount - 1 DO
-				__TRY
-					AutomationUnits[i].HandleFault(_ExecutionContext);			
-				__CATCH
-					exception := ExceptionManager.GetLastException(exceptionCode);
-					
-					fillErrorLog(Diagnostics.HandleFaultError, exception);
-					
-					_AdsLogger.TryLogException(exception);		
-				__ENDTRY
-			END_FOR
+			handleFault();
 	END_CASE
 END_IF
 
@@ -291,7 +396,8 @@ TryGetAutomationUnitByIndex := AutomationUnits[index];]]></ST>
       </Implementation>
     </Method>
     <Method Name="TrySetSimulationMode" Id="{de36a7a4-4bd3-4af6-8a6f-716c0a8b3ec9}">
-      <Declaration><![CDATA[METHOD TrySetSimulationMode : BOOL
+      <Declaration><![CDATA[{attribute 'TcRpcEnable':='1'}
+METHOD TrySetSimulationMode : BOOL
 VAR_INPUT
 	value : BOOL;
 END_VAR
