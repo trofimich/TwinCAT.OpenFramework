@@ -1,34 +1,45 @@
 # TwinCAT Framework
 
-Dear friends,  
-I'm happy to present first **exception-based open-source object-oriented framework for TwinCAT 3.1.4026**, featuring several unique capabilities. If you're interested — below you'll find a Q&A-style overview.
+This is **object-oriented framework** developed for **TwinCAT 3.1.4026+**, which provides a set of ready-to-use, scalable components for industrial automation.
+It is based on an error-handling concept that is unique for Structured Text and resembles the approach used in general-purpose languages like C# or Java.
 
----
+## Key Features
 
-## ❓ What is it?
+- **Dynamic collections**  
+  Work with an unknown number of elements at runtime.
 
-This is an **object-oriented framework** for developing PLC applications with **Beckhoff TwinCAT**.  
-It's written in **Structured Text**, using modern OOP principles and the latest language features (TwinCAT 3.1.4026).
+- **String handling**  
+  Convenient string concatenation from multiple parts, support for strings longer than 255 characters, and more.
 
----
+- **JSON support**  
+  Simplified serialization and deserialization of structures to and from JSON documents.
 
-## 🔧 What's it good for right now?
+- **Basic automation engine**  
+  A ready-to-use state machine with four fundamental states: *Initialization*, *Run*, *Stop*, *Error*.
 
-It enables:
+- **Simulation mode**  
+  Run your logic in simulation mode without the need for real hardware.
 
-- Building applications using modern OOP concepts
-- Making your code more modular, readable, and flexible
-- Enhancing standard Beckhoff libraries with additional functionality
+- **Controllable devices**  
+  Ready-made abstractions for interacting with the external world, such as terminals or communication channels.
 
----
+- **Device hierarchy**  
+  Intuitive modeling of complex devices composed of simpler sub-devices, which in turn may be composed of even simpler ones.
 
-## 💡 What does the framework offer today?
+- **Predefined device implementations**  
+  Includes digital and analog I/O; more standard device types such as axes are planned.
 
-- ✅ Core logic is based on an **exception-handling mechanism**. Many type of exceptions supported: Standard, NotSupported, NotImplemented, ArgumentNull, ArgumentOutOfRange, ArgumentValueNotSupported, Aggregate, etc...
-- ✅ Support for **dynamic collections** with automatic memory management: ListOfBytes, List, Dictionary, UniqueSet
-- ✅ Utilities for working with **long strings**: StringHelper/WideStringHelper, StringBuilder/WideStringBuilder. Strings with more then 255 characters are also supported.
-- ✅ An **automation engine**: AutomationRunner manages 1..* AutomationControllers. Each AutomationController manages 0..* hierarchical devices
-- 🔧 Many other components — either already ported or pending adaptation
+- **Advanced exception handling**  
+  An enhanced error management system that makes diagnostics easier by providing not only the message, but also the place and time the problem occurred.
+
+- **Automatic exception logging**  
+  The automation engine automatically catches exceptions and logs them.
+
+- **Modular architecture**  
+  Use only the parts of the framework you need — no need to include everything.
+
+- **Modern technologies and features**  
+  Practical examples of object-oriented programming and the latest compiler features.
 
 ---
 
@@ -40,12 +51,13 @@ It enables:
 
 ---
 
-## ✅ How reliable is it?
+## ⚠️ Known Issues
 
-- Partially covered by **unit tests** using [TcUnit](https://github.com/tcunit/TcUnit)
-- That said, the framework should be considered **experimental** at this stage
-- Note: TwinCAT itself still has issues related to exception handling
-- These issues aren't critical, and Beckhoff is aware and investigating solutions
+- Beckhoff currently use compiler from CoDeSys and this compiler has some issues:
+  - incorrect behavior related to methods with optional parameters in some cases
+  - incorrect memory deallocation in __TRY / __CATCH block in some cases
+
+These issues aren't critical, and Beckhoff is aware and investigating solutions
 
 ---
 
@@ -97,10 +109,8 @@ Also, if you're experienced in software architecture and have suggestions, I'd l
 ## 🔍 How to get started?
 
 1. Install the latest **TwinCAT XAE**  
-2. Create a local folder (e.g. `D:\TwinCAT Framework`)  
-3. Visit [my GitHub page](https://github.com/trofimich?tab=repositories)  
-4. Clone [TwinCAT.OpenFramework repository](https://github.com/trofimich/TwinCAT.OpenFramework.git)
-5. Open the solution in `TwinCAT.OpenFramework`
+2. Clone [TwinCAT.OpenFramework repository](https://github.com/trofimich/TwinCAT.OpenFramework.git)
+3. Open the solution in `TwinCAT.OpenFramework`
 
 ---
 
