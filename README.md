@@ -128,6 +128,6 @@ Yes, there are two projects:
 
 ## 📄 License
 
-This project is open-source and licensed under the **EUPL-1.1**.  
+This project is open-source and licensed under the **MIT**.  
 See [LICENSE](./LICENSE) for details.
 
