@@ -128,6 +128,17 @@ Yes, there are two projects:
 
 ## 📄 License
 
-This project is open-source and licensed under the **MIT**.  
+This project is open-source and licensed under the **LGPLv3** license, which allows:
+
+**Use in proprietary software:** You can use an LGPLv3-licensed library in closed-source/commercial applications.
+
+**Dynamic linking:** You may dynamically link to the library without releasing your own source code.
+
+**Static linking:** Allowed if you provide a way for users to replace or relink the library (e.g. with object files).
+
+**Modifications to the library:** You must release any changes to the library itself under LGPLv3.
+
+**Distribution:** You can distribute the library freely, as long as you include the license and make the source code available.
+
 See [LICENSE](./LICENSE) for details.
 
