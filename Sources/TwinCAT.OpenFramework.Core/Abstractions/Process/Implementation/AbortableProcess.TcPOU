@@ -4,9 +4,8 @@
     <Declaration><![CDATA[{attribute 'no_explicit_call' := 'do not call this function block directly'} 
 FUNCTION_BLOCK ABSTRACT AbortableProcess EXTENDS Object IMPLEMENTS IAbortableProcess
 VAR
-	_StartRequested : BOOL;
-	_AbortRequested : BOOL;
-	
+	_StateChanged : BOOL;
+
 	_Busy : BOOL;
 	
 	_Aborting : BOOL;	
@@ -21,6 +20,38 @@ END_VAR]]></Declaration>
     </Implementation>
     <Folder Name="Members to override" Id="{de2cf7b6-c026-46bb-842d-e540cbcd677e}" />
     <Folder Name="Service members" Id="{f95e6f8c-1b3b-4cfb-80ca-cc977f3eaa68}" />
+    <Method Name="Abort" Id="{af808b8b-c3da-4fd5-844b-338bd0b69cd7}">
+      <Declaration><![CDATA[METHOD FINAL Abort
+VAR_INPUT 
+	reason : ERROR_MESSAGE := "";
+END_VAR
+VAR
+	done : BOOL;
+
+	exceptionCode : __SYSTEM.ExceptionCode;
+	
+	exception : IException;
+
+	errorMessage : ERROR_MESSAGE;	
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF NOT Busy THEN
+	RETURN;
+END_IF
+
+__TRY
+	SetAbortingState(reason);
+	
+	OnAbort(TRUE, done => done);
+	
+	IF done THEN
+		SetAbortedState();
+	END_IF		
+__CATCH(exceptionCode)
+	handleException(exceptionCode);
+__ENDTRY]]></ST>
+      </Implementation>
+    </Method>
     <Property Name="Aborted" Id="{bed32b55-370d-44e6-97f1-6a6416bb8da9}">
       <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
 {attribute 'OPC.UA.DA.Property' := '1'}
@@ -97,26 +128,18 @@ VAR
 	errorMessage : ERROR_MESSAGE;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[__TRY
-	IF NOT Busy THEN
-		IF _AbortRequested THEN
-			SetAbortingState();
-			
-			OnAbort(TRUE, done => done);
+        <ST><![CDATA[_StateChanged := FALSE;
+
+__TRY
+	IF Busy THEN
+		IF _Aborting THEN
+			OnAbort(FALSE, done => done);
 
 			IF done THEN
 				SetAbortedState();
 			END_IF		
-		ELSIF _StartRequested THEN
-			SetBusyState();
-			
-			OnRun(TRUE);
-		END_IF
-	ELSE
-		IF _Busy THEN
-			OnRun(FALSE);
 		ELSE
-			OnAbort(FALSE, done => done);
+			OnRun(FALSE);
 			
 			IF done THEN
 				SetAbortedState();
@@ -124,18 +147,54 @@ END_VAR]]></Declaration>
 		END_IF
 	END_IF
 __CATCH(exceptionCode)
-	exception := ExceptionManager.GetLastException(exceptionCode);
-	
-	errorMessage := exception.GetMessage();
- 
-	SetErrorState(errorMessage);
-	
-	ExceptionManager.ReThrowLastException(exceptionCode);
+	handleException(exceptionCode);
 __ENDTRY]]></ST>
       </Implementation>
     </Method>
+    <Method Name="handleException" Id="{fe210877-9dbe-434f-8951-7da4495199a2}" FolderPath="Service members\">
+      <Declaration><![CDATA[METHOD PRIVATE handleException
+VAR_INPUT
+	exceptionCode : __SYSTEM.ExceptionCode;
+END_VAR
+VAR
+	exception : IException;
+
+	errorMessage : ERROR_MESSAGE;
+
+	handled : BOOL;	
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[exception := ExceptionManager.GetLastException(exceptionCode);
+
+__TRY
+	OnError(errorHandled => handled);
+__CATCH
+__ENDTRY
+
+IF NOT handled THEN
+	errorMessage := exception.GetMessage();
+	
+	SetErrorState(errorMessage);
+
+	ExceptionManager.Throw(exception);
+END_IF  ]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="Name" Id="{9b9726f6-e857-4b07-ae7f-2d453fe4f449}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+{attribute 'OPC.UA.DA.Property' := '1'}
+{attribute 'OPC.UA.DA.Access' := '1'}
+PROPERTY ABSTRACT Name : WSTRING
+]]></Declaration>
+      <Get Name="Get" Id="{75517f61-f18f-4a41-9ae6-821aa0377e5a}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
     <Method Name="OnAbort" Id="{036a72b2-a807-4cba-b342-166575a052e0}" FolderPath="Members to override\">
-      <Declaration><![CDATA[METHOD ABSTRACT OnAbort 
+      <Declaration><![CDATA[METHOD PROTECTED ABSTRACT OnAbort 
 VAR_INPUT
 	start : BOOL;
 END_VAR
@@ -147,13 +206,16 @@ END_VAR]]></Declaration>
       </Implementation>
     </Method>
     <Method Name="OnError" Id="{498269a5-422a-4cf0-9cb3-72e43b922e22}" FolderPath="Members to override\">
-      <Declaration><![CDATA[METHOD ABSTRACT OnError ]]></Declaration>
+      <Declaration><![CDATA[METHOD PROTECTED OnError 
+VAR_OUTPUT
+	errorHandled : BOOL;
+END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[]]></ST>
       </Implementation>
     </Method>
     <Method Name="OnRun" Id="{46828dc7-4ff2-4234-9dce-1176ba993f3c}" FolderPath="Members to override\">
-      <Declaration><![CDATA[METHOD ABSTRACT OnRun 
+      <Declaration><![CDATA[METHOD PROTECTED ABSTRACT OnRun 
 VAR_INPUT
 	start : BOOL;
 END_VAR]]></Declaration>
@@ -161,35 +223,14 @@ END_VAR]]></Declaration>
         <ST><![CDATA[]]></ST>
       </Implementation>
     </Method>
-    <Method Name="RequestAbort" Id="{af808b8b-c3da-4fd5-844b-338bd0b69cd7}">
-      <Declaration><![CDATA[METHOD FINAL RequestAbort
-VAR_INPUT 
-	reason : ERROR_MESSAGE := "";
-END_VAR]]></Declaration>
-      <Implementation>
-        <ST><![CDATA[IF NOT Busy THEN
-	RETURN;
-END_IF
-
-_AbortReason := reason;
-_AbortRequested := TRUE;]]></ST>
-      </Implementation>
-    </Method>
-    <Method Name="RequestStart" Id="{77941a48-0dbb-4b68-bf46-390eb85ca5e6}">
-      <Declaration><![CDATA[METHOD FINAL RequestStart]]></Declaration>
-      <Implementation>
-        <ST><![CDATA[IF Busy THEN
-	RETURN;
-END_IF
-
-_StartRequested := TRUE;]]></ST>
-      </Implementation>
-    </Method>
     <Method Name="SetAbortedState" Id="{b6c0b3ee-0072-43d0-be62-41d12317700d}" FolderPath="Service members\">
       <Declaration><![CDATA[METHOD PROTECTED FINAL SetAbortedState]]></Declaration>
       <Implementation>
-        <ST><![CDATA[_StartRequested := FALSE;
-_AbortRequested := FALSE;
+        <ST><![CDATA[IF NOT _Aborted THEN
+	_StateChanged := TRUE;
+END_IF
+
+_StateChanged := TRUE;
 
 _Busy := FALSE;
 
@@ -201,15 +242,22 @@ _ErrorMessage := "";	]]></ST>
       </Implementation>
     </Method>
     <Method Name="SetAbortingState" Id="{17b53a73-80b3-4c78-8188-53eb39286bb5}" FolderPath="Service members\">
-      <Declaration><![CDATA[METHOD PROTECTED FINAL SetAbortingState]]></Declaration>
+      <Declaration><![CDATA[METHOD PROTECTED FINAL SetAbortingState
+VAR_IN_OUT CONSTANT
+	reason : ERROR_MESSAGE;
+END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[_StartRequested := FALSE;
-_AbortRequested := FALSE;
+        <ST><![CDATA[IF NOT _Aborting THEN
+	_StateChanged := TRUE;
+END_IF
+
+_StateChanged := TRUE;
 
 _Busy := FALSE;
 
 _Aborting := TRUE;	
 _Aborted := FALSE;
+_AbortReason := reason;
 
 _Error := FALSE;	
 _ErrorMessage := "";	]]></ST>
@@ -219,8 +267,11 @@ _ErrorMessage := "";	]]></ST>
       <Declaration><![CDATA[METHOD PROTECTED FINAL SetBusyState
 ]]></Declaration>
       <Implementation>
-        <ST><![CDATA[_StartRequested := FALSE;
-_AbortRequested := FALSE;
+        <ST><![CDATA[IF NOT _Busy THEN
+	_StateChanged := TRUE;
+END_IF
+
+_StateChanged := TRUE;
 
 _Busy := TRUE;
 
@@ -238,8 +289,11 @@ VAR_IN_OUT CONSTANT
 	errorMessage : ERROR_MESSAGE;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[_StartRequested := FALSE;
-_AbortRequested := FALSE;
+        <ST><![CDATA[IF NOT _Error THEN
+	_StateChanged := TRUE;
+END_IF
+
+_StateChanged := TRUE;
 
 _Busy := FALSE;
 
@@ -251,5 +305,36 @@ _Error := TRUE;
 _ErrorMessage := errorMessage;	]]></ST>
       </Implementation>
     </Method>
+    <Method Name="Start" Id="{77941a48-0dbb-4b68-bf46-390eb85ca5e6}">
+      <Declaration><![CDATA[METHOD FINAL Start
+VAR
+	exceptionCode : __SYSTEM.ExceptionCode;
+	
+	exception : IException;
+
+	errorMessage : ERROR_MESSAGE;	
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[__TRY
+	SetBusyState();
+			
+	OnRun(TRUE);
+__CATCH(exceptionCode)
+	handleException(exceptionCode);
+__ENDTRY]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="StateChanged" Id="{b3b2f37a-1d4d-4c60-8ff9-1767ebeab8cc}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+{attribute 'OPC.UA.DA.Property' := '1'}
+{attribute 'OPC.UA.DA.Access' := '1'}
+PROPERTY FINAL StateChanged : BOOL]]></Declaration>
+      <Get Name="Get" Id="{d674a11c-5b29-444c-8369-087448f671b8}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[StateChanged := _StateChanged;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
   </POU>
 </TcPlcObject>

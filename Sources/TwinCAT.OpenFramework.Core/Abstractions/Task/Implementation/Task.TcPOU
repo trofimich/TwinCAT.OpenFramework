@@ -1,11 +1,11 @@
 ﻿<?xml version="1.0" encoding="utf-8"?>
 <TcPlcObject Version="1.1.0.1">
-  <POU Name="Action_" Id="{f1f3b7b6-b460-46cd-836f-3b06a1a78771}" SpecialFunc="None">
+  <POU Name="Task" Id="{f1f3b7b6-b460-46cd-836f-3b06a1a78771}" SpecialFunc="None">
     <Declaration><![CDATA[{attribute 'no_explicit_call' := 'do not call this function block directly'} 
-FUNCTION_BLOCK ABSTRACT Action_ EXTENDS Object IMPLEMENTS IAction
+FUNCTION_BLOCK ABSTRACT Task EXTENDS Object IMPLEMENTS ITask
 VAR
-	_StartRequested : BOOL;
-	
+	_StateChanged : BOOL;
+
 	_Busy : BOOL;
 
 	_Done : BOOL;
@@ -82,18 +82,10 @@ VAR
 	errorMessage : ERROR_MESSAGE;	
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[__TRY
-	IF NOT Busy THEN
-		IF _StartRequested THEN
-			SetBusyState();
-			
-			OnRun(TRUE, done => done);
-			
-			IF done THEN
-				SetDoneState();
-			END_IF
-		END_IF
-	ELSE
+        <ST><![CDATA[_StateChanged := FALSE;
+
+__TRY
+	IF Busy THEN
 		OnRun(FALSE, done => done);
 		
 		IF done THEN
@@ -101,18 +93,57 @@ END_VAR]]></Declaration>
 		END_IF
 	END_IF
 __CATCH(exceptionCode)
-	exception := ExceptionManager.GetLastException(exceptionCode);
-	
-	errorMessage := exception.GetMessage();
- 
-	SetErrorState(errorMessage);
-	
-	ExceptionManager.ReThrowLastException(exceptionCode);
+	handleException(exceptionCode);
 __ENDTRY]]></ST>
       </Implementation>
     </Method>
+    <Method Name="handleException" Id="{47428aea-fc16-4902-8fe9-b24adab05e00}" FolderPath="Service members\">
+      <Declaration><![CDATA[METHOD PRIVATE handleException
+VAR_INPUT
+	exceptionCode : __SYSTEM.ExceptionCode;
+END_VAR
+VAR
+	exception : IException;
+
+	errorMessage : ERROR_MESSAGE;
+
+	handled : BOOL;	
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[exception := ExceptionManager.GetLastException(exceptionCode);
+
+__TRY
+	OnError(errorHandled => handled);
+__CATCH
+__ENDTRY
+
+IF NOT handled THEN
+	errorMessage := exception.GetMessage();
+	
+	SetErrorState(errorMessage);
+
+	ExceptionManager.Throw(exception);
+END_IF  ]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="Name" Id="{95e03d13-f404-4f6e-bd02-efd2b583c724}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+{attribute 'OPC.UA.DA.Property' := '1'}
+{attribute 'OPC.UA.DA.Access' := '1'}
+PROPERTY ABSTRACT Name : WSTRING
+]]></Declaration>
+      <Get Name="Get" Id="{df213827-dccd-4975-9fa7-8d086e003fbe}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
     <Method Name="OnError" Id="{212f4722-72dd-4285-b015-1a644a5abd0b}" FolderPath="Members to override\">
-      <Declaration><![CDATA[METHOD ABSTRACT OnError ]]></Declaration>
+      <Declaration><![CDATA[METHOD OnError 
+VAR_OUTPUT
+	errorHandled : BOOL;
+END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[]]></ST>
       </Implementation>
@@ -129,21 +160,15 @@ END_VAR]]></Declaration>
         <ST><![CDATA[]]></ST>
       </Implementation>
     </Method>
-    <Method Name="RequestStart" Id="{0f7000bb-d73a-4156-a792-32c6f60a4aa3}">
-      <Declaration><![CDATA[METHOD FINAL RequestStart]]></Declaration>
-      <Implementation>
-        <ST><![CDATA[IF Busy THEN
-	RETURN;
-END_IF
-
-_StartRequested := TRUE;]]></ST>
-      </Implementation>
-    </Method>
     <Method Name="SetBusyState" Id="{f328d63d-e50c-4751-926a-0fad0331d3a0}" FolderPath="Service members\">
       <Declaration><![CDATA[METHOD PROTECTED FINAL SetBusyState
 ]]></Declaration>
       <Implementation>
-        <ST><![CDATA[_StartRequested := FALSE;
+        <ST><![CDATA[IF NOT _Busy THEN
+	_StateChanged := TRUE;
+END_IF
+
+_StateChanged := TRUE;
 
 _Busy := TRUE;
 
@@ -156,7 +181,11 @@ _ErrorMessage := "";]]></ST>
     <Method Name="SetDoneState" Id="{4150a979-89a7-44c7-af26-9c4308743de9}" FolderPath="Service members\">
       <Declaration><![CDATA[METHOD PROTECTED FINAL SetDoneState]]></Declaration>
       <Implementation>
-        <ST><![CDATA[_StartRequested := FALSE;
+        <ST><![CDATA[IF NOT _Done THEN
+	_StateChanged := TRUE;
+END_IF
+
+_StateChanged := TRUE;
 
 _Busy := FALSE;
 
@@ -172,7 +201,11 @@ VAR_IN_OUT CONSTANT
 	errorMessage : ERROR_MESSAGE;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[_StartRequested := FALSE;
+        <ST><![CDATA[IF NOT _Error THEN
+	_StateChanged := TRUE;
+END_IF
+
+_StateChanged := TRUE;
 
 _Busy := FALSE;
 
@@ -182,5 +215,42 @@ _Error := TRUE;
 _ErrorMessage := errorMessage;]]></ST>
       </Implementation>
     </Method>
+    <Method Name="Start" Id="{0f7000bb-d73a-4156-a792-32c6f60a4aa3}">
+      <Declaration><![CDATA[METHOD FINAL Start
+VAR
+	done : BOOL;
+
+	exceptionCode : __SYSTEM.ExceptionCode;
+	
+	exception : IException;
+
+	errorMessage : ERROR_MESSAGE;	
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[__TRY
+	SetBusyState();
+	
+	OnRun(TRUE, done => done);
+	
+	IF done THEN
+		SetDoneState();
+	END_IF
+__CATCH(exceptionCode)
+	handleException(exceptionCode);
+__ENDTRY]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="StateChanged" Id="{9a9d0af8-07a1-4495-b383-1ebce777e5fe}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+{attribute 'OPC.UA.DA.Property' := '1'}
+{attribute 'OPC.UA.DA.Access' := '1'}
+PROPERTY FINAL StateChanged : BOOL]]></Declaration>
+      <Get Name="Get" Id="{690e5c18-3f25-4028-8aae-be37aea24640}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[StateChanged := _StateChanged;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
   </POU>
 </TcPlcObject>
