@@ -2,8 +2,14 @@
 <TcPlcObject Version="1.1.0.1">
   <POU Name="Workflow" Id="{276b6eec-c9aa-49be-b713-e71500f934ba}" SpecialFunc="None">
     <Declaration><![CDATA[{attribute 'no_explicit_call' := 'do not call this function block directly'} 
-FUNCTION_BLOCK ABSTRACT Workflow EXTENDS Core.AbortableTask IMPLEMENTS IWorkflow
+FUNCTION_BLOCK ABSTRACT Workflow 
+VAR_GENERIC CONSTANT
+    VariableCount : INT(0..10000) := 0;
+END_VAR
+EXTENDS Core.AbortableTask IMPLEMENTS IWorkflow
 VAR
+	_Initialized : BOOL;
+	
 	_Name : WSTRING;
 	
 	_Variables : Collections.Dictionary;
@@ -13,11 +19,19 @@ END_VAR]]></Declaration>
     <Implementation>
       <ST><![CDATA[]]></ST>
     </Implementation>
+    <Folder Name="Service memebrs" Id="{ffeeb1bb-f103-4831-b028-ff9633b28215}" />
+    <Method Name="CreateWorkflowVariables" Id="{77b0e16c-37a3-4b71-b6b3-d4ba31e98e52}" FolderPath="Service memebrs\">
+      <Declaration><![CDATA[METHOD PROTECTED ABSTRACT CreateWorkflowVariables : ARRAY [0..VariableCount - 1] OF WORKFLOW_VARIABLE_DESCRIPTOR
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[]]></ST>
+      </Implementation>
+    </Method>
     <Property Name="Name" Id="{65ee405b-8b1e-4ae7-9974-225ad26df18e}">
       <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
 {attribute 'OPC.UA.DA.Property' := '1'}
 {attribute 'OPC.UA.DA.Access' := '1'}
-PROPERTY Name : WSTRING
+PROPERTY FINAL Name : WSTRING
 ]]></Declaration>
       <Get Name="Get" Id="{b7e931d0-7b7d-4f6b-8da6-49a3bdb4acdd}">
         <Declaration><![CDATA[]]></Declaration>
@@ -32,22 +46,56 @@ PROPERTY Name : WSTRING
         </Implementation>
       </Set>
     </Property>
-    <Method Name="RegisterWorkflowVariable" Id="{77b0e16c-37a3-4b71-b6b3-d4ba31e98e52}">
-      <Declaration><![CDATA[METHOD RegisterWorkflowVariable
+    <Method Name="OnAborting" Id="{6bd3b55b-678a-4eda-a303-ace07e392d29}" FolderPath="Service memebrs\">
+      <Declaration><![CDATA[METHOD PROTECTED OnAborting
 VAR_INPUT
-	name : STRING;
-	originalVariable : ANY;
-	isObject : BOOL := FALSE;
+	start : BOOL;
 END_VAR
-VAR
-	nameNotSpecifiedException : Core.ArgumentOutOfRangeException;
-END_VAR]]></Declaration>
+VAR_OUTPUT
+	done : BOOL;
+END_VAR
+]]></Declaration>
       <Implementation>
-        <ST><![CDATA[IF name = '' THEN
-	nameNotSpecifiedException.Throw(CurrentNamespace.Name, ClassName, __POUNAME(), __POSITION(), 'name', name);
+        <ST><![CDATA[IF RootActivity = 0 THEN
+	done := TRUE;
+	RETURN;
 END_IF
 
-_Variables.SetGeneric(Core.GenericValueFactory.FromStringValue(name), Core.GenericValueFactory.FromAny(originalVariable, isObject, FALSE));]]></ST>
+IF start THEN
+	RootActivity.StartAbort();
+ELSE
+	RootActivity.Execute();
+END_IF
+
+IF NOT RootActivity.Busy THEN
+	done := TRUE;
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="OnRunning" Id="{d6befcb3-c72e-4377-b591-92320c859943}" FolderPath="Service memebrs\">
+      <Declaration><![CDATA[METHOD PROTECTED OnRunning
+VAR_INPUT
+	start : BOOL;
+END_VAR
+VAR_OUTPUT
+	done : BOOL;
+END_VAR
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF RootActivity = 0 THEN
+	done := TRUE;
+	RETURN;
+END_IF
+
+IF start THEN
+	RootActivity.Start();
+ELSE
+	RootActivity.Execute();
+END_IF
+
+IF NOT RootActivity.Busy THEN
+	done := TRUE;
+END_IF]]></ST>
       </Implementation>
     </Method>
     <Property Name="RootActivity" Id="{142ff0bb-9cbe-49d5-8b58-eabad1dc6713}">
@@ -61,13 +109,19 @@ PROPERTY FINAL RootActivity : IActivity]]></Declaration>
       </Get>
     </Property>
     <Method Name="SetRootActivity" Id="{c98e2b1c-fc8c-4d20-ba30-5596dcd42dcd}">
-      <Declaration><![CDATA[METHOD SetRootActivity
+      <Declaration><![CDATA[METHOD FINAL SetRootActivity
 VAR_INPUT
 	rootActivity : IActivity;
 	deleteOnParentDelete : BOOL;
 END_VAR
 VAR
 	workflowBusyException : Core.StandardException; 
+
+	workflowVariablException : Core.StandardException;
+
+	workflowVariables : ARRAY [0..VariableCount - 1] OF WORKFLOW_VARIABLE_DESCRIPTOR;
+	
+	i : DINT;
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[IF _RootActivityReference.Activity = rootActivity THEN
@@ -76,6 +130,26 @@ END_IF
 
 IF Busy THEN
 	workflowBusyException.Throw(CurrentNamespace.Name, ClassName, __POUNAME(), __POSITION(), WideStringHelper.ConcatStrings255("Unable to change root activity for workflow '", Name, "': workflow is busy"));
+END_IF
+
+IF NOT _Initialized THEN
+	workflowVariables := CreateWorkflowVariables();
+	
+	FOR i := 0 TO VariableCount - 1 DO
+		IF workflowVariables[i].WorkflowVariableName = '' THEN
+			workflowVariablException.Throw(CurrentNamespace.Name, ClassName, __POUNAME(), __POSITION(), "Method CreateWorkflowVariables returned workflow variable with empty name");
+		END_IF
+				
+		_Variables.SetGeneric(Core.GenericValueFactory.FromStringValue(
+			workflowVariables[i].WorkflowVariableName), 
+			Core.GenericValueFactory.FromAny(workflowVariables[i].PlcVariable, workflowVariables[i].PlcVariableIsObject, FALSE));
+	END_FOR
+	
+	IF _Variables.Count <> VariableCount THEN
+		workflowVariablException.Throw(CurrentNamespace.Name, ClassName, __POUNAME(), __POSITION(), WideStringHelper.ConcatStrings255("Invalid number of unique workflow variables ", TO_WSTRING(_Variables.Count), " instead of ", TO_WSTRING(VariableCount), ". Check for duplicated names"));		
+	END_IF
+	
+	_Initialized := TRUE;
 END_IF
 
 _RootActivityReference.Set(rootActivity, deleteOnParentDelete);]]></ST>
