@@ -2,12 +2,13 @@
 <TcPlcObject Version="1.1.0.1">
   <POU Name="LogManager" Id="{5168e535-223e-4560-9821-bca21a9b8561}" SpecialFunc="None">
     <Declaration><![CDATA[PROGRAM LogManager
+VAR_INPUT
+	AddNumberToMessage : BOOL := TRUE;
+END_VAR
 VAR
 	_DefaultLogger : AdsLogger;
 	_Logger : ILogger;	
 	_Filter : ILogFilter;  
-	
-	_MessageCounter : ULINT;
 END_VAR]]></Declaration>
     <Implementation>
       <ST><![CDATA[]]></ST>
@@ -56,41 +57,27 @@ VAR_INPUT
 	topic4 : WSTRING := "";	
 END_VAR
 VAR
-	message : ERROR_MESSAGE;
-	aggregateException : IAggregateException;
-	innerException : IException;
-	i : DINT;
+	category : LOG_CATEGORY;
+	topics : ARRAY [0..4] OF WSTRING; 
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[IF exception = 0 THEN
 	RETURN;
 END_IF
 
-IF NOT __QUERYINTERFACE(exception, aggregateException) OR_ELSE aggregateException.InnerExceptionCount = 0 THEN
-	message := exception.GetMessage(TRUE, FALSE, TRUE);
-	TryLogException := TryLogMessage(message, LOG_CATEGORY.ERROR, TO_WSTRING(exception.ClassName), topic1, topic2, topic3, topic4);
-ELSE
-	IF aggregateException.InnerExceptionCount > 1 THEN
-		// reverce order
-		TryLogException := TryLogMessage("<<< aggregate exception end <<<", LOG_CATEGORY.ERROR, TO_WSTRING(exception.ClassName), topic1, topic2, topic3, topic4);
-		
-		FOR i := TO_DINT(aggregateException.InnerExceptionCount) - 1 TO 0 BY -1 DO
-			innerException := aggregateException.GetInnerException(i);
-			
-			message := WideStringHelper.ConcatStrings255("  ", innerException.GetMessage(TRUE, FALSE, TRUE));
-			
-			TryLogException := TryLogException AND TryLogMessage(message, LOG_CATEGORY.ERROR, TO_WSTRING(exception.ClassName), topic1, topic2, topic3, topic4);		
-		END_FOR
-		
-		TryLogException := TryLogException AND TryLogMessage(">>> aggregate exception start >>>", LOG_CATEGORY.ERROR, TO_WSTRING(exception.ClassName), topic1, topic2, topic3, topic4);
-	ELSE		
-		innerException := aggregateException.GetInnerException(0);
-		
-		message := innerException.GetMessage(TRUE, FALSE, TRUE);
-		
-		TryLogException := TryLogMessage(message, LOG_CATEGORY.ERROR, TO_WSTRING(exception.ClassName), topic1, topic2, topic3, topic4);
-	END_IF
-END_IF]]></ST>
+category := SEL(exception.Fatal, LOG_CATEGORY.ERROR, LOG_CATEGORY.ERROR); 
+
+topics[0] := TO_WSTRING(exception.ClassName);
+topics[1] := topic1;
+topics[2] := topic2;
+topics[3] := topic3;
+topics[4] := topic4;
+
+IF Filter <> 0 AND_THEN NOT Filter.ShouldLog(category, topics) THEN
+	RETURN;
+END_IF
+
+TryLogException := Logger.TryLogException(exception);]]></ST>
       </Implementation>
     </Method>
     <Method Name="TryLogMessage" Id="{1b41c149-f4d6-4a68-875a-675fa3954ac9}">
@@ -105,7 +92,6 @@ VAR_INPUT
 	topic5 : WSTRING := "";	
 END_VAR
 VAR
-	messageWithNumber : ERROR_MESSAGE;
 	topics : ARRAY [0..4] OF WSTRING; 
 END_VAR]]></Declaration>
       <Implementation>
@@ -119,11 +105,7 @@ IF Filter <> 0 AND_THEN NOT Filter.ShouldLog(category, topics) THEN
 	RETURN;
 END_IF
 
-_MessageCounter := _MessageCounter + 1;
-
-WideStringHelper.AppendToTarget(messageWithNumber, "#", TO_WSTRING(_MessageCounter), ": ", message);
-
-TryLogMessage := Logger.TryLogMessage(category, messageWithNumber);]]></ST>
+TryLogMessage := Logger.TryLogMessage(category, message);]]></ST>
       </Implementation>
     </Method>
   </POU>

@@ -5,6 +5,8 @@
 FUNCTION_BLOCK AdsLogger EXTENDS Object IMPLEMENTS ILogger
 VAR
 	_ClassName : STRING := __POUNAME();
+	
+	_MessageCounter : ULINT;
 END_VAR]]></Declaration>
     <Implementation>
       <ST><![CDATA[]]></ST>
@@ -29,22 +31,76 @@ PROPERTY FINAL Size : ULINT]]></Declaration>
         </Implementation>
       </Get>
     </Property>
-    <Method Name="TryLogMessage" Id="{936430cf-8fdd-47d1-875f-690550891879}">
-      <Declaration><![CDATA[METHOD TryLogMessage : BOOL
-VAR_IN_OUT CONSTANT
-	category : LOG_CATEGORY;
+    <Method Name="TryLogException" Id="{52444f42-e6c7-4828-baa7-3f12fe45268b}">
+      <Declaration><![CDATA[METHOD TryLogException : BOOL
+VAR_INPUT
+	exception : IException;
+END_VAR
+VAR
 	message : ERROR_MESSAGE;
+	aggregateException : IAggregateException;
+	innerException : IException;
+	i : DINT;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[CASE category OF
+        <ST><![CDATA[IF exception = 0 THEN
+	RETURN;
+END_IF
+
+IF NOT __QUERYINTERFACE(exception, aggregateException) OR_ELSE aggregateException.InnerExceptionCount = 0 THEN
+	message := exception.GetMessage(TRUE, FALSE, TRUE);
+	TryLogException := TryLogMessage(LOG_CATEGORY.ERROR, message);
+ELSE
+	IF aggregateException.InnerExceptionCount > 1 THEN
+		// reverce order
+		TryLogException := TryLogMessage(LOG_CATEGORY.ERROR, "<<< aggregate exception end <<<");
+		
+		FOR i := TO_DINT(aggregateException.InnerExceptionCount) - 1 TO 0 BY -1 DO
+			innerException := aggregateException.GetInnerException(i);
+			
+			message := WideStringHelper.ConcatStrings255("  ", innerException.GetMessage(TRUE, FALSE, TRUE));
+			
+			TryLogException := TryLogException AND TryLogMessage(LOG_CATEGORY.ERROR, message);		
+		END_FOR
+		
+		TryLogException := TryLogException AND TryLogMessage(LOG_CATEGORY.ERROR, ">>> aggregate exception start >>>");
+	ELSE		
+		innerException := aggregateException.GetInnerException(0);
+		
+		message := innerException.GetMessage(TRUE, FALSE, TRUE);
+		
+		TryLogException := TryLogMessage(LOG_CATEGORY.ERROR, message);
+	END_IF
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="TryLogMessage" Id="{936430cf-8fdd-47d1-875f-690550891879}">
+      <Declaration><![CDATA[METHOD TryLogMessage : BOOL
+VAR_INPUT
+	category : LOG_CATEGORY;	
+END_VAR
+VAR_IN_OUT CONSTANT
+	message : ERROR_MESSAGE;
+END_VAR
+VAR
+	number : STRING(10) := '';
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF LogManager.AddNumberToMessage THEN
+	_MessageCounter := _MessageCounter + 1;
+	number := StringHelper.ConcatStrings255('#', TO_STRING(_MessageCounter), ': '); 
+END_IF
+
+
+CASE category OF
 	LOG_CATEGORY.INFORMATION, LOG_CATEGORY.SUCCESS:
-		TryLogMessage := Tc2_System.ADSLOGSTR(msgCtrlMask := Tc2_System.Global_Variables.ADSLOG_MSGTYPE_LOG, msgFmtStr := TO_STRING(message), strArg := '') = 0;
+		TryLogMessage := Tc2_System.ADSLOGSTR(msgCtrlMask := Tc2_System.Global_Variables.ADSLOG_MSGTYPE_LOG, msgFmtStr := StringHelper.ConcatStrings255(number, TO_STRING(message)), strArg := '') = 0;
 
 	LOG_CATEGORY.WARNING:
-		TryLogMessage := Tc2_System.ADSLOGSTR(msgCtrlMask := Tc2_System.Global_Variables.ADSLOG_MSGTYPE_WARN, msgFmtStr := TO_STRING(message), strArg := '') = 0;
+		TryLogMessage := Tc2_System.ADSLOGSTR(msgCtrlMask := Tc2_System.Global_Variables.ADSLOG_MSGTYPE_WARN, msgFmtStr := StringHelper.ConcatStrings255(number, TO_STRING(message)), strArg := '') = 0;
 	
 	LOG_CATEGORY.ERROR, LOG_CATEGORY.FATAL_ERROR:
-		TryLogMessage := Tc2_System.ADSLOGSTR(msgCtrlMask := Tc2_System.Global_Variables.ADSLOG_MSGTYPE_ERROR, msgFmtStr := TO_STRING(message), strArg := '') = 0;
+		TryLogMessage := Tc2_System.ADSLOGSTR(msgCtrlMask := Tc2_System.Global_Variables.ADSLOG_MSGTYPE_ERROR, msgFmtStr := StringHelper.ConcatStrings255(number, TO_STRING(message)), strArg := '') = 0;
 END_CASE]]></ST>
       </Implementation>
     </Method>

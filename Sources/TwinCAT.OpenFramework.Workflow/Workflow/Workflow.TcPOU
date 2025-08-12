@@ -2,6 +2,7 @@
 <TcPlcObject Version="1.1.0.1">
   <POU Name="Workflow" Id="{276b6eec-c9aa-49be-b713-e71500f934ba}" SpecialFunc="None">
     <Declaration><![CDATA[{attribute 'no_explicit_call' := 'do not call this function block directly'} 
+{attribute 'enable_dynamic_creation'}	
 FUNCTION_BLOCK ABSTRACT Workflow 
 VAR_GENERIC CONSTANT
     VariableCount : INT(0..10000) := 0;
@@ -14,7 +15,9 @@ VAR
 	
 	_Variables : Collections.Dictionary;
 	
-	_RootActivityReference : ACTIVITY_REFERENCE;
+	_RootActivity : IActivity;
+	
+	_DynamicChildren : Collections.UniqueSet;
 END_VAR]]></Declaration>
     <Implementation>
       <ST><![CDATA[]]></ST>
@@ -25,6 +28,23 @@ END_VAR]]></Declaration>
 ]]></Declaration>
       <Implementation>
         <ST><![CDATA[]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="DisposeDynamicChildren" Id="{6b69ccba-15f0-48cc-974c-9c24c24bc45d}">
+      <Declaration><![CDATA[METHOD DisposeDynamicChildren]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_DynamicChildren.Clear();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="FB_exit" Id="{8a118ccc-cf33-4895-aaa4-ec240e9f2ff6}">
+      <Declaration><![CDATA[METHOD FB_exit : BOOL
+VAR_INPUT
+	(* if TRUE, the exit method is called for exiting an instance that is copied afterwards (online change).*)
+	bInCopyCode	: BOOL;
+END_VAR
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[DisposeDynamicChildren();]]></ST>
       </Implementation>
     </Method>
     <Property Name="Name" Id="{65ee405b-8b1e-4ae7-9974-225ad26df18e}">
@@ -98,13 +118,26 @@ IF NOT RootActivity.Busy THEN
 END_IF]]></ST>
       </Implementation>
     </Method>
+    <Method Name="RegisterChild" Id="{d5ebe690-8ae4-4f6f-8bba-5616c293b52c}">
+      <Declaration><![CDATA[METHOD RegisterChild
+VAR_INPUT
+	child : IWorkflowElement;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF child <> 0 AND_THEN child.IsDynamicInstance THEN	
+	_DynamicChildren.SetGeneric(Core.GenericValueFactory.FromParts(GENERIC_TYPE_CLASS.TYPE_OBJECT, child.Address, child.Size, GENERIC_MEMORY_MANAGEMENT_BEHAVIOR.STORE_ORIGINAL_REFERENCE_AND_OWNS_MEMORY));
+	
+	LogManager.TryLogMessage(WideStringHelper.ConcatStrings255("Dynamic child with address 16#", TO_WSTRING(Tc2_Utilities.LWORD_TO_HEXSTR(child.Address, 16)), " registred in workflow '", Name, "'"), LOG_CATEGORY.INFORMATION, "Workflow", "WorkflowRegisterChild");
+END_IF]]></ST>
+      </Implementation>
+    </Method>
     <Property Name="RootActivity" Id="{142ff0bb-9cbe-49d5-8b58-eabad1dc6713}">
       <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
 PROPERTY FINAL RootActivity : IActivity]]></Declaration>
       <Get Name="Get" Id="{bda62c52-93af-4541-b8a0-25e42cace2f2}">
         <Declaration><![CDATA[]]></Declaration>
         <Implementation>
-          <ST><![CDATA[RootActivity := _RootActivityReference.Activity;]]></ST>
+          <ST><![CDATA[RootActivity := _RootActivity;]]></ST>
         </Implementation>
       </Get>
     </Property>
@@ -112,7 +145,6 @@ PROPERTY FINAL RootActivity : IActivity]]></Declaration>
       <Declaration><![CDATA[METHOD FINAL SetRootActivity
 VAR_INPUT
 	rootActivity : IActivity;
-	deleteOnParentDelete : BOOL;
 END_VAR
 VAR
 	workflowBusyException : Core.StandardException; 
@@ -124,7 +156,7 @@ VAR
 	i : DINT;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[IF _RootActivityReference.Activity = rootActivity THEN
+        <ST><![CDATA[IF _RootActivity = rootActivity THEN
 	RETURN;
 END_IF
 
@@ -142,7 +174,7 @@ IF NOT _Initialized THEN
 		
 		_Variables.SetGeneric(
 			Core.GenericValueFactory.FromStringValue(variables[i].Name), 
-			Core.GenericValueFactory.FromParts(variables[i].TypeClass, variables[i].Address, variables[i].Size, FALSE));
+			Core.GenericValueFactory.FromParts(variables[i].TypeClass, variables[i].Address, variables[i].Size, GENERIC_MEMORY_MANAGEMENT_BEHAVIOR.STORE_ORIGINAL_REFERENCE_AND_NOT_OWNS_MEMORY));
 	END_FOR
 	
 	IF _Variables.Count <> VariableCount THEN
@@ -152,7 +184,7 @@ IF NOT _Initialized THEN
 	_Initialized := TRUE;
 END_IF
 
-_RootActivityReference.Set(rootActivity, deleteOnParentDelete);]]></ST>
+_RootActivity := rootActivity;]]></ST>
       </Implementation>
     </Method>
     <Method Name="TryGetVariable" Id="{5010e467-b98c-4a4e-ae7b-f87b6c5b379c}">
