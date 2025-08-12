@@ -1,0 +1,168 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="SequenceActivity" Id="{5f2d9604-eb7b-45e3-84bc-b901136bbe0b}" SpecialFunc="None">
+    <Declaration><![CDATA[{attribute 'no_explicit_call' := 'do not call this function block directly'} 
+{attribute 'enable_dynamic_creation'}
+FUNCTION_BLOCK SequenceActivity EXTENDS Activity IMPLEMENTS ISequenceActivity
+VAR
+	{attribute 'OPC.UA.DA' := '0'}
+	_ClassName : STRING := __POUNAME();
+
+	{attribute 'OPC.UA.DA' := '0'}
+	_Children : Collections.List;
+
+	{attribute 'OPC.UA.DA' := '0'}
+	_CurrentActivityIndex : DINT := -1;
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[]]></ST>
+    </Implementation>
+    <Folder Name="Overriden" Id="{1b1c5863-9f32-4a15-87e0-d0e2df5c3f78}" />
+    <Folder Name="Service members" Id="{1f0247af-e697-46d2-a7ad-83444186c8c6}" />
+    <Method Name="AddChildActivity" Id="{2c396587-941c-45cd-a7de-a236bec55a27}">
+      <Declaration><![CDATA[METHOD AddChildActivity
+VAR_INPUT
+	activity : IActivity;
+END_VAR
+VAR
+	argumentNullExcxeption : Core.ArgumentNullException;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF activity = 0  THEN
+	argumentNullExcxeption.Throw(CurrentNamespace.Name, ClassName, __POUNAME(), __POSITION(), 'activity');
+END_IF
+
+activity.Parent := THIS^;
+
+_Children.AppendGeneric(Core.GenericValueFactory.FromParts(GENERIC_TYPE_CLASS.TYPE_OBJECT, activity.Address, activity.Size, GENERIC_MEMORY_MANAGEMENT_BEHAVIOR.STORE_ORIGINAL_REFERENCE_AND_NOT_OWNS_MEMORY));]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="ClassName" Id="{ba95610f-5219-47c9-8c57-311d9e60e72f}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+PROPERTY ClassName : STRING]]></Declaration>
+      <Get Name="Get" Id="{013b3af7-a06d-4fbf-a280-1144598a7235}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ClassName := _ClassName;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="CurrentActivity" Id="{c0d02002-6e75-4b84-a496-ad82ebf3d647}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+PROPERTY FINAL CurrentActivity : IActivity]]></Declaration>
+      <Get Name="Get" Id="{28df5953-696c-4fdc-b8d7-69723340165e}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[IF _Children.Count > 0 AND_THEN _CurrentActivityIndex >= 0 AND_THEN _CurrentActivityIndex < _Children.Count THEN
+	__QUERYINTERFACE(_Children.Get(_CurrentActivityIndex).AsObject(), CurrentActivity);
+END_IF]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="CurrentActivityIndex" Id="{57ee575b-1867-4622-b68b-c137e6c21192}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+PROPERTY FINAL CurrentActivityIndex : DINT]]></Declaration>
+      <Get Name="Get" Id="{c24f3d90-442c-4a36-a32c-a9f9b1ca1fa1}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[CurrentActivityIndex := _CurrentActivityIndex;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="OnAborting" Id="{3a5ab894-6d0b-4ec0-b72f-2b4254f65f95}" FolderPath="Overriden\">
+      <Declaration><![CDATA[METHOD PROTECTED OnAborting 
+VAR_INPUT
+	start : BOOL;
+END_VAR
+VAR_OUTPUT
+	done : BOOL;
+END_VAR
+VAR
+	activity : IActivity;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF _Children.Count < 1 THEN
+	done := TRUE;
+	RETURN;
+END_IF
+
+activity := CurrentActivity;
+
+IF activity = 0 OR_ELSE NOT activity.Busy THEN
+	done := TRUE;
+	RETURN;
+END_IF
+
+IF start THEN
+	activity.StartAbort();
+ELSE
+	activity.Execute();
+END_IF
+
+done := NOT activity.Busy;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="OnRunning" Id="{2c7c0cfd-db41-4ccf-92fc-38a7fc6a065c}" FolderPath="Overriden\">
+      <Declaration><![CDATA[METHOD PROTECTED OnRunning 
+VAR_INPUT
+	start : BOOL;
+END_VAR
+VAR_OUTPUT
+	done : BOOL;
+END_VAR
+VAR
+	activity : IActivity;
+	
+	currentActivityIsNullException : Core.NullReferenceException;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF _Children.Count < 1 THEN
+	done := TRUE;
+	RETURN;
+END_IF
+
+IF start AND_THEN _CurrentActivityIndex < 0 THEN
+	_CurrentActivityIndex := 0;
+END_IF
+
+activity := CurrentActivity;
+
+IF activity = 0 THEN
+	currentActivityIsNullException.Throw(Currentnamespace.Name, ClassName, __POUNAME(), __POSITION(), 'CurrentActivity');
+END_IF
+
+IF start OR_ELSE NOT activity.Busy THEN
+	activity.Start();
+ELSE
+	activity.Execute();
+END_IF
+
+IF NOT activity.Busy THEN
+	selectNextTask();
+END_IF
+
+done := _CurrentActivityIndex < 0;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="selectNextTask" Id="{158fb674-f3c7-4b23-a12c-a74041bb8e97}" FolderPath="Service members\">
+      <Declaration><![CDATA[METHOD PRIVATE selectNextTask]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF _CurrentActivityIndex < _Children.Count - 1 THEN
+	_CurrentActivityIndex := _CurrentActivityIndex + 1;
+ELSE	
+	_CurrentActivityIndex := -1;
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="Size" Id="{b289e881-1f3e-4abc-9a70-4494d509b71b}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+PROPERTY FINAL Size : ULINT]]></Declaration>
+      <Get Name="Get" Id="{40179bbc-4746-4890-bbcf-233fb2a96bdf}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[Size := XSIZEOF(THIS^);]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+  </POU>
+</TcPlcObject>
