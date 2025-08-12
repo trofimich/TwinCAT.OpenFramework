@@ -23,7 +23,7 @@ It is based on an error-handling concept that is unique for Structured Text and 
 - **Basic automation engine**  
   A ready-to-use state machine with four fundamental states: *Initialization*, *Run*, *Stop*, *Error*.
 
-- **Simulation mode**  
+- **Simulation mode for automation engine and devices**  
   Run your logic in simulation mode without the need for real hardware.
 
 - **Controllable devices**  
