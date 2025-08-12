@@ -11,6 +11,12 @@ It is based on an error-handling concept that is unique for Structured Text and 
 - **String handling**  
   Convenient string concatenation from multiple parts, support for strings longer than 255 characters, and more.
 
+- **Logging system**  
+  A convenient logging system with advanced filtering capabilities based on topics and support for custom logger implementations.
+
+- **Workflow engine**  
+  A powerful engine for executing complex scenarios that can be composed dynamically. Basic activities such as Sequence, IfThenElse, WaitForVariableValue, WaitAndPick, etc., are already supported. Custom activities can also be created to meet individual requirements.
+  
 - **JSON support**  
   Simplified serialization and deserialization of structures to and from JSON documents.
 
