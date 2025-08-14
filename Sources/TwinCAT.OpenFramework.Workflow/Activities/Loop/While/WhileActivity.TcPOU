@@ -1,43 +1,33 @@
 ﻿<?xml version="1.0" encoding="utf-8"?>
 <TcPlcObject Version="1.1.0.1">
   <POU Name="WhileActivity" Id="{12c9e06e-5895-45ce-9974-6263c896f40b}" SpecialFunc="None">
-    <Declaration><![CDATA[{attribute 'no_explicit_call' := 'do not call this function block directly'} 
+    <Declaration><![CDATA[(*
+
+.. <legal notes>
+
+legal notes
+=================
+| SPDX-FileCopyrightText: © 2025 Oleksandr Tiutyk <trofimich@gmail.com>
+| SPDX-License-Identifier: LGPL-3.0-only
+| For details check: LGPL-3.0-only_
+
+.. _LGPL-3.0-only: https://www.gnu.org/licenses/lgpl-3.0.en.html
+
+.. </legal notes>
+
+*)
+
+{attribute 'no_explicit_call' := 'do not call this function block directly'} 
 {attribute 'enable_dynamic_creation'}
-FUNCTION_BLOCK WhileActivity EXTENDS Activity IMPLEMENTS IWhileActivity
+FUNCTION_BLOCK WhileActivity EXTENDS SequenceActivity IMPLEMENTS IWhileActivity
 VAR
 	{attribute 'OPC.UA.DA' := '0'}
-	_ClassName : STRING := __POUNAME();
-
-	{attribute 'OPC.UA.DA' := '0'}
 	_Condition : ICondition;	
-	{attribute 'OPC.UA.DA' := '0'}
-	_DeleteConditionOnParentDelete : BOOL;
-
-	{attribute 'OPC.UA.DA' := '0'}
-	_Activity : IActivity;
-	{attribute 'OPC.UA.DA' := '0'}
-	_DeleteActivityOnParentDelete : BOOL;
 END_VAR]]></Declaration>
     <Implementation>
       <ST><![CDATA[]]></ST>
     </Implementation>
     <Folder Name="Overriden" Id="{8c1d4263-b645-4c82-9dcb-55337470aad6}" />
-    <Property Name="Activity" Id="{67ecbf2d-c6eb-4446-894b-79dea8e79d79}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
-PROPERTY FINAL Activity : IActivity]]></Declaration>
-      <Get Name="Get" Id="{5d26f617-013c-4ecb-bbf5-2f163a194e3c}">
-        <Declaration><![CDATA[]]></Declaration>
-        <Implementation>
-          <ST><![CDATA[Activity := _Activity;]]></ST>
-        </Implementation>
-      </Get>
-      <Set Name="Set" Id="{0621a6bf-de24-483d-983f-40bc5001ca70}">
-        <Declaration><![CDATA[]]></Declaration>
-        <Implementation>
-          <ST><![CDATA[_Activity := Activity;]]></ST>
-        </Implementation>
-      </Set>
-    </Property>
     <Property Name="ClassName" Id="{945e9c30-b95b-43ef-9233-6a843f2d82bf}">
       <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
 PROPERTY ClassName : STRING]]></Declaration>
@@ -68,7 +58,6 @@ PROPERTY FINAL Condition : ICondition]]></Declaration>
       <Declaration><![CDATA[METHOD Configure
 VAR_INPUT
 	condition : ICondition; 
-	activity : IActivity;
 END_VAR
 VAR
 	argumentNullException : Core.ArgumentNullException;
@@ -78,46 +67,21 @@ END_VAR]]></Declaration>
 	argumentNullException.Throw(CurrentNamespace.Name, ClassName, __POUNAME(), __POSITION(), 'condition');
 END_IF
 
-IF activity = 0 THEN
-	argumentNullException.Throw(CurrentNamespace.Name, ClassName, __POUNAME(), __POSITION(), 'activity');
-END_IF
-
-_Condition := condition;
-_Activity := activity;]]></ST>
+_Condition := condition;]]></ST>
       </Implementation>
     </Method>
-    <Method Name="OnAborting" Id="{4570e04d-1285-4023-b17a-9e950403361e}" FolderPath="Overriden\">
-      <Declaration><![CDATA[METHOD PROTECTED OnAborting 
+    <Method Name="FB_init" Id="{6a543e26-62cd-441c-81f4-01e022c2491c}">
+      <Declaration><![CDATA[METHOD FB_init : BOOL
 VAR_INPUT
-	start : BOOL;
+	(* if TRUE, the retain variables are initialized (warm start / cold start)*)
+	bInitRetains	: BOOL;
+	(* if TRUE, the instance afterwards gets moved into the copy code (online change)*)
+	bInCopyCode	: BOOL;
+	workflow : IWorkflow;
 END_VAR
-VAR_OUTPUT
-	done : BOOL;
-END_VAR
-VAR
-	argumentNullException : Core.NullReferenceException;
-END_VAR]]></Declaration>
+]]></Declaration>
       <Implementation>
-        <ST><![CDATA[IF _Condition = 0 THEN
-	argumentNullException.Throw(CurrentNamespace.Name, ClassName, __POUNAME(), __POSITION(), 'Condition');
-END_IF
-
-IF _Activity = 0 THEN
-	argumentNullException.Throw(CurrentNamespace.Name, ClassName, __POUNAME(), __POSITION(), 'Activity');
-END_IF
-
-IF NOT _Activity.Busy THEN
-	done := TRUE;
-	RETURN;
-END_IF
-
-IF start THEN
-	_Activity.StartAbort();
-ELSE
-	_Activity.Execute();
-END_IF
-	
-done := NOT _Activity.Busy;]]></ST>
+        <ST><![CDATA[_ClassName := 'WhileActivity';]]></ST>
       </Implementation>
     </Method>
     <Method Name="OnRunning" Id="{346689b4-fcd7-4614-871f-ef4906187553}" FolderPath="Overriden\">
@@ -138,10 +102,6 @@ END_VAR]]></Declaration>
 	argumentNullException.Throw(CurrentNamespace.Name, ClassName, __POUNAME(), __POSITION(), 'Condition');
 END_IF
 
-IF _Activity = 0 THEN
-	argumentNullException.Throw(CurrentNamespace.Name, ClassName, __POUNAME(), __POSITION(), 'Activity');
-END_IF
-
 IF start THEN
 	IF NOT _Condition.Evaluate(THIS^) THEN
 		done := TRUE;
@@ -149,15 +109,11 @@ IF start THEN
 	END_IF
 END_IF
 
-IF start THEN
-	_Activity.Start();
-ELSE
-	_Activity.Execute();
-END_IF
-	
-IF NOT _Activity.Busy THEN
+SUPER^.OnRunning(start, done => done);
+
+IF done THEN
 	IF _Condition.Evaluate(THIS^) THEN
-		_Activity.Start();
+		SUPER^.OnRunning(TRUE, done => done);
 	ELSE
 		done := TRUE;
 	END_IF
@@ -166,7 +122,7 @@ END_IF]]></ST>
     </Method>
     <Property Name="Size" Id="{ef186776-ee7b-48a8-9b46-2633dc3274c4}">
       <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
-PROPERTY FINAL Size : ULINT]]></Declaration>
+PROPERTY Size : ULINT]]></Declaration>
       <Get Name="Get" Id="{cfd06962-6fec-4072-a8bc-e00513767b8d}">
         <Declaration><![CDATA[]]></Declaration>
         <Implementation>

@@ -120,9 +120,10 @@ Yes, there are two projects:
 - **`TwinCAT.OpenFramework.Tests`** — it contains unit tests and examples for specific classes.
 - **`TwinCAT.OpenFramework.Samples`** — it contains demo application with simple visualization. ![Read guid here.](Guides/SignalControlledIntersectionDemo.md)
 
-![Signal Controlled Intersection](Screenshots/SignalControlledIntersection.png)
+![Signal-controlled intersection](Screenshots/SignalControlledIntersection.png)
 ![Collections test](Screenshots/TestCollections.png)
 ![Exceptions test](Screenshots/TestExceptions.png)
+![Workflow creation](Screenshots/WorkflowCreation.png)
 
 ---
 
