@@ -49,21 +49,27 @@ It is based on an error-handling concept that is unique for Structured Text and 
 
 ---
 
+## 🧪 Are there examples?
+
+Yes, there are two projects:  
+- **`TwinCAT.OpenFramework.Tests`** — it contains unit tests and examples for specific classes.
+- **`TwinCAT.OpenFramework.Samples`** — it contains demo application with simple visualization. ![Read guid here.](Guides/SignalControlledIntersectionDemo.md)
+
+---
+
+## 🔍 How to get started?
+
+1. Install the latest **TwinCAT XAE**  
+2. Clone [TwinCAT.OpenFramework repository](https://github.com/trofimich/TwinCAT.OpenFramework.git)
+3. Open the solution in `TwinCAT.OpenFramework`
+
+---
+
 ## 📈 What are the future plans?
 
 - 🧱 Add new possibilities and wrap more standard libraries in OOP-style interfaces
 - 🧪 Broaden **unit test** coverage (TcUnit-based)
 - 📚 Improve documentation and examples
-
----
-
-## ⚠️ Known Issues
-
-- Beckhoff currently use compiler from CoDeSys and this compiler has some issues:
-  - incorrect behavior related to methods with optional parameters in some cases
-  - incorrect memory deallocation in __TRY / __CATCH block in some cases
-
-These issues aren't critical, and Beckhoff is aware and investigating solutions
 
 ---
 
@@ -112,24 +118,13 @@ Also, if you're experienced in software architecture and have suggestions, I'd l
 
 ---
 
-## 🔍 How to get started?
+## ⚠️ Known Issues
 
-1. Install the latest **TwinCAT XAE**  
-2. Clone [TwinCAT.OpenFramework repository](https://github.com/trofimich/TwinCAT.OpenFramework.git)
-3. Open the solution in `TwinCAT.OpenFramework`
+- Beckhoff currently use compiler from CoDeSys and this compiler has some issues:
+  - incorrect behavior related to methods with optional parameters in some cases
+  - incorrect memory deallocation in __TRY / __CATCH block in some cases
 
----
-
-## 🧪 Are there examples?
-
-Yes, there are two projects:  
-- **`TwinCAT.OpenFramework.Tests`** — it contains unit tests and examples for specific classes.
-- **`TwinCAT.OpenFramework.Samples`** — it contains demo application with simple visualization. ![Read guid here.](Guides/SignalControlledIntersectionDemo.md)
-
-![Signal-controlled intersection](Screenshots/SignalControlledIntersection.png)
-![Collections test](Screenshots/TestCollections.png)
-![Exceptions test](Screenshots/TestExceptions.png)
-![Workflow creation](Screenshots/WorkflowCreation.png)
+These issues aren't critical, and Beckhoff is aware and investigating solutions
 
 ---
 
@@ -148,4 +143,13 @@ This project is open-source and licensed under the **LGPLv3** license, which all
 **Distribution:** You can distribute the library freely, as long as you include the license and make the source code available.
 
 See [LICENSE](./LICENSE) for details.
+
+---
+
+## 🖼️ Screenshots 
+
+![Signal-controlled intersection](Screenshots/SignalControlledIntersection.png)
+![Collections test](Screenshots/TestCollections.png)
+![Exceptions test](Screenshots/TestExceptions.png)
+![Workflow creation](Screenshots/WorkflowCreation.png)
 
