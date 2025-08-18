@@ -49,6 +49,16 @@ It is based on an error-handling concept that is unique for Structured Text and 
 
 ---
 
+## 🚀 Visual comparision of some features:
+
+  ![Simple string concatenation](Screenshots/FunctionalityComparision/SimpleConcat.png)
+  ![Long string concatenation](Screenshots/FunctionalityComparision/ConcatLongString.png)
+  ![Dynamic collection](Screenshots/FunctionalityComparision/List.png)
+  ![Logging](Screenshots/FunctionalityComparision/Logging.png)
+  ![Error handling](Screenshots/FunctionalityComparision/Exceptions.png)
+
+---
+
 ## 🧪 Are there examples?
 
 Yes, there are two projects:  
