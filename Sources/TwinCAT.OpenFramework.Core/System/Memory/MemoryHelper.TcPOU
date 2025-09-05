@@ -1,0 +1,122 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="MemoryHelper" Id="{cb04704d-a05c-4735-b40b-67a92f3f86d5}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+
+.. <legal notes>
+
+legal notes
+=================
+| SPDX-FileCopyrightText: © 2025 Oleksandr Tiutyk <trofimich@gmail.com>
+| SPDX-License-Identifier: LGPL-3.0-only
+| For details check: LGPL-3.0-only_
+
+.. _LGPL-3.0-only: https://www.gnu.org/licenses/lgpl-3.0.en.html
+
+.. </legal notes>
+
+*)
+
+{attribute 'no_explicit_call' := 'Direct call is not allowed'} 
+PROGRAM MemoryHelper
+VAR
+	_ClassName : STRING := __POUNAME();
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[]]></ST>
+    </Implementation>
+    <Property Name="ClassName" Id="{f0cb7e04-3fa7-438c-9fb8-38f358e717d9}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+PROPERTY ClassName : STRING]]></Declaration>
+      <Get Name="Get" Id="{9465e911-db84-4abe-a766-2f2cfe6e21d4}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ClassName := _ClassName;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="GetAddressFromInterface" Id="{6158ab88-0c76-435a-bca8-37fff74aaa20}">
+      <Declaration><![CDATA[METHOD GetAddressFromInterface : PVOID
+VAR_INPUT
+	interfaceInstance : __SYSTEM.IQueryInterface; 
+END_VAR
+VAR
+	interfacePointer : POINTER TO PVOID;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF interfaceInstance <> 0 THEN
+	interfacePointer := ADR(interfaceInstance);
+	
+	GetAddressFromInterface := interfacePointer^ - XSIZEOF(interfaceInstance);	
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="IsDynamicData" Id="{4c5114c7-cc73-448a-9f8f-fa67bfde37e3}">
+      <Declaration><![CDATA[METHOD IsDynamicData : BOOL
+VAR_INPUT
+	dataAddress : PVOID;
+	dataSize : UDINT := 1;
+END_VAR
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IsDynamicData := Tc2_System.F_CheckMemoryArea(dataAddress, dataSize) = E_TcMemoryArea.Dynamic;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="TryReleaseDynamicMemory" Id="{5fe5bc2a-b608-418e-9ff0-e9c1a91c92f5}">
+      <Declaration><![CDATA[METHOD TryReleaseDynamicMemory : BOOL
+VAR_IN_OUT
+	address : POINTER TO BYTE;	
+END_VAR
+VAR_INPUT
+	isObject : BOOL;
+END_VAR
+VAR
+	objectPointer : POINTER TO Object;
+	objectClassName : STRING;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF address = 0 OR_ELSE NOT MemoryHelper.IsDynamicData(address, 1) THEN
+	RETURN;
+END_IF
+
+IF isObject THEN
+	objectPointer := address;
+	objectClassName := objectPointer^.ClassName;
+	
+	__DELETE(objectPointer);
+	address := 0;
+	
+	LogManager.TryLogMessage(WideStringHelper.ConcatStrings255("Object of class '", TO_WSTRING(objectClassName), "' disposed at ", TO_WSTRING(SystemDateTimeManager.SystemLocalDateTime)), LOG_CATEGORY.SUCCESS, TO_WSTRING(ClassName), "ReleaseDynamicMemory", "ObjectDispose");
+ELSE
+	__DELETE(address);
+END_IF
+
+TryReleaseDynamicMemory := TRUE;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="TryReleaseDynamicObject" Id="{1a29f8e6-f929-40c9-bee2-ed6219c50a45}">
+      <Declaration><![CDATA[METHOD TryReleaseDynamicObject : BOOL
+VAR_IN_OUT
+	instance : IObject;	
+END_VAR
+VAR
+	objectPointer : POINTER TO Object;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF instance = 0 THEN
+	RETURN;
+END_IF
+	
+objectPointer := instance.Address;
+
+IF NOT MemoryHelper.IsDynamicData(objectPointer, 1) THEN
+	RETURN;
+END_IF
+
+instance := 0;	
+
+TryReleaseDynamicObject := TryReleaseDynamicMemory(objectPointer, TRUE);]]></ST>
+      </Implementation>
+    </Method>
+  </POU>
+</TcPlcObject>
