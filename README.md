@@ -3,6 +3,9 @@
 This is **object-oriented framework** developed for **TwinCAT 3.1.4026+**, which provides a set of ready-to-use, scalable components for industrial automation.
 It is based on an error-handling concept that is unique for Structured Text and resembles the approach used in general-purpose languages like C# or Java.
 
+## ATTENTION
+Do not update to TC 3.1.4026.19 if you use this framework because of new bug in exception handling mechanism.
+
 ## Key Features
 
 - **Dynamic collections**  
