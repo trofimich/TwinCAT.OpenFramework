@@ -20,6 +20,7 @@ legal notes
 {attribute 'no_explicit_call' := 'Direct call is not allowed'} 
 PROGRAM StringHelper
 VAR_INPUT CONSTANT
+	CharSize : BYTE := 1;
 	NewLine : STRING(1) := F_ToChr(10);
 	Empty : STRING(0) := '';
 	//EmptyAnyString : __SYSTEM.AnyType := (typeclass := __SYSTEM.TYPE_CLASS.TYPE_ANYSTRING, pvalue := ADR(Empty), diSize := SIZEOF(Empty));
@@ -30,9 +31,11 @@ END_VAR]]></Declaration>
     <Implementation>
       <ST><![CDATA[]]></ST>
     </Implementation>
+    <Folder Name="Any" Id="{8688dfc3-2927-467c-9f5b-91ce2217a978}" />
     <Folder Name="Append" Id="{7e7c80a5-b2b3-4398-aeb3-fcbeeedb95b0}" />
+    <Folder Name="Replace" Id="{a7f2f348-7292-464d-8aaa-84a00bdb1d6c}" />
     <Folder Name="Service members" Id="{6eebbe56-ba8f-4c4e-a22c-3fcf35f9aa27}" />
-    <Method Name="AnyToString" Id="{b226cb15-ac0d-48f7-98b9-48ee0196d1ce}">
+    <Method Name="AnyToString" Id="{b226cb15-ac0d-48f7-98b9-48ee0196d1ce}" FolderPath="Any\">
       <Declaration><![CDATA[METHOD AnyToString : STRING(255)
 VAR_INPUT
 	value : ANY;
@@ -238,7 +241,7 @@ VAR_IN_OUT CONSTANT
 END_VAR
 ]]></Declaration>
       <Implementation>
-        <ST><![CDATA[GetActualSize := Tc2_Utilities.LEN2(ADR(value)) + 1;]]></ST>
+        <ST><![CDATA[GetActualSize := Tc2_Utilities.LEN2(ADR(value)) + CharSize;]]></ST>
       </Implementation>
     </Method>
     <Method Name="GetLength" Id="{a3dc2c45-cc1a-482d-b619-dbbdf1878690}">
@@ -396,9 +399,80 @@ END_CASE	]]></ST>
       </Implementation>
     </Method>
     <Method Name="InternalReplaceInSource" Id="{0ac24766-5e3a-42f7-a2a0-58aa460f844f}" FolderPath="Service members\">
-      <Declaration><![CDATA[METHOD INTERNAL InternalReplaceInSource : BOOL]]></Declaration>
+      <Declaration><![CDATA[METHOD INTERNAL InternalReplaceInSource : BOOL
+VAR_INPUT
+	sourceString : __SYSTEM.AnyType;
+	oldSubstring : POINTER TO STRING;
+	newSubstring : POINTER TO STRING;
+END_VAR
+VAR_OUTPUT
+	replacingCount : UINT;
+END_VAR
+VAR
+	sourceStringMemorySize : UDINT;
+	sourceStringLength : UDINT;
+
+	handledString : POINTER TO STRING;
+	handledStringLength : UDINT;
+		
+	oldSubstringLength : UDINT;
+	newSubstringLength : UDINT;
+	checkMemorySize : BOOL;	
+	
+	substringIndex : UDINT;
+	
+	memFunctionResult : UDINT;
+END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[]]></ST>
+        <ST><![CDATA[sourceStringMemorySize := TO_UDINT(sourceString.diSize);
+sourceStringLength := Tc2_Utilities.LEN2(sourceString.pValue);
+
+handledString := sourceString.pValue;
+handledStringLength := sourceStringLength;
+
+oldSubstringLength := Tc2_Utilities.LEN2(oldSubstring);
+newSubstringLength := Tc2_Utilities.LEN2(newSubstring);
+checkMemorySize := oldSubstringLength < newSubstringLength;
+
+WHILE handledStringLength >= oldSubstringLength DO
+	substringIndex := Tc2_Utilities.FIND2(handledString, oldSubstring);
+	
+	IF substringIndex = 0 THEN
+		EXIT;
+	END_IF
+	
+	handledString := handledString + substringIndex - CharSize;
+	handledStringLength := handledStringLength - substringIndex + CharSize;
+
+	sourceStringLength := sourceStringLength + newSubstringLength - oldSubstringLength;
+	
+	IF checkMemorySize AND_THEN sourceStringLength + CharSize > sourceStringMemorySize THEN
+		RETURN;
+	END_IF
+	
+	IF oldSubstringLength <> newSubstringLength THEN
+		memFunctionResult := Tc2_System.MEMMOVE(handledString + newSubstringLength, handledString + oldSubstringLength, handledStringLength - oldSubstringLength + CharSize);
+		
+		IF memFunctionResult < 1 THEN
+			RETURN;			
+		END_IF
+		
+		handledStringLength := handledStringLength + newSubstringLength - oldSubstringLength;
+	END_IF
+	
+	memFunctionResult := Tc2_System.MEMCPY(handledString, newSubstring, newSubstringLength);
+
+	IF memFunctionResult < 1 THEN
+		RETURN;			
+	END_IF
+	
+	replacingCount := replacingCount + 1;
+
+	handledString := handledString + newSubstringLength;	
+	handledStringLength := handledStringLength - newSubstringLength;
+END_WHILE
+
+InternalReplaceInSource := TRUE;]]></ST>
       </Implementation>
     </Method>
     <Method Name="InternalTryAppendToTarget" Id="{96f09b6b-a3b9-4899-b746-36fdcd4d9236}" FolderPath="Service members\">
@@ -492,59 +566,36 @@ PROPERTY NamespaceName : STRING]]></Declaration>
         </Implementation>
       </Get>
     </Property>
-    <Method Name="ReplaceInSource" Id="{f06898de-32ea-4f51-b053-1b282cb73a8a}">
+    <Method Name="ReplaceInSource" Id="{f06898de-32ea-4f51-b053-1b282cb73a8a}" FolderPath="Replace\">
       <Declaration><![CDATA[METHOD ReplaceInSource
 VAR_INPUT
 	sourceString : ANY_STRING;
 END_VAR
 VAR_IN_OUT CONSTANT
-	oldValue : STRING;
-	newValue : STRING;
+	oldSubstring : STRING;
+	newSubstring : STRING;
 END_VAR
-VAR_INPUT
+(*VAR_INPUT
 	maxReplacementCount : UINT := 0;
 	skip : UINT := 0;
+END_VAR*)
+VAR_OUTPUT
+	replacingCount : UINT;
 END_VAR
-VAR
+VAR	
 	stringTypeNotSupportedException : NotSupportedException;
 	sourceStringMemoryOverflowExcepton : TargetVariableMemoryOwerflowException;
-
-	sourceStringMemorySize : UDINT;
-	sourceStringLength : UDINT;
 	
-	oldValueLength : UDINT;
-	newValueLength : UDINT;
-	checkMemorySize : BOOL;	
-	
-	i : UDINT;
+	replaceResult : BOOL; 
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[IF sourceString.TypeClass <> __SYSTEM.TYPE_CLASS.TYPE_STRING THEN
 	stringTypeNotSupportedException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), Tc2_Utilities.WCONCAT("Not supported type ", TO_WSTRING(sourceString.TypeClass)), TRUE);
 END_IF
 
-sourceStringMemorySize := TO_UDINT(sourceString.diSize);
-sourceStringLength := Tc2_Utilities.LEN2(sourceString.pValue);
-
-oldValueLength := Tc2_Utilities.LEN2(ADR(oldValue));
-newValueLength := Tc2_Utilities.LEN2(ADR(newValue));
-checkMemorySize := oldValuelength < newValueLength;
-
-WHILE 1 = 1 DO
-	i := Tc2_Utilities.FIND2(sourceString.pValue + i, ADR(oldValue));
-	
-	IF i = 0 THEN
-		EXIT;
-	END_IF
-	
-	//IF checkMemorySize AND_THEN sourceStringLength + newValueLength - oldValueLength + 1 > sourceStringMemorySize THEN
-		
-	//END_IF
-END_WHILE
-
-(*IF NOT InternalTryAppendToTarget(targetString, sourceString1, sourceString2, sourceString3, sourceString4, sourceString5, sourceString6, sourceString7, sourceString8, sourceString9, sourceString10) THEN
-	sourceStringMemoryOverflowExcepton.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), 'targetString', TO_ULINT(targetString.diSize)); 
-END_IF*)]]></ST>
+IF NOT InternalReplaceInSource(sourceString, ADR(oldSubstring), ADR(newSubstring), replacingCount => replacingCount) THEN
+	sourceStringMemoryOverflowExcepton.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), 'sourceString', TO_UDINT(sourceString.diSize));
+END_IF]]></ST>
       </Implementation>
     </Method>
     <Method Name="StringPointerToAnyType" Id="{a10ef46f-9469-4b72-b2c7-fdc82174f321}">
@@ -569,6 +620,17 @@ END_VAR
         <ST><![CDATA[StringReferenceToAnyType.TypeClass := __SYSTEM.TYPE_CLASS.TYPE_STRING;
 StringReferenceToAnyType.pValue := ADR(value);
 StringReferenceToAnyType.diSize := TO_DINT(GetActualSize(value));]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="StringToAnyType" Id="{ad63b85b-ddb5-45f3-baef-6d6cd1517473}" FolderPath="Any\">
+      <Declaration><![CDATA[METHOD StringToAnyType : __SYSTEM.AnyType
+VAR_IN_OUT CONSTANT
+	value : STRING;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[StringToAnyType.TypeClass := __SYSTEM.TYPE_CLASS.TYPE_STRING;
+StringToAnyType.pValue := ADR(value);
+StringToAnyType.diSize := TO_DINT(GetActualSize(value));]]></ST>
       </Implementation>
     </Method>
     <Method Name="TryAppendToTarget" Id="{bf1d041e-2745-49ca-b076-368f2e842cc8}" FolderPath="Append\">
@@ -600,6 +662,31 @@ VAR_INPUT
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[TryAppendToTarget255 := InternalTryAppendToTarget(targetString, ADR(sourceString1), ADR(sourceString2), ADR(sourceString3), ADR(sourceString4), ADR(sourceString5), ADR(sourceString6), ADR(sourceString7), ADR(sourceString8), ADR(sourceString9), ADR(sourceString10));]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="TryReplaceInSource" Id="{6cd9fde4-681b-4169-adb0-283364fff827}" FolderPath="Replace\">
+      <Declaration><![CDATA[METHOD TryReplaceInSource : BOOL
+VAR_INPUT
+	sourceString : ANY_STRING;
+END_VAR
+VAR_IN_OUT CONSTANT
+	oldSubstring : STRING;
+	newSubstring : STRING;
+END_VAR
+(*VAR_INPUT
+	maxReplacementCount : UINT := 0;
+	skip : UINT := 0;
+END_VAR*)
+VAR_OUTPUT
+	replacingCount : UINT;
+END_VAR
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF sourceString.TypeClass <> __SYSTEM.TYPE_CLASS.TYPE_STRING THEN
+	RETURN;
+END_IF
+
+TryReplaceInSource := InternalReplaceInSource(sourceString, ADR(oldSubstring), ADR(newSubstring), replacingCount => replacingCount);]]></ST>
       </Implementation>
     </Method>
   </POU>
