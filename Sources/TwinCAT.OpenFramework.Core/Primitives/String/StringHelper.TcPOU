@@ -234,24 +234,41 @@ DateAndTimeToString := Tc2_Standard.REPLACE(DateAndTimeToString, timeValuesSepar
 DateAndTimeToString := Tc2_Standard.REPLACE(DateAndTimeToString, timeValuesSeparator, 1, 17);]]></ST>
       </Implementation>
     </Method>
+    <Method Name="Find" Id="{0c61da8f-b806-465e-b4f1-5bdbe54f1092}">
+      <Declaration><![CDATA[METHOD Find : BOOL
+VAR_IN_OUT CONSTANT
+	stringToSearchIn : STRING;
+	stringToFind : STRING;
+END_VAR
+VAR_OUTPUT
+	position : UDINT;
+END_VAR
+VAR
+	searchInStringLength : UDINT;
+	stringToFindLength : UDINT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[Find := InternalFind(ADR(stringToSearchIn), InternalGetLength(ADR(stringToSearchIn)), ADR(stringToFind), InternalGetLength(ADR(stringToFindLength)), position => position);]]></ST>
+      </Implementation>
+    </Method>
     <Method Name="GetActualSize" Id="{e8e8416f-8e42-44ac-ac9b-ab76e4a16eec}">
-      <Declaration><![CDATA[METHOD GetActualSize : ULINT
+      <Declaration><![CDATA[METHOD GetActualSize : UDINT
 VAR_IN_OUT CONSTANT
 	value : STRING;
 END_VAR
 ]]></Declaration>
       <Implementation>
-        <ST><![CDATA[GetActualSize := Tc2_Utilities.LEN2(ADR(value)) + CharSize;]]></ST>
+        <ST><![CDATA[GetActualSize := InternalGetLength(ADR(value)) + CharSize;]]></ST>
       </Implementation>
     </Method>
     <Method Name="GetLength" Id="{a3dc2c45-cc1a-482d-b619-dbbdf1878690}">
-      <Declaration><![CDATA[METHOD GetLength : ULINT
+      <Declaration><![CDATA[METHOD GetLength : UDINT
 VAR_IN_OUT CONSTANT
 	value : STRING;
 END_VAR
 ]]></Declaration>
       <Implementation>
-        <ST><![CDATA[GetLength := Tc2_Utilities.LEN2(ADR(value));]]></ST>
+        <ST><![CDATA[GetLength := InternalGetLength(ADR(value));]]></ST>
       </Implementation>
     </Method>
     <Method Name="InternalAnyToString" Id="{dbd6569e-fd5b-4765-a843-fc6bef815e68}" FolderPath="Service members\">
@@ -398,15 +415,56 @@ END_VAR]]></Declaration>
 END_CASE	]]></ST>
       </Implementation>
     </Method>
+    <Method Name="InternalFind" Id="{5b6aff61-016c-4db4-94ed-cfbbb336515e}" FolderPath="Service members\">
+      <Declaration><![CDATA[METHOD INTERNAL InternalFind : BOOL
+VAR_INPUT
+	stringToSearchIn : POINTER TO STRING;
+	searchInStringLength : UDINT;
+	stringToFind : POINTER TO STRING;
+	stringToFindLength : UDINT;
+END_VAR
+VAR_OUTPUT
+	position : UDINT;
+END_VAR
+VAR	
+	i : UDINT;
+	memCoparisionResult : DINT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF searchInStringLength < stringToFindLength THEN
+	RETURN;
+END_IF
+
+FOR i := 0 TO searchInStringLength - stringToFindLength DO
+	IF Tc2_System.MEMCMP(stringToSearchIn + i, stringToFind, stringToFindLength * CharSize) = 0 THEN
+		position := i + 1;
+		InternalFind := TRUE;
+		RETURN;
+	END_IF
+END_FOR]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="InternalGetLength" Id="{06d76460-e6eb-42be-8f6b-fb87a2b574a4}" FolderPath="Service members\">
+      <Declaration><![CDATA[METHOD INTERNAL InternalGetLength : UDINT
+VAR_INPUT
+	value : POINTER TO STRING;
+END_VAR
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[InternalGetLength := Tc2_Utilities.LEN2(value);]]></ST>
+      </Implementation>
+    </Method>
     <Method Name="InternalReplaceInSource" Id="{0ac24766-5e3a-42f7-a2a0-58aa460f844f}" FolderPath="Service members\">
       <Declaration><![CDATA[METHOD INTERNAL InternalReplaceInSource : BOOL
 VAR_INPUT
 	sourceString : __SYSTEM.AnyType;
 	oldSubstring : POINTER TO STRING;
 	newSubstring : POINTER TO STRING;
+	maxReplacements : UINT;
+	skipReplacements : UINT;
 END_VAR
 VAR_OUTPUT
-	replacingCount : UINT;
+	replacementCount : UINT;
 END_VAR
 VAR
 	sourceStringMemorySize : UDINT;
@@ -419,30 +477,39 @@ VAR
 	newSubstringLength : UDINT;
 	checkMemorySize : BOOL;	
 	
-	substringIndex : UDINT;
+	substringPosition : UDINT;
+
+	skipCount : UINT;
 	
 	memFunctionResult : UDINT;
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[sourceStringMemorySize := TO_UDINT(sourceString.diSize);
-sourceStringLength := Tc2_Utilities.LEN2(sourceString.pValue);
+sourceStringLength := InternalGetLength(sourceString.pValue);
 
 handledString := sourceString.pValue;
 handledStringLength := sourceStringLength;
 
-oldSubstringLength := Tc2_Utilities.LEN2(oldSubstring);
-newSubstringLength := Tc2_Utilities.LEN2(newSubstring);
+oldSubstringLength := InternalGetLength(oldSubstring);
+newSubstringLength := InternalGetLength(newSubstring);
 checkMemorySize := oldSubstringLength < newSubstringLength;
 
 WHILE handledStringLength >= oldSubstringLength DO
-	substringIndex := Tc2_Utilities.FIND2(handledString, oldSubstring);
-	
-	IF substringIndex = 0 THEN
+	IF NOT InternalFind(handledString, handledStringLength / CharSize, oldSubstring, oldSubstringLength / CharSize, position => substringPosition) THEN
 		EXIT;
 	END_IF
 	
-	handledString := handledString + substringIndex - CharSize;
-	handledStringLength := handledStringLength - substringIndex + CharSize;
+	IF skipReplacements > 0 AND_THEN skipCount < skipReplacements THEN
+		skipCount := skipCount + 1;
+
+		handledString := handledString + oldSubstringLength + (substringPosition * CharSize) - CharSize;	
+		handledStringLength := handledStringLength - oldSubstringLength - (substringPosition * CharSize) + CharSize;
+		
+		CONTINUE;		
+	END_IF
+	
+	handledString := handledString + (substringPosition * CharSize) - CharSize;
+	handledStringLength := handledStringLength - (substringPosition * CharSize) + CharSize;
 
 	sourceStringLength := sourceStringLength + newSubstringLength - oldSubstringLength;
 	
@@ -466,7 +533,11 @@ WHILE handledStringLength >= oldSubstringLength DO
 		RETURN;			
 	END_IF
 	
-	replacingCount := replacingCount + 1;
+	replacementCount := replacementCount + 1;
+	
+	IF maxReplacements > 0 AND_THEN replacementCount>= maxReplacements THEN
+		EXIT;
+	END_IF
 
 	handledString := handledString + newSubstringLength;	
 	handledStringLength := handledStringLength - newSubstringLength;
@@ -575,12 +646,12 @@ VAR_IN_OUT CONSTANT
 	oldSubstring : STRING;
 	newSubstring : STRING;
 END_VAR
-(*VAR_INPUT
-	maxReplacementCount : UINT := 0;
-	skip : UINT := 0;
-END_VAR*)
+VAR_INPUT
+	maxReplacements : UINT := 0;
+	skipReplacements : UINT := 0;
+END_VAR
 VAR_OUTPUT
-	replacingCount : UINT;
+	replacementCount : UINT;
 END_VAR
 VAR	
 	stringTypeNotSupportedException : NotSupportedException;
@@ -593,7 +664,35 @@ END_VAR]]></Declaration>
 	stringTypeNotSupportedException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), Tc2_Utilities.WCONCAT("Not supported type ", TO_WSTRING(sourceString.TypeClass)), TRUE);
 END_IF
 
-IF NOT InternalReplaceInSource(sourceString, ADR(oldSubstring), ADR(newSubstring), replacingCount => replacingCount) THEN
+IF NOT InternalReplaceInSource(sourceString, ADR(oldSubstring), ADR(newSubstring), maxReplacements, skipReplacements, replacementCount => replacementCount) THEN
+	sourceStringMemoryOverflowExcepton.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), 'sourceString', TO_UDINT(sourceString.diSize));
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="ReplaceInSource255" Id="{f41fa253-7b57-4bb9-a052-ea59a6eb6bff}" FolderPath="Replace\">
+      <Declaration><![CDATA[METHOD ReplaceInSource255
+VAR_INPUT
+	sourceString : ANY_STRING;
+	oldSubstring : STRING(255);
+	newSubstring : STRING(255);
+	maxReplacements : UINT := 0;
+	skipReplacements : UINT := 0;
+END_VAR
+VAR_OUTPUT
+	replacementCount : UINT;
+END_VAR
+VAR	
+	stringTypeNotSupportedException : NotSupportedException;
+	sourceStringMemoryOverflowExcepton : TargetVariableMemoryOwerflowException;
+	
+	replaceResult : BOOL; 
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF sourceString.TypeClass <> __SYSTEM.TYPE_CLASS.TYPE_STRING THEN
+	stringTypeNotSupportedException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), Tc2_Utilities.WCONCAT("Not supported type ", TO_WSTRING(sourceString.TypeClass)), TRUE);
+END_IF
+
+IF NOT InternalReplaceInSource(sourceString, ADR(oldSubstring), ADR(newSubstring), maxReplacements, skipReplacements, replacementCount => replacementCount) THEN
 	sourceStringMemoryOverflowExcepton.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), 'sourceString', TO_UDINT(sourceString.diSize));
 END_IF]]></ST>
       </Implementation>
@@ -673,12 +772,12 @@ VAR_IN_OUT CONSTANT
 	oldSubstring : STRING;
 	newSubstring : STRING;
 END_VAR
-(*VAR_INPUT
-	maxReplacementCount : UINT := 0;
-	skip : UINT := 0;
-END_VAR*)
+VAR_INPUT
+	maxReplacements : UINT := 0;
+	skipReplacements : UINT := 0;
+END_VAR
 VAR_OUTPUT
-	replacingCount : UINT;
+	replacementCount : UINT;
 END_VAR
 ]]></Declaration>
       <Implementation>
@@ -686,7 +785,28 @@ END_VAR
 	RETURN;
 END_IF
 
-TryReplaceInSource := InternalReplaceInSource(sourceString, ADR(oldSubstring), ADR(newSubstring), replacingCount => replacingCount);]]></ST>
+TryReplaceInSource := InternalReplaceInSource(sourceString, ADR(oldSubstring), ADR(newSubstring), maxReplacements, skipReplacements, replacementCount => replacementCount);]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="TryReplaceInSource255" Id="{9f1f7515-63df-42e0-8ebb-d9a7a98ddbf5}" FolderPath="Replace\">
+      <Declaration><![CDATA[METHOD TryReplaceInSource255 : BOOL
+VAR_INPUT
+	sourceString : ANY_STRING;
+	oldSubstring : STRING(255);
+	newSubstring : STRING(255);
+	maxReplacements : UINT := 0;
+	skipReplacements : UINT := 0;
+END_VAR
+VAR_OUTPUT
+	replacementCount : UINT;
+END_VAR
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF sourceString.TypeClass <> __SYSTEM.TYPE_CLASS.TYPE_STRING THEN
+	RETURN;
+END_IF
+
+TryReplaceInSource255 := InternalReplaceInSource(sourceString, ADR(oldSubstring), ADR(newSubstring), maxReplacements, skipReplacements, replacementCount => replacementCount);]]></ST>
       </Implementation>
     </Method>
   </POU>
