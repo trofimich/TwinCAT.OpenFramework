@@ -33,6 +33,8 @@ END_VAR]]></Declaration>
     <Folder Name="Append" Id="{0bb8b256-f491-4a2d-9a6b-2432088dbd33}" />
     <Folder Name="Replace" Id="{a756485d-6296-418d-b791-6f297941943f}" />
     <Folder Name="Service members" Id="{9fab643e-bbff-4a9b-947d-8a7d558c89e1}" />
+    <Folder Name="Split" Id="{3fe01d04-7439-4837-881a-92e26af7a9f4}" />
+    <Folder Name="Trim" Id="{222b85cc-d2c6-46ad-a621-67a695bdca8e}" />
     <Method Name="AnyToString" Id="{5eddfbb1-a4c4-4bf3-95de-4ec7342266cd}">
       <Declaration><![CDATA[METHOD AnyToString : WSTRING(255)
 VAR_INPUT
@@ -211,29 +213,24 @@ ELSE
 END_IF]]></ST>
       </Implementation>
     </Method>
-    <Method Name="DateAndTimeToString" Id="{7498afc1-9ae1-4986-8ff2-63e14a92dea2}">
-      <Declaration><![CDATA[METHOD DateAndTimeToString : WSTRING
+    <Method Name="CreateSplitter" Id="{58f73e01-1198-4842-bb84-b0fc8575acd0}" FolderPath="Split\">
+      <Declaration><![CDATA[METHOD CreateSplitter : WideStringSplitter
 VAR_INPUT
-	value : DATE_AND_TIME;
-	dateValuesSeparator : STRING(1) := '_';
-	dateAndTimeSeparator : STRING(1) := '-';
-	timeValuesSeparator : STRING(1) := '_';
+	sourceString : ANY_STRING;
+	separator : WSTRING(255);
+	maxCount : UDINT := 0;
+	trimEntries : BOOL := FALSE;
+	removeEmptyEntries : BOOL := FALSE;
 END_VAR
 VAR
-	result : STRING;
+	stringTypeNotSupportedException : NotSupportedException;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[result := TO_STRING(value);
+        <ST><![CDATA[IF sourceString.TypeClass <> __SYSTEM.TYPE_CLASS.TYPE_WSTRING THEN
+	stringTypeNotSupportedException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), Tc2_Utilities.WCONCAT("Not supported type ", TO_WSTRING(sourceString.TypeClass)), TRUE);
+END_IF
 
-result := Tc2_Standard.DELETE(result, 3, 1);
-
-result := Tc2_Standard.REPLACE(result, dateValuesSeparator, 1, 5);
-result := Tc2_Standard.REPLACE(result, dateValuesSeparator, 1, 8);
-result := Tc2_Standard.REPLACE(result, dateAndTimeSeparator, 1, 11);
-result := Tc2_Standard.REPLACE(result, timeValuesSeparator, 1, 14);
-result := Tc2_Standard.REPLACE(result, timeValuesSeparator, 1, 17);
-
-DateAndTimeToString := TO_WSTRING(result);]]></ST>
+CreateSplitter.Initialize(sourceString.pValue, separator, maxCount, trimEntries, removeEmptyEntries);]]></ST>
       </Implementation>
     </Method>
     <Method Name="Find" Id="{fbf73ef7-e095-455c-b374-56142e92beda}">
@@ -421,7 +418,7 @@ END_CASE	]]></ST>
       <Declaration><![CDATA[METHOD INTERNAL InternalFind : BOOL
 VAR_INPUT
 	stringToSearchIn : POINTER TO WSTRING;
-	searchInStringLength : UDINT;
+	stringToSearchInLength : UDINT;
 	stringToFind : POINTER TO WSTRING;
 	stringToFindLength : UDINT;
 END_VAR
@@ -433,11 +430,11 @@ VAR
 	memCoparisionResult : DINT;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[IF searchInStringLength < stringToFindLength THEN
+        <ST><![CDATA[IF stringToSearchInLength < stringToFindLength THEN
 	RETURN;
 END_IF
 
-FOR i := 0 TO searchInStringLength - stringToFindLength DO
+FOR i := 0 TO stringToSearchInLength - stringToFindLength DO
 	IF Tc2_System.MEMCMP(stringToSearchIn + (i * CharSize), stringToFind, stringToFindLength * CharSize) = 0 THEN
 		position := i + 1;
 		InternalFind := TRUE;
@@ -453,7 +450,7 @@ VAR_INPUT
 END_VAR
 ]]></Declaration>
       <Implementation>
-        <ST><![CDATA[InternalGetLength := Tc2_Utilities.WLEN2(value);]]></ST>
+        <ST><![CDATA[InternalGetLength := SEL(value = 0, Tc2_Utilities.WLEN2(value), 0);]]></ST>
       </Implementation>
     </Method>
     <Method Name="InternalReplaceInSource" Id="{ba1ad49c-b07c-4f21-b23e-4e0400c679ac}" FolderPath="Service members\">
@@ -719,6 +716,107 @@ StringReferenceToAnyType.pValue := ADR(value);
 StringReferenceToAnyType.diSize := TO_DINT(GetActualSize(value));]]></ST>
       </Implementation>
     </Method>
+    <Method Name="TrimChar" Id="{e2ff62b2-4701-4d44-a6fc-9b69cb60ec38}" FolderPath="Trim\">
+      <Declaration><![CDATA[METHOD TrimChar
+VAR_IN_OUT
+	stringToTrim : WSTRING;
+END_VAR
+VAR_INPUT
+	trimMode : TRIM_MODE := TRIM_MODE.LEFT_AND_RIGHT;
+	trimChar : WSTRING(1) := " ";
+END_VAR
+VAR
+	trimCharArray : ARRAY [0..0] OF WSTRING(1);	
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[trimCharArray[0] := trimChar;
+
+TrimChars(stringToTrim, trimMode, trimCharArray);]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="TrimChars" Id="{cb597a03-3a6d-40b2-92cb-bb844efea4ef}" FolderPath="Trim\">
+      <Declaration><![CDATA[METHOD TrimChars
+VAR_IN_OUT
+	stringToTrim : WSTRING;
+END_VAR
+VAR_INPUT
+	trimMode : TRIM_MODE := TRIM_MODE.LEFT_AND_RIGHT;
+END_VAR
+VAR_IN_OUT CONSTANT
+	trimChars : ARRAY [*] OF WSTRING(1);	
+END_VAR
+VAR
+	stringLength : UDINT;
+	stringData : POINTER TO WORD;
+	trimCharData : POINTER TO WORD;
+	
+	originalCharIndex : UDINT;
+	trimCharIndex : UDINT;
+	trimCharCount : UDINT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[stringData := ADR(stringToTrim);
+stringLength := InternalGetLength(stringData);
+
+IF stringLength < 1 THEN
+	RETURN;
+END_IF
+
+IF trimMode = TRIM_MODE.LEFT_AND_RIGHT OR_ELSE trimMode = TRIM_MODE.LEFT THEN
+	trimCharCount := 0;
+	
+	FOR originalCharIndex := 0 TO stringLength - 1 BY 1 DO
+		FOR trimCharIndex := TO_UDINT(LOWER_BOUND(trimChars, 1)) TO TO_UDINT(UPPER_BOUND(trimChars, 1)) DO
+			trimCharData := ADR(trimChars[trimCharIndex]);
+			
+			IF stringData[originalCharIndex] = trimCharData^ THEN
+				trimCharCount := trimCharCount + 1;
+				EXIT;
+			END_IF
+		END_FOR
+		
+		IF trimCharCount <> originalCharIndex + 1 THEN
+			EXIT;
+		END_IF
+	END_FOR
+
+	IF trimCharCount > 0 THEN
+		stringLength := stringLength - trimCharCount;
+		
+		Tc2_System.MEMCPY(stringData, (stringData + (trimCharCount * CharSize)), (stringLength * CharSize) + CharSize);		
+	END_IF
+END_IF
+
+IF stringLength < 1 THEN
+	RETURN;
+END_IF
+
+IF trimMode = TRIM_MODE.LEFT_AND_RIGHT OR_ELSE trimMode = TRIM_MODE.RIGHT THEN
+	trimCharCount := 0;
+	
+	FOR originalCharIndex := stringLength - 1 TO 0 BY -1 DO
+		FOR trimCharIndex := TO_UDINT(LOWER_BOUND(trimChars, 1)) TO TO_UDINT(UPPER_BOUND(trimChars, 1)) DO
+			trimCharData := ADR(trimChars[trimCharIndex]);
+			
+			IF stringData[originalCharIndex] = trimCharData^ THEN
+				trimCharCount := trimCharCount + 1;
+				EXIT;
+			END_IF
+		END_FOR
+		
+		IF trimCharCount <> stringLength - originalCharIndex THEN
+			EXIT;
+		END_IF
+	END_FOR
+
+	IF trimCharCount > 0 THEN
+		stringLength := stringLength - trimCharCount;
+		
+		Tc2_System.MEMSET(stringData + (stringLength * CharSize), 0, CharSize);		
+	END_IF	
+END_IF]]></ST>
+      </Implementation>
+    </Method>
     <Method Name="TryAppendToTarget" Id="{4de57109-f456-48e2-92b9-7ccc4d2d48fb}" FolderPath="Append\">
       <Declaration><![CDATA[METHOD TryAppendToTarget : BOOL
 VAR_INPUT
@@ -748,6 +846,31 @@ VAR_INPUT
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[TryAppendToTarget255 := InternalTryAppendToTarget(targetString, ADR(sourceString1), ADR(sourceString2), ADR(sourceString3), ADR(sourceString4), ADR(sourceString5), ADR(sourceString6), ADR(sourceString7), ADR(sourceString8), ADR(sourceString9), ADR(sourceString10));]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="TryCreateSplitter" Id="{527506d6-1420-4056-93a4-b1b0eacd1e2d}" FolderPath="Split\">
+      <Declaration><![CDATA[METHOD TryCreateSplitter : BOOL
+VAR_INPUT
+	sourceString : ANY_STRING;
+	separator : WSTRING(255);
+	maxCount : UDINT := 0;
+	trimEntries : BOOL := FALSE;
+	removeEmptyEntries : BOOL := FALSE;
+END_VAR
+VAR_OUTPUT
+	splitter : WideStringSplitter;
+END_VAR
+VAR
+	stringTypeNotSupportedException : NotSupportedException;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF sourceString.TypeClass <> __SYSTEM.TYPE_CLASS.TYPE_WSTRING THEN
+	RETURN;
+END_IF
+
+splitter.Initialize(sourceString.pValue, separator, maxCount, trimEntries, removeEmptyEntries);
+
+TryCreateSplitter := TRUE;]]></ST>
       </Implementation>
     </Method>
     <Method Name="TryReplaceInSource" Id="{4174b626-3bd8-4d6b-815f-679d9353671f}" FolderPath="Replace\">
