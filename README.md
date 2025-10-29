@@ -12,7 +12,7 @@ Do not update to TC 3.1.4026.19 if you use this framework because of new bug in 
   Work with an unknown number of elements at runtime.
 
 - **String handling**  
-  Convenient string concatenation from multiple parts, support for strings longer than 255 characters, and more.
+  Convenient string concatenation, replacement, trimming, splitting for STRING and WSTRING types. Support for strings longer than 255 characters and more.
 
 - **Logging system**  
   A convenient logging system with advanced filtering capabilities based on topics and support for custom logger implementations.
