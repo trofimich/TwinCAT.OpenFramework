@@ -18,7 +18,7 @@ Do not update to TC 3.1.4026.19 if you use this framework because of new bug in 
   A convenient logging system with advanced filtering capabilities based on topics and support for custom logger implementations.
 
 - **Workflow engine**  
-  A powerful engine for executing complex scenarios that can be composed dynamically. Basic activities such as Sequence, IfThenElse, While, WaitForVariableValue, WaitAndPick, etc., are already supported. Custom activities can also be created to meet individual requirements.
+  A powerful engine for executing complex scenarios that can be composed dynamically. Basic activities such as Sequence, IfThenElse, While, WaitForVariableValue, WaitAndPick, TryCatch, etc., are already supported. Custom activities can also be created to meet individual requirements.
   
 - **JSON support**  
   Simplified serialization and deserialization of structures to and from JSON documents.
