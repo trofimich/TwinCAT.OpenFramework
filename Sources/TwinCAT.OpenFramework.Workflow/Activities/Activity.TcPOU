@@ -18,23 +18,126 @@ legal notes
 *)
 
 {attribute 'no_explicit_call' := 'do not call this function block directly'} 
-FUNCTION_BLOCK ABSTRACT Activity EXTENDS Core.AbortableTask IMPLEMENTS IActivity
+FUNCTION_BLOCK ABSTRACT Activity EXTENDS Core.Object IMPLEMENTS IActivity
 VAR
-	{attribute 'OPC.UA.DA' := '0'}
 	_Name : WSTRING;
-
-	{attribute 'OPC.UA.DA' := '0'}
+	
 	_Workflow : IWorkflow;
 	
-	{attribute 'OPC.UA.DA' := '0'}
 	_Parent : IActivity;
 
-	{attribute 'OPC.UA.DA' := '0'}
 	_Variables : Collections.Dictionary(0, 0);
+	
+	_State : WORKFLOW_ELEMENT_STATE;
+	_PreviousState : WORKFLOW_ELEMENT_STATE;
+	_StateChanged : BOOL;
+	
+	_FailErrorMessage : Core.ERROR_MESSAGE;
+	_CancelReason : WSTRING(255);
+	_HaltReason : WSTRING(255);
 END_VAR]]></Declaration>
     <Implementation>
       <ST><![CDATA[]]></ST>
     </Implementation>
+    <Folder Name="Internal methods" Id="{d209e4cb-f636-4994-9756-8ec05d532d51}" />
+    <Folder Name="Methods to override" Id="{e7dec774-a925-4c60-82fb-0de6b314c0cf}" />
+    <Property Name="Busy" Id="{4a27e4a6-049e-423b-bd5e-9b17f40d26c7}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+{attribute 'OPC.UA.DA.Property' := '1'}
+{attribute 'OPC.UA.DA.Access' := '1'}
+PROPERTY FINAL Busy : BOOL]]></Declaration>
+      <Get Name="Get" Id="{051f0622-8617-4132-bb68-a981920bece1}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[Busy := _State = WORKFLOW_ELEMENT_STATE.ACTIVE_RUNNING 
+	OR_ELSE _State = WORKFLOW_ELEMENT_STATE.ACTIVE_CANCELLING
+	OR_ELSE _State = WORKFLOW_ELEMENT_STATE.ACTIVE_SUSPENDING;	]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="CancelReason" Id="{e2bc3f04-4677-4d3c-9357-f54296f5e5c8}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+{attribute 'OPC.UA.DA.Property' := '1'}
+{attribute 'OPC.UA.DA.Access' := '1'}
+PROPERTY CancelReason : REFERENCE TO WSTRING(255)
+]]></Declaration>
+      <Get Name="Get" Id="{df206a6b-d527-4e14-aba8-68798b8c9d03}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[CancelReason REF= _CancelReason;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="Execute" Id="{be6fc6c1-8eae-4046-84ea-8d4eaff4bdc8}">
+      <Declaration><![CDATA[METHOD FINAL Execute
+VAR
+	runningState : ACTIVITY_RUNNING_STATE;
+	stoppingState : ACTIVITY_STOPPING_STATE;
+	
+	haltReason : WSTRING(255);
+	
+	exceptionCode : __SYSTEM.ExceptionCode;
+	
+	exception : IException;	
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_StateChanged := FALSE;
+
+__TRY	
+	CASE _State OF
+		WORKFLOW_ELEMENT_STATE.ACTIVE_RUNNING:
+			runningState := OnRunning(FALSE, FALSE, haltReason => haltReason);
+	
+			CASE runningState OF
+				ACTIVITY_RUNNING_STATE.WORK_COMPLETED:
+					SetNewState(WORKFLOW_ELEMENT_STATE.PASSIVE_COMPLETED);
+					
+				ACTIVITY_RUNNING_STATE.WORK_HALTED:
+					SetNewState(WORKFLOW_ELEMENT_STATE.PASSIVE_HALTED);
+					_HaltReason := haltReason;
+			END_CASE
+		
+		WORKFLOW_ELEMENT_STATE.ACTIVE_CANCELLING, WORKFLOW_ELEMENT_STATE.ACTIVE_SUSPENDING:
+			stoppingState := OnStopping(FALSE, FALSE, haltReason => haltReason); 
+		
+			CASE stoppingState OF
+				ACTIVITY_STOPPING_STATE.WORK_STOPPED:
+					IF _State = WORKFLOW_ELEMENT_STATE.ACTIVE_CANCELLING THEN
+						SetNewState(WORKFLOW_ELEMENT_STATE.PASSIVE_CANCELLED);
+					ELSE 
+						SetNewState(WORKFLOW_ELEMENT_STATE.PASSIVE_SUSPENDED);
+					END_IF
+					
+				ACTIVITY_STOPPING_STATE.WORK_COMPLETED:
+					SetNewState(WORKFLOW_ELEMENT_STATE.PASSIVE_COMPLETED);
+					
+				ACTIVITY_STOPPING_STATE.WORK_HALTED:
+					SetNewState(WORKFLOW_ELEMENT_STATE.PASSIVE_HALTED);
+					_HaltReason := haltReason;
+			END_CASE
+	END_CASE
+__CATCH(exceptionCode)
+	exception := Core.ExceptionManager.GetLastException(exceptionCode);
+	
+	SetNewState(WORKFLOW_ELEMENT_STATE.PASSIVE_FAILED);
+	_FailErrorMessage := exception.GetMessage();
+	
+	Core.ExceptionManager.ReThrowLastException();
+__ENDTRY]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="FailErrorMessage" Id="{487ced16-7528-4ca7-b275-2962ec89e588}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+{attribute 'OPC.UA.DA.Property' := '1'}
+{attribute 'OPC.UA.DA.Access' := '1'}
+PROPERTY FailErrorMessage : REFERENCE TO ERROR_MESSAGE]]></Declaration>
+      <Get Name="Get" Id="{388e0c13-041e-488c-a343-649e016470b2}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[FailErrorMessage REF= _FailErrorMessage;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
     <Method Name="FB_init" Id="{ffd89157-0584-4da6-8b2f-193481b5613d}">
       <Declaration><![CDATA[METHOD FB_init : BOOL
 VAR_INPUT
@@ -53,25 +156,73 @@ IF _Workflow <> 0 THEN
 END_IF]]></ST>
       </Implementation>
     </Method>
-    <Property Name="Name" Id="{6f9801a4-5977-4def-a91d-0e8a2adf8486}">
+    <Property Name="HaltReason" Id="{07437ef7-469f-4431-94a0-8d23aebd0d97}">
       <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
 {attribute 'OPC.UA.DA.Property' := '1'}
 {attribute 'OPC.UA.DA.Access' := '1'}
-PROPERTY Name : WSTRING
+PROPERTY HaltReason : REFERENCE TO WSTRING(255)
 ]]></Declaration>
-      <Get Name="Get" Id="{f46d6ffa-61a5-4dc1-af31-5e5917bbe297}">
+      <Get Name="Get" Id="{f06593a6-8dcc-4d84-a248-9dce2650988b}">
         <Declaration><![CDATA[]]></Declaration>
         <Implementation>
-          <ST><![CDATA[Name := SEL(_Name = "", _Name, TO_WSTRING(ClassName));]]></ST>
+          <ST><![CDATA[HaltReason REF= _HaltReason;]]></ST>
         </Implementation>
       </Get>
-      <Set Name="Set" Id="{fc99bfa7-024d-4538-9fd8-9276dd17dca6}">
+    </Property>
+    <Property Name="Name" Id="{4ab9bbf7-e87b-4c87-bc17-1da2b3393057}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+{attribute 'OPC.UA.DA.Property' := '1'}
+{attribute 'OPC.UA.DA.Access' := '1'}
+PROPERTY FINAL Name : WSTRING]]></Declaration>
+      <Get Name="Get" Id="{1f523989-83ef-4516-813c-be024b8169a3}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[Name := SEL(_Name = "", _Name, SUPER^.Name);]]></ST>
+        </Implementation>
+      </Get>
+      <Set Name="Set" Id="{5d803245-4836-429c-95a2-020b8d455b52}">
         <Declaration><![CDATA[]]></Declaration>
         <Implementation>
           <ST><![CDATA[_Name := Name;]]></ST>
         </Implementation>
       </Set>
     </Property>
+    <Method Name="OnFail" Id="{86d98c43-34b6-41e3-a2de-bfa6e2663324}" FolderPath="Methods to override\">
+      <Declaration><![CDATA[METHOD PROTECTED OnFail
+VAR_INPUT
+	exception : Core.IException;
+END_VAR
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="OnRunning" Id="{ff3568b9-81d7-45c0-aad6-1ecbde24ba04}" FolderPath="Methods to override\">
+      <Declaration><![CDATA[METHOD PROTECTED ABSTRACT OnRunning : ACTIVITY_RUNNING_STATE
+VAR_INPUT
+	startRunning : BOOL;
+	startResuming : BOOL;
+END_VAR
+VAR_OUTPUT
+	haltReason : WSTRING(255);
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="OnStopping" Id="{0f732c8a-9e9a-4779-80c6-a3e254a4c94f}" FolderPath="Methods to override\">
+      <Declaration><![CDATA[METHOD PROTECTED ABSTRACT OnStopping : ACTIVITY_STOPPING_STATE
+VAR_INPUT
+	startCancelling : BOOL;
+	startSuspending : BOOL;
+END_VAR
+VAR_OUTPUT
+	haltReason : WSTRING(255);
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[]]></ST>
+      </Implementation>
+    </Method>
     <Property Name="Parent" Id="{7746eee7-81b2-4cc8-b04b-86aaff99c3e3}">
       <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
 PROPERTY Parent : IActivity]]></Declaration>
@@ -87,6 +238,194 @@ PROPERTY Parent : IActivity]]></Declaration>
           <ST><![CDATA[_Parent := Parent;]]></ST>
         </Implementation>
       </Set>
+    </Property>
+    <Method Name="RequestCancel" Id="{b3ceac03-f171-4dc0-9de1-bd85e0183af2}">
+      <Declaration><![CDATA[METHOD FINAL RequestCancel
+VAR_INPUT
+	reason : WSTRING(255);
+END_VAR
+VAR
+	exceptionCode : __SYSTEM.ExceptionCode;
+	
+	exception : IException;
+	
+	stoppingState : ACTIVITY_STOPPING_STATE;
+	haltReason : WSTRING(255);
+END_VAR
+VAR CONSTANT
+	targetState : WORKFLOW_ELEMENT_STATE := WORKFLOW_ELEMENT_STATE.ACTIVE_CANCELLING;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[LogManager.TryLogMessage(WideStringHelper.ConcatStrings255("Cancel requested for activity '", Name, "'"), LOG_CATEGORY.INFORMATION, "Activity", "ActivityRequest", "ActivityRequestCancel");
+
+IF NOT WorkflowHelper.ValidateTransition(_State, targetState) THEN
+	RETURN;
+END_IF
+
+SetNewState(targetState);
+_CancelReason := reason;
+
+__TRY	
+	stoppingState := OnStopping(TRUE, FALSE, haltReason => haltReason); 
+
+	CASE stoppingState OF
+		ACTIVITY_STOPPING_STATE.WORK_STOPPED:
+			SetNewState(WORKFLOW_ELEMENT_STATE.PASSIVE_CANCELLED);
+			
+		ACTIVITY_STOPPING_STATE.WORK_COMPLETED:
+			SetNewState(WORKFLOW_ELEMENT_STATE.PASSIVE_COMPLETED);
+			
+		ACTIVITY_STOPPING_STATE.WORK_HALTED:
+			SetNewState(WORKFLOW_ELEMENT_STATE.PASSIVE_HALTED);
+			_HaltReason := haltReason;
+	END_CASE
+__CATCH(exceptionCode)
+	exception := Core.ExceptionManager.GetLastException(exceptionCode);
+	
+	SetNewState(WORKFLOW_ELEMENT_STATE.PASSIVE_FAILED);
+	_FailErrorMessage := exception.GetMessage();
+	
+	__TRY
+		OnFail(exception);
+	__CATCH
+	__ENDTRY
+	
+	Core.ExceptionManager.ReThrowLastException();
+__ENDTRY]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="RequestStart" Id="{09722d60-5a50-4ba0-834d-aa751d69d95a}">
+      <Declaration><![CDATA[METHOD RequestStart
+VAR
+	resuming : BOOL;
+	
+	exceptionCode : __SYSTEM.ExceptionCode;
+	
+	exception : IException;
+	
+	runningState : ACTIVITY_RUNNING_STATE;
+	haltReason : WSTRING(255);
+END_VAR
+VAR CONSTANT
+	targetState : WORKFLOW_ELEMENT_STATE := WORKFLOW_ELEMENT_STATE.ACTIVE_RUNNING;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[LogManager.TryLogMessage(WideStringHelper.ConcatStrings255("Start requested for activity '", Name, "'"), LOG_CATEGORY.INFORMATION, "Activity", "ActivityRequest", "ActivityRequestStart");
+
+IF NOT WorkflowHelper.ValidateTransition(_State, targetState) THEN
+	RETURN;
+END_IF
+
+resuming := _State = WORKFLOW_ELEMENT_STATE.PASSIVE_SUSPENDED;
+
+SetNewState(targetState);
+
+_FailErrorMessage := "";
+_CancelReason := "";
+_HaltReason := "";
+
+__TRY
+	runningState := OnRunning(NOT resuming, resuming, haltReason => haltReason); 
+
+	CASE runningState OF
+		ACTIVITY_RUNNING_STATE.WORK_COMPLETED:
+			SetNewState(WORKFLOW_ELEMENT_STATE.PASSIVE_COMPLETED);
+			
+		ACTIVITY_RUNNING_STATE.WORK_HALTED:
+			SetNewState(WORKFLOW_ELEMENT_STATE.PASSIVE_HALTED);
+			_HaltReason := haltReason;
+	END_CASE
+__CATCH(exceptionCode)
+	exception := Core.ExceptionManager.GetLastException(exceptionCode);
+	
+	SetNewState(WORKFLOW_ELEMENT_STATE.PASSIVE_FAILED);
+	_FailErrorMessage := exception.GetMessage();
+	
+	__TRY
+		OnFail(exception);
+	__CATCH
+	__ENDTRY
+	
+	Core.ExceptionManager.ReThrowLastException();
+__ENDTRY]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="RequestSuspend" Id="{2ed6294f-7e81-48bb-96fc-22593c00015d}">
+      <Declaration><![CDATA[METHOD RequestSuspend
+VAR
+	exceptionCode : __SYSTEM.ExceptionCode;
+	
+	exception : IException;
+	
+	stoppingState : ACTIVITY_STOPPING_STATE;
+	haltReason : WSTRING(255);
+END_VAR
+VAR CONSTANT
+	targetState : WORKFLOW_ELEMENT_STATE := WORKFLOW_ELEMENT_STATE.ACTIVE_SUSPENDING;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[LogManager.TryLogMessage(WideStringHelper.ConcatStrings255("Suspend requested for activity '", Name, "'"), LOG_CATEGORY.INFORMATION, "Activity", "ActivityRequest", "ActivityRequestSuspend");
+
+IF NOT WorkflowHelper.ValidateTransition(_State, targetState) THEN
+	RETURN;
+END_IF
+
+SetNewState(targetState);
+
+__TRY	
+	stoppingState := OnStopping(FALSE, TRUE, haltReason => haltReason); 
+
+	CASE stoppingState OF
+		ACTIVITY_STOPPING_STATE.WORK_STOPPED:
+			SetNewState(WORKFLOW_ELEMENT_STATE.PASSIVE_SUSPENDED);
+			
+		ACTIVITY_STOPPING_STATE.WORK_COMPLETED:
+			SetNewState(WORKFLOW_ELEMENT_STATE.PASSIVE_COMPLETED);
+			
+		ACTIVITY_STOPPING_STATE.WORK_HALTED:
+			SetNewState(WORKFLOW_ELEMENT_STATE.PASSIVE_HALTED);
+			_HaltReason := haltReason;
+	END_CASE
+__CATCH(exceptionCode)
+	exception := Core.ExceptionManager.GetLastException(exceptionCode);	
+	
+	SetNewState(WORKFLOW_ELEMENT_STATE.PASSIVE_FAILED);
+	_FailErrorMessage := exception.GetMessage();
+	
+	__TRY
+		OnFail(exception);
+	__CATCH
+	__ENDTRY
+	
+	Core.ExceptionManager.ReThrowLastException();
+__ENDTRY]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="SetNewState" Id="{7af2da96-4196-4a37-93e6-687784f94a02}" FolderPath="Internal methods\">
+      <Declaration><![CDATA[METHOD PROTECTED FINAL SetNewState
+VAR_INPUT
+	newState : WORKFLOW_ELEMENT_STATE;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF _State = newState THEN
+	RETURN;
+END_IF
+
+LogManager.TryLogMessage(WideStringHelper.ConcatStrings255("Activity '", Name, "' state changed from '", TO_WSTRING(_State), "' to '", TO_WSTRING(newState), "'"), LOG_CATEGORY.INFORMATION, "Activity", "ActivitySetNewState");
+
+_PreviousState := _State;
+_State := newState;
+_StateChanged := TRUE;]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="State" Id="{201c6b82-3a53-42a5-a4be-54bc270d67ef}">
+      <Declaration><![CDATA[PROPERTY FINAL State : WORKFLOW_ELEMENT_STATE]]></Declaration>
+      <Get Name="Get" Id="{a6a927b4-af82-407a-901f-2a288505a083}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[State := _State;]]></ST>
+        </Implementation>
+      </Get>
     </Property>
     <Method Name="TryGetVariable" Id="{7404742e-521b-4644-b536-622820cce67b}">
       <Declaration><![CDATA[METHOD TryGetVariable : BOOL

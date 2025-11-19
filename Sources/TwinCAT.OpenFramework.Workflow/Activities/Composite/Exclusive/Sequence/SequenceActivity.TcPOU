@@ -1,0 +1,211 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="SequenceActivity" Id="{1bca36af-b7de-4b08-b287-296cf8c67b1e}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+
+.. <legal notes>
+
+legal notes
+=================
+| SPDX-FileCopyrightText: © 2025 Oleksandr Tiutyk <trofimich@gmail.com>
+| SPDX-License-Identifier: LGPL-3.0-only
+| For details check: LGPL-3.0-only_
+
+.. _LGPL-3.0-only: https://www.gnu.org/licenses/lgpl-3.0.en.html
+
+.. </legal notes>
+
+*)
+
+{attribute 'no_explicit_call' := 'do not call this function block directly'} 
+{attribute 'enable_dynamic_creation'}
+FUNCTION_BLOCK SequenceActivity EXTENDS ExclusiveCompositeActivity IMPLEMENTS ISequenceActivity
+VAR
+	{attribute 'OPC.UA.DA' := '0'}
+	_ClassName : STRING := __POUNAME();
+
+	{attribute 'OPC.UA.DA' := '0'}
+	_Children : Collections.List(0);
+
+	{attribute 'OPC.UA.DA' := '0'}
+	_CurrentActivityIndex : DINT := -1;
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[]]></ST>
+    </Implementation>
+    <Folder Name="Service members" Id="{3f51cbe1-be68-4e5e-a663-f6baed6e006e}" />
+    <Method Name="AddChildActivity" Id="{a30975d8-8e95-48ec-a5ab-8e9aa1d75be7}">
+      <Declaration><![CDATA[METHOD AddChildActivity
+VAR_INPUT
+	activity : IActivity;
+END_VAR
+VAR
+	argumentNullExcxeption : Core.ArgumentNotSpecifiedException;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF activity = 0  THEN
+	argumentNullExcxeption.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), 'activity');
+END_IF
+
+activity.Parent := THIS^;
+
+_Children.AppendGeneric(Core.GenericValueFactory.FromParts(GENERIC_TYPE_CLASS.TYPE_OBJECT, activity.Address, activity.Size, GENERIC_MEMORY_MANAGEMENT_BEHAVIOR.STORE_ORIGINAL_REFERENCE_AND_NOT_OWNS_MEMORY));]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="ClassName" Id="{72010df4-c4eb-4a27-acd3-c42588cae27a}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+PROPERTY ClassName : STRING]]></Declaration>
+      <Get Name="Get" Id="{d41e15da-8455-40c4-82b6-9574b0fe558a}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ClassName := _ClassName;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="CurrentActivity" Id="{1a4ebfb1-244f-44f9-8b12-8787ad4a03a7}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+PROPERTY FINAL CurrentActivity : IActivity]]></Declaration>
+      <Get Name="Get" Id="{3a9f72bd-ef17-4fe7-b05f-5afb314fb2fe}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[IF _Children.Count > 0 AND_THEN _CurrentActivityIndex >= 0 AND_THEN _CurrentActivityIndex < _Children.Count THEN
+	__QUERYINTERFACE(_Children.Get(_CurrentActivityIndex).AsObject(), CurrentActivity);
+END_IF]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="CurrentActivityIndex" Id="{8fdd1d3f-3fdc-492f-b895-9e1e6061e1cd}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+PROPERTY FINAL CurrentActivityIndex : DINT]]></Declaration>
+      <Get Name="Get" Id="{1ac1fa84-8eed-4de1-9a51-3f86182c90ee}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[CurrentActivityIndex := _CurrentActivityIndex;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="NamespaceName" Id="{1771b04b-38be-4416-9a7e-972d57af0862}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+PROPERTY NamespaceName : STRING]]></Declaration>
+      <Get Name="Get" Id="{d41be4b9-0e62-4695-98dc-b4b063425079}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[NamespaceName := CurrentNamespace.Name;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="OnRunning" Id="{53e0829c-4dbd-4b85-a474-dd611d0f45cd}">
+      <Declaration><![CDATA[METHOD PROTECTED OnRunning : ACTIVITY_RUNNING_STATE
+VAR_INPUT
+	startRunning : BOOL;
+	startResuming : BOOL;
+END_VAR
+VAR_OUTPUT
+	haltReason : WSTRING(255);
+END_VAR
+VAR
+	activity : IActivity;
+	
+	currentActivityIsNullException : Core.NullReferenceException;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF _Children.Count < 1 THEN
+	OnRunning := ACTIVITY_RUNNING_STATE.WORK_COMPLETED;
+	RETURN;
+END_IF
+
+IF startRunning OR_ELSE (startResuming AND_THEN _CurrentActivityIndex < 0) THEN
+	_CurrentActivityIndex := 0;
+END_IF
+
+activity := CurrentActivity;
+
+IF activity = 0 THEN
+	currentActivityIsNullException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), 'CurrentActivity');
+END_IF
+
+IF startRunning OR_ELSE startResuming OR_ELSE NOT activity.Busy THEN
+	activity.RequestStart();
+ELSE
+	activity.Execute();
+END_IF
+
+OnRunning := GetActivityRunningStateByNestedActivityState(activity.State);
+
+IF OnRunning = ACTIVITY_RUNNING_STATE.WORK_COMPLETED THEN
+	selectNextTask();
+	
+	IF _CurrentActivityIndex >= 0 THEN
+		OnRunning := ACTIVITY_RUNNING_STATE.WORK_IN_PROGRESS;
+	END_IF
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="OnStopping" Id="{58c42973-4e56-4492-9a0d-c7eb58c052dc}">
+      <Declaration><![CDATA[METHOD PROTECTED OnStopping : ACTIVITY_STOPPING_STATE
+VAR_INPUT
+	startCancelling : BOOL;
+	startSuspending : BOOL;
+END_VAR
+VAR_OUTPUT
+	haltReason : WSTRING(255);
+END_VAR
+VAR
+	activity : IActivity;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF _Children.Count < 1 THEN
+	OnStopping := ACTIVITY_STOPPING_STATE.WORK_COMPLETED;
+	RETURN;
+END_IF
+
+activity := CurrentActivity;
+
+IF activity = 0 THEN
+	IF startCancelling OR_ELSE startSuspending THEN
+		OnStopping := ACTIVITY_STOPPING_STATE.WORK_STOPPED;
+	ELSE
+		OnStopping := ACTIVITY_STOPPING_STATE.WORK_COMPLETED;		
+	END_IF
+
+	RETURN;
+END_IF
+
+IF NOT activity.Busy THEN
+	OnStopping := GetActivityStoppingStateByNestedActivityState(activity.State);
+	RETURN;
+END_IF
+
+IF startCancelling THEN
+	activity.RequestCancel(_CancelReason);
+ELSIF startSuspending THEN
+	activity.RequestSuspend();
+ELSE
+	activity.Execute();
+END_IF
+
+OnStopping := GetActivityStoppingStateByNestedActivityState(activity.State);]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="selectNextTask" Id="{7ad99828-ec1f-4f8b-bfdb-f4b31de1f87c}" FolderPath="Service members\">
+      <Declaration><![CDATA[METHOD PRIVATE selectNextTask]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF _CurrentActivityIndex < _Children.Count - 1 THEN
+	_CurrentActivityIndex := _CurrentActivityIndex + 1;
+ELSE	
+	_CurrentActivityIndex := -1;
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="Size" Id="{41f1ba7d-873e-4cab-8142-5d65c440edef}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+PROPERTY Size : ULINT]]></Declaration>
+      <Get Name="Get" Id="{3d49e29e-d473-48e0-b330-20e133f0a344}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[Size := XSIZEOF(THIS^);]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+  </POU>
+</TcPlcObject>
