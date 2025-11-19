@@ -166,7 +166,7 @@ See [LICENSE](./LICENSE) for details.
 ## 🖼️ Screenshots 
 
 ![Signal-controlled intersection visualization](Screenshots/SignalControlledIntersection.png)
-![Demo workflow visualization](Screenshots/SignalControlledIntersection.png)
+![Demo workflow visualization](Screenshots/DemoWorkflow.png)
 ![Collections test](Screenshots/TestCollections.png)
 ![Exceptions test](Screenshots/TestExceptions.png)
 ![Workflow creation](Screenshots/WorkflowCreation.png)
