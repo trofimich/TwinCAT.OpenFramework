@@ -32,6 +32,7 @@ END_VAR]]></Declaration>
       <ST><![CDATA[]]></ST>
     </Implementation>
     <Folder Name="Overriden members" Id="{fa4015c4-9b09-4ca8-8a87-8fd2497e24b8}" />
+    <Folder Name="Service members" Id="{dfb1ef28-2e7d-45d9-a141-45600b7f6d77}" />
     <Method Name="AddTask" Id="{4fbf566b-f914-4407-80d5-dd104cd557de}">
       <Declaration><![CDATA[METHOD AddTask : DINT
 VAR_INPUT
@@ -45,7 +46,7 @@ END_VAR]]></Declaration>
 	taskTypeNotSpecifiedException.Throw(Namespacename, ClassName, __POUNAME(), __POSITION(), 'task');
 END_IF
 
-_Tasks.AppendGeneric(GenericValueFactory.FromAny(task, FALSE, GENERIC_MEMORY_MANAGEMENT_BEHAVIOR.STORE_ORIGINAL_REFERENCE_AND_NOT_OWNS_MEMORY), index => AddTask);]]></ST>
+_Tasks.AppendGeneric(GenericValueFactory.FromIObjectReference(task), index => AddTask);]]></ST>
       </Implementation>
     </Method>
     <Property Name="ClassName" Id="{773ba440-b042-488f-97a2-de044245c5b8}">
@@ -64,6 +65,30 @@ PROPERTY ClassName : STRING]]></Declaration>
         <ST><![CDATA[_Tasks.Clear();]]></ST>
       </Implementation>
     </Method>
+    <Method Name="getTaskByIndex" Id="{db2a16e5-5db2-4e2b-93ea-bd2d371cec83}" FolderPath="Service members\">
+      <Declaration><![CDATA[METHOD getTaskByIndex : ITask
+VAR_INPUT
+	taskIndex : DINT;
+END_VAR
+VAR
+	taskInterface : TOF_Core.IObject;
+	
+	taskIndexOutOfRangeException : TOF_Core.ArgumentOutOfRangeException;
+	
+	toITaskConversionNotSupportedException : TOF_Core.StandardException;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF taskIndex < 0 OR_ELSE taskIndex >= _Tasks.Count THEN
+	taskIndexOutOfRangeException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), 'taskIndex', taskIndex);
+END_IF
+
+taskInterface := _Tasks.Get(taskIndex).AsIObject();
+
+IF NOT __QUERYINTERFACE(taskInterface, getTaskByIndex) THEN
+	toITaskConversionNotSupportedException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), "Can't convert task from _Tasks collection to ITask type");
+END_IF]]></ST>
+      </Implementation>
+    </Method>
     <Property Name="NamespaceName" Id="{5dd6d568-afa1-4a66-a02b-252ca76934a5}">
       <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
 PROPERTY NamespaceName : STRING]]></Declaration>
@@ -77,13 +102,13 @@ PROPERTY NamespaceName : STRING]]></Declaration>
     <Method Name="OnCancel" Id="{7c8c6dde-1fe7-48db-9a57-8a23ac600474}" FolderPath="Overriden members\">
       <Declaration><![CDATA[METHOD PROTECTED OnCancel
 VAR
-	currentTask : POINTER TO ITask;
+	currentTask : ITask;
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[IF _CurrentTaskIndex > 0 AND_THEN _CurrentTaskIndex < _Tasks.Count THEN
-	currentTask := _Tasks.Get(_CurrentTaskIndex).Address;
-	
-	currentTask^.Cancel();
+	IF __QUERYINTERFACE(_Tasks.Get(_CurrentTaskIndex).AsIObject(), currentTask) THEN
+		currentTask.Cancel();		
+	END_IF
 END_IF]]></ST>
       </Implementation>
     </Method>
@@ -96,17 +121,17 @@ VAR_OUTPUT
 	state : TASK_RUNNING_STATE;
 END_VAR
 VAR
-	currentTask, nextTask : POINTER TO ITask;
+	currentTask, nextTask : ITask;
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[IF startRequest THEN	
 	IF _Tasks.Count > 0 THEN
 		_CurrentTaskIndex := 0;
 		
-		currentTask := _Tasks.Get(_CurrentTaskIndex).Address;
+		currentTask := getTaskByIndex(_CurrentTaskIndex);
 		
 		IF _TaskSwitchingHandler <> 0 THEN
-			_TaskSwitchingHandler.OnNextTask(0, currentTask^);
+			_TaskSwitchingHandler.OnNextTask(0, currentTask);
 		END_IF
 	ELSE
 		state := TASK_RUNNING_STATE.DONE;
@@ -117,25 +142,25 @@ END_IF
 EXECUTE_TASK:
 
 IF NOT startRequest THEN
-	currentTask^.Execute();
+	currentTask.Execute();
 ELSE
 	TOF_Core.LogManager.TryLogMessage("Task sequence starting", LOG_CATEGORY.INFORMATION, "TaskSequence", "TaskSequence.Starting");
 	
-	currentTask^.Start();
+	currentTask.Start();
 END_IF
 
-IF currentTask^.Aborted THEN
+IF currentTask.Aborted THEN
 	state := TASK_RUNNING_STATE.ABORTED;
-ELSIF currentTask^.Done THEN
-	TOF_Core.LogManager.TryLogMessage(WideStringHelper.ConcatStrings255("Task '", currentTask^.Name, "' done in sequence"), LOG_CATEGORY.INFORMATION, "TaskSequence", "TaskSequence.Task", "TaskSequence.Task.Done");
+ELSIF currentTask.Done THEN
+	TOF_Core.LogManager.TryLogMessage(WideStringHelper.ConcatStrings255("Task '", currentTask.Name, "' done in sequence"), LOG_CATEGORY.INFORMATION, "TaskSequence", "TaskSequence.Task", "TaskSequence.Task.Done");
 
 	IF _CurrentTaskIndex + 1 < _Tasks.Count THEN
 		_CurrentTaskIndex := _CurrentTaskIndex + 1;
 		
-		nextTask := _Tasks.Get(_CurrentTaskIndex).Address;
+		nextTask := getTaskByIndex(_CurrentTaskIndex);
 		
 		IF _TaskSwitchingHandler <> 0 THEN			
-			_TaskSwitchingHandler.OnNextTask(currentTask^, nextTask^);
+			_TaskSwitchingHandler.OnNextTask(currentTask, nextTask);
 		END_IF
 		
 		currentTask := nextTask;
@@ -145,7 +170,7 @@ ELSIF currentTask^.Done THEN
 		JMP EXECUTE_TASK;
 	ELSE
 		IF _TaskSwitchingHandler <> 0 THEN			
-			_TaskSwitchingHandler.OnNextTask(currentTask^, 0);
+			_TaskSwitchingHandler.OnNextTask(currentTask, 0);
 		END_IF
 
 		state := TASK_RUNNING_STATE.DONE;
