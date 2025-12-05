@@ -1,0 +1,194 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="TaskSequence" Id="{57ebc80d-8e9e-4079-b23e-23120ddfa49e}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+
+.. <legal notes>
+
+legal notes
+=================
+| SPDX-FileCopyrightText: © 2025 Oleksandr Tiutyk <trofimich@gmail.com>
+| SPDX-License-Identifier: LGPL-3.0-only
+| For details check: LGPL-3.0-only_
+
+.. _LGPL-3.0-only: https://www.gnu.org/licenses/lgpl-3.0.en.html
+
+.. </legal notes>
+
+*)
+
+{attribute 'no_explicit_call' := 'do not call this function block directly'} 
+FUNCTION_BLOCK TaskSequence EXTENDS Task IMPLEMENTS ITaskSequence
+VAR
+	_ClassName : STRING := __POUNAME();
+
+	_Tasks : TOF_Collections.List(0);
+	
+	_TaskSwitchingHandler : ITaskSwitchingHandler;
+	
+	_CurrentTaskIndex : DINT := -1;
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[]]></ST>
+    </Implementation>
+    <Folder Name="Overriden members" Id="{fa4015c4-9b09-4ca8-8a87-8fd2497e24b8}" />
+    <Method Name="AddTask" Id="{4fbf566b-f914-4407-80d5-dd104cd557de}">
+      <Declaration><![CDATA[METHOD AddTask : DINT
+VAR_INPUT
+	task : ITask;
+END_VAR
+VAR
+	taskTypeNotSpecifiedException : TOF_Core.ArgumentNotSpecifiedException;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF task = 0 THEN
+	taskTypeNotSpecifiedException.Throw(Namespacename, ClassName, __POUNAME(), __POSITION(), 'task');
+END_IF
+
+_Tasks.AppendGeneric(GenericValueFactory.FromAny(task, FALSE, GENERIC_MEMORY_MANAGEMENT_BEHAVIOR.STORE_ORIGINAL_REFERENCE_AND_NOT_OWNS_MEMORY), index => AddTask);]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="ClassName" Id="{773ba440-b042-488f-97a2-de044245c5b8}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+PROPERTY ClassName : STRING]]></Declaration>
+      <Get Name="Get" Id="{c97bc7e4-1362-47f1-8cb5-39a5fff38a98}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ClassName := _ClassName;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="ClearTasks" Id="{d2f3a742-1eb6-4e3d-b5a5-c6bc001e8e97}">
+      <Declaration><![CDATA[METHOD FINAL ClearTasks]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_Tasks.Clear();]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="NamespaceName" Id="{5dd6d568-afa1-4a66-a02b-252ca76934a5}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+PROPERTY NamespaceName : STRING]]></Declaration>
+      <Get Name="Get" Id="{b2f72abe-d7d0-40ef-aaed-f7660617931d}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[NamespaceName := CurrentNamespace.Name;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="OnCancel" Id="{7c8c6dde-1fe7-48db-9a57-8a23ac600474}" FolderPath="Overriden members\">
+      <Declaration><![CDATA[METHOD PROTECTED OnCancel
+VAR
+	currentTask : POINTER TO ITask;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF _CurrentTaskIndex > 0 AND_THEN _CurrentTaskIndex < _Tasks.Count THEN
+	currentTask := _Tasks.Get(_CurrentTaskIndex).Address;
+	
+	currentTask^.Cancel();
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="OnRunning" Id="{d440ee13-6872-4a06-96ce-9fcbf2169e4f}" FolderPath="Overriden members\">
+      <Declaration><![CDATA[METHOD PROTECTED OnRunning 
+VAR_INPUT
+	startRequest : BOOL;
+END_VAR
+VAR_OUTPUT
+	state : TASK_RUNNING_STATE;
+END_VAR
+VAR
+	currentTask, nextTask : POINTER TO ITask;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF startRequest THEN	
+	IF _Tasks.Count > 0 THEN
+		_CurrentTaskIndex := 0;
+		
+		currentTask := _Tasks.Get(_CurrentTaskIndex).Address;
+		
+		IF _TaskSwitchingHandler <> 0 THEN
+			_TaskSwitchingHandler.OnNextTask(0, currentTask^);
+		END_IF
+	ELSE
+		state := TASK_RUNNING_STATE.DONE;
+		RETURN;	
+	END_IF
+END_IF
+
+EXECUTE_TASK:
+
+IF NOT startRequest THEN
+	currentTask^.Execute();
+ELSE
+	TOF_Core.LogManager.TryLogMessage("Task sequence starting", LOG_CATEGORY.INFORMATION, "TaskSequence", "TaskSequence.Starting");
+	
+	currentTask^.Start();
+END_IF
+
+IF currentTask^.Aborted THEN
+	state := TASK_RUNNING_STATE.ABORTED;
+ELSIF currentTask^.Done THEN
+	TOF_Core.LogManager.TryLogMessage(WideStringHelper.ConcatStrings255("Task '", currentTask^.Name, "' done in sequence"), LOG_CATEGORY.INFORMATION, "TaskSequence", "TaskSequence.Task", "TaskSequence.Task.Done");
+
+	IF _CurrentTaskIndex + 1 < _Tasks.Count THEN
+		_CurrentTaskIndex := _CurrentTaskIndex + 1;
+		
+		nextTask := _Tasks.Get(_CurrentTaskIndex).Address;
+		
+		IF _TaskSwitchingHandler <> 0 THEN			
+			_TaskSwitchingHandler.OnNextTask(currentTask^, nextTask^);
+		END_IF
+		
+		currentTask := nextTask;
+		
+		startRequest := TRUE;
+		
+		JMP EXECUTE_TASK;
+	ELSE
+		IF _TaskSwitchingHandler <> 0 THEN			
+			_TaskSwitchingHandler.OnNextTask(currentTask^, 0);
+		END_IF
+
+		state := TASK_RUNNING_STATE.DONE;
+
+		TOF_Core.LogManager.TryLogMessage("Task sequence done", LOG_CATEGORY.INFORMATION, "TaskSequence", "TaskSequence.Done");
+	END_IF 
+END_IF
+]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="Size" Id="{a6053151-483e-4238-9886-7e7b91664275}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+PROPERTY Size : ULINT]]></Declaration>
+      <Get Name="Get" Id="{b11c9c5a-d14a-45ac-9b8c-29c4f081003a}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[Size := XSIZEOF(THIS^);]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="TaskCount" Id="{aadedd78-bdaf-4aac-af1e-c96cf8093b75}">
+      <Declaration><![CDATA[PROPERTY FINAL TaskCount : DINT]]></Declaration>
+      <Get Name="Get" Id="{24847adc-b894-494f-b5f0-c26f6e5e9b2b}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[TaskCount := _Tasks.Count;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="TaskSwitchingHandler" Id="{9c42978d-d4f1-4caf-a41c-4ba59c2824fd}">
+      <Declaration><![CDATA[PROPERTY FINAL TaskSwitchingHandler : ITaskSwitchingHandler]]></Declaration>
+      <Get Name="Get" Id="{98b40666-63ec-4f03-9d44-478255ee8baf}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[TaskSwitchingHandler := _TaskSwitchingHandler;]]></ST>
+        </Implementation>
+      </Get>
+      <Set Name="Set" Id="{d4b27105-8606-47f8-bdb2-54b0ddda9c46}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[_TaskSwitchingHandler := TaskSwitchingHandler;]]></ST>
+        </Implementation>
+      </Set>
+    </Property>
+  </POU>
+</TcPlcObject>
