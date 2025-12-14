@@ -8,6 +8,9 @@ Do not update to TC 3.1.4026.19 if you use this framework because of new bug in 
 
 ## Key Features
 
+- **Advanced exception handling**  
+  An enhanced error management system that makes diagnostics easier by providing not only the message, but also the place and time the problem occurred.
+
 - **Dynamic collections**  
   Work with an unknown number of elements at runtime.
 
@@ -16,6 +19,12 @@ Do not update to TC 3.1.4026.19 if you use this framework because of new bug in 
 
 - **Logging system**  
   A convenient logging system with advanced filtering capabilities based on topics and support for custom logger implementations.
+
+- **Task and task sequensor**  
+  An abstraction for a basic task that can either complete successfully, be aborted internally, be cancelled externally, or be terminated due to an exception. There is also a sequence of tasks that allows multiple tasks to be executed one after another as a single composite task.
+
+- **Working with files**  
+  Working with the file system is represented as a set of tasks. Opening and closing files is handled automatically for the functions that require it. All you need to do is define the sequence of tasks, and the dirty work will be done behind the scenes.
 
 - **Workflow engine**  
   A powerful engine for executing complex scenarios that can be composed dynamically. Basic activities such as Sequence, IfThenElse, While, WaitForVariableValue, WaitAndPick, TryCatch, etc., are already supported. Custom activities can also be created to meet individual requirements.
@@ -37,9 +46,6 @@ Do not update to TC 3.1.4026.19 if you use this framework because of new bug in 
 
 - **Predefined device implementations**  
   Includes digital and analog I/O; more standard device types such as axes are planned.
-
-- **Advanced exception handling**  
-  An enhanced error management system that makes diagnostics easier by providing not only the message, but also the place and time the problem occurred.
 
 - **Automatic exception logging**  
   The automation engine automatically catches exceptions and logs them.
