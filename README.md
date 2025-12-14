@@ -3,9 +3,6 @@
 This is **object-oriented framework** developed for **TwinCAT 3.1.4026+**, which provides a set of ready-to-use, scalable components for industrial automation.
 It is based on an error-handling concept that is unique for Structured Text and resembles the approach used in general-purpose languages like C# or Java.
 
-## ATTENTION
-Do not update to TC 3.1.4026.19 if you use this framework because of new bug in exception handling mechanism.
-
 ## Key Features
 
 - **Advanced exception handling**  
@@ -146,6 +143,7 @@ Also, if you're experienced in software architecture and have suggestions, I'd l
 - Beckhoff currently use compiler from CoDeSys and this compiler has some issues:
   - incorrect behavior related to methods with optional parameters in some cases
   - incorrect memory deallocation in __TRY / __CATCH block in some cases
+  - compiler regresson in TC 3.1.4026.19 related to custom exception throwing
 
 These issues aren't critical, and Beckhoff is aware and investigating solutions
 
