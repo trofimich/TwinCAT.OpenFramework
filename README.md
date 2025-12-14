@@ -173,6 +173,7 @@ See [LICENSE](./LICENSE) for details.
 
 ![Signal-controlled intersection visualization](Screenshots/SignalControlledIntersection.png)
 ![Demo workflow visualization](Screenshots/DemoWorkflow.png)
+![File manager test](Screenshots/FileManager.png)
 ![Collections test](Screenshots/TestCollections.png)
 ![Exceptions test](Screenshots/TestExceptions.png)
 ![Workflow creation](Screenshots/WorkflowCreation.png)
