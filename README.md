@@ -3,9 +3,6 @@
 This is **object-oriented framework** developed for **TwinCAT 3.1.4026+**, which provides a set of ready-to-use, scalable components for industrial automation.
 It is based on an error-handling concept that is unique for Structured Text and resembles the approach used in general-purpose languages like C# or Java.
 
-## ATTENTION
-Do not update to TC 3.1.4026.19 if you use this framework because of new bug in exception handling mechanism.
-
 ## Key Features
 
 - **Advanced exception handling**  
@@ -35,9 +32,6 @@ Do not update to TC 3.1.4026.19 if you use this framework because of new bug in 
 - **Basic automation engine**  
   A ready-to-use state machine: AutomationRunner supports three fundamental states: *Initializing*, *Running*, *Fault* and can handle multiple AutomationController instances with four fundamental states: *Initializing*, *Running*, *Stopping*, *Fault*
 
-- **Simulation mode for automation engine and devices**  
-  Run your logic in simulation mode without the need for real hardware.
-
 - **Controllable devices**  
   Ready-made abstractions for interacting with the external world, such as terminals or communication channels.
 
@@ -46,6 +40,9 @@ Do not update to TC 3.1.4026.19 if you use this framework because of new bug in 
 
 - **Predefined device implementations**  
   Includes digital and analog I/O; more standard device types such as axes are planned.
+  
+- **Simulation mode for automation engine and devices**  
+  Run your logic in simulation mode without the need for real hardware.
 
 - **Automatic exception logging**  
   The automation engine automatically catches exceptions and logs them.
@@ -146,6 +143,7 @@ Also, if you're experienced in software architecture and have suggestions, I'd l
 - Beckhoff currently use compiler from CoDeSys and this compiler has some issues:
   - incorrect behavior related to methods with optional parameters in some cases
   - incorrect memory deallocation in __TRY / __CATCH block in some cases
+  - compiler regresson in TC 3.1.4026.19 related to custom exception throwing
 
 These issues aren't critical, and Beckhoff is aware and investigating solutions
 
@@ -173,6 +171,7 @@ See [LICENSE](./LICENSE) for details.
 
 ![Signal-controlled intersection visualization](Screenshots/SignalControlledIntersection.png)
 ![Demo workflow visualization](Screenshots/DemoWorkflow.png)
+![File manager test](Screenshots/FileManager.png)
 ![Collections test](Screenshots/TestCollections.png)
 ![Exceptions test](Screenshots/TestExceptions.png)
 ![Workflow creation](Screenshots/WorkflowCreation.png)
