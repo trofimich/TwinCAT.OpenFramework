@@ -32,9 +32,6 @@ It is based on an error-handling concept that is unique for Structured Text and 
 - **Basic automation engine**  
   A ready-to-use state machine: AutomationRunner supports three fundamental states: *Initializing*, *Running*, *Fault* and can handle multiple AutomationController instances with four fundamental states: *Initializing*, *Running*, *Stopping*, *Fault*
 
-- **Simulation mode for automation engine and devices**  
-  Run your logic in simulation mode without the need for real hardware.
-
 - **Controllable devices**  
   Ready-made abstractions for interacting with the external world, such as terminals or communication channels.
 
@@ -43,6 +40,9 @@ It is based on an error-handling concept that is unique for Structured Text and 
 
 - **Predefined device implementations**  
   Includes digital and analog I/O; more standard device types such as axes are planned.
+  
+- **Simulation mode for automation engine and devices**  
+  Run your logic in simulation mode without the need for real hardware.
 
 - **Automatic exception logging**  
   The automation engine automatically catches exceptions and logs them.
