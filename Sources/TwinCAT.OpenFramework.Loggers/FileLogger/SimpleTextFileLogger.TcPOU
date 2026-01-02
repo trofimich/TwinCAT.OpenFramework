@@ -1,0 +1,303 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="SimpleTextFileLogger" Id="{c9d8643e-1245-46dc-b854-d67cd09f9849}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+
+.. <legal notes>
+
+legal notes
+=================
+| SPDX-FileCopyrightText: © 2025 Oleksandr Tiutyk <trofimich@gmail.com>
+| SPDX-License-Identifier: LGPL-3.0-only
+| For details check: LGPL-3.0-only_
+
+.. _LGPL-3.0-only: https://www.gnu.org/licenses/lgpl-3.0.en.html
+
+.. </legal notes>
+
+*)
+
+{attribute 'no_explicit_call' := 'do not call this function block directly'} 
+FUNCTION_BLOCK SimpleTextFileLogger EXTENDS TOF_Core.Object IMPLEMENTS TOF_Core.ILogger
+VAR
+	_ClassName : STRING := __POUNAME();
+	
+	_State : FILE_LOGGER_STATE_MACHINE;
+	_ErrorMessage : TOF_Core.ERROR_MESSAGE;
+	
+	_DirectoryPath : Tc2_System.T_MaxString;
+	_DirectoryPathType : Tc2_System.E_PathType
+	
+	_LogFilePrefix : STRING(32);
+	
+	_FileManager : TOF_FileSystem.FileManager;
+	
+	_MaxRecordsPerFile : UINT;
+	_RecordsPerFile : UINT;
+	
+	_HintMessageCounter : ULINT;
+	_WarningMessageCounter : ULINT;
+	_ErrorMessageCounter : ULINT;
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[]]></ST>
+    </Implementation>
+    <Folder Name="Service memebers" Id="{23f3c168-aa3e-41c9-8656-467cb2b8262a}" />
+    <Property Name="ClassName" Id="{1c851d02-4ca2-4f25-a849-839385a5dbab}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+PROPERTY ClassName : STRING]]></Declaration>
+      <Get Name="Get" Id="{83d1e7be-893c-4f7b-b733-e85ea11d30f5}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ClassName := _ClassName;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="createCurrentFilePath" Id="{ca6e22e2-90b3-499d-a72f-e99009f1b4ec}" FolderPath="Service memebers\">
+      <Declaration><![CDATA[METHOD PRIVATE createCurrentFilePath : Tc2_System.T_MaxString
+VAR
+	stringBuilder : TOF_Core.StringBuilder;
+END_VAR
+VAR
+	filePathOverflowException : TOF_Core.StringOwerflowException;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[stringBuilder
+	.Append(_DirectoryPath)
+	.AppendString255('\')
+	.Append(_LogFilePrefix)
+	.AppendString255('_')
+	.AppendString255(DateAndTimeHelper.ToString(SystemDateTimeManager.SystemLocalDateTime))
+	.AppendString255('.log');
+	
+IF stringBuilder.StringLength > 255 THEN
+	filePathOverflowException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), 'CurrentFilePath', stringBuilder.StringLength, 255);  
+END_IF
+
+stringBuilder.AssignToString(createCurrentFilePath); ]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="DirectoryPath" Id="{94bd0435-0d84-474e-a1ec-237ce1293544}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+PROPERTY DirectoryPath : Tc2_System.T_MaxString]]></Declaration>
+      <Get Name="Get" Id="{d9e78a19-b81b-4e9b-b0b9-97faece19c52}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[DirectoryPath := _DirectoryPath;]]></ST>
+        </Implementation>
+      </Get>
+      <Set Name="Set" Id="{b0b8c469-3008-4e46-b98d-a987b3ae5af3}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[_DirectoryPath := DirectoryPath;]]></ST>
+        </Implementation>
+      </Set>
+    </Property>
+    <Property Name="DirectoryPathType" Id="{54324f5d-1050-491f-bf7e-c62d1b9d586c}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+PROPERTY DirectoryPathType : Tc2_System.E_PathType]]></Declaration>
+      <Get Name="Get" Id="{d33548de-ffe1-4d4e-afe8-be9289c99711}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[DirectoryPathType := _DirectoryPathType;]]></ST>
+        </Implementation>
+      </Get>
+      <Set Name="Set" Id="{f902b067-842c-4db8-b30a-4772ce8934d3}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[_DirectoryPathType := DirectoryPathType;]]></ST>
+        </Implementation>
+      </Set>
+    </Property>
+    <Property Name="ErrorMessage" Id="{a0ecd76a-1fbd-413a-b471-4f1bc6db4cb3}">
+      <Declaration><![CDATA[PROPERTY ErrorMessage : REFERENCE TO TOF_Core.ERROR_MESSAGE]]></Declaration>
+      <Get Name="Get" Id="{d483655a-840c-48a1-b4b0-779eaaf75b0f}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ErrorMessage REF= _ErrorMessage;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="Execute" Id="{fb5ae989-a335-4d00-9822-2d51d9b09e57}">
+      <Declaration><![CDATA[METHOD Execute
+VAR
+	exceptionCode : __SYSTEM.ExceptionCode;
+	exception : IException;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[__TRY
+	(*CASE _State OF
+		FILE_LOGGER_STATE_MACHINE.INITIAL:		
+			_FileManager.FilePath := _FilePath;
+			_FileManager.ModeFlags := Tc2_System.Global_Variables.FOPEN_MODEWRITE OR Tc2_System.Global_Variables.FOPEN_MODEPLUS OR Tc2_System.Global_Variables.FOPEN_MODETEXT;
+			_FileManager.PathType := Tc2_System.E_OpenPath.PATH_GENERIC;
+			
+			_WriteStringToFile1.StringToWrite := TEST_STRING1;
+			_WriteStringToFile2.StringToWrite := TEST_STRING2;
+			
+			_FileManager.AddTask(_WriteStringToFile1);
+			_State := FILE_LOGGER_STATE_MACHINE.CREATE_DIRECTORY;
+		
+		FILE_LOGGER_STATE_MACHINE.CREATE_DIRECTORY:	
+			_CreateDirectory.Execute();
+			
+			IF _CreateDirectory.Done OR_ELSE (_CreateDirectory.Error AND_THEN _CreateDirectory
+			
+			
+	END_CASE*)
+__CATCH(exceptionCode)
+	_State := FILE_LOGGER_STATE_MACHINE.FAILED;
+	
+	exception := ExceptionManager.GetLastException(exceptionCode);
+	
+	_ErrorMessage := exception.GetMessage();
+	
+	ExceptionManager.Throw(exception);
+__ENDTRY]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="LogFilePrefix" Id="{40add88b-d2fb-4d3b-98cc-bad1e64da312}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+PROPERTY LogFilePrefix : STRING(32)]]></Declaration>
+      <Get Name="Get" Id="{4c3e6ef5-a4e7-48c3-a7a6-4379c4a25fd2}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[LogFilePrefix := _LogFilePrefix;]]></ST>
+        </Implementation>
+      </Get>
+      <Set Name="Set" Id="{d98e43c4-c841-4cb5-97de-15fe28853274}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[_LogFilePrefix := _LogFilePrefix;]]></ST>
+        </Implementation>
+      </Set>
+    </Property>
+    <Property Name="MaxRecordsPerFile" Id="{0dfa9c35-c9c2-4980-a810-2983eca9e012}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+PROPERTY MaxRecordsPerFile : UINT]]></Declaration>
+      <Get Name="Get" Id="{98d5b626-1240-45cb-ab68-cadf61864d2d}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[MaxRecordsPerFile := _MaxRecordsPerFile;]]></ST>
+        </Implementation>
+      </Get>
+      <Set Name="Set" Id="{fb2899b3-46b9-4439-be40-b9188c034ffd}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[_MaxRecordsPerFile := MaxRecordsPerFile;]]></ST>
+        </Implementation>
+      </Set>
+    </Property>
+    <Property Name="NamespaceName" Id="{a2891bf6-e5a5-4439-9b48-a1ce3b9fe7e5}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+PROPERTY NamespaceName : STRING]]></Declaration>
+      <Get Name="Get" Id="{5ff3dc63-4bd4-4d08-af93-e0e18171ffa3}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[NamespaceName := CurrentNamespace.Name;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="Size" Id="{26a805fc-69de-4218-9d0a-a6159c2e8b1c}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+PROPERTY Size : ULINT]]></Declaration>
+      <Get Name="Get" Id="{a575e209-b49d-4b51-b2b7-52dee844fac2}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[Size := XSIZEOF(THIS^);]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="State" Id="{b977ac9f-344e-4250-abf4-1d517085a4b0}">
+      <Declaration><![CDATA[PROPERTY State : FILE_LOGGER_STATE_MACHINE]]></Declaration>
+      <Get Name="Get" Id="{e0b36e8f-e7ca-4443-9251-c57892a0b995}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[State := _State;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="TryLogException" Id="{b99885cc-2056-4f4b-ba06-145c472d92b5}">
+      <Declaration><![CDATA[METHOD TryLogException : BOOL
+VAR_INPUT
+	exception : IException;
+END_VAR
+VAR
+	message : ERROR_MESSAGE;
+	aggregateException : IAggregateException;
+	innerException : IException;
+	i : DINT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF exception = 0 THEN
+	RETURN;
+END_IF
+
+(*IF NOT __QUERYINTERFACE(exception, aggregateException) OR_ELSE aggregateException.InnerExceptionCount = 0 THEN
+	message := exception.GetMessage(TRUE, FALSE, TRUE);
+	TryLogException := TryLogMessage(LOG_CATEGORY.ERROR, message);
+ELSE
+	IF aggregateException.InnerExceptionCount > 1 THEN
+		// reverce order
+		TryLogException := TryLogMessage(LOG_CATEGORY.ERROR, "<<< aggregate exception end <<<");
+		
+		FOR i := TO_DINT(aggregateException.InnerExceptionCount) - 1 TO 0 BY -1 DO
+			innerException := aggregateException.GetInnerException(i);
+			
+			message := WideStringHelper.ConcatStrings255("  ", innerException.GetMessage(TRUE, FALSE, TRUE));
+			
+			TryLogException := TryLogException AND TryLogMessage(LOG_CATEGORY.ERROR, message);		
+		END_FOR
+		
+		TryLogException := TryLogException AND TryLogMessage(LOG_CATEGORY.ERROR, ">>> aggregate exception start >>>");
+	ELSE		
+		innerException := aggregateException.GetInnerException(0);
+		
+		message := innerException.GetMessage(TRUE, FALSE, TRUE);
+		
+		TryLogException := TryLogMessage(LOG_CATEGORY.ERROR, message);
+	END_IF
+END_IF*)]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="TryLogMessage" Id="{350b4112-ef62-44cb-8cce-fcf9841762dc}">
+      <Declaration><![CDATA[METHOD TryLogMessage : BOOL
+VAR_INPUT
+	category : LOG_CATEGORY;	
+END_VAR
+VAR_IN_OUT CONSTANT
+	message : ERROR_MESSAGE;
+END_VAR
+VAR
+	number : STRING(10) := '';
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[(*CASE category OF
+	LOG_CATEGORY.INFORMATION, LOG_CATEGORY.SUCCESS:
+		IF LogManager.AddNumberToMessage THEN
+			_HintMessageCounter := _HintMessageCounter + 1;
+			number := StringHelper.ConcatStrings255('#', TO_STRING(_HintMessageCounter), ': '); 
+		END_IF
+		
+		TryLogMessage := Tc2_System.ADSLOGSTR(msgCtrlMask := Tc2_System.Global_Variables.ADSLOG_MSGTYPE_LOG, msgFmtStr := StringHelper.ConcatStrings255(number, TO_STRING(message)), strArg := '') = 0;
+
+	LOG_CATEGORY.WARNING:
+		IF LogManager.AddNumberToMessage THEN
+			_WarningMessageCounter := _WarningMessageCounter + 1;
+			number := StringHelper.ConcatStrings255('#', TO_STRING(_WarningMessageCounter), ': '); 
+		END_IF
+		
+		TryLogMessage := Tc2_System.ADSLOGSTR(msgCtrlMask := Tc2_System.Global_Variables.ADSLOG_MSGTYPE_WARN, msgFmtStr := StringHelper.ConcatStrings255(number, TO_STRING(message)), strArg := '') = 0;
+	
+	LOG_CATEGORY.ERROR, LOG_CATEGORY.FATAL_ERROR:
+		IF LogManager.AddNumberToMessage THEN
+			_ErrorMessageCounter := _ErrorMessageCounter + 1;
+			number := StringHelper.ConcatStrings255('#', TO_STRING(_ErrorMessageCounter), ': '); 
+		END_IF
+		
+		TryLogMessage := Tc2_System.ADSLOGSTR(msgCtrlMask := Tc2_System.Global_Variables.ADSLOG_MSGTYPE_ERROR, msgFmtStr := StringHelper.ConcatStrings255(number, TO_STRING(message)), strArg := '') = 0;
+END_CASE*)]]></ST>
+      </Implementation>
+    </Method>
+  </POU>
+</TcPlcObject>
