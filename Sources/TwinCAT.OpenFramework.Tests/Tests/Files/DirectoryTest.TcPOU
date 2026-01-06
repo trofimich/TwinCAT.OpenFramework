@@ -21,18 +21,23 @@ FUNCTION_BLOCK DirectoryTest EXTENDS TcUnit.FB_TestSuite
 VAR
 	_ClassName : STRING := __POUNAME();
 	
-	_CheckDirectoryExists : TOF_FileSystem.CheckDirectoryExists;
+	_CheckDirectoryExists : TOF_FileSystem.CheckDirectoryExists;	
+	_CreateDirectory : TOF_FileSystem.CreateDirectory;
+
+	_CheckInvalidDirectoryExists : TOF_FileSystem.CheckDirectoryExists;	
 END_VAR]]></Declaration>
     <Implementation>
-      <ST><![CDATA[PathValidation();]]></ST>
+      <ST><![CDATA[PathValidation();
+CheckThenCreateDirectory();
+CheckInvalidDirectory();]]></ST>
     </Implementation>
-    <Method Name="CheckAndCreateDirectory" Id="{5bc73480-957c-4dd7-ad6d-100d5d15a788}">
-      <Declaration><![CDATA[METHOD CheckAndCreateDirectory
+    <Method Name="CheckInvalidDirectory" Id="{5b90f0a8-63c9-4de6-954b-71a101a6f473}">
+      <Declaration><![CDATA[METHOD CheckInvalidDirectory
 VAR CONSTANT
-	NON_EXISTING_PATH : STRING(255) := 'W:\LKFJIKDLDGJHDLF';
+	PATH : STRING(255) := 'W:\abcde12345';
 END_VAR
 VAR_INST
-	_Initialized : BOOL;
+	initialized : BOOL;
 END_VAR
 VAR
 	exceptionCode : __SYSTEM.ExceptionCode;
@@ -42,51 +47,97 @@ VAR
 	errorMessage : TOF_Core.ERROR_MESSAGE;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[(*TEST(__POUNAME());
+        <ST><![CDATA[TEST(__POUNAME());
 
-IF NOT _Initialized THEN
-	_FileManager.FilePath := _FilePath;
-	_FileManager.ModeFlags := Tc2_System.Global_Variables.FOPEN_MODEWRITE OR Tc2_System.Global_Variables.FOPEN_MODEPLUS OR Tc2_System.Global_Variables.FOPEN_MODETEXT;
-	_FileManager.PathType := Tc2_System.E_OpenPath.PATH_GENERIC;
-	
-	_WriteStringToFile1.StringToWrite := TEST_STRING1;
-	_WriteStringToFile2.StringToWrite := TEST_STRING2;
-	
-	_FileManager.AddTask(_WriteStringToFile1);
-	_FileManager.AddTask(_WriteStringToFile2);
-	_FileManager.AddTask(_SetPositionInFile);
-	_FileManager.AddTask(_ReadStringFromFile);
+IF NOT initialized THEN
+	initialized := TRUE;
+
+	_CheckInvalidDirectoryExists.DirectoryPath := PATH;
+
+	_CheckInvalidDirectoryExists.Start();
+ELSE
+	_CheckInvalidDirectoryExists.Execute();
 END_IF
 
+IF NOT _CheckInvalidDirectoryExists.Busy THEN
+	IF _CheckInvalidDirectoryExists.DirectoryExists THEN
+		AssertTrue(FALSE, StringHelper.ConcatStrings255('Found not existing directory "', PATH, '"'));			
+	END_IF
+	
+	TEST_FINISHED();
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="CheckThenCreateDirectory" Id="{5bc73480-957c-4dd7-ad6d-100d5d15a788}">
+      <Declaration><![CDATA[METHOD CheckThenCreateDirectory
+VAR CONSTANT
+	PATH : STRING(255) := 'C:\TwinCatFiles';
+END_VAR
+VAR_INST
+	initialized : BOOL;
+	directoryChecking : BOOL;
+END_VAR
+VAR
+	exceptionCode : __SYSTEM.ExceptionCode;
+
+	caughtException : TOF_Core.IException;
+	
+	errorMessage : TOF_Core.ERROR_MESSAGE;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[TEST(__POUNAME());
+
 __TRY
-	IF NOT _Initialized THEN
-		_Initialized := TRUE;
-	
-		_FileManager.Start();
-	ELSE
-		_FileManager.Execute();
-	END_IF	
-	
-	IF NOT _FileManager.Busy THEN
-		IF _FileManager.Done THEN;
-			AssertEquals_STRING(CONCAT(TEST_STRING1, TEST_STRING2), _ReadStringFromFile.ReadString, 'The written to file string differs from the read string');			
-		ELSIF _FileManager.Aborted THEN;
-			AssertTrue(FALSE, 'FileManager aborted');
-		ELSIF _FileManager.Cancelled THEN;
-			AssertTrue(FALSE, 'FileManager cancelled');
-		ELSIF _FileManager.Error THEN;
-			AssertTrue(FALSE, 'FileManager error');
-		END_IF
+	IF NOT initialized THEN
+		initialized := TRUE;
 		
-		TEST_FINISHED();
+		directoryChecking := TRUE;
+	
+		_CheckDirectoryExists.DirectoryPath := PATH;
+		
+		_CreateDirectory.DirectoryPath := PATH;
+	
+		_CheckDirectoryExists.Start();
+	ELSE
+		IF directoryChecking THEN
+			_CheckDirectoryExists.Execute();
+		ELSE
+			_CreateDirectory.Execute();		
+		END_IF
+	END_IF
+	
+	IF directoryChecking THEN
+		IF NOT _CheckDirectoryExists.Busy THEN
+			IF _CheckDirectoryExists.Done THEN
+				IF _CheckDirectoryExists.DirectoryExists THEN
+					TEST_FINISHED();
+				ELSE
+					directoryChecking := FALSE;
+					_CreateDirectory.Start();
+				END_IF
+			ELSE
+				AssertTrue(FALSE, 'CheckDirectoryExists wrong result');
+				TEST_FINISHED();
+			END_IF			
+		END_IF
+	ELSE
+		IF NOT _CreateDirectory.Busy THEN
+			IF NOT _CheckDirectoryExists.Done THEN;
+				AssertTrue(FALSE, 'CreateDirectory error');
+			END_IF
+			
+			TEST_FINISHED();
+		END_IF
 	END_IF
 __CATCH(exceptionCode)
-	errorMessage := TOF_Core.ExceptionManager.GetLastException(exceptionCode).GetMessage();
+	caughtException := TOF_Core.ExceptionManager.GetLastException(exceptionCode);
+	
+	errorMessage := caughtException.GetMessage();
 	
 	AssertTrue(FALSE, WSTRING_TO_STRING(errorMessage));
 	
 	TEST_FINISHED();	
-__ENDTRY*)]]></ST>
+__ENDTRY]]></ST>
       </Implementation>
     </Method>
     <Property Name="ClassName" Id="{b781c019-1c1b-484b-acec-96a5874d1a6b}">
