@@ -20,16 +20,12 @@ legal notes
 FUNCTION_BLOCK DirectoryTest EXTENDS TcUnit.FB_TestSuite
 VAR
 	_ClassName : STRING := __POUNAME();
-	
-	_CheckDirectoryExists : TOF_FileSystem.CheckDirectoryExists;	
-	_CreateDirectory : TOF_FileSystem.CreateDirectory;
-
-	_CheckInvalidDirectoryExists : TOF_FileSystem.CheckDirectoryExists;	
 END_VAR]]></Declaration>
     <Implementation>
       <ST><![CDATA[PathValidation();
-CheckThenCreateDirectory();
-CheckInvalidDirectory();]]></ST>
+CheckThenCreateThenRemoveDirectory();
+CheckInvalidDirectory();
+CreateDirectoryIfNotExistsThenRemoveItIfExists();]]></ST>
     </Implementation>
     <Method Name="CheckInvalidDirectory" Id="{5b90f0a8-63c9-4de6-954b-71a101a6f473}">
       <Declaration><![CDATA[METHOD CheckInvalidDirectory
@@ -38,6 +34,8 @@ VAR CONSTANT
 END_VAR
 VAR_INST
 	initialized : BOOL;
+	
+	checkInvalidDirectoryExists : TOF_FileSystem.CheckDirectoryExists;	
 END_VAR
 VAR
 	exceptionCode : __SYSTEM.ExceptionCode;
@@ -52,15 +50,15 @@ END_VAR]]></Declaration>
 IF NOT initialized THEN
 	initialized := TRUE;
 
-	_CheckInvalidDirectoryExists.DirectoryPath := PATH;
+	checkInvalidDirectoryExists.DirectoryPath := PATH;
 
-	_CheckInvalidDirectoryExists.Start();
+	checkInvalidDirectoryExists.Start();
 ELSE
-	_CheckInvalidDirectoryExists.Execute();
+	checkInvalidDirectoryExists.Execute();
 END_IF
 
-IF NOT _CheckInvalidDirectoryExists.Busy THEN
-	IF _CheckInvalidDirectoryExists.DirectoryExists THEN
+IF NOT checkInvalidDirectoryExists.Busy THEN
+	IF checkInvalidDirectoryExists.DirectoryExists THEN
 		AssertTrue(FALSE, StringHelper.ConcatStrings255('Found not existing directory "', PATH, '"'));			
 	END_IF
 	
@@ -68,14 +66,17 @@ IF NOT _CheckInvalidDirectoryExists.Busy THEN
 END_IF]]></ST>
       </Implementation>
     </Method>
-    <Method Name="CheckThenCreateDirectory" Id="{5bc73480-957c-4dd7-ad6d-100d5d15a788}">
-      <Declaration><![CDATA[METHOD CheckThenCreateDirectory
+    <Method Name="CheckThenCreateThenRemoveDirectory" Id="{5bc73480-957c-4dd7-ad6d-100d5d15a788}">
+      <Declaration><![CDATA[METHOD CheckThenCreateThenRemoveDirectory
 VAR CONSTANT
-	PATH : STRING(255) := 'C:\TwinCatFiles';
+	PATH : STRING(255) := 'C:\TestTwinCatDirectory1';
 END_VAR
 VAR_INST
-	initialized : BOOL;
-	directoryChecking : BOOL;
+	stage : BYTE;
+
+	checkDirectoryExists : TOF_FileSystem.CheckDirectoryExists;	
+	createDirectory : TOF_FileSystem.CreateDirectory;
+	removeDirectory : TOF_FileSystem.RemoveEmptyDirectory;
 END_VAR
 VAR
 	exceptionCode : __SYSTEM.ExceptionCode;
@@ -88,47 +89,61 @@ END_VAR]]></Declaration>
         <ST><![CDATA[TEST(__POUNAME());
 
 __TRY
-	IF NOT initialized THEN
-		initialized := TRUE;
+	CASE stage OF
+		0:
+			checkDirectoryExists.DirectoryPath := PATH;			
+			createDirectory.DirectoryPath := PATH;
+			removeDirectory.DirectoryPath := PATH;
 		
-		directoryChecking := TRUE;
-	
-		_CheckDirectoryExists.DirectoryPath := PATH;
-		
-		_CreateDirectory.DirectoryPath := PATH;
-	
-		_CheckDirectoryExists.Start();
-	ELSE
-		IF directoryChecking THEN
-			_CheckDirectoryExists.Execute();
-		ELSE
-			_CreateDirectory.Execute();		
-		END_IF
-	END_IF
-	
-	IF directoryChecking THEN
-		IF NOT _CheckDirectoryExists.Busy THEN
-			IF _CheckDirectoryExists.Done THEN
-				IF _CheckDirectoryExists.DirectoryExists THEN
-					TEST_FINISHED();
+			checkDirectoryExists.Start();
+
+			stage := 1;
+						
+		1:
+			checkDirectoryExists.Execute();
+
+			IF NOT checkDirectoryExists.Busy THEN
+				IF checkDirectoryExists.Done THEN
+					IF checkDirectoryExists.DirectoryExists THEN
+						TEST_FINISHED();
+					ELSE
+						createDirectory.Start();						
+
+						stage := 2;
+					END_IF
 				ELSE
-					directoryChecking := FALSE;
-					_CreateDirectory.Start();
-				END_IF
-			ELSE
-				AssertTrue(FALSE, 'CheckDirectoryExists wrong result');
-				TEST_FINISHED();
-			END_IF			
-		END_IF
-	ELSE
-		IF NOT _CreateDirectory.Busy THEN
-			IF NOT _CheckDirectoryExists.Done THEN;
-				AssertTrue(FALSE, 'CreateDirectory error');
+					AssertTrue(FALSE, 'CheckDirectoryExists wrong result');
+					
+					TEST_FINISHED();
+				END_IF			
+			END_IF
+						
+		2:			
+			createDirectory.Execute();		
+
+			IF NOT createDirectory.Busy THEN
+				IF checkDirectoryExists.Done THEN;
+					removeDirectory.Start();					
+
+					stage := 3;
+				ELSE
+					AssertTrue(FALSE, 'CreateDirectory error');
+					
+					TEST_FINISHED();
+				END_IF				
 			END_IF
 			
-			TEST_FINISHED();
-		END_IF
-	END_IF
+		3:
+			removeDirectory.Execute();		
+
+			IF NOT removeDirectory.Busy THEN
+				IF NOT removeDirectory.Done THEN;
+					AssertTrue(FALSE, 'DeleteDirectory error');
+				END_IF
+								
+				TEST_FINISHED();								
+			END_IF
+	END_CASE
 __CATCH(exceptionCode)
 	caughtException := TOF_Core.ExceptionManager.GetLastException(exceptionCode);
 	
@@ -150,6 +165,74 @@ PROPERTY ClassName : STRING]]></Declaration>
         </Implementation>
       </Get>
     </Property>
+    <Method Name="CreateDirectoryIfNotExistsThenRemoveItIfExists" Id="{f932d0fc-d998-4f22-9038-acfe40a25bc1}">
+      <Declaration><![CDATA[METHOD CreateDirectoryIfNotExistsThenRemoveItIfExists
+VAR CONSTANT
+	PATH : STRING(255) := 'C:\TestTwinCatDirectory2';
+END_VAR
+VAR_INST
+	stage : BYTE;
+	
+	createDirectoryIfNotExists : TOF_FileSystem.CreateDirectoryIfNotExists;	
+	removeDirectoryIfExists : TOF_FileSystem.RemoveEmptyDirectoryIfExists;	
+END_VAR
+VAR
+	exceptionCode : __SYSTEM.ExceptionCode;
+
+	caughtException : TOF_Core.IException;
+	
+	errorMessage : TOF_Core.ERROR_MESSAGE;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[TEST(__POUNAME());
+
+//__TRY
+	CASE stage OF
+		0:		
+			createDirectoryIfNotExists.DirectoryPath := PATH;
+			removeDirectoryIfExists.DirectoryPath := PATH;
+			
+			createDirectoryIfNotExists.Start();
+			
+			stage := 1;
+		
+		1:
+			createDirectoryIfNotExists.Execute();		
+
+			IF NOT createDirectoryIfNotExists.Busy THEN
+				IF createDirectoryIfNotExists.Done THEN;
+					removeDirectoryIfExists.Start();
+					
+					stage := 2;
+				ELSE
+					AssertTrue(FALSE, 'CreateDirectoryIfExists error');
+					
+					TEST_FINISHED();
+				END_IF
+			END_IF
+		
+		2:
+			removeDirectoryIfExists.Execute();		
+
+			IF NOT removeDirectoryIfExists.Busy THEN
+				IF NOT removeDirectoryIfExists.Done THEN;
+					AssertTrue(FALSE, 'RemoveEmptyDirectoryIfExists error');
+				END_IF
+					
+				TEST_FINISHED();
+			END_IF
+	END_CASE	
+(*__CATCH(exceptionCode)
+	caughtException := TOF_Core.ExceptionManager.GetLastException(exceptionCode);
+	
+	errorMessage := caughtException.GetMessage();
+	
+	AssertTrue(FALSE, WSTRING_TO_STRING(errorMessage));
+	
+	TEST_FINISHED();	
+__ENDTRY*)]]></ST>
+      </Implementation>
+    </Method>
     <Property Name="NamespaceName" Id="{84d1f26a-3563-43b2-b392-59a3c3ab34fd}">
       <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
 PROPERTY NamespaceName : STRING]]></Declaration>
