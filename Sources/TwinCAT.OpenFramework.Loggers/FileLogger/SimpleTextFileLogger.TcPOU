@@ -36,6 +36,8 @@ VAR
 	_HintMessageCounter : ULINT;
 	_WarningMessageCounter : ULINT;
 	_ErrorMessageCounter : ULINT;
+	
+	_MessageBuffer : TOF_Collections.List(0);
 END_VAR]]></Declaration>
     <Implementation>
       <ST><![CDATA[]]></ST>
@@ -118,30 +120,31 @@ PROPERTY DirectoryPathType : Tc2_System.E_OpenPath]]></Declaration>
     <Method Name="Execute" Id="{fb5ae989-a335-4d00-9822-2d51d9b09e57}">
       <Declaration><![CDATA[METHOD Execute
 VAR
+	createDirectoryException : TOF_Core.StandardException;
+	
 	exceptionCode : __SYSTEM.ExceptionCode;
 	exception : IException;
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[__TRY
-	(*CASE _State OF
-		FILE_LOGGER_STATE_MACHINE.INITIAL:		
-			_FileManager.FilePath := _FilePath;
-			_FileManager.ModeFlags := Tc2_System.Global_Variables.FOPEN_MODEWRITE OR Tc2_System.Global_Variables.FOPEN_MODEPLUS OR Tc2_System.Global_Variables.FOPEN_MODETEXT;
-			_FileManager.PathType := Tc2_System.E_OpenPath.PATH_GENERIC;
+	CASE _State OF
+		SIMPLE_TEXT_FILE_LOGGER_STATE.INITIAL:				
+			_CreateDirectoryIfNotExists.Start();
 			
-			_WriteStringToFile1.StringToWrite := TEST_STRING1;
-			_WriteStringToFile2.StringToWrite := TEST_STRING2;
-			
-			_FileManager.AddTask(_WriteStringToFile1);
-			_State := FILE_LOGGER_STATE_MACHINE.CREATE_DIRECTORY;
+			_State := SIMPLE_TEXT_FILE_LOGGER_STATE.CREATING_DIRECTORY;
 		
-		FILE_LOGGER_STATE_MACHINE.CREATE_DIRECTORY:	
-			_CreateDirectory.Execute();
+		SIMPLE_TEXT_FILE_LOGGER_STATE.CREATING_DIRECTORY:	
+			_CreateDirectoryIfNotExists.Execute();
 			
-			IF _CreateDirectory.Done OR_ELSE (_CreateDirectory.Error AND_THEN _CreateDirectory
+			IF NOT _CreateDirectoryIfNotExists.Busy THEN
+				IF _CreateDirectoryIfNotExists.Done THEN
+					_FileManager.FilePath := createCurrentFilePath();
+				ELSE			
+					createDirectoryException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), "Log directory not created");
+				END_IF
+			END_IF	
 			
-			
-	END_CASE*)
+	END_CASE
 __CATCH(exceptionCode)
 	_State := SIMPLE_TEXT_FILE_LOGGER_STATE.FAILED;
 	
@@ -164,17 +167,24 @@ VAR_INPUT
 	logFilePrefix : STRING(32);
 	maxRecordsPerFile : UINT;
 	directoryPathType : Tc2_System.E_OpenPath := Tc2_System.E_OpenPath.PATH_GENERIC; // use Tc2_System.E_OpenPath.PATH_GENERIC by default
-	amsNetId : Tc2_System.T_AmsNetID := ''; // use '' for local system
 	timeout : TIME := Tc2_System.Global_Variables.DEFAULT_ADS_TIMEOUT; // use Tc2_System.Global_Variables.DEFAULT_ADS_TIMEOUT by default
+	amsNetId : Tc2_System.T_AmsNetID := ''; // use '' for local system
 END_VAR
 ]]></Declaration>
       <Implementation>
         <ST><![CDATA[_CreateDirectoryIfNotExists.DirectoryPath := directoryPath;
-_LogFilePrefix := logFilePrefix;
-_MaxRecordsPerFile := maxRecordsPerFile;
 _CreateDirectoryIfNotExists.PathType := directoryPathType;
+_CreateDirectoryIfNotExists.Timeout := timeout;
 _CreateDirectoryIfNotExists.AmsNetId := amsNetId;
-_CreateDirectoryIfNotExists.Timeout := timeout; ]]></ST>
+
+_FileManager.PathType := directoryPathType;
+_FileManager.ModeFlags := Tc2_System.Global_Variables.FOPEN_MODEWRITE OR Tc2_System.Global_Variables.FOPEN_MODEPLUS OR Tc2_System.Global_Variables.FOPEN_MODETEXT;
+_FileManager.Timeout := timeout;
+_FileManager.AmsNetId := amsNetId;
+
+_LogFilePrefix := logFilePrefix;
+
+_MaxRecordsPerFile := maxRecordsPerFile; ]]></ST>
       </Implementation>
     </Method>
     <Property Name="LogFilePrefix" Id="{40add88b-d2fb-4d3b-98cc-bad1e64da312}" FolderPath="Settings\">
@@ -187,6 +197,12 @@ PROPERTY LogFilePrefix : STRING(32)]]></Declaration>
         </Implementation>
       </Get>
     </Property>
+    <Method Name="logNewMessages" Id="{cca9aac9-2d4b-4e92-aa8f-79b455184bb9}" FolderPath="Service memebers\">
+      <Declaration><![CDATA[METHOD PRIVATE logNewMessages]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[]]></ST>
+      </Implementation>
+    </Method>
     <Property Name="MaxRecordsPerFile" Id="{0dfa9c35-c9c2-4980-a810-2983eca9e012}" FolderPath="Settings\">
       <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
 PROPERTY MaxRecordsPerFile : UINT]]></Declaration>
@@ -239,12 +255,12 @@ PROPERTY Timeout : TIME]]></Declaration>
     <Method Name="TryLogException" Id="{b99885cc-2056-4f4b-ba06-145c472d92b5}">
       <Declaration><![CDATA[METHOD TryLogException : BOOL
 VAR_INPUT
-	exception : IException;
+	exception : TOF_Core.IException;
 END_VAR
 VAR
-	message : ERROR_MESSAGE;
-	aggregateException : IAggregateException;
-	innerException : IException;
+	message : TOF_Core.ERROR_MESSAGE;
+	aggregateException : TOF_Core.IAggregateException;
+	innerException : TOF_Core.IException;
 	i : DINT;
 END_VAR]]></Declaration>
       <Implementation>
@@ -252,70 +268,30 @@ END_VAR]]></Declaration>
 	RETURN;
 END_IF
 
-(*IF NOT __QUERYINTERFACE(exception, aggregateException) OR_ELSE aggregateException.InnerExceptionCount = 0 THEN
-	message := exception.GetMessage(TRUE, FALSE, TRUE);
-	TryLogException := TryLogMessage(LOG_CATEGORY.ERROR, message);
-ELSE
-	IF aggregateException.InnerExceptionCount > 1 THEN
-		// reverce order
-		TryLogException := TryLogMessage(LOG_CATEGORY.ERROR, "<<< aggregate exception end <<<");
-		
-		FOR i := TO_DINT(aggregateException.InnerExceptionCount) - 1 TO 0 BY -1 DO
-			innerException := aggregateException.GetInnerException(i);
-			
-			message := WideStringHelper.ConcatStrings255("  ", innerException.GetMessage(TRUE, FALSE, TRUE));
-			
-			TryLogException := TryLogException AND TryLogMessage(LOG_CATEGORY.ERROR, message);		
-		END_FOR
-		
-		TryLogException := TryLogException AND TryLogMessage(LOG_CATEGORY.ERROR, ">>> aggregate exception start >>>");
-	ELSE		
-		innerException := aggregateException.GetInnerException(0);
-		
-		message := innerException.GetMessage(TRUE, FALSE, TRUE);
-		
-		TryLogException := TryLogMessage(LOG_CATEGORY.ERROR, message);
-	END_IF
-END_IF*)]]></ST>
+message := exception.GetMessage(TRUE, FALSE, TRUE);
+
+TryLogException := TryLogMessage(LOG_CATEGORY.ERROR, message);]]></ST>
       </Implementation>
     </Method>
     <Method Name="TryLogMessage" Id="{350b4112-ef62-44cb-8cce-fcf9841762dc}">
       <Declaration><![CDATA[METHOD TryLogMessage : BOOL
 VAR_INPUT
-	category : LOG_CATEGORY;	
+	category : TOF_Core.LOG_CATEGORY;	
 END_VAR
 VAR_IN_OUT CONSTANT
-	message : ERROR_MESSAGE;
+	message : TOF_Core.ERROR_MESSAGE;
 END_VAR
 VAR
-	number : STRING(10) := '';
+	textToLog : TOF_Core.ERROR_MESSAGE;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[(*CASE category OF
-	LOG_CATEGORY.INFORMATION, LOG_CATEGORY.SUCCESS:
-		IF LogManager.AddNumberToMessage THEN
-			_HintMessageCounter := _HintMessageCounter + 1;
-			number := StringHelper.ConcatStrings255('#', TO_STRING(_HintMessageCounter), ': '); 
-		END_IF
-		
-		TryLogMessage := Tc2_System.ADSLOGSTR(msgCtrlMask := Tc2_System.Global_Variables.ADSLOG_MSGTYPE_LOG, msgFmtStr := StringHelper.ConcatStrings255(number, TO_STRING(message)), strArg := '') = 0;
+        <ST><![CDATA[textToLog := WideStringHelper.ConcatStrings255("#", TO_WSTRING(category), ": ");
 
-	LOG_CATEGORY.WARNING:
-		IF LogManager.AddNumberToMessage THEN
-			_WarningMessageCounter := _WarningMessageCounter + 1;
-			number := StringHelper.ConcatStrings255('#', TO_STRING(_WarningMessageCounter), ': '); 
-		END_IF
-		
-		TryLogMessage := Tc2_System.ADSLOGSTR(msgCtrlMask := Tc2_System.Global_Variables.ADSLOG_MSGTYPE_WARN, msgFmtStr := StringHelper.ConcatStrings255(number, TO_STRING(message)), strArg := '') = 0;
-	
-	LOG_CATEGORY.ERROR, LOG_CATEGORY.FATAL_ERROR:
-		IF LogManager.AddNumberToMessage THEN
-			_ErrorMessageCounter := _ErrorMessageCounter + 1;
-			number := StringHelper.ConcatStrings255('#', TO_STRING(_ErrorMessageCounter), ': '); 
-		END_IF
-		
-		TryLogMessage := Tc2_System.ADSLOGSTR(msgCtrlMask := Tc2_System.Global_Variables.ADSLOG_MSGTYPE_ERROR, msgFmtStr := StringHelper.ConcatStrings255(number, TO_STRING(message)), strArg := '') = 0;
-END_CASE*)]]></ST>
+TOF_Core.WideStringHelper.AppendToTarget(textToLog, message);
+TOF_Core.WideStringHelper.AppendToTarget(textToLog, TOF_Core.WideStringHelper.NewLine);
+TOF_Core.WideStringHelper.AppendToTarget(textToLog, TOF_Core.WideStringHelper.NewLine);
+
+_MessageBuffer.AppendGeneric(TOF_Core.GenericValueFactory.FromWStringValue(textToLog));]]></ST>
       </Implementation>
     </Method>
   </POU>

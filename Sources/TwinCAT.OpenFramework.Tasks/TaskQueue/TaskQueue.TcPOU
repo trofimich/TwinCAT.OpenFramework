@@ -1,0 +1,188 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="TaskQueue" Id="{f0c61143-c00e-4407-a4c7-9d2217888a98}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+
+.. <legal notes>
+
+legal notes
+=================
+| SPDX-FileCopyrightText: © 2025 Oleksandr Tiutyk <trofimich@gmail.com>
+| SPDX-License-Identifier: LGPL-3.0-only
+| For details check: LGPL-3.0-only_
+
+.. _LGPL-3.0-only: https://www.gnu.org/licenses/lgpl-3.0.en.html
+
+.. </legal notes>
+
+*)
+
+{attribute 'no_explicit_call' := 'do not call this function block directly'} 
+FUNCTION_BLOCK TaskQueue EXTENDS Task IMPLEMENTS ITaskQueue
+VAR
+	_ClassName : STRING := __POUNAME();
+
+	_PendingTasks : TOF_Collections.List(0);
+	
+	_CurrentTask : ITask;
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[]]></ST>
+    </Implementation>
+    <Folder Name="Overriden members" Id="{4bef8cc9-2b5e-47d3-8687-e276258e154f}" />
+    <Folder Name="Service members" Id="{6a1e7c2e-640d-4cd4-b950-ba44aa8bcbd5}" />
+    <Property Name="ClassName" Id="{4bbf79c5-3d95-48df-abeb-00b7dafcae82}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+PROPERTY ClassName : STRING]]></Declaration>
+      <Get Name="Get" Id="{6dc2e1f1-5a0f-4d62-9c87-6d93e93e17a6}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ClassName := _ClassName;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="Clear" Id="{788001cb-ee7f-48be-bef7-a8282728456b}">
+      <Declaration><![CDATA[METHOD FINAL Clear]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_PendingTasks.Clear();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="Enqueue" Id="{8da25e2d-82fa-4e76-951d-e0b53d9c9013}">
+      <Declaration><![CDATA[METHOD Enqueue
+VAR_INPUT
+	task : ITask;
+	deleteOnFinishOrClear : BOOL := FALSE;
+END_VAR
+VAR
+	taskTypeNotSpecifiedException : TOF_Core.ArgumentNotSpecifiedException;
+	
+	taskAsGeneric : TOF_Core.GENERIC_VALUE;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF task = 0 THEN
+	taskTypeNotSpecifiedException.Throw(Namespacename, ClassName, __POUNAME(), __POSITION(), 'task');
+END_IF
+
+IF deleteOnFinishOrClear THEN
+	taskAsGeneric := TOF_Core.GenericValueFactory.FromParts(GENERIC_TYPE_CLASS.OBJECT, task.Address, task.Size, GENERIC_MEMORY_MANAGEMENT_BEHAVIOR.STORE_ORIGINAL_REFERENCE_AND_OWNS_MEMORY);
+ELSE
+	taskAsGeneric := TOF_Core.GenericValueFactory.FromParts(GENERIC_TYPE_CLASS.OBJECT, task.Address, task.Size, GENERIC_MEMORY_MANAGEMENT_BEHAVIOR.STORE_ORIGINAL_REFERENCE_AND_NOT_OWNS_MEMORY);
+END_IF
+
+_PendingTasks.AppendGeneric(taskAsGeneric);]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="NamespaceName" Id="{eaa94bce-52a2-4bcd-bdc2-647a6fc566d3}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+PROPERTY NamespaceName : STRING]]></Declaration>
+      <Get Name="Get" Id="{c712cae9-e17d-4f81-8062-16f10677ff1a}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[NamespaceName := CurrentNamespace.Name;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="OnCancel" Id="{8a9c9437-b951-4ff4-bd9f-8ee95ea047bf}" FolderPath="Overriden members\">
+      <Declaration><![CDATA[METHOD PROTECTED OnCancel]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF _CurrentTask <> 0 THEN
+	_CurrentTask.Cancel();		
+	
+	_PendingTasks.RemoveAt(0);
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="OnRunning" Id="{8c37d804-4a10-43d0-b554-b085457ead5a}" FolderPath="Overriden members\">
+      <Declaration><![CDATA[METHOD PROTECTED OnRunning 
+VAR_INPUT
+	startRequest : BOOL;
+END_VAR
+VAR_OUTPUT
+	state : TASK_RUNNING_STATE;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF startRequest THEN	
+	TOF_Core.LogManager.TryLogMessage("Task queue starting", LOG_CATEGORY.INFORMATION, "TaskQueue", "TaskQueue.Starting");
+END_IF
+
+__TRY
+	IF _CurrentTask <> 0 THEN
+		_CurrentTask.Execute();	
+	ELSE
+		updateCurrentTask();
+
+		IF _CurrentTask <> 0 THEN
+			TOF_Core.LogManager.TryLogMessage(WideStringHelper.ConcatStrings255("Task '", _CurrentTask.Name, "' start in queue"), LOG_CATEGORY.INFORMATION, "TaskQueue", "TaskQueue.Task", "TaskQueue.Task.Start");
+	
+			_CurrentTask.Start();
+		END_IF 
+	END_IF
+__CATCH
+	IF _CurrentTask <> 0 AND_THEN _PendingTasks.Count > 0 THEN
+		_PendingTasks.RemoveAt(0);
+	END_IF
+	
+	TOF_Core.LogManager.TryLogMessage(WideStringHelper.ConcatStrings255("Task '", _CurrentTask.Name, "' error in queue"), LOG_CATEGORY.INFORMATION, "TaskQueue", "TaskQueue.Task", "TaskQueue.Task.Error");
+	
+	TOF_Core.ExceptionManager.ReThrowLastException();
+__ENDTRY
+
+IF _CurrentTask <> 0 AND_THEN NOT _CurrentTask.Busy THEN
+	IF _CurrentTask.Aborted THEN
+		TOF_Core.LogManager.TryLogMessage(WideStringHelper.ConcatStrings255("Task '", _CurrentTask.Name, "' aborted in queue"), LOG_CATEGORY.INFORMATION, "TaskQueue", "TaskQueue.Task", "TaskQueue.Task.Aborted");
+	
+		state := TASK_RUNNING_STATE.ABORTED;
+	ELSIF _CurrentTask.Cancelled THEN
+		TOF_Core.LogManager.TryLogMessage(WideStringHelper.ConcatStrings255("Task '", _CurrentTask.Name, "' cancelled in queue"), LOG_CATEGORY.INFORMATION, "TaskQueue", "TaskQueue.Task", "TaskQueue.Task.Cancelled");
+	ELSIF _CurrentTask.Done THEN
+		TOF_Core.LogManager.TryLogMessage(WideStringHelper.ConcatStrings255("Task '", _CurrentTask.Name, "' done in queue"), LOG_CATEGORY.INFORMATION, "TaskQueue", "TaskQueue.Task", "TaskQueue.Task.Task.Done");		
+	END_IF	
+	
+	IF _PendingTasks.Count > 0 THEN
+		_PendingTasks.RemoveAt(0);
+	END_IF
+	
+	_CurrentTask := 0;
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="PendingTaskCount" Id="{c09374ca-4d8b-4efc-8aab-59993dc43f7f}">
+      <Declaration><![CDATA[PROPERTY FINAL PendingTaskCount : DINT]]></Declaration>
+      <Get Name="Get" Id="{413936c1-b0cd-4945-862e-706d956d382e}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[PendingTaskCount := _PendingTasks.Count;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="Size" Id="{0e116005-f27b-466f-9db7-ce75e0416da4}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+PROPERTY Size : ULINT]]></Declaration>
+      <Get Name="Get" Id="{3c3b7424-8264-46de-9ea9-397c63ed7cc7}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[Size := XSIZEOF(THIS^);]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="updateCurrentTask" Id="{73d80406-0def-4971-8e04-a476c9509e42}" FolderPath="Service members\">
+      <Declaration><![CDATA[METHOD PRIVATE updateCurrentTask
+VAR
+	taskInterface : TOF_Core.IObject;
+	
+	toITaskConversionNotSupportedException : TOF_Core.StandardException;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF _PendingTasks.Count < 1 THEN
+	RETURN;
+END_IF
+
+taskInterface := _PendingTasks.Get(0).AsIObject();
+
+IF NOT __QUERYINTERFACE(taskInterface, _CurrentTask) THEN
+	toITaskConversionNotSupportedException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), "Can't convert task from _PendingTasks collection to ITask type");
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+  </POU>
+</TcPlcObject>

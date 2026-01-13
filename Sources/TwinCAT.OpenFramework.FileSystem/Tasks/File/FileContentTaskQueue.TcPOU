@@ -1,6 +1,6 @@
 ﻿<?xml version="1.0" encoding="utf-8"?>
 <TcPlcObject Version="1.1.0.1">
-  <POU Name="FileManager" Id="{bc2051e9-92a1-4c8e-a38d-beb02683c33f}" SpecialFunc="None">
+  <POU Name="FileContentTaskQueue" Id="{bc2051e9-92a1-4c8e-a38d-beb02683c33f}" SpecialFunc="None">
     <Declaration><![CDATA[(*
 
 .. <legal notes>
@@ -18,18 +18,16 @@ legal notes
 *)
 
 {attribute 'no_explicit_call' := 'Direct call is not allowed'} 
-FUNCTION_BLOCK FileManager EXTENDS TOF_Tasks.Task
+FUNCTION_BLOCK FileContentTaskQueue EXTENDS TOF_Tasks.Task
 VAR
 	_FileManagerClassName : STRING := __POUNAME();
 	
 	_Open : Tc2_System.FB_FileOpen;
 	_Close : Tc2_System.FB_FileClose;
 	
-	_StartTaskSequence : BOOL;
+	_Starting : BOOL;
 		
-	_TaskSequence : TOF_Tasks.TaskSequence;
-	
-	_FileTaskSwitchingHandler : FileTaskSwitchingHandler(THIS^);
+	_TaskQueue : TOF_Tasks.TaskQueue;
 END_VAR]]></Declaration>
     <Implementation>
       <ST><![CDATA[]]></ST>
@@ -38,15 +36,6 @@ END_VAR]]></Declaration>
     <Folder Name="Outputs" Id="{9ba5e1c6-a771-4234-bb21-c0bdd9c29447}" />
     <Folder Name="Overriden members" Id="{b5902f7c-0b68-468a-aed6-ab0827abdd52}" />
     <Folder Name="Service memebers" Id="{10603918-70f1-4abe-9de6-dff33e7d7d98}" />
-    <Method Name="AddTask" Id="{6d338e28-e90a-4f1d-be55-6a823f742ef9}">
-      <Declaration><![CDATA[METHOD AddTask : DINT
-VAR_INPUT
-	fileHandleTask : IFileHandleTask; 
-END_VAR]]></Declaration>
-      <Implementation>
-        <ST><![CDATA[AddTask := _TaskSequence.AddTask(fileHandleTask);]]></ST>
-      </Implementation>
-    </Method>
     <Property Name="AmsNetId" Id="{1c569c82-f0ee-422a-ab1a-6efc60d4b20b}" FolderPath="Inputs\">
       <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
 {attribute 'OPC.UA.DA.Property' := '1'}
@@ -80,20 +69,21 @@ PROPERTY ClassName : STRING
     <Method Name="ClearTasks" Id="{8c96f5d2-116d-4613-b8ca-9482f7ab04c1}">
       <Declaration><![CDATA[METHOD FINAL ClearTasks]]></Declaration>
       <Implementation>
-        <ST><![CDATA[_TaskSequence.ClearTasks();]]></ST>
+        <ST><![CDATA[_TaskQueue.Clear();]]></ST>
       </Implementation>
     </Method>
-    <Method Name="FB_init" Id="{0eec3045-6325-457d-b0c5-a2950815d51e}">
-      <Declaration><![CDATA[METHOD FB_init : BOOL
+    <Method Name="Enqueue" Id="{6d338e28-e90a-4f1d-be55-6a823f742ef9}">
+      <Declaration><![CDATA[METHOD Enqueue
 VAR_INPUT
-	(* if TRUE, the retain variables are initialized (warm start / cold start)*)
-	bInitRetains	: BOOL;
-	(* if TRUE, the instance afterwards gets moved into the copy code (online change)*)
-	bInCopyCode	: BOOL;
-END_VAR
-]]></Declaration>
+	fileHandleTask : IFileContentTask; 
+	deleteOnFinishOrClear : BOOL := FALSE;
+END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[_TaskSequence.TaskSwitchingHandler := _FileTaskSwitchingHandler;]]></ST>
+        <ST><![CDATA[IF fileHandleTask <> 0 THEN
+	fileHandleTask.SetFileOpen(_Open);
+	
+	_TaskQueue.Enqueue(fileHandleTask, deleteOnFinishOrClear);
+END_IF]]></ST>
       </Implementation>
     </Method>
     <Method Name="fileClose" Id="{023ab949-b21b-4f26-9304-fdefb517b6cf}" FolderPath="Service memebers\">
@@ -140,12 +130,6 @@ PROPERTY FilePath : Tc2_System.T_MaxString]]></Declaration>
         </Implementation>
       </Set>
     </Property>
-    <Method Name="GetFileOpen" Id="{121dea51-f0fa-4ba7-933d-b9a5a3058d04}" FolderPath="Service memebers\">
-      <Declaration><![CDATA[METHOD INTERNAL GetFileOpen : REFERENCE TO Tc2_System.FB_FileOpen]]></Declaration>
-      <Implementation>
-        <ST><![CDATA[GetFileOpen REF= _Open;]]></ST>
-      </Implementation>
-    </Method>
     <Property Name="ModeFlags" Id="{eab34e5a-e16f-430d-90f0-029e4eb57eb1}" FolderPath="Inputs\">
       <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
 // use Tc2_System.Global_Variables.FOPEN_MODEXXX
@@ -177,7 +161,7 @@ PROPERTY NamespaceName : STRING]]></Declaration>
       <Declaration><![CDATA[METHOD PROTECTED OnCancel
 ]]></Declaration>
       <Implementation>
-        <ST><![CDATA[_TaskSequence.Cancel();
+        <ST><![CDATA[_TaskQueue.Cancel();
 
 fileClose();]]></ST>
       </Implementation>
@@ -212,17 +196,17 @@ END_VAR]]></Declaration>
 
 	fileOpen();
 	
-	_StartTaskSequence := TRUE;
+	_Starting := TRUE;
 	
 	RETURN;
-ELSE	
-	IF _StartTaskSequence THEN
+ELSE		
+	IF _Starting THEN
 		_Close();
 		_Open();
 		
 		IF _Open.bError THEN
 			errorMessageBuilder
-				.AppendString("An error occurred while opening the file '")
+				.AppendString("Error while open file '")
 				.Append(_Open.sPathName)
 				.AppendString("'");
 		
@@ -233,18 +217,18 @@ ELSE
 			RETURN;
 		END_IF
 
-		_StartTaskSequence := FALSE;
+		_Starting := FALSE;
 		
-		_TaskSequence.Start();
+		_TaskQueue.Start();
 	ELSE
-		_TaskSequence.Execute(); 
+		_TaskQueue.Execute(); 
 	END_IF
 END_IF
 
-IF NOT _TaskSequence.Busy THEN
-	IF _TaskSequence.Done THEN	
+IF NOT _TaskQueue.Busy THEN
+	IF _TaskQueue.Done THEN	
 		state := TASK_RUNNING_STATE.DONE;
-	ELSIF _TaskSequence.Aborted THEN
+	ELSIF _TaskQueue.Aborted THEN
 		state := TASK_RUNNING_STATE.ABORTED;
 	END_IF	
 
@@ -268,6 +252,16 @@ PROPERTY PathType : Tc2_System.E_OpenPath]]></Declaration>
         </Implementation>
       </Set>
     </Property>
+    <Property Name="PendingTaskCount" Id="{d108cb5f-99bc-48a9-ab2b-56da3b0f948f}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+PROPERTY FINAL PendingTaskCount : DINT]]></Declaration>
+      <Get Name="Get" Id="{32398972-9e42-46b6-a8d9-ee3d9bdb5dc1}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[PendingTaskCount := _TaskQueue.PendingTaskCount;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
     <Property Name="Size" Id="{aa575a10-da54-44bb-a1d2-ac20af742a7b}">
       <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
 PROPERTY Size : ULINT]]></Declaration>
@@ -275,15 +269,6 @@ PROPERTY Size : ULINT]]></Declaration>
         <Declaration><![CDATA[]]></Declaration>
         <Implementation>
           <ST><![CDATA[Size := XSIZEOF(THIS^);]]></ST>
-        </Implementation>
-      </Get>
-    </Property>
-    <Property Name="TaskCount" Id="{d108cb5f-99bc-48a9-ab2b-56da3b0f948f}">
-      <Declaration><![CDATA[PROPERTY FINAL TaskCount : DINT]]></Declaration>
-      <Get Name="Get" Id="{32398972-9e42-46b6-a8d9-ee3d9bdb5dc1}">
-        <Declaration><![CDATA[]]></Declaration>
-        <Implementation>
-          <ST><![CDATA[TaskCount := _TaskSequence.TaskCount;]]></ST>
         </Implementation>
       </Get>
     </Property>
