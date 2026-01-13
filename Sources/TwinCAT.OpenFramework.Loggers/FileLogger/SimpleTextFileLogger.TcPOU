@@ -28,14 +28,14 @@ VAR
 	_LogFilePrefix : STRING(32);
 
 	_CreateDirectoryIfNotExists : TOF_FileSystem.CreateDirectoryIfNotExists;	
-	_FileManager : TOF_FileSystem.FileManager;
+	
+	_FileContentManagers : ARRAY [0..1] OF TOF_FileSystem.FileContentManager;
+	_RecordsPerFiles : ARRAY [0..1] OF UINT;
+	_WriteBytesTasks : ARRAY [0..1] OF TOF_FileSystem.WriteBytesToFile;
+	
+	_ActiveManagerIndex : BYTE(0..1);
 	
 	_MaxRecordsPerFile : UINT;
-	_RecordsPerFile : UINT;
-	
-	_HintMessageCounter : ULINT;
-	_WarningMessageCounter : ULINT;
-	_ErrorMessageCounter : ULINT;
 	
 	_MessageBuffer : TOF_Collections.List(0);
 END_VAR]]></Declaration>
@@ -137,13 +137,20 @@ END_VAR]]></Declaration>
 			_CreateDirectoryIfNotExists.Execute();
 			
 			IF NOT _CreateDirectoryIfNotExists.Busy THEN
-				IF _CreateDirectoryIfNotExists.Done THEN
-					_FileManager.FilePath := createCurrentFilePath();
+				IF _CreateDirectoryIfNotExists.Done THEN					
+					_State := SIMPLE_TEXT_FILE_LOGGER_STATE.LOGGING;
 				ELSE			
 					createDirectoryException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), "Log directory not created");
 				END_IF
 			END_IF	
 			
+		SIMPLE_TEXT_FILE_LOGGER_STATE.LOGGING:
+			_FileContentManagers[0].Execute();
+			_FileContentManagers[1].Execute();
+			
+			IF _FileContentManagers[_ActiveManagerIndex].PendingTaskCount = 0 THEN
+				logNewMessages();
+			END_IF
 	END_CASE
 __CATCH(exceptionCode)
 	_State := SIMPLE_TEXT_FILE_LOGGER_STATE.FAILED;
@@ -177,10 +184,15 @@ _CreateDirectoryIfNotExists.PathType := directoryPathType;
 _CreateDirectoryIfNotExists.Timeout := timeout;
 _CreateDirectoryIfNotExists.AmsNetId := amsNetId;
 
-_FileManager.PathType := directoryPathType;
-_FileManager.ModeFlags := Tc2_System.Global_Variables.FOPEN_MODEWRITE OR Tc2_System.Global_Variables.FOPEN_MODEPLUS OR Tc2_System.Global_Variables.FOPEN_MODETEXT;
-_FileManager.Timeout := timeout;
-_FileManager.AmsNetId := amsNetId;
+_FileContentManagers[0].PathType := directoryPathType;
+_FileContentManagers[0].ModeFlags := Tc2_System.Global_Variables.FOPEN_MODEWRITE OR Tc2_System.Global_Variables.FOPEN_MODEPLUS OR Tc2_System.Global_Variables.FOPEN_MODETEXT;
+_FileContentManagers[0].Timeout := timeout;
+_FileContentManagers[0].AmsNetId := amsNetId;
+
+_FileContentManagers[1].PathType := directoryPathType;
+_FileContentManagers[1].ModeFlags := Tc2_System.Global_Variables.FOPEN_MODEWRITE OR Tc2_System.Global_Variables.FOPEN_MODEPLUS OR Tc2_System.Global_Variables.FOPEN_MODETEXT;
+_FileContentManagers[1].Timeout := timeout;
+_FileContentManagers[1].AmsNetId := amsNetId;
 
 _LogFilePrefix := logFilePrefix;
 
@@ -198,9 +210,18 @@ PROPERTY LogFilePrefix : STRING(32)]]></Declaration>
       </Get>
     </Property>
     <Method Name="logNewMessages" Id="{cca9aac9-2d4b-4e92-aa8f-79b455184bb9}" FolderPath="Service memebers\">
-      <Declaration><![CDATA[METHOD PRIVATE logNewMessages]]></Declaration>
+      <Declaration><![CDATA[METHOD PRIVATE logNewMessages
+VAR
+	message : TOF_Core.GENERIC_VALUE;
+END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[]]></ST>
+        <ST><![CDATA[IF _MessageBuffer.Count = 0 THEN
+	RETURN;
+END_IF
+
+WHILE _MessageBuffer.Count > 0 DO
+	message := _MessageBuffer.Get(0);
+END_WHILE]]></ST>
       </Implementation>
     </Method>
     <Property Name="MaxRecordsPerFile" Id="{0dfa9c35-c9c2-4980-a810-2983eca9e012}" FolderPath="Settings\">
