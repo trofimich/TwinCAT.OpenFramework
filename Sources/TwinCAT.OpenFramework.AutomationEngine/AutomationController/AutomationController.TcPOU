@@ -25,23 +25,26 @@ EXTENDS Core.Object IMPLEMENTS IAutomationController
 VAR
 	_AutomationRunner : IAutomationRunner;
 	
+	_RunningExceptionHandler : Core.IExceptionHandler;
+	_StoppingExceptionHandler : Core.IExceptionHandler;
+	
 	_Enabled : BOOL := TRUE;
 			
 	_SimulationModeOverride : Automation.SIMULATION_MODE_OVERRIDE;
 
-	_State : Automation.AUTOMATION_CONTROLLER_STATE;	
+	_State : AUTOMATION_CONTROLLER_STATE;	
+	_PreviousState : AUTOMATION_CONTROLLER_STATE;	
 
 	_Diagnostics : AUTOMATION_CONTROLLER_DIAGNOSTICS;
 END_VAR]]></Declaration>
     <Implementation>
       <ST><![CDATA[]]></ST>
     </Implementation>
+    <Folder Name="Exception handlers" Id="{7e6e08bd-25f5-4a57-b4a8-f1c0773fab21}" />
     <Folder Name="Methods to override" Id="{18713aca-9c47-4769-936e-cd3be2ed069c}" />
     <Folder Name="Service memebers" Id="{5df4ad11-a7ac-4049-8c04-41c0497c7559}" />
     <Property Name="DeviceCount" Id="{612962ce-4a03-4dcb-a1ce-f9e94eefa0eb}">
       <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
-{attribute 'OPC.UA.DA' := '1'}
-{attribute 'OPC.UA.DA.Access' := '1'}
 PROPERTY DeviceCount : INT]]></Declaration>
       <Get Name="Get" Id="{cc518b3a-e440-4848-8075-189e5ee4e093}">
         <Declaration><![CDATA[]]></Declaration>
@@ -62,8 +65,6 @@ PROPERTY ABSTRACT Devices : REFERENCE TO ARRAY [0.._DeviceCount - 1] OF Automati
     </Property>
     <Property Name="Diagnostics" Id="{89d80bd2-f2bc-45f4-b861-f9194e4bb6a5}">
       <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
-{attribute 'OPC.UA.DA' := '1'}
-{attribute 'OPC.UA.DA.Access' := '1'}
 PROPERTY FINAL Diagnostics : REFERENCE TO AUTOMATION_CONTROLLER_DIAGNOSTICS]]></Declaration>
       <Get Name="Get" Id="{6974a2c5-c336-4c3a-a18a-82f762fc3656}">
         <Declaration><![CDATA[]]></Declaration>
@@ -76,40 +77,56 @@ PROPERTY FINAL Diagnostics : REFERENCE TO AUTOMATION_CONTROLLER_DIAGNOSTICS]]></
       <Declaration><![CDATA[METHOD FINAL Disable
 VAR
 	i : INT;
+
+	exceptionCode : __SYSTEM.ExceptionCode;
+	exception : IException;
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[_Enabled := FALSE;
 
-OnEnabledChange();
+__TRY
+	OnEnabledChange();
+	
+	IF __ISVALIDREF(Devices) AND_THEN _DeviceCount > 0 THEN
+		FOR i := 0 TO _DeviceCount - 1 DO
+			Devices[i].Disable();
+		END_FOR	
+	END_IF
+__CATCH(exceptionCode)	
+	exception := ExceptionManager.GetLastException(exceptionCode);	
 
-IF __ISVALIDREF(Devices) AND_THEN _DeviceCount > 0 THEN
-	FOR i := 0 TO _DeviceCount - 1 DO
-		Devices[i].Disable();
-	END_FOR	
-END_IF]]></ST>
+	fillErrorLog('LastDisableError', Diagnostics.LastDisableError, exception);					
+__ENDTRY]]></ST>
       </Implementation>
     </Method>
     <Method Name="Enable" Id="{df8c9490-4eb4-4f45-9a7b-8c348978a15b}">
       <Declaration><![CDATA[METHOD FINAL Enable
 VAR
 	i : INT;
+
+	exceptionCode : __SYSTEM.ExceptionCode;
+	exception : IException;
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[_Enabled := TRUE;
 
-OnEnabledChange();
+__TRY
+	OnEnabledChange();
+	
+	IF __ISVALIDREF(Devices) AND_THEN _DeviceCount > 0 THEN
+		FOR i := 0 TO _DeviceCount - 1 DO
+			Devices[i].Enable();
+		END_FOR	
+	END_IF
+__CATCH(exceptionCode)	
+	exception := ExceptionManager.GetLastException(exceptionCode);	
 
-IF __ISVALIDREF(Devices) AND_THEN _DeviceCount > 0 THEN
-	FOR i := 0 TO _DeviceCount - 1 DO
-		Devices[i].Enable();
-	END_FOR	
-END_IF]]></ST>
+	fillErrorLog('LastEnableError', Diagnostics.LastEnableError, exception);					
+__ENDTRY]]></ST>
       </Implementation>
     </Method>
     <Property Name="Enabled" Id="{d5768b1c-6fec-4453-809d-b40c8bd349ff}">
       <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
-{attribute 'OPC.UA.DA' := '1'}
-{attribute 'OPC.UA.DA.Access' := '1'}
 PROPERTY FINAL Enabled : BOOL]]></Declaration>
       <Get Name="Get" Id="{a02f7fac-5fa7-4362-9e5d-241f8804e466}">
         <Declaration><![CDATA[]]></Declaration>
@@ -118,6 +135,30 @@ PROPERTY FINAL Enabled : BOOL]]></Declaration>
         </Implementation>
       </Get>
     </Property>
+    <Method Name="Execute" Id="{edf960fe-6c94-4ace-a7be-524e71aafd2a}">
+      <Declaration><![CDATA[METHOD FINAL Execute
+VAR
+	invalidStateException : Core.StandardException;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_PreviousState := _State;
+
+IF NOT Enabled THEN
+	RETURN;
+END_IF
+
+IF _State = AUTOMATION_CONTROLLER_STATE.INITIAL THEN
+	invalidStateException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), "Automation controller is not initialized");
+END_IF
+
+handleInputDevices();
+
+handleWorkingStates();
+
+handleOutputDevices();
+]]></ST>
+      </Implementation>
+    </Method>
     <Method Name="FB_init" Id="{46ebd59e-7068-435f-99df-fef2ff312630}">
       <Declaration><![CDATA[METHOD FB_init : BOOL
 VAR_INPUT
@@ -140,19 +181,176 @@ _AutomationRunner := automationRunner;]]></ST>
     </Method>
     <Method Name="fillErrorLog" Id="{13ecfb4e-9729-40c0-b5b7-a5c89543cb1f}" FolderPath="Service memebers\">
       <Declaration><![CDATA[METHOD PRIVATE fillErrorLog
+VAR_INPUT
+	errorPlace : STRING(39);
+END_VAR
 VAR_IN_OUT
 	targetErrorLog : AUTOMATION_ERROR_LOG;
 	sourceException : IException;  
 END_VAR
 ]]></Declaration>
       <Implementation>
-        <ST><![CDATA[targetErrorLog.ShortMessage := sourceException.GetMessage(FALSE, FALSE);
+        <ST><![CDATA[_Diagnostics.LastErrorPalce := errorPlace;
+
+targetErrorLog.ShortMessage := sourceException.GetMessage(FALSE, FALSE);
 targetErrorLog.FullMessage := sourceException.GetMessage(TRUE, TRUE);
 targetErrorLog.Source := sourceException.GetSourceDescription();
 targetErrorLog.LocalTimestamp := sourceException.LocalTimestamp;
 targetErrorLog.UtcTimestamp := sourceException.UtcTimestamp;
 
 Core.LogManager.TryLogException(sourceException, "AutomationControllerError");]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="handleInputDevices" Id="{cd23818a-f724-4bce-970a-f4c5c7f1d1fb}" FolderPath="Service memebers\">
+      <Declaration><![CDATA[METHOD PRIVATE handleInputDevices
+VAR
+	i : DINT;
+
+	exceptionCode : __SYSTEM.ExceptionCode;
+	exception : IException;
+	
+	inputDevice : Automation.IInputDevice;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF __ISVALIDREF(Devices) AND_THEN _DeviceCount > 0 THEN
+	FOR i := 0 TO _DeviceCount - 1 DO
+		IF NOT __QUERYINTERFACE(Devices[i], inputDevice) OR_ELSE NOT inputDevice.Enabled THEN
+			CONTINUE;
+		END_IF
+		
+		__TRY
+			inputDevice.UpdateStateFromInputs();
+		__CATCH(exceptionCode)
+			exception := ExceptionManager.GetLastException(exceptionCode);
+						
+			fillErrorLog('LastRefreshInputDeviceError', Diagnostics.LastRefreshInputDeviceError, exception);
+					
+			IF _State <> AUTOMATION_CONTROLLER_STATE.FAULT THEN
+				setState(AUTOMATION_CONTROLLER_STATE.FAULT);				
+			END_IF					
+		__ENDTRY
+	END_FOR
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="handleOutputDevices" Id="{421f0782-6afa-4e82-84cb-a5cc3ea35f21}" FolderPath="Service memebers\">
+      <Declaration><![CDATA[METHOD PRIVATE handleOutputDevices
+VAR
+	i : DINT;
+
+	exceptionCode : __SYSTEM.ExceptionCode;
+	exception : IException;
+	
+	outputDevice : Automation.IOutputDevice;	
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF __ISVALIDREF(Devices) AND_THEN _DeviceCount > 0 THEN
+	FOR i := 0 TO _DeviceCount - 1 DO
+		IF NOT __QUERYINTERFACE(Devices[i], outputDevice) OR_ELSE NOT outputDevice.Enabled THEN
+			CONTINUE;
+		END_IF
+		
+		__TRY
+			outputDevice.UpdateOutputsFromState(); 
+		__CATCH(exceptionCode)
+			exception := ExceptionManager.GetLastException(exceptionCode);
+						
+			fillErrorLog('LastRefreshOutputDeviceError', Diagnostics.LastRefreshOutputDeviceError, exception);
+
+			IF _State <> AUTOMATION_CONTROLLER_STATE.FAULT THEN
+				setState(AUTOMATION_CONTROLLER_STATE.FAULT);				
+			END_IF					
+		__ENDTRY 
+	END_FOR
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="handleWorkingStates" Id="{bb165360-ba12-474f-a548-167a2e5dd0a1}" FolderPath="Service memebers\">
+      <Declaration><![CDATA[METHOD PRIVATE handleWorkingStates
+VAR
+	i : DINT;
+
+	exceptionCode : __SYSTEM.ExceptionCode;
+	exception : IException;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[__TRY
+	IF _State = AUTOMATION_CONTROLLER_STATE.RUNNING AND_THEN StopRequest THEN
+		setState(AUTOMATION_CONTROLLER_STATE.STOPPING);
+	ELSIF _State = AUTOMATION_CONTROLLER_STATE.STOPPING AND_THEN StartRequest AND_THEN NOT StopRequest THEN
+		setState(AUTOMATION_CONTROLLER_STATE.RUNNING);
+	END_IF
+	
+	CASE _State OF
+		AUTOMATION_CONTROLLER_STATE.RUNNING:
+			OnRun();
+			
+		AUTOMATION_CONTROLLER_STATE.STOPPING:
+			OnStop();
+
+		AUTOMATION_CONTROLLER_STATE.FAULT:
+			OnFault();			
+	END_CASE
+__CATCH(exceptionCode)	
+	exception := ExceptionManager.GetLastException(exceptionCode);	
+
+	CASE _State OF
+		AUTOMATION_CONTROLLER_STATE.RUNNING:
+			fillErrorLog('LastRunningError', Diagnostics.LastRunningError, exception);			
+			
+			IF RunningExceptionHandler = 0 OR_ELSE NOT RunningExceptionHandler.HandleException(exception) THEN
+				setState(AUTOMATION_CONTROLLER_STATE.FAULT);
+			END_IF					
+			
+		AUTOMATION_CONTROLLER_STATE.STOPPING:
+			fillErrorLog('LastStoppingError', Diagnostics.LastStoppingError, exception);					
+			
+			IF RunningExceptionHandler = 0 OR_ELSE NOT StoppingExceptionHandler.HandleException(exception) THEN
+				setState(AUTOMATION_CONTROLLER_STATE.FAULT);
+			END_IF					
+
+		AUTOMATION_CONTROLLER_STATE.FAULT:
+			fillErrorLog('LastFaultError', Diagnostics.LastFaultError, exception);					
+	END_CASE
+__ENDTRY]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="Initialize" Id="{eb1221b0-f976-4a46-99f2-a6494cff3a27}">
+      <Declaration><![CDATA[METHOD FINAL Initialize
+VAR
+	initialized : BOOL;
+	
+	i : DINT;
+
+	exceptionCode : __SYSTEM.ExceptionCode;
+	exception : IException;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF _State <> AUTOMATION_CONTROLLER_STATE.INITIAL THEN
+	RETURN;
+END_IF
+
+initialized := TRUE;
+
+__TRY
+	IF __ISVALIDREF(Devices) THEN
+		FOR i := 0 TO _DeviceCount - 1 DO
+			initialized := initialized AND Devices[i].Initialize();
+		END_FOR
+	END_IF
+	
+	initialized := initialized AND OnInitialize();
+	
+	IF initialized THEN
+		setState(AUTOMATION_CONTROLLER_STATE.RUNNING);
+	END_IF	
+__CATCH(exceptionCode)
+	setState(AUTOMATION_CONTROLLER_STATE.FAULT);
+	
+	exception := ExceptionManager.GetLastException(exceptionCode);
+					
+	fillErrorLog('InitializationError', Diagnostics.InitializationError, exception);					
+__ENDTRY]]></ST>
       </Implementation>
     </Method>
     <Method Name="OnEnabledChange" Id="{d1fcb6d0-b53a-4b1a-b954-eb5cd2d33bc4}" FolderPath="Methods to override\">
@@ -162,28 +360,19 @@ Core.LogManager.TryLogException(sourceException, "AutomationControllerError");]]
       </Implementation>
     </Method>
     <Method Name="OnFault" Id="{47b787a0-74db-428e-a805-17453cf9f9ee}" FolderPath="Methods to override\">
-      <Declaration><![CDATA[METHOD PROTECTED OnFault
-VAR_IN_OUT CONSTANT
-	executionContext : AUTOMATION_EXECUTION_CONTEXT;
-END_VAR]]></Declaration>
+      <Declaration><![CDATA[METHOD PROTECTED OnFault]]></Declaration>
       <Implementation>
         <ST><![CDATA[]]></ST>
       </Implementation>
     </Method>
     <Method Name="OnInitialize" Id="{f30a4c4a-7966-446f-95b6-a1ce70efb536}" FolderPath="Methods to override\">
-      <Declaration><![CDATA[METHOD PROTECTED OnInitialize : BOOL
-VAR_IN_OUT CONSTANT
-	executionContext : AUTOMATION_EXECUTION_CONTEXT;
-END_VAR]]></Declaration>
+      <Declaration><![CDATA[METHOD PROTECTED OnInitialize : BOOL]]></Declaration>
       <Implementation>
         <ST><![CDATA[OnInitialize := TRUE;]]></ST>
       </Implementation>
     </Method>
     <Method Name="OnRun" Id="{f7f57440-8e03-4827-9c8c-4741292bf658}" FolderPath="Methods to override\">
-      <Declaration><![CDATA[METHOD PROTECTED ABSTRACT OnRun
-VAR_IN_OUT CONSTANT
-	executionContext : AUTOMATION_EXECUTION_CONTEXT;
-END_VAR]]></Declaration>
+      <Declaration><![CDATA[METHOD PROTECTED ABSTRACT OnRun]]></Declaration>
       <Implementation>
         <ST><![CDATA[]]></ST>
       </Implementation>
@@ -195,10 +384,7 @@ END_VAR]]></Declaration>
       </Implementation>
     </Method>
     <Method Name="OnStop" Id="{e9a7087e-9b95-447b-8bf1-2d25488d5f40}" FolderPath="Methods to override\">
-      <Declaration><![CDATA[METHOD PROTECTED OnStop
-VAR_IN_OUT CONSTANT
-	executionContext : AUTOMATION_EXECUTION_CONTEXT;
-END_VAR]]></Declaration>
+      <Declaration><![CDATA[METHOD PROTECTED OnStop]]></Declaration>
       <Implementation>
         <ST><![CDATA[]]></ST>
       </Implementation>
@@ -213,265 +399,21 @@ PROPERTY FINAL Parent : ISimulatable]]></Declaration>
         </Implementation>
       </Get>
     </Property>
-    <Method Name="processAutomationRunnerFaultState" Id="{bf8dc720-7294-48a4-b0de-8d1fd4d46c48}" FolderPath="Service memebers\">
-      <Declaration><![CDATA[METHOD PRIVATE processAutomationRunnerFaultState
-VAR_IN_OUT CONSTANT
-	executionContext : AUTOMATION_EXECUTION_CONTEXT;
-	aggregateException : Core.AggregateException;
-END_VAR
-VAR
-	i : DINT;
-
-	exceptionCode : __SYSTEM.ExceptionCode;
-	exception : IException;
-	
-	inputDevice : Automation.IInputDevice;
-	outputDevice : Automation.IOutputDevice;	
-END_VAR]]></Declaration>
-      <Implementation>
-        <ST><![CDATA[IF NOT Enabled THEN
-	RETURN;
-END_IF
-
-IF _State = Automation.AUTOMATION_CONTROLLER_STATE.RUNNING THEN
-	_State := Automation.AUTOMATION_CONTROLLER_STATE.STOPPING;
-END_IF
-
-// handle input devices
-IF __ISVALIDREF(Devices) AND_THEN _DeviceCount > 0 THEN
-	FOR i := 0 TO _DeviceCount - 1 DO
-		IF NOT __QUERYINTERFACE(Devices[i], inputDevice) OR_ELSE NOT inputDevice.Enabled THEN
-			CONTINUE;
-		END_IF
-		
-		__TRY
-			inputDevice.UpdateStateFromInputs(executionContext, aggregateException);
-		__CATCH(exceptionCode)
-			exception := ExceptionManager.GetLastException(exceptionCode);
-
-			fillErrorLog(Diagnostics.LastRefreshInputDeviceNonFatalError, exception);
-					
-			aggregateException.AddInnerException(exception);
-		__ENDTRY
-	END_FOR
-END_IF
-
-// handle fault
-__TRY
-	IF _State = Automation.AUTOMATION_CONTROLLER_STATE.FAULT THEN
-		OnFault(executionContext);
-	ELSE
-		OnStop(executionContext);
-	END_IF
-__CATCH(exceptionCode)	
-	exception := ExceptionManager.GetLastException(exceptionCode);	
-
-	fillErrorLog(Diagnostics.LastFaultError, exception);					
-
-	aggregateException.AddInnerException(exception);
-__ENDTRY
-
-// handle output devices
-IF __ISVALIDREF(Devices) AND_THEN _DeviceCount > 0 THEN
-	FOR i := 0 TO _DeviceCount - 1 DO
-		IF NOT __QUERYINTERFACE(Devices[i], outputDevice) OR_ELSE NOT outputDevice.Enabled THEN
-			CONTINUE;
-		END_IF
-		
-		__TRY
-			outputDevice.UpdateOutputsFromState(executionContext, aggregateException); 
-		__CATCH(exceptionCode)
-			exception := ExceptionManager.GetLastException(exceptionCode);
-			
-			fillErrorLog(Diagnostics.LastRefreshOutputDeviceNonFatalError, exception);
-					
-			aggregateException.AddInnerException(exception);
-		__ENDTRY 
-	END_FOR
-END_IF]]></ST>
-      </Implementation>
-    </Method>
-    <Method Name="processAutomationRunnerInitializingState" Id="{77df98d2-5a5f-4aa7-9f80-f54434f2c5ba}" FolderPath="Service memebers\">
-      <Declaration><![CDATA[METHOD PRIVATE processAutomationRunnerInitializingState
-VAR_IN_OUT CONSTANT
-	executionContext : AUTOMATION_EXECUTION_CONTEXT;
-END_VAR
-VAR
-	initialized : BOOL;
-	
-	i : DINT;
-
-	exceptionCode : __SYSTEM.ExceptionCode;
-	exception : IException;
-END_VAR]]></Declaration>
-      <Implementation>
-        <ST><![CDATA[IF _State <> Automation.AUTOMATION_CONTROLLER_STATE.INITIALIZING THEN
-	RETURN;
-END_IF
-
-initialized := TRUE;
-
-__TRY
-	IF __ISVALIDREF(Devices) THEN
-		FOR i := 0 TO _DeviceCount - 1 DO
-			initialized := initialized AND Devices[i].Initialize(executionContext);
-		END_FOR
-	END_IF
-	
-	initialized := initialized AND OnInitialize(executionContext);
-	
-	IF initialized THEN
-		_State := AUTOMATION_CONTROLLER_STATE.RUNNING;
-	END_IF	
-__CATCH(exceptionCode)
-	_State := AUTOMATION_CONTROLLER_STATE.FAULT;
-	
-	exception := ExceptionManager.GetLastException(exceptionCode);
-					
-	fillErrorLog(Diagnostics.InitializationError, exception);					
-
-	ExceptionManager.ReThrowLastException();
-__ENDTRY]]></ST>
-      </Implementation>
-    </Method>
-    <Method Name="processAutomationRunnerRunningState" Id="{bb18fb5a-a25a-4107-9c1d-6788c20e09ff}" FolderPath="Service memebers\">
-      <Declaration><![CDATA[METHOD PRIVATE processAutomationRunnerRunningState
-VAR_IN_OUT CONSTANT
-	executionContext : AUTOMATION_EXECUTION_CONTEXT;
-	aggregateException : Core.AggregateException;
-END_VAR
-VAR
-	i : DINT;
-
-	exceptionCode : __SYSTEM.ExceptionCode;
-	exception : IException;
-		
-	invalidStateException : Core.StandardException;
-	
-	inputDevice : Automation.IInputDevice;
-	outputDevice : Automation.IOutputDevice;	
-END_VAR]]></Declaration>
-      <Implementation>
-        <ST><![CDATA[IF _State = Automation.AUTOMATION_CONTROLLER_STATE.INITIALIZING THEN
-	invalidStateException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), "Automation controller is not initialized");
-END_IF
-
-IF NOT Enabled THEN
-	RETURN;
-END_IF
-
-IF _State = Automation.AUTOMATION_CONTROLLER_STATE.FAULT THEN
-	invalidStateException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), "Automation controller is in fault state");
-END_IF
-
-// handle input devices
-IF __ISVALIDREF(Devices) AND_THEN _DeviceCount > 0 THEN
-	FOR i := 0 TO _DeviceCount - 1 DO
-		IF NOT __QUERYINTERFACE(Devices[i], inputDevice) OR_ELSE NOT inputDevice.Enabled THEN
-			CONTINUE;
-		END_IF
-		
-		__TRY
-			inputDevice.UpdateStateFromInputs(executionContext, aggregateException);
-		__CATCH(exceptionCode)
-			exception := ExceptionManager.GetLastException(exceptionCode);
-						
-			IF NOT exception.Fatal THEN
-				fillErrorLog(Diagnostics.LastRefreshInputDeviceNonFatalError, exception);					
-				aggregateException.AddInnerException(exception);
-			ELSE
-				_State := AUTOMATION_CONTROLLER_STATE.FAULT;
-				fillErrorLog(Diagnostics.FatalError, exception);				
-				ExceptionManager.ReThrowLastException();
-			END_IF		
-		__ENDTRY
-	END_FOR
-END_IF
-
-// handle running and stopping
-__TRY
-	IF _State = Automation.AUTOMATION_CONTROLLER_STATE.RUNNING AND_THEN StopRequest THEN
-		_State := Automation.AUTOMATION_CONTROLLER_STATE.STOPPING;
-	ELSIF _State = Automation.AUTOMATION_CONTROLLER_STATE.STOPPING AND_THEN StartRequest AND_THEN NOT StopRequest THEN
-		_State := Automation.AUTOMATION_CONTROLLER_STATE.RUNNING;
-	END_IF
-
-	IF _State = Automation.AUTOMATION_CONTROLLER_STATE.RUNNING THEN
-		OnRun(executionContext);
-	ELSE
-		OnStop(executionContext);
-	END_IF
-__CATCH(exceptionCode)	
-	exception := ExceptionManager.GetLastException(exceptionCode);	
-
-	IF NOT exception.Fatal THEN		
-		IF _State = Automation.AUTOMATION_CONTROLLER_STATE.RUNNING THEN
-			fillErrorLog(Diagnostics.LastRunningNonFatalError, exception);					
-		ELSE
-			fillErrorLog(Diagnostics.LastStoppingNonFatalError, exception);					
-		END_IF
-
-		aggregateException.AddInnerException(exception);
-	ELSE
-		_State := AUTOMATION_CONTROLLER_STATE.FAULT;
-		fillErrorLog(Diagnostics.FatalError, exception);					
-		ExceptionManager.ReThrowLastException();
-	END_IF	
-__ENDTRY
-
-// handle output devices
-IF __ISVALIDREF(Devices) AND_THEN _DeviceCount > 0 THEN
-	FOR i := 0 TO _DeviceCount - 1 DO
-		IF NOT __QUERYINTERFACE(Devices[i], outputDevice) OR_ELSE NOT outputDevice.Enabled THEN
-			CONTINUE;
-		END_IF
-		
-		__TRY
-			outputDevice.UpdateOutputsFromState(executionContext, aggregateException); 
-		__CATCH(exceptionCode)
-			exception := ExceptionManager.GetLastException(exceptionCode);
-						
-			IF NOT exception.Fatal THEN
-				fillErrorLog(Diagnostics.LastRefreshOutputDeviceNonFatalError, exception);					
-				aggregateException.AddInnerException(exception);
-			ELSE
-				_State := AUTOMATION_CONTROLLER_STATE.FAULT;
-				fillErrorLog(Diagnostics.FatalError, exception);					
-				ExceptionManager.ReThrowLastException();
-			END_IF		
-		__ENDTRY 
-	END_FOR
-END_IF]]></ST>
-      </Implementation>
-    </Method>
-    <Method Name="Run" Id="{edf960fe-6c94-4ace-a7be-524e71aafd2a}">
-      <Declaration><![CDATA[METHOD FINAL Run
-VAR_IN_OUT CONSTANT
-	executionContext : AUTOMATION_EXECUTION_CONTEXT;
-END_VAR
-VAR
-	aggregateException : Core.AggregateException;	
-
-	exceptionCode : __SYSTEM.ExceptionCode;
-	exception : IException;
-END_VAR]]></Declaration>
-      <Implementation>
-        <ST><![CDATA[CASE executionContext.AutomationRunnerState OF
-	Automation.AUTOMATION_RUNNER_STATE.INITIALIZING:
-		processAutomationRunnerInitializingState(executionContext);
-	
-	Automation.AUTOMATION_RUNNER_STATE.RUNNING:
-		processAutomationRunnerRunningState(executionContext, aggregateException);
-	
-	Automation.AUTOMATION_RUNNER_STATE.FAULT:
-		processAutomationRunnerFaultState(executionContext, aggregateException);
-END_CASE
-
-IF NOT aggregateException.Empty THEN
-	aggregateException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION());
-END_IF]]></ST>
-      </Implementation>
-    </Method>
+    <Property Name="RunningExceptionHandler" Id="{60a29608-799c-49a7-a0f5-81ee4e55824c}" FolderPath="Exception handlers\">
+      <Declaration><![CDATA[PROPERTY RunningExceptionHandler : Core.IExceptionHandler]]></Declaration>
+      <Get Name="Get" Id="{fae050a0-52d3-4847-a89b-06de749e48ee}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[RunningExceptionHandler := _RunningExceptionHandler;]]></ST>
+        </Implementation>
+      </Get>
+      <Set Name="Set" Id="{0ab07e6b-d588-44a7-8de9-0695649fe2c2}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[_RunningExceptionHandler := RunningExceptionHandler;]]></ST>
+        </Implementation>
+      </Set>
+    </Property>
     <Method Name="SetSimulationModeOverride" Id="{7ab6b783-f248-4de5-a295-d3938f75284e}">
       <Declaration><![CDATA[METHOD FINAL SetSimulationModeOverride
 VAR_INPUT
@@ -479,23 +421,41 @@ VAR_INPUT
 END_VAR
 VAR
 	i : INT;
+
+	exceptionCode : __SYSTEM.ExceptionCode;
+	exception : IException;
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[_SimulationModeOverride := value;
   
-OnSimulationModeOverrideChange();
+__TRY
+	OnSimulationModeOverrideChange();
+	
+	IF __ISVALIDREF(Devices) AND_THEN _DeviceCount > 0 THEN
+		FOR i := 0 TO _DeviceCount - 1 DO
+			Devices[i].SetSimulationModeOverride(Devices[i].SimulationModeOverride);
+		END_FOR	
+	END_IF
+__CATCH(exceptionCode)	
+	exception := ExceptionManager.GetLastException(exceptionCode);	
 
-IF __ISVALIDREF(Devices) AND_THEN _DeviceCount > 0 THEN
-	FOR i := 0 TO _DeviceCount - 1 DO
-		Devices[i].SetSimulationModeOverride(Devices[i].SimulationModeOverride);
-	END_FOR	
-END_IF]]></ST>
+	fillErrorLog('LastSimulationModeChangeError', Diagnostics.LastSimulationModeChangeError, exception);					
+__ENDTRY]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="setState" Id="{9b9897ff-6da5-467a-bc24-ba7a46c549d1}" FolderPath="Service memebers\">
+      <Declaration><![CDATA[METHOD PRIVATE setState
+VAR_INPUT
+	state : AUTOMATION_CONTROLLER_STATE;
+END_VAR
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_PreviousState := _State;
+_State := state;]]></ST>
       </Implementation>
     </Method>
     <Property Name="SimulationMode" Id="{d06903e4-ea01-42fc-a468-b432f4fc159b}">
       <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
-{attribute 'OPC.UA.DA' := '1'}
-{attribute 'OPC.UA.DA.Access' := '1'}
 PROPERTY FINAL SimulationMode : BOOL]]></Declaration>
       <Get Name="Get" Id="{c0b7b53d-f5eb-4914-b43e-57840bfbc5da}">
         <Declaration><![CDATA[]]></Declaration>
@@ -515,8 +475,6 @@ END_CASE]]></ST>
     </Property>
     <Property Name="SimulationModeOverride" Id="{bef27b77-29d7-4729-ae00-5f308c7e5257}">
       <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
-{attribute 'OPC.UA.DA' := '1'}
-{attribute 'OPC.UA.DA.Access' := '1'}
 PROPERTY FINAL SimulationModeOverride : Automation.SIMULATION_MODE_OVERRIDE]]></Declaration>
       <Get Name="Get" Id="{908ef2f4-2445-4cdb-94d6-03aad2842213}">
         <Declaration><![CDATA[]]></Declaration>
@@ -537,15 +495,38 @@ PROPERTY ABSTRACT StartRequest : BOOL]]></Declaration>
     </Property>
     <Property Name="State" Id="{b57e32a3-ebf4-4492-89c3-02193601134f}">
       <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
-{attribute 'OPC.UA.DA' := '1'}
-{attribute 'OPC.UA.DA.Access' := '1'}
-PROPERTY FINAL State : Automation.AUTOMATION_CONTROLLER_STATE]]></Declaration>
+PROPERTY FINAL State : AUTOMATION_CONTROLLER_STATE]]></Declaration>
       <Get Name="Get" Id="{e675c2b5-5934-4e03-a0b0-61bb8b8e344b}">
         <Declaration><![CDATA[]]></Declaration>
         <Implementation>
           <ST><![CDATA[State := _State;]]></ST>
         </Implementation>
       </Get>
+    </Property>
+    <Property Name="StateChanged" Id="{2d2d514b-9477-4fbb-b4e8-52562c635954}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+PROPERTY FINAL StateChanged : BOOL]]></Declaration>
+      <Get Name="Get" Id="{c4932c37-19e2-4343-9ad0-6d106776d675}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[StateChanged := _State <> _PreviousState;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="StoppingExceptionHandler" Id="{752cf219-28a5-4d25-845f-8de2972562b0}" FolderPath="Exception handlers\">
+      <Declaration><![CDATA[PROPERTY StoppingExceptionHandler : Core.IExceptionHandler]]></Declaration>
+      <Get Name="Get" Id="{75a8acb0-6a41-4937-abc1-960c0a9b8df3}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[StoppingExceptionHandler := _StoppingExceptionHandler;]]></ST>
+        </Implementation>
+      </Get>
+      <Set Name="Set" Id="{7720bdd2-a15f-46cc-9953-ee29781d41e0}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[_StoppingExceptionHandler := StoppingExceptionHandler;]]></ST>
+        </Implementation>
+      </Set>
     </Property>
     <Property Name="StopRequest" Id="{608fa160-a1ee-4b42-a40b-f54246a9eaa1}">
       <Declaration><![CDATA[{attribute 'monitoring' := 'call'}

@@ -22,8 +22,6 @@ FUNCTION_BLOCK ABSTRACT Task EXTENDS TOF_Core.Object IMPLEMENTS ITask
 VAR
 	_Name : WSTRING;
 	
-	_ResourceManager : TOF_Core.IResourceManager;
-	
 	_State : TASK_STATE;	
 	_StateChanged : BOOL;
 	
@@ -31,112 +29,208 @@ VAR
 
 	_StopReason : TASK_STOP_REASON;
 	_StopReasonMessage : TOF_Core.ERROR_MESSAGE;
+	
+	_LastExceptionMessage : TOF_Core.ERROR_MESSAGE;
+	
+	_StateObject : TaskState(THIS^);
+	_RunningSubstateObject : TaskRunningSubstate(THIS^);
+	_StopReasonObject : TaskStopReason(THIS^);
 END_VAR]]></Declaration>
     <Implementation>
       <ST><![CDATA[]]></ST>
     </Implementation>
     <Folder Name="Members to override" Id="{db2f5785-7161-42e1-b407-390855af59c1}" />
     <Folder Name="Service members" Id="{edd1c5da-fac4-4215-94b9-14921518865c}" />
-    <Folder Name="State flags" Id="{a31826e6-4b24-43fb-be0b-e8f69f304016}" />
-    <Method Name="Execute" Id="{7d3bbbc2-d8e4-48ed-be78-b8da5dd67256}">
-      <Declaration><![CDATA[METHOD FINAL Execute 
-VAR
-	stopped : BOOL;
-
-	exceptionCode : __SYSTEM.ExceptionCode;
-
-	exception : IException;
+    <Method Name="Cancel" Id="{2a9e1292-e28a-4dd3-94e3-162c35bf20f1}">
+      <Declaration><![CDATA[METHOD FINAL Cancel : BOOL
+VAR_OUTPUT
+	refuseReason : WSTRING(255);
 END_VAR
-VAR_INST
-	stopReason : TASK_STOP_REASON;
-	stopReasonMessage : TOF_Core.ERROR_MESSAGE;
+VAR
+	exceptionCode : __SYSTEM.ExceptionCode;
+	
+	exception : IException;
 END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF _State <> TASK_STATE.RUNNING THEN
+	refuseReason := TOF_Core.WideStringHelper.ConcatStrings255("Expected state is '", TO_WSTRING(TASK_STATE.RUNNING), "' but current state is '", TO_WSTRING(_State), "'");
+	RETURN;
+END_IF
+
+setStoppedState();
+
+_StopReason := TASK_STOP_REASON.EXTERNAL_LOGIC;
+_StopReasonMessage := "Cancelled by external logic";
+
+handleStop();
+
+Cancel := TRUE;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="Execute" Id="{7d3bbbc2-d8e4-48ed-be78-b8da5dd67256}">
+      <Declaration><![CDATA[METHOD FINAL Execute ]]></Declaration>
       <Implementation>
         <ST><![CDATA[_StateChanged := FALSE;
 
-CASE _State OF
-	TASK_STATE.RUNNING:
-		__TRY
-			CASE _RunningSubstate OF
-				TASK_RUNNING_SUBSTATE.RESOURCE_ACQUIRING:
-					IF _ResourceManager.AcquireResource() THEN
-						setRunningSubstate(TASK_RUNNING_SUBSTATE.PROCESSING);
-					END_IF
-				
-				TASK_RUNNING_SUBSTATE.PROCESSING:
-					OnRunning(stopped => stopped, stopReason => stopReason, stopReasonMessage);
-
-					IF stopped THEN
-						IF _ResourceManager = 0 OR_ELSE NOT _ResourceManager.ResourceAcquired THEN
-							setStoppedState(stopReason, stopReasonMessage);				
-						ELSE
-							setRunningSubstate(TASK_RUNNING_SUBSTATE.RESOURCE_RELEASING);
-						END_IF
-					END_IF
-				
-				TASK_RUNNING_SUBSTATE.RESOURCE_RELEASING:
-					IF _ResourceManager.ReleaseResource() THEN
-						setStoppedState(stopReason, stopReasonMessage);				
-					END_IF				
-			END_CASE
-			
-		__CATCH(exceptionCode)
-			exception := ExceptionManager.GetLastException(exceptionCode);
-			
-			stopReason := TASK_STOP_REASON.FAILURE;
-			stopReasonMessage := exception.GetMessage();
-			
-			IF _ResourceManager = 0 OR_ELSE NOT _ResourceManager.ResourceAcquired THEN
-				setStoppedState(stopReason, stopReasonMessage);				
-			ELSE
-				setRunningSubstate(TASK_RUNNING_SUBSTATE.RESOURCE_RELEASING);
-			END_IF
-		__ENDTRY
-	
-	TASK_STATE.STOPPED:
-		OnStopped();
-END_CASE]]></ST>
+IF _State = TASK_STATE.RUNNING THEN
+	handleRunning();
+END_IF]]></ST>
       </Implementation>
     </Method>
-    <Method Name="FB_init" Id="{7090956e-c27d-4671-ab2f-a1b87ff6921d}">
-      <Declaration><![CDATA[METHOD FB_init : BOOL
+    <Method Name="GetProcessingStateByStopReason" Id="{9962f8db-5572-44bf-849c-6a20a87e913d}" FolderPath="Service members\">
+      <Declaration><![CDATA[METHOD PROTECTED GetProcessingStateByStopReason : TASK_PROCESSING_STATE
 VAR_INPUT
-	(* if TRUE, the retain variables are initialized (warm start / cold start)*)
-	bInitRetains	: BOOL;
-	(* if TRUE, the instance afterwards gets moved into the copy code (online change)*)
-	bInCopyCode	: BOOL;
-	resourceManager : IResourceManager;
-END_VAR
-]]></Declaration>
-      <Implementation>
-        <ST><![CDATA[_ResourceManager := resourceManager;]]></ST>
-      </Implementation>
-    </Method>
-    <Method Name="handleException" Id="{d87e2b0c-4c9d-420b-9a85-b297eb6c9479}" FolderPath="Service members\">
-      <Declaration><![CDATA[METHOD PRIVATE handleException
-VAR_INPUT
-	exceptionCode : __SYSTEM.ExceptionCode;
-END_VAR
-VAR
-	exception : IException;
-	
-	errorMessage : TOF_Core.ERROR_MESSAGE;
+	taskStopReason : TASK_STOP_REASON;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[]]></ST>
+        <ST><![CDATA[CASE taskStopReason OF
+	TASK_STOP_REASON.SUCCESS:
+		GetProcessingStateByStopReason := TASK_PROCESSING_STATE.SUCCESS;
+	
+    TASK_STOP_REASON.EXTERNAL_LOGIC:
+		GetProcessingStateByStopReason := TASK_PROCESSING_STATE.EXTERNAL_STOP;
+	
+    TASK_STOP_REASON.INTERNAL_LOGIC:
+		GetProcessingStateByStopReason := TASK_PROCESSING_STATE.INTERNAL_STOP;
+	
+    TASK_STOP_REASON.FAILURE:
+		GetProcessingStateByStopReason := TASK_PROCESSING_STATE.FAILURE;
+	
+	TASK_STOP_REASON.USER_DEFINED:
+		GetProcessingStateByStopReason := TASK_PROCESSING_STATE.USER_DEFINED;
+END_CASE ]]></ST>
       </Implementation>
     </Method>
-    <Property Name="Idle" Id="{752972e5-29e8-4d66-9b9b-bacbd95bc807}" FolderPath="State flags\">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
-PROPERTY FINAL Idle : BOOL
-]]></Declaration>
-      <Get Name="Get" Id="{be7b15e3-99cc-422a-a1f5-1bf7586205fb}">
-        <Declaration><![CDATA[]]></Declaration>
-        <Implementation>
-          <ST><![CDATA[Idle := _State = TASK_STATE.IDLE;]]></ST>
-        </Implementation>
-      </Get>
-    </Property>
+    <Method Name="GetStopReasonByProcessingState" Id="{fda3bf18-557f-4243-8262-1f6978f3854e}" FolderPath="Service members\">
+      <Declaration><![CDATA[METHOD PROTECTED GetStopReasonByProcessingState : TASK_STOP_REASON
+VAR_INPUT
+	taskpPocessingState : TASK_PROCESSING_STATE;
+END_VAR
+VAR
+	invalidTaskRunningResult : TOF_Core.ArgumentOutOfRangeException;
+	
+	taskRunningResultName : STRING(16);
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[CASE taskpPocessingState OF
+	TASK_PROCESSING_STATE.SUCCESS:
+		GetStopReasonByProcessingState := TASK_STOP_REASON.SUCCESS;
+	
+    TASK_PROCESSING_STATE.EXTERNAL_STOP:
+		GetStopReasonByProcessingState := TASK_STOP_REASON.EXTERNAL_LOGIC;
+	
+    TASK_PROCESSING_STATE.INTERNAL_STOP:
+		GetStopReasonByProcessingState := TASK_STOP_REASON.INTERNAL_LOGIC;
+	
+    TASK_PROCESSING_STATE.FAILURE:
+		GetStopReasonByProcessingState := TASK_STOP_REASON.FAILURE;
+	
+	TASK_PROCESSING_STATE.USER_DEFINED:
+		GetStopReasonByProcessingState := TASK_STOP_REASON.USER_DEFINED;
+	
+	ELSE
+		taskRunningResultName := TO_STRING(taskpPocessingState);
+		invalidTaskRunningResult.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), 'taskpPocessingState', taskRunningResultName);
+END_CASE
+ ]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="handleRunning" Id="{ccb582d9-8390-4648-b568-59dfb083e837}" FolderPath="Service members\">
+      <Declaration><![CDATA[METHOD PRIVATE handleRunning
+VAR
+	runningResult : TASK_PROCESSING_STATE;
+
+	exceptionCode : __SYSTEM.ExceptionCode;
+	
+	exception : TOF_Core.IException;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[__TRY
+	CASE _RunningSubstate OF
+		TASK_RUNNING_SUBSTATE.RESOURCE_ACQUIRING:
+			ResourceManager.AcquireResource();
+			
+			IF ResourceManager.ResourceAcquired THEN
+				setRunningSubstate(TASK_RUNNING_SUBSTATE.PROCESSING);
+			END_IF
+		
+		TASK_RUNNING_SUBSTATE.PROCESSING:
+			OnRunning(processingState => runningResult, _StopReasonMessage);
+	
+			IF runningResult <> TASK_PROCESSING_STATE.IN_PROGRESS THEN
+				_StopReason := GetStopReasonByProcessingState(runningResult);
+				
+				IF ResourceManager = 0 OR_ELSE NOT ResourceManager.ResourceAcquired THEN
+					setStoppedState();				
+				ELSE
+					setRunningSubstate(TASK_RUNNING_SUBSTATE.RESOURCE_RELEASING);
+				END_IF
+			END_IF
+		
+		TASK_RUNNING_SUBSTATE.RESOURCE_RELEASING:
+			ResourceManager.ReleaseResource();
+			
+			IF NOT ResourceManager.ResourceAcquired THEN
+				setStoppedState();				
+			END_IF				
+	END_CASE	
+__CATCH(exceptionCode)
+	exception := ExceptionManager.GetLastException(exceptionCode);
+	
+	_LastExceptionMessage := exception.GetMessage();
+	
+	// save original stop reason if exists
+	IF _StopReason = TASK_STOP_REASON.SUCCESS THEN
+		_StopReason := TASK_STOP_REASON.FAILURE;
+		_StopReasonMessage := _LastExceptionMessage;		
+	END_IF
+			
+	IF ResourceManager = 0 OR_ELSE NOT ResourceManager.ResourceAcquired THEN
+		setStoppedState();				
+	ELSE
+		setRunningSubstate(TASK_RUNNING_SUBSTATE.RESOURCE_RELEASING);
+	END_IF
+__ENDTRY]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="handleStop" Id="{b198c32e-de99-475e-bf73-776ec44e7987}" FolderPath="Service members\">
+      <Declaration><![CDATA[METHOD PRIVATE handleStop
+VAR
+	runningResult : TASK_PROCESSING_STATE;
+
+	exceptionCode : __SYSTEM.ExceptionCode;
+
+	exception : IException;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[__TRY
+	CASE _RunningSubstate OF
+		TASK_RUNNING_SUBSTATE.RESOURCE_ACQUIRING:
+			setRunningSubstate(TASK_RUNNING_SUBSTATE.RESOURCE_RELEASING);
+		
+		TASK_RUNNING_SUBSTATE.PROCESSING:
+			OnStop();
+
+			IF ResourceManager = 0 OR_ELSE NOT ResourceManager.ResourceAcquired THEN
+				setStoppedState();				
+			ELSE
+				setRunningSubstate(TASK_RUNNING_SUBSTATE.RESOURCE_RELEASING);
+			END_IF			
+	END_CASE	
+__CATCH(exceptionCode)
+	exception := ExceptionManager.GetLastException(exceptionCode);
+	
+	_LastExceptionMessage := exception.GetMessage();
+	
+	IF ResourceManager = 0 OR_ELSE NOT ResourceManager.ResourceAcquired THEN
+		setStoppedState();				
+	ELSE
+		setRunningSubstate(TASK_RUNNING_SUBSTATE.RESOURCE_RELEASING);
+	END_IF
+__ENDTRY
+]]></ST>
+      </Implementation>
+    </Method>
     <Property Name="Name" Id="{6e123c98-9b28-4ea6-9d42-c3fcc2d44b13}">
       <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
 PROPERTY FINAL Name : WSTRING]]></Declaration>
@@ -162,8 +256,7 @@ PROPERTY FINAL Name : WSTRING]]></Declaration>
     <Method Name="OnRunning" Id="{6dd0e9d8-af4c-4ffa-bd19-f8adf74f282d}" FolderPath="Members to override\">
       <Declaration><![CDATA[METHOD PROTECTED ABSTRACT OnRunning 
 VAR_OUTPUT
-	stopped : BOOL;
-	stopReason : TASK_STOP_REASON;
+	processingState : TASK_PROCESSING_STATE;
 END_VAR
 VAR_IN_OUT
 	stopReasonMessage : TOF_Core.ERROR_MESSAGE;
@@ -172,56 +265,11 @@ END_VAR]]></Declaration>
         <ST><![CDATA[]]></ST>
       </Implementation>
     </Method>
-    <Method Name="OnStopped" Id="{50ea53b3-200a-461c-ab11-2f0c2b1dae40}" FolderPath="Members to override\">
-      <Declaration><![CDATA[METHOD PROTECTED OnStopped
+    <Method Name="OnStop" Id="{50ea53b3-200a-461c-ab11-2f0c2b1dae40}" FolderPath="Members to override\">
+      <Declaration><![CDATA[METHOD PROTECTED OnStop
 ]]></Declaration>
       <Implementation>
         <ST><![CDATA[]]></ST>
-      </Implementation>
-    </Method>
-    <Method Name="RequestCancel" Id="{2a9e1292-e28a-4dd3-94e3-162c35bf20f1}">
-      <Declaration><![CDATA[METHOD FINAL RequestCancel : BOOL
-VAR_OUTPUT
-	refuseReason : WSTRING(255);
-END_VAR
-VAR
-	exceptionCode : __SYSTEM.ExceptionCode;
-	
-	exception : IException;
-END_VAR]]></Declaration>
-      <Implementation>
-        <ST><![CDATA[IF _State <> TASK_STATE.RUNNING THEN
-	refuseReason := TOF_Core.WideStringHelper.ConcatStrings255("Expected state is '", TO_WSTRING(TASK_STATE.RUNNING), "' but current state is '", TO_WSTRING(_State), "'");
-	RETURN;
-END_IF
-
-setStoppedState(TASK_STOP_REASON.EXTERNAL_STOP, "Cancelled by external logic");
-
-RequestCancel := TRUE;]]></ST>
-      </Implementation>
-    </Method>
-    <Method Name="RequestStart" Id="{9882b806-c3e8-4a3f-aaf2-ed11ba23d42b}">
-      <Declaration><![CDATA[METHOD FINAL RequestStart : BOOL
-VAR_OUTPUT
-	refuseReason : WSTRING(255);
-END_VAR
-VAR
-	stopped : BOOL;
-	stopReason : TASK_STOP_REASON;
-	exceptionCode : __SYSTEM.ExceptionCode;
-END_VAR
-VAR_INST
-	stopReasonMessage : TOF_Core.ERROR_MESSAGE;
-END_VAR]]></Declaration>
-      <Implementation>
-        <ST><![CDATA[IF _State <> TASK_STATE.IDLE THEN
-	refuseReason := TOF_Core.WideStringHelper.ConcatStrings255("Expected state is '", TO_WSTRING(TASK_STATE.IDLE), "' but current state is '", TO_WSTRING(_State), "'");
-	RETURN;
-END_IF
-
-setRunningState();
-
-RequestStart := TRUE;]]></ST>
       </Implementation>
     </Method>
     <Method Name="Reset" Id="{0f2a4a27-8629-40c4-9efd-77f7df39221c}">
@@ -252,18 +300,18 @@ Reset := TRUE;]]></ST>
       <Get Name="Get" Id="{8259ec91-69bd-4d5f-a200-41ce2936c280}">
         <Declaration><![CDATA[]]></Declaration>
         <Implementation>
-          <ST><![CDATA[ResourceManager := _ResourceManager;]]></ST>
+          <ST><![CDATA[]]></ST>
         </Implementation>
       </Get>
     </Property>
-    <Property Name="Running" Id="{d518eb01-4363-42cc-ba1f-054fa911674c}" FolderPath="State flags\">
+    <Property Name="RunningSubstate" Id="{1074f9f0-899f-47f3-b104-32c726f902e3}">
       <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
-PROPERTY FINAL Running : BOOL
+PROPERTY FINAL RunningSubstate : REFERENCE TO TaskRunningSubstate
 ]]></Declaration>
-      <Get Name="Get" Id="{ec791bbc-65ee-464b-aed3-27af2a7e3b0d}">
+      <Get Name="Get" Id="{eaa3499c-033d-41bd-8266-6b82e372a9fe}">
         <Declaration><![CDATA[]]></Declaration>
         <Implementation>
-          <ST><![CDATA[Running := _State = TASK_STATE.RUNNING;]]></ST>
+          <ST><![CDATA[RunningSubstate REF= _RunningSubstateObject;]]></ST>
         </Implementation>
       </Get>
     </Property>
@@ -311,7 +359,7 @@ END_VAR]]></Declaration>
 	_StateChanged := TRUE;	
 END_IF 
 
-IF _ResourceManager <> 0 AND_THEN NOT _ResourceManager.ResourceAcquired THEN
+IF ResourceManager <> 0 AND_THEN NOT ResourceManager.ResourceAcquired THEN
 	_RunningSubstate := TASK_RUNNING_SUBSTATE.RESOURCE_ACQUIRING;
 ELSE
 	_RunningSubstate := TASK_RUNNING_SUBSTATE.PROCESSING;
@@ -333,12 +381,6 @@ END_VAR
     </Method>
     <Method Name="setStoppedState" Id="{701711d6-d83b-4c51-bbb9-f891989ade15}" FolderPath="Service members\">
       <Declaration><![CDATA[METHOD PRIVATE FINAL setStoppedState
-VAR_INPUT
-	stopReason : TASK_STOP_REASON;
-END_VAR
-VAR_IN_OUT CONSTANT
-	stopReasonMessage : TOF_Core.ERROR_MESSAGE;
-END_VAR
 VAR CONSTANT
 	NEW_STATE : TASK_STATE := TASK_STATE.STOPPED;
 END_VAR]]></Declaration>
@@ -356,80 +398,62 @@ END_VAR]]></Declaration>
 	_StateChanged := TRUE;	
 END_IF 
 
-_StopReason := stopReason;
-
-IF stopReasonMessage <> "" THEN
-	_StopReasonMessage := stopReasonMessage;
-ELSE
-	CASE stopReason OF
+IF _StopReasonMessage = "" THEN
+	CASE _StopReason OF
 		TASK_STOP_REASON.SUCCESS:
 			_StopReasonMessage := "Successfully completed";
 			
-		TASK_STOP_REASON.EXTERNAL_STOP:
+		TASK_STOP_REASON.EXTERNAL_LOGIC:
 			_StopReasonMessage := "Stopped by external logic";
-
-		TASK_STOP_REASON.INTERNAL_STOP:
+	
+		TASK_STOP_REASON.INTERNAL_LOGIC:
 			_StopReasonMessage := "Stopped by internal logic";
-
+	
 		TASK_STOP_REASON.FAILURE:
 			_StopReasonMessage := "Exception occured";
-
+	
 		TASK_STOP_REASON.USER_DEFINED:		
 			_StopReasonMessage := "User defined";
-	END_CASE
-END_IF	]]></ST>
+	END_CASE	
+END_IF]]></ST>
       </Implementation>
     </Method>
-    <Property Name="State" Id="{aea1c285-89e6-43e8-af45-f9790e917087}">
+    <Method Name="Start" Id="{9882b806-c3e8-4a3f-aaf2-ed11ba23d42b}">
+      <Declaration><![CDATA[METHOD FINAL Start : BOOL
+VAR_OUTPUT
+	refuseReason : WSTRING(255);
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF _State <> TASK_STATE.IDLE THEN
+	refuseReason := TOF_Core.WideStringHelper.ConcatStrings255("Expected state is '", TO_WSTRING(TASK_STATE.IDLE), "' but current state is '", TO_WSTRING(_State), "'");
+	RETURN;
+END_IF
+
+setRunningState();
+
+handleRunning();
+
+Start := TRUE;]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="State" Id="{7f5b82bd-0883-4857-a0c7-770647e24256}">
       <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
-PROPERTY State : TASK_STATE
+PROPERTY FINAL State : REFERENCE TO TaskState
 ]]></Declaration>
-      <Get Name="Get" Id="{41100485-bb0e-4be9-be0c-0ed2f158a278}">
+      <Get Name="Get" Id="{fa1e6aa2-a09d-4b31-b449-f6936821b743}">
         <Declaration><![CDATA[]]></Declaration>
         <Implementation>
-          <ST><![CDATA[State := _State;]]></ST>
-        </Implementation>
-      </Get>
-    </Property>
-    <Property Name="StateChanged" Id="{600cdb42-d3b2-455a-b48f-83e96606c782}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
-PROPERTY FINAL StateChanged : BOOL]]></Declaration>
-      <Get Name="Get" Id="{a6557db5-61fd-4ccb-85a4-b417b3791f73}">
-        <Declaration><![CDATA[]]></Declaration>
-        <Implementation>
-          <ST><![CDATA[StateChanged := _StateChanged;]]></ST>
-        </Implementation>
-      </Get>
-    </Property>
-    <Property Name="Stopped" Id="{3c595d3f-f42d-49d4-acc1-b271a058369a}" FolderPath="State flags\">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
-PROPERTY FINAL Stopped : BOOL
-]]></Declaration>
-      <Get Name="Get" Id="{746f2357-c572-4244-992a-04736fd48af0}">
-        <Declaration><![CDATA[]]></Declaration>
-        <Implementation>
-          <ST><![CDATA[Stopped := _State = TASK_STATE.STOPPED;]]></ST>
+          <ST><![CDATA[State REF= _StateObject;]]></ST>
         </Implementation>
       </Get>
     </Property>
     <Property Name="StopReason" Id="{67946b75-ded8-468e-a4e3-0a11a6a9934d}">
       <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
-PROPERTY FINAL StopReason : TASK_STOP_REASON]]></Declaration>
+PROPERTY FINAL StopReason : REFERENCE TO TaskStopReason]]></Declaration>
       <Get Name="Get" Id="{9c409cdb-d955-4a97-8035-cec1dbac6e4c}">
         <Declaration><![CDATA[]]></Declaration>
         <Implementation>
-          <ST><![CDATA[StopReason := _StopReason;]]></ST>
-        </Implementation>
-      </Get>
-    </Property>
-    <Property Name="StopReasonMessage" Id="{44677661-4a52-4007-92cf-654b73072a50}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
-PROPERTY FINAL StopReasonMessage : REFERENCE TO TOF_Core.ERROR_MESSAGE]]></Declaration>
-      <Get Name="Get" Id="{7fd445a6-8c2c-4dde-9f29-ace905d6bc1b}">
-        <Declaration><![CDATA[
-]]></Declaration>
-        <Implementation>
-          <ST><![CDATA[StopReasonMessage REF= _StopReasonMessage;]]></ST>
+          <ST><![CDATA[StopReason REF= _StopReasonObject;]]></ST>
         </Implementation>
       </Get>
     </Property>

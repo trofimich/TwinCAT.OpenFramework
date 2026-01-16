@@ -24,11 +24,9 @@ VAR_GENERIC CONSTANT
 END_VAR
 EXTENDS Core.Object IMPLEMENTS IAutomationRunner
 VAR
-	_ExecutionContext : Automation.AUTOMATION_EXECUTION_CONTEXT;
+	_State : AUTOMATION_RUNNER_STATE;
 
 	_SimulationMode : BOOL;
-
-	_Diagnostics : AUTOMATION_RUNNER_DIAGNOSTICS;
 END_VAR
 VAR_STAT
     _InstanceCounter : BYTE := 0;
@@ -37,11 +35,8 @@ END_VAR]]></Declaration>
       <ST><![CDATA[]]></ST>
     </Implementation>
     <Folder Name="Methods to override" Id="{5f039dec-fa9c-42c7-a4c1-ce2a83662742}" />
-    <Folder Name="Service members" Id="{136ed185-96f6-42da-bd14-292cf8568f8a}" />
     <Property Name="AutomationControllerCount" Id="{b763fe3e-ac45-40f7-8e0a-80bac18bc801}">
       <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
-{attribute 'OPC.UA.DA' := '1'}
-{attribute 'OPC.UA.DA.Access' := '1'}
 PROPERTY AutomationControllerCount : BYTE]]></Declaration>
       <Get Name="Get" Id="{41fb60e1-30ec-4999-8fd3-d29a9cdfc0bd}">
         <Declaration><![CDATA[]]></Declaration>
@@ -62,7 +57,6 @@ PROPERTY ABSTRACT AutomationControllers : REFERENCE TO ARRAY [0.._AutomationCont
     </Property>
     <Property Name="CodeExecutionPhase" Id="{c4f37de1-c494-4e98-bff8-e5a29ee70657}">
       <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
-{attribute 'OPC.UA.DA' := '0'}
 PROPERTY FINAL CodeExecutionPhase : BOOL]]></Declaration>
       <Get Name="Get" Id="{cca78e62-5e2b-457e-91fc-ec64208d7a39}">
         <Declaration><![CDATA[]]></Declaration>
@@ -73,8 +67,6 @@ PROPERTY FINAL CodeExecutionPhase : BOOL]]></Declaration>
     </Property>
     <Property Name="CycleCounter" Id="{b44e2d41-8633-4c1c-ad38-18becdb27866}">
       <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
-{attribute 'OPC.UA.DA' := '1'}
-{attribute 'OPC.UA.DA.Access' := '1'}
 PROPERTY FINAL CycleCounter : LWORD]]></Declaration>
       <Get Name="Get" Id="{3b2c949f-bedb-4db8-bff6-1b934597b8a9}">
         <Declaration><![CDATA[]]></Declaration>
@@ -83,23 +75,13 @@ PROPERTY FINAL CycleCounter : LWORD]]></Declaration>
         </Implementation>
       </Get>
     </Property>
-    <Property Name="Diagnostics" Id="{8d5d1cb6-fbf7-445b-bf3b-946f6e4d2f7d}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
-{attribute 'OPC.UA.DA' := '1'}
-{attribute 'OPC.UA.DA.Access' := '1'}
-PROPERTY FINAL Diagnostics : REFERENCE TO AUTOMATION_RUNNER_DIAGNOSTICS]]></Declaration>
-      <Get Name="Get" Id="{ff612338-7273-4025-bfe7-69ef45fb7440}">
-        <Declaration><![CDATA[]]></Declaration>
-        <Implementation>
-          <ST><![CDATA[Diagnostics REF= _Diagnostics;]]></ST>
-        </Implementation>
-      </Get>
-    </Property>
     <Method Name="Execute" Id="{cddfd6b6-d698-4df7-b955-3cc076d37dea}">
       <Declaration><![CDATA[METHOD FINAL Execute
 VAR
 	i : INT;
 			
+	initialized : BOOL;
+	
 	exceptionCode : __SYSTEM.ExceptionCode;
 	exception : IException;
 END_VAR]]></Declaration>
@@ -111,11 +93,36 @@ Core.SystemDateTimeManager.Execute();
 Core.LogManager.Execute();
 
 IF Core.SystemDateTimeManager.SystemTimeValid THEN
-	_ExecutionContext.CycleLocalStartTime := Core.SystemDateTimeManager.SystemLocalDateTime;
-	_ExecutionContext.CycleUtcStartTime := Core.SystemDateTimeManager.SystemUtcDateTime;
-	_ExecutionContext.PreviousAutomationRunnerState := _ExecutionContext.AutomationRunnerState;
+	//_ExecutionContext.CycleLocalStartTime := Core.SystemDateTimeManager.SystemLocalDateTime;
+	//_ExecutionContext.CycleUtcStartTime := Core.SystemDateTimeManager.SystemUtcDateTime;
 	
-	handleRunning();
+	CASE _State OF
+		AUTOMATION_RUNNER_STATE.INITIALIZING:
+			initialized := TRUE;
+			
+			FOR i := 0 TO _AutomationControllerCount - 1 DO
+				AutomationControllers[i].Initialize();
+				
+				CASE AutomationControllers[i].State OF
+					AUTOMATION_CONTROLLER_STATE.FAULT:
+						_State := AUTOMATION_RUNNER_STATE.INITIALIZATION_FAILED;
+						EXIT;
+						
+					AUTOMATION_CONTROLLER_STATE.INITIAL:
+						initialized := FALSE;						
+				END_CASE
+			END_FOR		
+			
+			IF initialized THEN
+				_State := AUTOMATION_RUNNER_STATE.RUNNING;
+			END_IF
+		
+		AUTOMATION_RUNNER_STATE.RUNNING:
+			FOR i := 0 TO _AutomationControllerCount - 1 DO
+				AutomationControllers[i].Execute();			
+			END_FOR		
+	END_CASE
+
 END_IF
 
 Core.ExceptionManager.Cleanup();
@@ -135,69 +142,6 @@ VAR_INPUT
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[_InstanceCounter := _InstanceCounter + 1;]]></ST>
-      </Implementation>
-    </Method>
-    <Method Name="fillErrorLog" Id="{d055dd31-f097-4bbe-8c3e-fd4d4c6e2672}" FolderPath="Service members\">
-      <Declaration><![CDATA[METHOD PRIVATE fillErrorLog
-VAR_IN_OUT
-	targetErrorLog : AUTOMATION_ERROR_LOG;
-	sourceException : IException;  
-END_VAR
-]]></Declaration>
-      <Implementation>
-        <ST><![CDATA[targetErrorLog.ShortMessage := sourceException.GetMessage(FALSE, FALSE);
-targetErrorLog.FullMessage := sourceException.GetMessage(TRUE, TRUE);
-targetErrorLog.Source := sourceException.GetSourceDescription();
-targetErrorLog.LocalTimestamp := sourceException.LocalTimestamp;
-targetErrorLog.UtcTimestamp := sourceException.UtcTimestamp;]]></ST>
-      </Implementation>
-    </Method>
-    <Method Name="handleRunning" Id="{485a79cd-7b23-4bb2-9ba1-baa8dc5453b5}" FolderPath="Service members\">
-      <Declaration><![CDATA[METHOD PRIVATE handleRunning
-VAR
-	i : INT;
-	
-	exceptionCode : __SYSTEM.ExceptionCode;
-	exception : IException;
-	fatalError : BOOL;
-END_VAR]]></Declaration>
-      <Implementation>
-        <ST><![CDATA[FOR i := 0 TO _AutomationControllerCount - 1 DO
-	__TRY
-		AutomationControllers[i].Run(_ExecutionContext);			
-	__CATCH(exceptionCode)
-		exception := ExceptionManager.GetLastException(exceptionCode);
-		
-		fatalError := fatalError OR exception.Fatal;
-		
-		CASE State OF
-			Automation.AUTOMATION_RUNNER_STATE.INITIALIZING:
-				_ExecutionContext.AutomationRunnerState := Automation.AUTOMATION_RUNNER_STATE.FAULT;					
-				fillErrorLog(Diagnostics.InitializationError, exception);
-			
-			Automation.AUTOMATION_RUNNER_STATE.RUNNING:
-				IF exception.Fatal THEN
-					_ExecutionContext.AutomationRunnerState := Automation.AUTOMATION_RUNNER_STATE.FAULT;					
-					fillErrorLog(Diagnostics.RunningFatalError, exception);
-				ELSE
-					fillErrorLog(Diagnostics.LastRunningNonFatalError, exception);					
-				END_IF
-
-			Automation.AUTOMATION_RUNNER_STATE.FAULT:
-				fillErrorLog(Diagnostics.LastRunningNonFatalError, exception);					
-		END_CASE
-	__ENDTRY
-END_FOR
-
-IF State = AUTOMATION_RUNNER_STATE.INITIALIZING THEN
-	FOR i := 0 TO _AutomationControllerCount - 1 DO
-		IF AutomationControllers[i].State = Automation.AUTOMATION_CONTROLLER_STATE.INITIALIZING THEN
-			RETURN;
-		END_IF
-	END_FOR
-	
-	_ExecutionContext.AutomationRunnerState := AUTOMATION_RUNNER_STATE.RUNNING;
-END_IF]]></ST>
       </Implementation>
     </Method>
     <Method Name="OnEnabledChange" Id="{14417ccc-b0b2-4cc1-8a7c-d0d338c12224}" FolderPath="Methods to override\">
@@ -234,8 +178,6 @@ END_IF]]></ST>
     </Method>
     <Property Name="SimulationMode" Id="{7d432578-acb4-4dd3-acc6-8dd7c5d8c6c5}">
       <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
-{attribute 'OPC.UA.DA' := '1'}
-{attribute 'OPC.UA.DA.Access' := '1'}
 PROPERTY FINAL SimulationMode : BOOL]]></Declaration>
       <Get Name="Get" Id="{5238d38e-a178-4a48-817f-b0e7b9afc466}">
         <Declaration><![CDATA[]]></Declaration>
@@ -246,13 +188,11 @@ PROPERTY FINAL SimulationMode : BOOL]]></Declaration>
     </Property>
     <Property Name="State" Id="{f2dce25c-3e10-4ca3-baf9-9dc113064c6d}">
       <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
-{attribute 'OPC.UA.DA' := '1'}
-{attribute 'OPC.UA.DA.Access' := '1'}
-PROPERTY FINAL State : Automation.AUTOMATION_RUNNER_STATE]]></Declaration>
+PROPERTY FINAL State : AUTOMATION_RUNNER_STATE]]></Declaration>
       <Get Name="Get" Id="{62ee6d12-cc93-4e49-aed3-a8cc7d8a5a22}">
         <Declaration><![CDATA[]]></Declaration>
         <Implementation>
-          <ST><![CDATA[State := _ExecutionContext.AutomationRunnerState;]]></ST>
+          <ST><![CDATA[State := _State;]]></ST>
         </Implementation>
       </Get>
     </Property>
@@ -262,7 +202,7 @@ PROPERTY StateName : STRING]]></Declaration>
       <Get Name="Get" Id="{b78f5aab-7d64-4910-9ee4-7e1a78e3105f}">
         <Declaration><![CDATA[]]></Declaration>
         <Implementation>
-          <ST><![CDATA[StateName := TO_STRING(_ExecutionContext.AutomationRunnerState);]]></ST>
+          <ST><![CDATA[StateName := TO_STRING(_State);]]></ST>
         </Implementation>
       </Get>
     </Property>
