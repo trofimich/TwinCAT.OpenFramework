@@ -23,6 +23,8 @@ VAR
 	_Tasks : TOF_Collections.List(0);
 	
 	_CurrentTask : ITask;
+	
+	_StopWhenNoPendingTasks : BOOL;
 END_VAR]]></Declaration>
     <Implementation>
       <ST><![CDATA[]]></ST>
@@ -57,7 +59,6 @@ END_IF]]></ST>
       <Declaration><![CDATA[METHOD PROTECTED FINAL InternalEnqueue
 VAR_INPUT
 	task : ITask;
-	//deleteOnFinishOrClear : BOOL := FALSE;
 END_VAR
 VAR
 	taskTypeNotSpecifiedException : TOF_Core.ArgumentNotSpecifiedException;
@@ -69,13 +70,17 @@ END_VAR]]></Declaration>
 	taskTypeNotSpecifiedException.Throw(Namespacename, ClassName, __POUNAME(), __POSITION(), 'task');
 END_IF
 
-(*IF deleteOnFinishOrClear THEN
-	taskAsGeneric := TOF_Core.GenericValueFactory.FromParts(GENERIC_TYPE_CLASS.OBJECT, task.SelfAddress, task.SelfSize, GENERIC_MEMORY_MANAGEMENT_BEHAVIOR.STORE_ORIGINAL_REFERENCE_AND_OWNS_MEMORY);
-ELSE*)
-	taskAsGeneric := TOF_Core.GenericValueFactory.FromParts(GENERIC_TYPE_CLASS.OBJECT, task.SelfAddress, task.SelfSize, GENERIC_MEMORY_MANAGEMENT_BEHAVIOR.STORE_ORIGINAL_REFERENCE_AND_NOT_OWNS_MEMORY);
-//END_IF
+taskAsGeneric := TOF_Core.GenericValueFactory.FromParts(GENERIC_TYPE_CLASS.OBJECT, task.SelfAddress, task.SelfSize, GENERIC_MEMORY_MANAGEMENT_BEHAVIOR.STORE_ORIGINAL_REFERENCE_AND_NOT_OWNS_MEMORY);
 
 _Tasks.AppendGeneric(taskAsGeneric);]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="OnBeforeStop" Id="{4199b25e-a4f1-42bb-8e93-032ee175a88d}" FolderPath="Overriden members\">
+      <Declaration><![CDATA[METHOD PROTECTED OnBeforeStop]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF _CurrentTask <> 0 AND_THEN _CurrentTask.State.Running THEN
+	_CurrentTask.Cancel();
+END_IF]]></ST>
       </Implementation>
     </Method>
     <Method Name="OnReset" Id="{77d5a316-a3d7-4b72-abf0-f45fddad039f}" FolderPath="Overriden members\">
@@ -100,25 +105,17 @@ VAR_IN_OUT
 	stopReasonMessage : TOF_Core.ERROR_MESSAGE;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[__TRY
-	IF _CurrentTask <> 0 THEN
-		_CurrentTask.Execute();	
-	ELSE
-		IF _Tasks.Count > 0 THEN
-			_CurrentTask := getTaskByIndex(0);
-			
-			_CurrentTask.Start();
-		END_IF 
-	END_IF
-__CATCH
-	(*IF _CurrentTask <> 0 AND_THEN _Tasks.Count > 0 THEN
-		_Tasks.RemoveAt(0);
-	END_IF
-	
-	TOF_Core.LogManager.TryLogMessage(WideStringHelper.ConcatStrings255("Task '", _CurrentTask.Name, "' error in queue"), LOG_CATEGORY.INFORMATION, "TaskQueue", "TaskQueue.Task", "TaskQueue.Task.Error");
-	*)
-	TOF_Core.ExceptionManager.ReThrowLastException();
-__ENDTRY
+        <ST><![CDATA[IF _CurrentTask <> 0 THEN
+	_CurrentTask.Execute();	
+ELSE
+	IF _Tasks.Count > 0 THEN
+		_CurrentTask := getTaskByIndex(0);
+		
+		_CurrentTask.Start();
+	ELSIF _StopWhenNoPendingTasks THEN
+		processingState := TASK_PROCESSING_STATE.DONE;
+	END_IF 
+END_IF
 
 IF _CurrentTask <> 0 THEN
 	CASE _CurrentTask.State.Value OF
@@ -126,33 +123,19 @@ IF _CurrentTask <> 0 THEN
 			removeCurrentTask();		
 			
 		TASK_STATE.STOPPED:
-			IF _CurrentTask.StopReason.Success THEN
+			IF _CurrentTask.OriginalStopReason.WorkDone THEN
 				removeCurrentTask();						
 			ELSE
-				processingState := GetProcessingStateByStopReason(_CurrentTask.StopReason.Value);
-				
-				stopReasonMessage := _CurrentTask.StopReason.Message;
+				processingState := GetProcessingStateByStopReason(_CurrentTask.OriginalStopReason.Value);				
+				stopReasonMessage := _CurrentTask.OriginalStopReason.Message;
 			END_IF
 	END_CASE
 END_IF]]></ST>
       </Implementation>
     </Method>
-    <Method Name="OnStop" Id="{4199b25e-a4f1-42bb-8e93-032ee175a88d}" FolderPath="Overriden members\">
-      <Declaration><![CDATA[METHOD PROTECTED OnStop]]></Declaration>
-      <Implementation>
-        <ST><![CDATA[IF _CurrentTask <> 0 THEN
-	CASE _CurrentTask.State.Value OF
-		TASK_STATE.RUNNING:
-			_CurrentTask.Cancel();
-		
-		TASK_STATE.STOPPED:
-			_CurrentTask.Execute();	
-	END_CASE
-END_IF]]></ST>
-      </Implementation>
-    </Method>
     <Property Name="PendingTaskCount" Id="{2038ab95-2e50-4179-a754-1d1cc97697ad}">
-      <Declaration><![CDATA[PROPERTY FINAL PendingTaskCount : DINT]]></Declaration>
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+PROPERTY FINAL PendingTaskCount : DINT]]></Declaration>
       <Get Name="Get" Id="{771aaa60-c187-4100-b7c8-70432db59981}">
         <Declaration><![CDATA[]]></Declaration>
         <Implementation>
@@ -170,5 +153,21 @@ END_IF
 _CurrentTask := 0;]]></ST>
       </Implementation>
     </Method>
+    <Property Name="StopWhenNoPendingTasks" Id="{88898ba4-339d-4e7d-ad5c-2ad26acedd0e}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+PROPERTY FINAL StopWhenNoPendingTasks : BOOL]]></Declaration>
+      <Get Name="Get" Id="{e11d548f-9f11-44b2-98c2-153ff14511f3}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[StopWhenNoPendingTasks := _StopWhenNoPendingTasks;]]></ST>
+        </Implementation>
+      </Get>
+      <Set Name="Set" Id="{8155d48a-5e36-4cd2-9d1d-ee03111c46a4}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[_StopWhenNoPendingTasks := StopWhenNoPendingTasks;]]></ST>
+        </Implementation>
+      </Set>
+    </Property>
   </POU>
 </TcPlcObject>
