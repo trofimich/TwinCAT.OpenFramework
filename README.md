@@ -3,6 +3,11 @@
 This is **object-oriented framework** developed for **TwinCAT 3.1.4026+**, which provides a set of ready-to-use, scalable components for industrial automation.
 It is based on an error-handling concept that is unique for Structured Text and resembles the approach used in general-purpose languages like C# or Java.
 
+## ATTENTION
+
+- **Do not use 4026.20 build**  
+  Compiler has regression in this version related to __SYSTEM.AnyType handling. Use build 4026.19 instead.
+
 ## Key Features
 
 - **Advanced exception handling**  
@@ -15,10 +20,13 @@ It is based on an error-handling concept that is unique for Structured Text and 
   Convenient string concatenation, replacement, trimming, splitting for STRING and WSTRING types. Support for strings longer than 255 characters and more.
 
 - **Logging system**  
-  A convenient logging system with advanced filtering capabilities based on topics and support for custom logger implementations.
+  A convenient logging system with advanced filtering capabilities based on topics and support for custom logger implementations. Simple logging to text files is already implemented.
 
-- **Task and task sequensor**  
-  An abstraction for a basic task that can either complete successfully, be aborted internally, be cancelled externally, or be terminated due to an exception. There is also a sequence of tasks that allows multiple tasks to be executed one after another as a single composite task.
+- **Tasks**  
+  An abstraction for a basic task that can either complete successfully, be aborted internally, be cancelled externally, or be terminated due to an exception. Tasks can preemptively acquire resources and automatically release them after completion.
+
+- **Task queue**  
+  Tasks queue allows multiple tasks to be executed one after another as a single composite task. The queue can also operate in a mode where it constantly waits for new tasks and places them in the execution queue.
 
 - **Working with files**  
   Working with the file system is represented as a set of tasks. Opening and closing files is handled automatically for the functions that require it. All you need to do is define the sequence of tasks, and the dirty work will be done behind the scenes.
@@ -30,7 +38,7 @@ It is based on an error-handling concept that is unique for Structured Text and 
   Simplified serialization and deserialization of structures to and from JSON documents.
 
 - **Basic automation engine**  
-  A ready-to-use state machine: AutomationRunner supports three fundamental states: *Initializing*, *Running*, *Fault* and can handle multiple AutomationController instances with four fundamental states: *Initializing*, *Running*, *Stopping*, *Fault*
+  A ready-to-use state machine: AutomationRunner supports three fundamental states: *Initializing*, *Running*, *InitializationFailed* and can handle multiple AutomationController instances with four fundamental states: *Initial*, *Running*, *Stopping*, *Fault*, *Resetting*
 
 - **Controllable devices**  
   Ready-made abstractions for interacting with the external world, such as terminals or communication channels.
@@ -45,7 +53,7 @@ It is based on an error-handling concept that is unique for Structured Text and 
   Run your logic in simulation mode without the need for real hardware.
 
 - **Automatic exception logging**  
-  The automation engine automatically catches exceptions and logs them.
+  Tasks and automation engine automatically catches exceptions and logs them.
 
 - **Modular architecture**  
   Use only the parts of the framework you need — no need to include everything.
