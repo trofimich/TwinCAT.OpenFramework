@@ -38,7 +38,7 @@ It is based on an error-handling concept that is unique for Structured Text and 
   Simplified serialization and deserialization of structures to and from JSON documents.
 
 - **Basic automation engine**  
-  A ready-to-use state machine: AutomationRunner supports three fundamental states: *Initializing*, *Running*, *InitializationFailed* and can handle multiple AutomationController instances with four fundamental states: *Initial*, *Running*, *Stopping*, *Fault*, *Resetting*
+  A ready-to-use state machine: AutomationRunner supports three fundamental states: *Initializing*, *Running*, *InitializationFailed* and can handle multiple AutomationController instances with five fundamental states: *Initial*, *Running*, *Stopping*, *Fault*, *Resetting*
 
 - **Controllable devices**  
   Ready-made abstractions for interacting with the external world, such as terminals or communication channels.
@@ -151,7 +151,8 @@ Also, if you're experienced in software architecture and have suggestions, I'd l
 - Beckhoff currently use compiler from CoDeSys and this compiler has some issues:
   - incorrect behavior related to methods with optional parameters in some cases
   - incorrect memory deallocation in __TRY / __CATCH block in some cases
-  - compiler regresson in TC 3.1.4026.19 related to custom exception throwing
+  - compiler regresson in TC 3.1.4026.19 related to custom exception throwing, but workaround was implemented
+  - compiler regression in TC 3.1.4026.20 related to __SYSTEM.AnyType handling, use build 3.1.4026.19 instead
 
 These issues aren't critical, and Beckhoff is aware and investigating solutions
 
