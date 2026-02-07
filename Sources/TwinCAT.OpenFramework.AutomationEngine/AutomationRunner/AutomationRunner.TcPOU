@@ -20,13 +20,14 @@ legal notes
 {attribute 'no_explicit_call' := 'do not call this function block directly'} 
 FUNCTION_BLOCK ABSTRACT AutomationRunner
 VAR_GENERIC CONSTANT
-    _AutomationControllerCount : BYTE := 1;
+    _ControllerCount : BYTE := 1;
 END_VAR
 EXTENDS Core.Object IMPLEMENTS IAutomationRunner
+VAR_OUTPUT
+	InitializationErrorMessage : Core.ERROR_MESSAGE;
+END_VAR
 VAR
 	_State : AUTOMATION_RUNNER_STATE;
-
-	_SimulationMode : BOOL;
 END_VAR
 VAR_STAT
     _InstanceCounter : BYTE := 0;
@@ -34,26 +35,6 @@ END_VAR]]></Declaration>
     <Implementation>
       <ST><![CDATA[]]></ST>
     </Implementation>
-    <Property Name="AutomationControllerCount" Id="{b763fe3e-ac45-40f7-8e0a-80bac18bc801}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
-PROPERTY AutomationControllerCount : BYTE]]></Declaration>
-      <Get Name="Get" Id="{41fb60e1-30ec-4999-8fd3-d29a9cdfc0bd}">
-        <Declaration><![CDATA[]]></Declaration>
-        <Implementation>
-          <ST><![CDATA[AutomationControllerCount := _AutomationControllerCount;]]></ST>
-        </Implementation>
-      </Get>
-    </Property>
-    <Property Name="AutomationControllers" Id="{d916e7c7-2f82-41ab-b518-da33d8b6a0ac}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
-PROPERTY ABSTRACT AutomationControllers : REFERENCE TO ARRAY [0.._AutomationControllerCount - 1] OF IAutomationController]]></Declaration>
-      <Get Name="Get" Id="{bbac70c1-0c12-4a6e-b63c-959272410e00}">
-        <Declaration><![CDATA[]]></Declaration>
-        <Implementation>
-          <ST><![CDATA[]]></ST>
-        </Implementation>
-      </Get>
-    </Property>
     <Property Name="CodeExecutionPhase" Id="{c4f37de1-c494-4e98-bff8-e5a29ee70657}">
       <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
 PROPERTY FINAL CodeExecutionPhase : BOOL]]></Declaration>
@@ -61,6 +42,26 @@ PROPERTY FINAL CodeExecutionPhase : BOOL]]></Declaration>
         <Declaration><![CDATA[]]></Declaration>
         <Implementation>
           <ST><![CDATA[CodeExecutionPhase := GlobalState.CodeExecutionPhase;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="ControllerCount" Id="{b763fe3e-ac45-40f7-8e0a-80bac18bc801}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+PROPERTY ControllerCount : BYTE]]></Declaration>
+      <Get Name="Get" Id="{41fb60e1-30ec-4999-8fd3-d29a9cdfc0bd}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ControllerCount := _ControllerCount;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="Controllers" Id="{d916e7c7-2f82-41ab-b518-da33d8b6a0ac}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+PROPERTY ABSTRACT Controllers : REFERENCE TO ARRAY [0.._ControllerCount - 1] OF IAutomationController]]></Declaration>
+      <Get Name="Get" Id="{bbac70c1-0c12-4a6e-b63c-959272410e00}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[]]></ST>
         </Implementation>
       </Get>
     </Property>
@@ -97,14 +98,27 @@ IF Core.SystemDateTimeManager.SystemTimeValid THEN
 	
 	CASE _State OF
 		AUTOMATION_RUNNER_STATE.INITIALIZING:
+			IF NOT __ISVALIDREF(Controllers) THEN
+				_State := AUTOMATION_RUNNER_STATE.INITIALIZATION_FAILED;		
+				InitializationErrorMessage := "Controllers property is null";
+				RETURN;		
+			END_IF
+
 			initialized := TRUE;
 			
-			FOR i := 0 TO _AutomationControllerCount - 1 DO
-				AutomationControllers[i].Initialize();
+			FOR i := 0 TO _ControllerCount - 1 DO
+				IF Controllers[i] = 0 THEN
+					_State := AUTOMATION_RUNNER_STATE.INITIALIZATION_FAILED;
+					InitializationErrorMessage := WideStrings.ConcatStrings255("Controller[", TO_WSTRING(i), "] is null");
+					EXIT;					
+				END_IF
+
+				Controllers[i].Initialize();
 				
-				CASE AutomationControllers[i].State OF
+				CASE Controllers[i].State OF
 					AUTOMATION_CONTROLLER_STATE.FAULT:
 						_State := AUTOMATION_RUNNER_STATE.INITIALIZATION_FAILED;
+						InitializationErrorMessage := WideStrings.ConcatStrings255("Controller[", TO_WSTRING(i), "] failed");
 						EXIT;
 						
 					AUTOMATION_CONTROLLER_STATE.INITIAL:
@@ -117,8 +131,8 @@ IF Core.SystemDateTimeManager.SystemTimeValid THEN
 			END_IF
 		
 		AUTOMATION_RUNNER_STATE.RUNNING:
-			FOR i := 0 TO _AutomationControllerCount - 1 DO
-				AutomationControllers[i].Execute();			
+			FOR i := 0 TO _ControllerCount - 1 DO
+				Controllers[i].Execute();			
 			END_FOR		
 	END_CASE
 
@@ -169,11 +183,11 @@ VAR_INPUT
 	index : BYTE;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[IF index < 0 OR_ELSE index >= _AutomationControllerCount OR_ELSE NOT __ISVALIDREF(AutomationControllers) THEN
+        <ST><![CDATA[IF index < 0 OR_ELSE index >= _ControllerCount OR_ELSE NOT __ISVALIDREF(Controllers) THEN
 	RETURN;
 END_IF
 
-TryGetAutomationControllerByIndex := AutomationControllers[index];]]></ST>
+TryGetAutomationControllerByIndex := Controllers[index];]]></ST>
       </Implementation>
     </Method>
   </POU>

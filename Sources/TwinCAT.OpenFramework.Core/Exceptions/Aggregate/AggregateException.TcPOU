@@ -24,14 +24,11 @@ VAR
 	_ClassName : STRING := __POUNAME();
 	_InnerExceptions : POINTER TO IException;
 	_InnerExceptionCount : UINT;
-END_VAR
-VAR CONSTANT
-	EXCEPTION_NUMBER_DELIMITER : WSTRING(1) := ".";
-	AGGREGATE_EXCEPTION_SUFFIX : WSTRING(25) := " aggregated exceptions";
 END_VAR]]></Declaration>
     <Implementation>
       <ST><![CDATA[]]></ST>
     </Implementation>
+    <Folder Name="Service members" Id="{c31ba568-bfb3-4fae-ac77-198d7130e4aa}" />
     <Method Name="AddInnerException" Id="{bfce23ea-1373-4ba3-866d-7d8a69bbfdab}">
       <Declaration><![CDATA[METHOD AddInnerException
 VAR_INPUT
@@ -42,7 +39,7 @@ VAR
 	i : DINT;
 	subInnerException : IException;	
 	
-	newInnerExceptions : POINTER TO IException;
+	newInnerExceptionArray : POINTER TO IException;
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[IF innerException = 0 THEN
@@ -56,21 +53,21 @@ IF __QUERYINTERFACE(innerException, aggregateException) THEN
 		AddInnerException(subInnerException);
 	END_FOR
 ELSE
-	newInnerExceptions := __NEW(POINTER TO IException, (_InnerExceptionCount + 1));
+	newInnerExceptionArray := __NEW(POINTER TO IException, (_InnerExceptionCount + 1));
 		
 	IF _InnerExceptionCount > 0 THEN
-		Tc2_System.MEMCPY(newInnerExceptions, _InnerExceptions, TO_UDINT(XSIZEOF(POINTER TO IException) * _InnerExceptionCount));	
+		Tc2_System.MEMCPY(newInnerExceptionArray, _InnerExceptions, TO_UDINT(XSIZEOF(POINTER TO IException) * _InnerExceptionCount));	
 	
 		__DELETE(_InnerExceptions);
 	END_IF
-	
+		
 	IF innerException.IsDynamicInstance THEN
-		newInnerExceptions[_InnerExceptionCount] := innerException;
+		newInnerExceptionArray[_InnerExceptionCount] := innerException;
 	ELSE
-		__QUERYINTERFACE(innerException.Clone(), newInnerExceptions[_InnerExceptionCount]); 
+		__QUERYINTERFACE(innerException.Clone(), newInnerExceptionArray[_InnerExceptionCount]);
 	END_IF
 	
-	_InnerExceptions := newInnerExceptions; 
+	_InnerExceptions := newInnerExceptionArray; 
 	_InnerExceptionCount := _InnerExceptionCount + 1;
 END_IF]]></ST>
       </Implementation>
@@ -101,23 +98,53 @@ SUPER^.Clear();]]></ST>
       <Declaration><![CDATA[METHOD Clone : IObject
 VAR
 	exceptionClone : POINTER TO AggregateException;
+	exceptionCloneCopy : POINTER TO AggregateException;
+		
 	i : DINT;
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[exceptionClone := __NEW(AggregateException);
 
-exceptionClone^.SourceNamespaceName := SourceNamespaceName;
-exceptionClone^.SourceClassName := SourceClassName;
-exceptionClone^.SourceMethodName := SourceMethodName;
-exceptionClone^.SourcePosition := SourcePosition;
-exceptionClone^.LocalTimestamp := LocalTimestamp;	
-exceptionClone^.UtcTimestamp := UtcTimestamp;	
+exceptionClone^.SourceNamespaceName := _SourceNamespaceName;
+exceptionClone^.SourceClassName := _SourceClassName;
+exceptionClone^.SourceMethodName := _SourceMethodName;
+exceptionClone^.SourcePosition := _SourcePosition;
+exceptionClone^.LocalTimestamp := _LocalTimestamp;	
+exceptionClone^.UtcTimestamp := _UtcTimestamp;	
 
 FOR i := 0 TO _InnerExceptionCount - 1 DO
-	exceptionClone^.AddInnerException(_InnerExceptions[i]);
+	exceptionClone^.AddInnerException(GetInnerException(i));
 END_FOR
 
-Clone := exceptionClone^;]]></ST>
+exceptionCloneCopy := exceptionClone;
+
+//exceptionClone^.CopyFields(THIS^);
+
+Clone := exceptionClone^;
+
+RETURN; // for debugging proposes]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="CopyFields" Id="{0584c9e4-cd70-4feb-b915-e7d77badfcc1}" FolderPath="Service members\">
+      <Declaration><![CDATA[METHOD PROTECTED CopyFields
+VAR_IN_OUT CONSTANT
+	sourceExxception : AggregateException;	
+END_VAR
+VAR
+	i : DINT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_SourceNamespaceName := sourceExxception.SourceNamespaceName;
+_SourceClassName := sourceExxception.SourceClassName;
+_SourceMethodName := sourceExxception.SourceMethodName;
+_SourcePosition := sourceExxception.SourcePosition;
+_LocalTimestamp := sourceExxception.LocalTimestamp;	
+_UtcTimestamp := sourceExxception.UtcTimestamp;	
+
+FOR i := 0 TO sourceExxception.InnerExceptionCount - 1 DO
+	AddInnerException(sourceExxception.GetInnerException(i));
+END_FOR
+]]></ST>
       </Implementation>
     </Method>
     <Property Name="Empty" Id="{d2ade75f-e0d1-434c-8840-7186cc0e6f7a}">
@@ -163,31 +190,34 @@ VAR
 	stringBuilder : WideStringBuilder;
 	
 	i : DINT;
+	innerException : IException;
 	innerExceptionMessage : ERROR_MESSAGE;
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[stringBuilder
 	.Append(_InnerExceptionCount)
-	.AppendString(AGGREGATE_EXCEPTION_SUFFIX);
+	.AppendString(ExceptionConstants.AGGREGATE_EXCEPTION_SUFFIX);
 
 IF showLocalTimestamp OR_ELSE showUtcTimestamp THEN
-	stringBuilder.AppendString(TIME_PREFIX);
+	stringBuilder.AppendString(ExceptionConstants.TIME_PREFIX);
 	AppendTimestampDescription(stringBuilder, showLocalTimestamp, showUtcTimestamp, _LocalTimestamp, _UtcTimestamp);
 END_IF
 
 IF showSource THEN
-	stringBuilder.AppendString(SOURCE_PREFIX);
+	stringBuilder.AppendString(ExceptionConstants.SOURCE_PREFIX);
 	AppendSourceDescription(stringBuilder, _SourceNamespaceName, _SourceClassName, _SourceMethodName, _SourcePosition);
 END_IF
 
 FOR i := 0 TO _InnerExceptionCount - 1 DO
-	innerExceptionMessage := _InnerExceptions[i].GetMessage(showLocalTimestamp, showUtcTimestamp, showSource);
+	innerException := _InnerExceptions[i];
+	
+	innerExceptionMessage := innerException.GetMessage(showLocalTimestamp, showUtcTimestamp, showSource);
 	
 	stringBuilder
-		.AppendString255(WideStringHelper.NewLine)
+		.AppendString255(WideStrings.NewLine)
 		.Append(i)
+		.AppendString(ExceptionConstants.EXCEPTION_NUMBER_DELIMITER)	
 		.AppendString(" ")
-		.AppendString(EXCEPTION_NUMBER_DELIMITER)	
 		.Append(innerExceptionMessage);
 END_FOR		
 
@@ -233,14 +263,29 @@ VAR_INPUT
 	sourcePosition : STRING;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[THIS^.SourceNamespaceName := sourceNamespaceName;	
-THIS^.SourceClassName := sourceClassName;
-THIS^.SourceMethodName := GetNormalizedMethodName(sourceClassName, sourceMethodName); 
-THIS^.SourcePosition := sourcePosition;
-THIS^.LocalTimestamp := SystemDateTimeManager.SystemLocalDateTime;
-THIS^.UtcTimestamp := SystemDateTimeManager.SystemUtcDateTime;
+        <ST><![CDATA[_SourceNamespaceName := sourceNamespaceName;	
+_SourceClassName := sourceClassName;
+_SourceMethodName := GetNormalizedMethodName(sourceClassName, sourceMethodName); 
+_SourcePosition := sourcePosition;
+_LocalTimestamp := SystemDateTimeManager.SystemLocalDateTime;
+_UtcTimestamp := SystemDateTimeManager.SystemUtcDateTime;
 
 ExceptionManager.Throw(THIS^);]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="ThrowByObject" Id="{23c561f4-d680-4b45-9187-922178515246}">
+      <Declaration><![CDATA[METHOD ThrowByObject
+VAR_INPUT
+	sourceObject : IObject;
+	sourceMethodName : STRING;
+	sourcePosition : STRING;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF sourceObject <> 0 THEN
+	Throw(sourceObject.NamespaceName, sourceObject.ClassName, sourceMethodName, sourcePosition);
+ELSE
+	Throw(ExceptionConstants.UNSPECIFIED_SOURCE, ExceptionConstants.UNSPECIFIED_SOURCE, sourceMethodName, sourcePosition);
+END_IF]]></ST>
       </Implementation>
     </Method>
   </POU>
