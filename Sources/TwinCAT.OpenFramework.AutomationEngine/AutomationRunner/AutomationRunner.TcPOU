@@ -18,39 +18,29 @@ legal notes
 *)
 
 {attribute 'no_explicit_call' := 'do not call this function block directly'} 
-FUNCTION_BLOCK ABSTRACT AutomationRunner
-VAR_GENERIC CONSTANT
-    _AutomationControllerCount : BYTE := 1;
+FUNCTION_BLOCK AutomationRunner EXTENDS Core.Object IMPLEMENTS IAutomationRunner
+VAR_OUTPUT
+	InitializationErrorMessage : Core.ERROR_MESSAGE;
 END_VAR
-EXTENDS Core.Object IMPLEMENTS IAutomationRunner
 VAR
-	_State : AUTOMATION_RUNNER_STATE;
+	_ClassName : STRING := __POUNAME();
 
-	_SimulationMode : BOOL;
+	_State : AUTOMATION_RUNNER_STATE;
 END_VAR
 VAR_STAT
+	{attribute 'hide'} 
     _InstanceCounter : BYTE := 0;
 END_VAR]]></Declaration>
     <Implementation>
       <ST><![CDATA[]]></ST>
     </Implementation>
-    <Property Name="AutomationControllerCount" Id="{b763fe3e-ac45-40f7-8e0a-80bac18bc801}">
+    <Property Name="ClassName" Id="{c0a74b6f-d74a-495c-97f7-b85bba3b2667}">
       <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
-PROPERTY AutomationControllerCount : BYTE]]></Declaration>
-      <Get Name="Get" Id="{41fb60e1-30ec-4999-8fd3-d29a9cdfc0bd}">
+PROPERTY ClassName : STRING]]></Declaration>
+      <Get Name="Get" Id="{42ced8f1-8292-4d64-9005-f1d881faf538}">
         <Declaration><![CDATA[]]></Declaration>
         <Implementation>
-          <ST><![CDATA[AutomationControllerCount := _AutomationControllerCount;]]></ST>
-        </Implementation>
-      </Get>
-    </Property>
-    <Property Name="AutomationControllers" Id="{d916e7c7-2f82-41ab-b518-da33d8b6a0ac}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
-PROPERTY ABSTRACT AutomationControllers : REFERENCE TO ARRAY [0.._AutomationControllerCount - 1] OF IAutomationController]]></Declaration>
-      <Get Name="Get" Id="{bbac70c1-0c12-4a6e-b63c-959272410e00}">
-        <Declaration><![CDATA[]]></Declaration>
-        <Implementation>
-          <ST><![CDATA[]]></ST>
+          <ST><![CDATA[ClassName := _ClassName;]]></ST>
         </Implementation>
       </Get>
     </Property>
@@ -76,8 +66,11 @@ PROPERTY FINAL CycleCounter : LWORD]]></Declaration>
     </Property>
     <Method Name="Execute" Id="{cddfd6b6-d698-4df7-b955-3cc076d37dea}">
       <Declaration><![CDATA[METHOD FINAL Execute
+VAR_IN_OUT CONSTANT
+	controllers : ARRAY [*] OF IAutomationController;
+END_VAR
 VAR
-	i : INT;
+	i : DINT;
 			
 	initialized : BOOL;
 	
@@ -97,14 +90,27 @@ IF Core.SystemDateTimeManager.SystemTimeValid THEN
 	
 	CASE _State OF
 		AUTOMATION_RUNNER_STATE.INITIALIZING:
+			IF UPPER_BOUND(controllers, 1) - LOWER_BOUND(controllers, 1) < 0 THEN
+				_State := AUTOMATION_RUNNER_STATE.INITIALIZATION_FAILED;		
+				InitializationErrorMessage := "No controllers to run";
+				RETURN;		
+			END_IF
+
 			initialized := TRUE;
 			
-			FOR i := 0 TO _AutomationControllerCount - 1 DO
-				AutomationControllers[i].Initialize();
+			FOR i := LOWER_BOUND(controllers, 1) TO UPPER_BOUND(controllers, 1) DO
+				IF Controllers[i] = 0 THEN
+					_State := AUTOMATION_RUNNER_STATE.INITIALIZATION_FAILED;
+					InitializationErrorMessage := WideStrings.ConcatStrings255("controller[", TO_WSTRING(i), "] is null");
+					EXIT;					
+				END_IF
+
+				Controllers[i].Initialize();
 				
-				CASE AutomationControllers[i].State OF
+				CASE Controllers[i].State OF
 					AUTOMATION_CONTROLLER_STATE.FAULT:
 						_State := AUTOMATION_RUNNER_STATE.INITIALIZATION_FAILED;
+						InitializationErrorMessage := WideStrings.ConcatStrings255("controller[", TO_WSTRING(i), "] failed");
 						EXIT;
 						
 					AUTOMATION_CONTROLLER_STATE.INITIAL:
@@ -117,8 +123,8 @@ IF Core.SystemDateTimeManager.SystemTimeValid THEN
 			END_IF
 		
 		AUTOMATION_RUNNER_STATE.RUNNING:
-			FOR i := 0 TO _AutomationControllerCount - 1 DO
-				AutomationControllers[i].Execute();			
+			FOR i := LOWER_BOUND(controllers, 1) TO UPPER_BOUND(controllers, 1) DO
+				Controllers[i].Execute();			
 			END_FOR		
 	END_CASE
 
@@ -143,6 +149,26 @@ END_VAR]]></Declaration>
         <ST><![CDATA[_InstanceCounter := _InstanceCounter + 1;]]></ST>
       </Implementation>
     </Method>
+    <Property Name="NamespaceName" Id="{631acbbf-d63d-4152-93f4-5099a5ad032e}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+PROPERTY NamespaceName : STRING]]></Declaration>
+      <Get Name="Get" Id="{4f5331e9-77d5-4a4f-bcca-1aa45e235864}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[NamespaceName := CurrentNamespace.Name;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="SelfSize" Id="{92318db9-3f18-4ff5-a634-be283d0bf91b}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+PROPERTY SelfSize : ULINT]]></Declaration>
+      <Get Name="Get" Id="{cb1c0e7d-8133-4dbc-9b47-0a21e7b7ce5a}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[SelfSize := XSIZEOF(THIS^);]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
     <Property Name="State" Id="{f2dce25c-3e10-4ca3-baf9-9dc113064c6d}">
       <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
 PROPERTY FINAL State : AUTOMATION_RUNNER_STATE]]></Declaration>
@@ -163,18 +189,5 @@ PROPERTY StateName : STRING]]></Declaration>
         </Implementation>
       </Get>
     </Property>
-    <Method Name="TryGetAutomationControllerByIndex" Id="{24622356-d6c8-4a30-a975-e7a7aa358d86}">
-      <Declaration><![CDATA[METHOD FINAL TryGetAutomationControllerByIndex : IAutomationController
-VAR_INPUT
-	index : BYTE;
-END_VAR]]></Declaration>
-      <Implementation>
-        <ST><![CDATA[IF index < 0 OR_ELSE index >= _AutomationControllerCount OR_ELSE NOT __ISVALIDREF(AutomationControllers) THEN
-	RETURN;
-END_IF
-
-TryGetAutomationControllerByIndex := AutomationControllers[index];]]></ST>
-      </Implementation>
-    </Method>
   </POU>
 </TcPlcObject>

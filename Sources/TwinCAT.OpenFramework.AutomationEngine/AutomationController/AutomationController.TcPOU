@@ -23,10 +23,7 @@ VAR_GENERIC CONSTANT
 END_VAR
 EXTENDS Core.Object IMPLEMENTS IAutomationController
 VAR
-	_AutomationRunner : IAutomationRunner;
-	
-	_RunningExceptionHandler : Core.IExceptionHandler;
-	_StoppingExceptionHandler : Core.IExceptionHandler;
+	_ExceptionHandler : Core.IExceptionHandler;
 	
 	_Enabled : BOOL := TRUE;
 			
@@ -40,8 +37,11 @@ END_VAR]]></Declaration>
     <Implementation>
       <ST><![CDATA[]]></ST>
     </Implementation>
-    <Folder Name="Exception handlers" Id="{7e6e08bd-25f5-4a57-b4a8-f1c0773fab21}" />
-    <Folder Name="Methods to override" Id="{18713aca-9c47-4769-936e-cd3be2ed069c}" />
+    <Folder Name="Methods to override" Id="{18713aca-9c47-4769-936e-cd3be2ed069c}">
+      <Folder Name="EnabledChange" Id="{7cc34a9f-6118-4793-9de6-359b78cb7be4}" />
+      <Folder Name="Initialization" Id="{42d1bd21-062f-45b1-a165-3fc00e8443d8}" />
+      <Folder Name="SimulationModeChange" Id="{e7dbeee9-12ad-4d8b-b88c-86c803e2d26d}" />
+    </Folder>
     <Folder Name="Service memebers" Id="{5df4ad11-a7ac-4049-8c04-41c0497c7559}" />
     <Property Name="DeviceCount" Id="{612962ce-4a03-4dcb-a1ce-f9e94eefa0eb}">
       <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
@@ -143,6 +143,21 @@ PROPERTY FINAL Enabled : BOOL]]></Declaration>
         </Implementation>
       </Get>
     </Property>
+    <Property Name="ExceptionHandler" Id="{60a29608-799c-49a7-a0f5-81ee4e55824c}">
+      <Declaration><![CDATA[PROPERTY FINAL ExceptionHandler : Core.IExceptionHandler]]></Declaration>
+      <Get Name="Get" Id="{fae050a0-52d3-4847-a89b-06de749e48ee}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ExceptionHandler := _ExceptionHandler;]]></ST>
+        </Implementation>
+      </Get>
+      <Set Name="Set" Id="{0ab07e6b-d588-44a7-8de9-0695649fe2c2}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[_ExceptionHandler := ExceptionHandler;]]></ST>
+        </Implementation>
+      </Set>
+    </Property>
     <Method Name="Execute" Id="{edf960fe-6c94-4ace-a7be-524e71aafd2a}">
       <Declaration><![CDATA[METHOD FINAL Execute
 VAR
@@ -165,26 +180,6 @@ handleWorkingStates();
 
 handleOutputDevices();
 ]]></ST>
-      </Implementation>
-    </Method>
-    <Method Name="FB_init" Id="{46ebd59e-7068-435f-99df-fef2ff312630}">
-      <Declaration><![CDATA[METHOD FB_init : BOOL
-VAR_INPUT
-	(* if TRUE, the retain variables are initialized (warm start / cold start)*)
-	bInitRetains	: BOOL;
-	(* if TRUE, the instance afterwards gets moved into the copy code (online change)*)
-	bInCopyCode	: BOOL;
-	automationRunner : IAutomationRunner; 
-END_VAR
-VAR
-	automationRunnerNullException : Core.ArgumentNotSpecifiedException;
-END_VAR]]></Declaration>
-      <Implementation>
-        <ST><![CDATA[IF automationRunner = 0 THEN
-	automationRunnerNullException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), 'automationRunner');
-END_IF
-
-_AutomationRunner := automationRunner;]]></ST>
       </Implementation>
     </Method>
     <Method Name="fillErrorLog" Id="{13ecfb4e-9729-40c0-b5b7-a5c89543cb1f}" FolderPath="Service memebers\">
@@ -283,53 +278,35 @@ VAR
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[__TRY
-	IF _State = AUTOMATION_CONTROLLER_STATE.RUNNING AND_THEN StopRequest THEN
-		setState(AUTOMATION_CONTROLLER_STATE.STOPPING);
-	ELSIF _State = AUTOMATION_CONTROLLER_STATE.STOPPING AND_THEN StartRequest AND_THEN NOT StopRequest THEN
-		setState(AUTOMATION_CONTROLLER_STATE.RUNNING);
-	END_IF
-	
 	CASE _State OF
-		AUTOMATION_CONTROLLER_STATE.RUNNING:
-			OnRun();
+		AUTOMATION_CONTROLLER_STATE.WORKING:
+			OnWorking();
 			
-		AUTOMATION_CONTROLLER_STATE.STOPPING:
-			OnStop();
-
 		AUTOMATION_CONTROLLER_STATE.FAULT:
 			OnFault();
 			
 		AUTOMATION_CONTROLLER_STATE.RESETTING:			
-			IF OnReset() THEN
-				setState(AUTOMATION_CONTROLLER_STATE.STOPPING);
+			IF OnResetting() THEN
+				setState(AUTOMATION_CONTROLLER_STATE.WORKING);
 			END_IF			
 	END_CASE
 __CATCH(exceptionCode)	
 	exception := ExceptionManager.GetLastException(exceptionCode);	
 
 	CASE _State OF
-		AUTOMATION_CONTROLLER_STATE.RUNNING:
+		AUTOMATION_CONTROLLER_STATE.WORKING:
 			fillErrorLog('LastRunningError', Diagnostics.LastRunningError, exception);			
-			
-			IF RunningExceptionHandler = 0 OR_ELSE NOT RunningExceptionHandler.HandleException(exception) THEN
-				setState(AUTOMATION_CONTROLLER_STATE.FAULT);
-			END_IF					
-			
-		AUTOMATION_CONTROLLER_STATE.STOPPING:
-			fillErrorLog('LastStoppingError', Diagnostics.LastStoppingError, exception);					
-			
-			IF RunningExceptionHandler = 0 OR_ELSE NOT StoppingExceptionHandler.HandleException(exception) THEN
-				setState(AUTOMATION_CONTROLLER_STATE.FAULT);
-			END_IF					
 
 		AUTOMATION_CONTROLLER_STATE.FAULT:
 			fillErrorLog('LastFaultError', Diagnostics.LastFaultError, exception);
 					
-		AUTOMATION_CONTROLLER_STATE.RESETTING:
-			setState(AUTOMATION_CONTROLLER_STATE.FAULT);
-			
+		AUTOMATION_CONTROLLER_STATE.RESETTING:		
 			fillErrorLog('LastResettingError', Diagnostics.LastResettingError, exception);					
 	END_CASE
+	
+	IF _ExceptionHandler = 0 OR_ELSE NOT _ExceptionHandler.HandleException(exception) THEN
+		setState(AUTOMATION_CONTROLLER_STATE.FAULT);
+	END_IF						
 __ENDTRY]]></ST>
       </Implementation>
     </Method>
@@ -342,25 +319,35 @@ VAR
 
 	exceptionCode : __SYSTEM.ExceptionCode;
 	exception : IException;
+	
+	deviceNotSpecifiedException : DataMemberNotSpecifiedException;
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[IF _State <> AUTOMATION_CONTROLLER_STATE.INITIAL THEN
 	RETURN;
 END_IF
 
-initialized := TRUE;
-
 __TRY
-	IF __ISVALIDREF(Devices) THEN
+	IF _DeviceCount > 0 AND_THEN NOT __ISVALIDREF(Devices) THEN
+		deviceNotSpecifiedException.Throw(Namespacename, ClassName, __POUNAME(), __POSITION(), 'Devices');
+	END_IF
+	
+	initialized := OnPreDeviceInitializing();
+
+	IF _DeviceCount > 0 THEN
 		FOR i := 0 TO _DeviceCount - 1 DO
+			IF Devices[i] = 0 THEN
+				deviceNotSpecifiedException.Throw(Namespacename, ClassName, __POUNAME(), __POSITION(), Strings.ConcatStrings255('Devices[', TO_STRING(i), ']'));			
+			END_IF
+			
 			initialized := initialized AND Devices[i].Initialize();
 		END_FOR
 	END_IF
-	
-	initialized := initialized AND OnInitialize();
+
+	initialized := initialized AND OnPostDeviceInitializing();
 	
 	IF initialized THEN
-		setState(AUTOMATION_CONTROLLER_STATE.STOPPING);
+		setState(AUTOMATION_CONTROLLER_STATE.WORKING);
 	END_IF	
 __CATCH(exceptionCode)
 	setState(AUTOMATION_CONTROLLER_STATE.FAULT);
@@ -371,13 +358,13 @@ __CATCH(exceptionCode)
 __ENDTRY]]></ST>
       </Implementation>
     </Method>
-    <Method Name="OnEnabledChanged" Id="{dd63764b-f122-4f50-a25d-0df5144930d7}" FolderPath="Methods to override\">
+    <Method Name="OnEnabledChanged" Id="{dd63764b-f122-4f50-a25d-0df5144930d7}" FolderPath="Methods to override\EnabledChange\">
       <Declaration><![CDATA[METHOD PROTECTED OnEnabledChanged]]></Declaration>
       <Implementation>
         <ST><![CDATA[]]></ST>
       </Implementation>
     </Method>
-    <Method Name="OnEnabledChanging" Id="{d1fcb6d0-b53a-4b1a-b954-eb5cd2d33bc4}" FolderPath="Methods to override\">
+    <Method Name="OnEnabledChanging" Id="{d1fcb6d0-b53a-4b1a-b954-eb5cd2d33bc4}" FolderPath="Methods to override\EnabledChange\">
       <Declaration><![CDATA[METHOD PROTECTED OnEnabledChanging
 VAR_INPUT
 	newValue : BOOL;
@@ -392,31 +379,31 @@ END_VAR]]></Declaration>
         <ST><![CDATA[]]></ST>
       </Implementation>
     </Method>
-    <Method Name="OnInitialize" Id="{f30a4c4a-7966-446f-95b6-a1ce70efb536}" FolderPath="Methods to override\">
-      <Declaration><![CDATA[METHOD PROTECTED OnInitialize : BOOL]]></Declaration>
+    <Method Name="OnPostDeviceInitializing" Id="{b196f5d6-1614-4d95-80dc-69c224e94b14}" FolderPath="Methods to override\Initialization\">
+      <Declaration><![CDATA[METHOD PROTECTED OnPostDeviceInitializing : BOOL]]></Declaration>
       <Implementation>
-        <ST><![CDATA[OnInitialize := TRUE;]]></ST>
+        <ST><![CDATA[OnPostDeviceInitializing := TRUE;]]></ST>
       </Implementation>
     </Method>
-    <Method Name="OnReset" Id="{26bb7324-2a54-4dd6-91d7-07c8f2cb1be0}" FolderPath="Methods to override\">
-      <Declaration><![CDATA[METHOD PROTECTED OnReset : BOOL]]></Declaration>
+    <Method Name="OnPreDeviceInitializing" Id="{f30a4c4a-7966-446f-95b6-a1ce70efb536}" FolderPath="Methods to override\Initialization\">
+      <Declaration><![CDATA[METHOD PROTECTED OnPreDeviceInitializing : BOOL]]></Declaration>
       <Implementation>
-        <ST><![CDATA[OnReset := TRUE;]]></ST>
+        <ST><![CDATA[OnPreDeviceInitializing := TRUE;]]></ST>
       </Implementation>
     </Method>
-    <Method Name="OnRun" Id="{f7f57440-8e03-4827-9c8c-4741292bf658}" FolderPath="Methods to override\">
-      <Declaration><![CDATA[METHOD PROTECTED ABSTRACT OnRun]]></Declaration>
+    <Method Name="OnResetting" Id="{26bb7324-2a54-4dd6-91d7-07c8f2cb1be0}" FolderPath="Methods to override\">
+      <Declaration><![CDATA[METHOD PROTECTED OnResetting : BOOL]]></Declaration>
       <Implementation>
-        <ST><![CDATA[]]></ST>
+        <ST><![CDATA[OnResetting := TRUE;]]></ST>
       </Implementation>
     </Method>
-    <Method Name="OnSimulationModeChanged" Id="{98e58809-7aad-4c0f-a45c-a1267872df0f}" FolderPath="Methods to override\">
+    <Method Name="OnSimulationModeChanged" Id="{98e58809-7aad-4c0f-a45c-a1267872df0f}" FolderPath="Methods to override\SimulationModeChange\">
       <Declaration><![CDATA[METHOD PROTECTED OnSimulationModeChanged]]></Declaration>
       <Implementation>
         <ST><![CDATA[]]></ST>
       </Implementation>
     </Method>
-    <Method Name="OnSimulationModeChanging" Id="{b12912cf-6c5d-475c-8063-64601bc950e5}" FolderPath="Methods to override\">
+    <Method Name="OnSimulationModeChanging" Id="{b12912cf-6c5d-475c-8063-64601bc950e5}" FolderPath="Methods to override\SimulationModeChange\">
       <Declaration><![CDATA[METHOD PROTECTED OnSimulationModeChanging
 VAR_INPUT
 	newValue : BOOL;
@@ -425,8 +412,8 @@ END_VAR]]></Declaration>
         <ST><![CDATA[]]></ST>
       </Implementation>
     </Method>
-    <Method Name="OnStop" Id="{e9a7087e-9b95-447b-8bf1-2d25488d5f40}" FolderPath="Methods to override\">
-      <Declaration><![CDATA[METHOD PROTECTED OnStop]]></Declaration>
+    <Method Name="OnWorking" Id="{f7f57440-8e03-4827-9c8c-4741292bf658}" FolderPath="Methods to override\">
+      <Declaration><![CDATA[METHOD PROTECTED ABSTRACT OnWorking]]></Declaration>
       <Implementation>
         <ST><![CDATA[]]></ST>
       </Implementation>
@@ -438,7 +425,7 @@ VAR_OUTPUT
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[IF _State <> AUTOMATION_CONTROLLER_STATE.FAULT THEN
-	refuseReason := WideStringHelper.ConcatStrings255("Expected controller state is 'FAULT', but actual controller state is '", TO_WSTRING(_State), "'");
+	refuseReason := WideStrings.ConcatStrings255("Expected controller state is 'FAULT', but actual controller state is '", TO_WSTRING(_State), "'");
 	RETURN;
 END_IF
 
@@ -447,21 +434,6 @@ setState(AUTOMATION_CONTROLLER_STATE.RESETTING);
 Reset := TRUE;]]></ST>
       </Implementation>
     </Method>
-    <Property Name="RunningExceptionHandler" Id="{60a29608-799c-49a7-a0f5-81ee4e55824c}" FolderPath="Exception handlers\">
-      <Declaration><![CDATA[PROPERTY RunningExceptionHandler : Core.IExceptionHandler]]></Declaration>
-      <Get Name="Get" Id="{fae050a0-52d3-4847-a89b-06de749e48ee}">
-        <Declaration><![CDATA[]]></Declaration>
-        <Implementation>
-          <ST><![CDATA[RunningExceptionHandler := _RunningExceptionHandler;]]></ST>
-        </Implementation>
-      </Get>
-      <Set Name="Set" Id="{0ab07e6b-d588-44a7-8de9-0695649fe2c2}">
-        <Declaration><![CDATA[]]></Declaration>
-        <Implementation>
-          <ST><![CDATA[_RunningExceptionHandler := RunningExceptionHandler;]]></ST>
-        </Implementation>
-      </Set>
-    </Property>
     <Method Name="SetSimulationMode" Id="{3acd1d25-f788-4c6d-9785-9ccf62e4ddbf}">
       <Declaration><![CDATA[METHOD SetSimulationMode
 VAR_INPUT
@@ -516,16 +488,6 @@ PROPERTY FINAL SimulationMode : BOOL]]></Declaration>
         </Implementation>
       </Get>
     </Property>
-    <Property Name="StartRequest" Id="{efbb592d-bbef-421a-a357-ab7d8e20bcce}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
-PROPERTY ABSTRACT StartRequest : BOOL]]></Declaration>
-      <Get Name="Get" Id="{f92effac-0e0d-4aa7-89d3-b6db7e0aeded}">
-        <Declaration><![CDATA[]]></Declaration>
-        <Implementation>
-          <ST><![CDATA[]]></ST>
-        </Implementation>
-      </Get>
-    </Property>
     <Property Name="State" Id="{b57e32a3-ebf4-4492-89c3-02193601134f}">
       <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
 PROPERTY FINAL State : AUTOMATION_CONTROLLER_STATE]]></Declaration>
@@ -553,31 +515,6 @@ PROPERTY StateName : STRING]]></Declaration>
         <Declaration><![CDATA[]]></Declaration>
         <Implementation>
           <ST><![CDATA[StateName := TO_STRING(_State);]]></ST>
-        </Implementation>
-      </Get>
-    </Property>
-    <Property Name="StoppingExceptionHandler" Id="{752cf219-28a5-4d25-845f-8de2972562b0}" FolderPath="Exception handlers\">
-      <Declaration><![CDATA[PROPERTY StoppingExceptionHandler : Core.IExceptionHandler]]></Declaration>
-      <Get Name="Get" Id="{75a8acb0-6a41-4937-abc1-960c0a9b8df3}">
-        <Declaration><![CDATA[]]></Declaration>
-        <Implementation>
-          <ST><![CDATA[StoppingExceptionHandler := _StoppingExceptionHandler;]]></ST>
-        </Implementation>
-      </Get>
-      <Set Name="Set" Id="{7720bdd2-a15f-46cc-9953-ee29781d41e0}">
-        <Declaration><![CDATA[]]></Declaration>
-        <Implementation>
-          <ST><![CDATA[_StoppingExceptionHandler := StoppingExceptionHandler;]]></ST>
-        </Implementation>
-      </Set>
-    </Property>
-    <Property Name="StopRequest" Id="{608fa160-a1ee-4b42-a40b-f54246a9eaa1}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
-PROPERTY StopRequest : BOOL]]></Declaration>
-      <Get Name="Get" Id="{ea1fec94-0a94-4c91-97a8-b829d143d2d9}">
-        <Declaration><![CDATA[]]></Declaration>
-        <Implementation>
-          <ST><![CDATA[]]></ST>
         </Implementation>
       </Get>
     </Property>

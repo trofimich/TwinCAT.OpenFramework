@@ -25,7 +25,7 @@ VAR
 	
 	_InnerException : IException;
 
-	_Message : ERROR_MESSAGE;
+	_SourceMessage : ERROR_MESSAGE;
 END_VAR]]></Declaration>
     <Implementation>
       <ST><![CDATA[]]></ST>
@@ -36,9 +36,37 @@ END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[_ErrorCode := 0;
 _InnerException := 0;
-_Message := "";
+_SourceMessage := "";
 
 SUPER^.Clear();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="CopyGeneralFields" Id="{00e99485-7cf2-47c4-96ca-14a9de96b271}" FolderPath="Service members\">
+      <Declaration><![CDATA[METHOD PROTECTED FINAL CopyGeneralFields
+VAR_IN_OUT CONSTANT
+	sourceException : GeneralException;
+END_VAR
+VAR
+	innerException : IException;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF _InnerException <> 0 THEN
+	IF _InnerException.IsDynamicInstance THEN
+		innerException := _InnerException;
+	ELSE
+		__QUERYINTERFACE(_InnerException.Clone(), innerException);
+	END_IF
+END_IF
+
+_SourceNamespaceName := sourceException.SourceNamespaceName;	
+_SourceClassName := sourceException.SourceClassName;
+_SourceMethodName := GetNormalizedMethodName(sourceException.SourceClassName, sourceException.SourceMethodName); 
+_SourcePosition := sourceException.SourcePosition;
+_SourceMessage := sourceException.SourceMessage;
+_ErrorCode := sourceException.ErrorCode;
+_LocalTimestamp := sourceException.LocalTimestamp;
+_UtcTimestamp := sourceException.UtcTimestamp;
+_InnerException := sourceException.InnerException;]]></ST>
       </Implementation>
     </Method>
     <Property Name="Empty" Id="{2c487122-2631-4c9e-81c7-74c59235aeea}">
@@ -47,7 +75,7 @@ PROPERTY Empty : BOOL]]></Declaration>
       <Get Name="Get" Id="{55a012e2-d7b7-48ff-8ce7-8cc112477a4e}">
         <Declaration><![CDATA[]]></Declaration>
         <Implementation>
-          <ST><![CDATA[Empty := _ErrorCode = 0 AND_THEN _Message = "";]]></ST>
+          <ST><![CDATA[Empty := _ErrorCode = 0 AND_THEN _SourceMessage = "";]]></ST>
         </Implementation>
       </Get>
     </Property>
@@ -61,30 +89,6 @@ PROPERTY FINAL ErrorCode : UDINT]]></Declaration>
         </Implementation>
       </Get>
     </Property>
-    <Method Name="FillClone" Id="{00e99485-7cf2-47c4-96ca-14a9de96b271}" FolderPath="Service members\">
-      <Declaration><![CDATA[METHOD PROTECTED FillClone
-VAR_INPUT
-	exceptionClone : POINTER TO GeneralException;
-END_VAR]]></Declaration>
-      <Implementation>
-        <ST><![CDATA[exceptionClone^._ErrorCode := _ErrorCode;
-Tc2_System.MEMCPY(ADR(exceptionClone^._Message), ADR(_Message), TO_UDINT(XSIZEOF(_Message)));
-exceptionClone^.SourceNamespaceName := SourceNamespaceName;
-exceptionClone^.SourceClassName := SourceClassName;
-exceptionClone^.SourceMethodName := SourceMethodName;
-exceptionClone^.SourcePosition := SourcePosition;
-exceptionClone^.LocalTimestamp := LocalTimestamp;	
-exceptionClone^.UtcTimestamp := UtcTimestamp;	
-
-IF _InnerException <> 0 THEN
-	IF _InnerException.IsDynamicInstance THEN
-		exceptionClone^._InnerException := _InnerException;
-	ELSE
-		__QUERYINTERFACE(_InnerException.Clone(), exceptionClone^._InnerException);
-	END_IF
-END_IF]]></ST>
-      </Implementation>
-    </Method>
     <Method Name="GetMessage" Id="{3db2de1b-8880-4652-a131-08e8d78488a3}">
       <Declaration><![CDATA[METHOD GetMessage : ERROR_MESSAGE
 VAR_INPUT
@@ -99,17 +103,17 @@ VAR
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[stringBuilder
-	.Append(_Message)
-	.AppendStringIf(ERROR_CODE_PREFIX, _ErrorCode > 0)
+	.Append(_SourceMessage)
+	.AppendStringIf(ExceptionConstants.ERROR_CODE_PREFIX, _ErrorCode > 0)
 	.AppendIf(_ErrorCode, _ErrorCode > 0);	
 
 IF showLocalTimestamp OR_ELSE showUtcTimestamp THEN
-	stringBuilder.AppendString(TIME_PREFIX);
+	stringBuilder.AppendString(ExceptionConstants.TIME_PREFIX);
 	AppendTimestampDescription(stringBuilder, showLocalTimestamp, showUtcTimestamp, _LocalTimestamp, _UtcTimestamp);
 END_IF
 
 IF showSource THEN
-	stringBuilder.AppendString(SOURCE_PREFIX);
+	stringBuilder.AppendString(ExceptionConstants.SOURCE_PREFIX);
 	AppendSourceDescription(stringBuilder, _SourceNamespaceName, _SourceClassName, _SourceMethodName, _SourcePosition);
 END_IF
 
@@ -119,7 +123,7 @@ END_IF
 
 IF innerExceptionMessage <> "" THEN
 	stringBuilder
-		.AppendString(INNER_MESSAGE_PREFIX)
+		.AppendString(ExceptionConstants.INNER_MESSAGE_PREFIX)
 		.AppendString(innerExceptionMessage);	
 END_IF
 
@@ -137,7 +141,7 @@ PROPERTY FINAL InnerException : IException]]></Declaration>
         </Implementation>
       </Get>
     </Property>
-    <Method Name="InternalThrow" Id="{106035ff-80e4-499c-8c2e-6479af0d1e6a}">
+    <Method Name="InternalThrow" Id="{106035ff-80e4-499c-8c2e-6479af0d1e6a}" FolderPath="Service members\">
       <Declaration><![CDATA[METHOD PROTECTED InternalThrow
 VAR_IN_OUT CONSTANT
 	sourceNamespaceName : STRING;
@@ -151,27 +155,37 @@ VAR_INPUT
 	innerException : IException;	
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[THIS^.SourceNamespaceName := sourceNamespaceName;	
-THIS^.SourceClassName := sourceClassName;
-THIS^.SourceMethodName := GetNormalizedMethodName(sourceClassName, sourceMethodName); 
-THIS^.SourcePosition := sourcePosition;
-THIS^._Message := message;
-THIS^._ErrorCode := errorCode;
-THIS^.LocalTimestamp := SystemDateTimeManager.SystemLocalDateTime;
-THIS^.UtcTimestamp := SystemDateTimeManager.SystemUtcDateTime;
+        <ST><![CDATA[_SourceNamespaceName := sourceNamespaceName;	
+_SourceClassName := sourceClassName;
+_SourceMethodName := GetNormalizedMethodName(sourceClassName, sourceMethodName); 
+_SourcePosition := sourcePosition;
+_SourceMessage := message;
+_ErrorCode := errorCode;
+_LocalTimestamp := SystemDateTimeManager.SystemLocalDateTime;
+_UtcTimestamp := SystemDateTimeManager.SystemUtcDateTime;
 
 IF innerException <> 0 THEN
 	IF innerException.IsDynamicInstance THEN
-		THIS^._InnerException := innerException;
+		_InnerException := innerException;
 	ELSE		
-		__QUERYINTERFACE(innerException.Clone(), THIS^._InnerException); 
+		__QUERYINTERFACE(innerException.Clone(), _InnerException); 
 	END_IF
 ELSE
-	THIS^._InnerException := 0;
+	_InnerException := 0;
 END_IF
 
 ExceptionManager.Throw(THIS^);]]></ST>
       </Implementation>
     </Method>
+    <Property Name="SourceMessage" Id="{f95394ae-f3fa-41a0-9ff1-1b06e2acc75a}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+PROPERTY FINAL SourceMessage : REFERENCE TO ERROR_MESSAGE]]></Declaration>
+      <Get Name="Get" Id="{e2b70d3d-22b6-49c5-91b1-02c758c1bd0e}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[SourceMessage REF= _SourceMessage;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
   </POU>
 </TcPlcObject>
