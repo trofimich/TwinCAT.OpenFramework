@@ -38,24 +38,33 @@ VAR_OUTPUT
 
 	{region "Devices"}
 	
-	WorkingModeSwitch : TOF_Devices_IO.DigitalInput(THIS^, CONTACT_TYPE.NORMALY_OPEN);
+	WorkingModeSwitch : TOF_Devices_IO.DigitalInput(THIS^, "WorkingModeSwitch");
 	
-	BlinkingYellowModeSwitch : TOF_Devices_IO.DigitalInput(THIS^, CONTACT_TYPE.NORMALY_OPEN);
+	BlinkingYellowModeSwitch : TOF_Devices_IO.DigitalInput(THIS^, "BlinkingYellowModeSwitch");
 	
 	SpeedAdjusterConverter : RangeInt16AnalogValueConverter(TOF_Core.SignedInt16.MIN_VALUE, TOF_Core.SignedInt16.MAX_VALUE, -10, +10);
-	SwitchSpeedAdjuster : TOF_Devices_IO.AnalogInput(THIS^, SpeedAdjusterConverter);
+	SwitchSpeedAdjuster : TOF_Devices_IO.AnalogInput(THIS^, "SwitchSpeedAdjuster") := (Converter := SpeedAdjusterConverter);
 	
-	TrafficLight1 : TrafficLight(THIS^);
-	TrafficLight2 : TrafficLight(THIS^);
-	TrafficLight3 : TrafficLight(THIS^);
-	TrafficLight4 : TrafficLight(THIS^);
+	TrafficLight1 : TrafficLight(THIS^, "TrafficLight1");
+	TrafficLight2 : TrafficLight(THIS^, "TrafficLight2");
+	TrafficLight3 : TrafficLight(THIS^, "TrafficLight3");
+	TrafficLight4 : TrafficLight(THIS^, "TrafficLight4");
 	
  	{endregion} 	
 END_VAR
 VAR	
 	_ClassName : STRING := __POUNAME();
 
-	_Devices : ARRAY [0..6] OF TOF_Automation.IDevice := [WorkingModeSwitch, BlinkingYellowModeSwitch, SwitchSpeedAdjuster, TrafficLight1, TrafficLight2, TrafficLight3, TrafficLight4];
+	_Devices : ARRAY [0.._DeviceCount - 1] OF TOF_Automation.IDevice := 
+	[
+		WorkingModeSwitch, 
+		BlinkingYellowModeSwitch, 
+		SwitchSpeedAdjuster, 
+		TrafficLight1, 
+		TrafficLight2, 
+		TrafficLight3, 
+		TrafficLight4
+	];
 	
 	{region "Timers"}
 	
@@ -125,7 +134,6 @@ VAR_INPUT
 	bInitRetains	: BOOL;
 	(* if TRUE, the instance afterwards gets moved into the copy code (online change)*)
 	bInCopyCode	: BOOL;
-	automationRunner : IAutomationRunner; 
 END_VAR
 ]]></Declaration>
       <Implementation>
@@ -146,13 +154,7 @@ PROPERTY NamespaceName : STRING]]></Declaration>
       <Declaration><![CDATA[METHOD PROTECTED OnFault
 ]]></Declaration>
       <Implementation>
-        <ST><![CDATA[_RedGreenLightTimer.Cancel();
-_YellowLightTimer.Cancel();
-_FlashingYellowLightTimer.Cancel();
-
-IntersectionState := SIGNAL_CONTROLLED_INTERSECTION_STATE.ALL_OFF;
-
-updateTraficLights();
+        <ST><![CDATA[startIdelingMode();
 
 IF ResetRequest THEN
 	ResetRequest := FALSE;
@@ -180,12 +182,16 @@ END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[executeTimers();
 
-IF StateChanged OR_ELSE BlinkingYellowModeSwitch.Changed THEN
-	IF BlinkingYellowModeSwitch.Value THEN
-		startBlinkingYellowMode();
+IF StateChanged OR_ELSE WorkingModeSwitch.Changed OR_ELSE BlinkingYellowModeSwitch.Changed THEN
+	IF NOT WorkingModeSwitch.Value THEN
+		startIdelingMode();
 	ELSE
-		startNormalMode();
-	END_IF	
+		IF BlinkingYellowModeSwitch.Value THEN
+			startBlinkingYellowMode();
+		ELSE
+			startNormalMode();
+		END_IF	
+	END_IF
 	
 	RETURN;
 ELSE
@@ -291,6 +297,19 @@ updateTraficLights();]]></ST>
 _FlashingYellowLightTimer.Restart();]]></ST>
       </Implementation>
     </Method>
+    <Method Name="startIdelingMode" Id="{8ddb5609-6544-4dcc-b972-500abb23f0f5}" FolderPath="Service methods\Start mode\">
+      <Declaration><![CDATA[METHOD startIdelingMode]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_RedGreenLightTimer.Cancel();
+_YellowLightTimer.Cancel();
+_FlashingYellowLightTimer.Cancel();
+
+IntersectionMode := SIGNAL_CONTROLLED_INTERSECTION_MODE.IDELING;
+IntersectionState := SIGNAL_CONTROLLED_INTERSECTION_STATE.ALL_OFF;
+
+updateTraficLights();]]></ST>
+      </Implementation>
+    </Method>
     <Method Name="startNormalMode" Id="{bfa9afc6-d6b0-4dbc-b2b3-10d6e8a939c6}" FolderPath="Service methods\Start mode\">
       <Declaration><![CDATA[METHOD startNormalMode]]></Declaration>
       <Implementation>
@@ -313,16 +332,6 @@ updateTraficLights();]]></ST>
 _RedGreenLightTimer.Restart();]]></ST>
       </Implementation>
     </Method>
-    <Property Name="StartRequest" Id="{d018e538-9108-4f8a-8e29-ee953167e593}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
-PROPERTY StartRequest : BOOL]]></Declaration>
-      <Get Name="Get" Id="{15e3c071-d4c1-426f-b329-d4f77c84ec74}">
-        <Declaration><![CDATA[]]></Declaration>
-        <Implementation>
-          <ST><![CDATA[StartRequest := WorkingModeSwitch.Value;]]></ST>
-        </Implementation>
-      </Get>
-    </Property>
     <Method Name="startYellowLightTimer" Id="{75f70f4d-af10-457d-91be-f1022c3b5646}" FolderPath="Service methods\Start timer\">
       <Declaration><![CDATA[METHOD PRIVATE startYellowLightTimer]]></Declaration>
       <Implementation>
@@ -331,16 +340,6 @@ PROPERTY StartRequest : BOOL]]></Declaration>
 _YellowLightTimer.Restart();]]></ST>
       </Implementation>
     </Method>
-    <Property Name="StopRequest" Id="{1dbfebf4-5771-4a7f-8ec2-1b122be73ccc}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
-PROPERTY StopRequest : BOOL]]></Declaration>
-      <Get Name="Get" Id="{8749f36c-db2a-4db9-8a82-70ef5b5d90c5}">
-        <Declaration><![CDATA[]]></Declaration>
-        <Implementation>
-          <ST><![CDATA[StopRequest := NOT WorkingModeSwitch.Value;]]></ST>
-        </Implementation>
-      </Get>
-    </Property>
     <Method Name="updateTraficLights" Id="{f60cca55-65f4-4222-8c1f-0c67e0a9c589}" FolderPath="Service methods\">
       <Declaration><![CDATA[METHOD PRIVATE updateTraficLights]]></Declaration>
       <Implementation>
