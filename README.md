@@ -11,7 +11,7 @@ It is based on an error-handling concept that is unique for Structured Text and 
 - **Dynamic collections**  
   Work with an unknown number of elements at runtime. DynamicList, DynamicByteList, DynamicDictionary and DynamicUniqueSet already supported.
 
--- **Static collections**  
+- **Static collections**  
   The number of elements is defined at instantiation using a generic constant (VAR_GENERIC CONSTANT declaration). StaticQueue already supported.
   
 - **String handling**  
