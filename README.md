@@ -3,11 +3,6 @@
 This is **object-oriented framework** developed for **TwinCAT 3.1.4026+**, which provides a set of ready-to-use, scalable components for industrial automation.
 It is based on an error-handling concept that is unique for Structured Text and resembles the approach used in general-purpose languages like C# or Java.
 
-## ATTENTION
-
-- **Do not use 4026.20 build**  
-  Compiler has regression in this version related to __SYSTEM.AnyType handling. Use build 4026.19 instead.
-
 ## Key Features
 
 - **Advanced exception handling**  
