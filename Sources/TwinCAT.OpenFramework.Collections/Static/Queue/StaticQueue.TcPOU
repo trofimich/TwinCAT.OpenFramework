@@ -21,7 +21,7 @@ legal notes
 FUNCTION_BLOCK FINAL StaticQueue 
 VAR_GENERIC CONSTANT
 	{attribute 'hide'} 
-    _Capacity : UDINT := 10;
+    _Capacity : DINT(0..32767) := 10;
 END_VAR
 EXTENDS Core.Object IMPLEMENTS IStaticQueue
 VAR	
@@ -29,16 +29,16 @@ VAR
 	
 	_ValueValidator : IGenericValueValidator;
 
-	_Queue : ARRAY [0.._Capacity - 1] OF Core.GENERIC_VALUE;
+	_Array : ARRAY [0.._Capacity - 1] OF Core.GENERIC_VALUE;
 
-	_Length : BYTE;
+	_Length : DINT;
 END_VAR]]></Declaration>
     <Implementation>
       <ST><![CDATA[]]></ST>
     </Implementation>
     <Property Name="Capacity" Id="{7888a12f-d0b9-438a-9f0b-5d40fe12e0e3}">
       <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
-PROPERTY FINAL Capacity : UDINT]]></Declaration>
+PROPERTY FINAL Capacity : DINT]]></Declaration>
       <Get Name="Get" Id="{f891206e-ffcf-48cd-bdbb-2328e6aea9d2}">
         <Declaration><![CDATA[]]></Declaration>
         <Implementation>
@@ -63,12 +63,23 @@ VAR
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[FOR i := 0 TO _Length - 1 DO
-	_Queue[i].Release();
+	_Array[i].Release();
 END_FOR
 
 _Length := 0;
 
 Clear := THIS^;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="CreateEnumerator" Id="{9097b908-1d6e-4826-bffb-32689d07a98b}">
+      <Declaration><![CDATA[METHOD CreateEnumerator : IEnumerator
+VAR
+	enumerator : POINTER TO StaticQueueEnumerator;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[enumerator := __NEW(StaticQueueEnumerator(queue := THIS^));
+
+CreateEnumerator := enumerator^;]]></ST>
       </Implementation>
     </Method>
     <Property Name="Empty" Id="{a1c6e062-ae96-4284-8bcd-b367f6f0563d}">
@@ -86,9 +97,20 @@ PROPERTY FINAL Empty : BOOL]]></Declaration>
 VAR_INPUT
 	value : ANY;
 	isObject : BOOL := FALSE;
+END_VAR
+VAR
+	genericValue : Core.GENERIC_VALUE;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[EnqueueCopy := EnqueueGeneric(GenericValueFactory.FromAnyType(value, isObject, GENERIC_MEMORY_MANAGEMENT_BEHAVIOR.CLONE_ORIGINAL_VALUE_AND_OWNS_MEMORY));]]></ST>
+        <ST><![CDATA[genericValue := GenericValueFactory.FromAnyType(value, isObject, GENERIC_MEMORY_MANAGEMENT_BEHAVIOR.CLONE_ORIGINAL_VALUE_AND_OWNS_MEMORY);
+
+__TRY
+	EnqueueCopy := EnqueueGeneric(genericValue);
+__CATCH
+	genericValue.Release();
+	
+	Core.ExceptionManager.ReThrowLastException();
+__ENDTRY]]></ST>
       </Implementation>
     </Method>
     <Method Name="EnqueueGeneric" Id="{dc2a8154-c6f2-4c3f-bcdd-f986d98a1e58}">
@@ -101,15 +123,14 @@ VAR
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[IF _Length >= _Capacity THEN
-	queueIsFullException.ThrowByObject(THIS^, __POUNAME(), __POSITION(), Name, Capacity);
-	RETURN;
+	queueIsFullException.ThrowByObject(THIS^, __POUNAME(), __POSITION(), Name, TO_UDINT(Capacity));
 END_IF
 
 IF _ValueValidator <> 0 THEN
 	_ValueValidator.Validate(Name, value);
 END_IF
 
-_Queue[_Length] := value;
+_Array[_Length] := value;
 _Length := _Length + 1;
 
 EnqueueGeneric := THIS^;]]></ST>
@@ -148,9 +169,25 @@ PROPERTY FINAL Full : BOOL]]></Declaration>
         </Implementation>
       </Get>
     </Property>
+    <Method Name="GetByIndex" Id="{2a4feb2d-2715-46e3-bec1-609604a1f554}">
+      <Declaration><![CDATA[METHOD GetByIndex : REFERENCE TO GENERIC_VALUE
+VAR_INPUT
+	index : DINT;
+END_VAR
+VAR
+	argumentOutOfRangeException : ArgumentOutOfRangeException;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF index < 0 OR_ELSE index >= _Length THEN
+	argumentOutOfRangeException.ThrowByObject(THIS^, __POUNAME(), __POSITION(), 'index', index);
+END_IF
+
+GetByIndex REF= _Array[index];]]></ST>
+      </Implementation>
+    </Method>
     <Property Name="Length" Id="{db8b4963-67cb-4cbd-8f81-48286bcd0954}">
       <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
-PROPERTY FINAL Length : UDINT]]></Declaration>
+PROPERTY FINAL Length : DINT]]></Declaration>
       <Get Name="Get" Id="{41a7eda1-bced-4b82-852f-839263e1e1c0}">
         <Declaration><![CDATA[]]></Declaration>
         <Implementation>
@@ -178,7 +215,7 @@ END_VAR]]></Declaration>
 	queueEmptyException.ThrowByObject(THIS^, __POUNAME(), __POSITION(), Name);
 END_IF
 
-Peek REF= _Queue[0];]]></ST>
+Peek REF= _Array[0];]]></ST>
       </Implementation>
     </Method>
     <Method Name="RemoveFirst" Id="{54ab5e77-3b71-4028-972c-152ddf087fec}">
@@ -213,7 +250,7 @@ VAR_OUTPUT
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[IF _Length > 0 THEN
-	value := _Queue[0];
+	value := _Array[0];
 	TryPeek := TRUE;
 END_IF]]></ST>
       </Implementation>
@@ -228,12 +265,12 @@ END_VAR]]></Declaration>
 	RETURN;
 END_IF
 
-_Queue[0].Release();		
+_Array[0].Release();		
 
 IF _Length > 1 THEN
-	Tc2_System.MEMCPY(ADR(_Queue), ADR(_Queue) + SIZEOF(Core.GENERIC_VALUE), SIZEOF(Core.GENERIC_VALUE) * (_length - 1));
+	Tc2_System.MEMCPY(ADR(_Array), ADR(_Array) + SIZEOF(Core.GENERIC_VALUE), TO_UDINT(SIZEOF(Core.GENERIC_VALUE) * (_length - 1)));
 	
-	_Queue[_Length - 1].Reset();
+	_Array[_Length - 1].Reset();
 END_IF
 
 _Length := _Length - 1;

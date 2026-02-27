@@ -1,6 +1,6 @@
 ﻿<?xml version="1.0" encoding="utf-8"?>
 <TcPlcObject Version="1.1.0.1">
-  <POU Name="ListOfBytes" Id="{44085af7-7241-03f1-3e6d-aeb87f0c58dd}" SpecialFunc="None">
+  <POU Name="DynamicByteList" Id="{44085af7-7241-03f1-3e6d-aeb87f0c58dd}" SpecialFunc="None">
     <Declaration><![CDATA[(*
 
 .. <legal notes>
@@ -20,21 +20,21 @@ legal notes
 {attribute 'no_explicit_call' := 'do not call this function block directly'} 
 {attribute 'enable_dynamic_creation'}
 // Collection of bytes of dynamic size
-FUNCTION_BLOCK ListOfBytes EXTENDS Core.Object IMPLEMENTS IListOfBytes
+FUNCTION_BLOCK DynamicByteList EXTENDS Core.Object IMPLEMENTS IDynamicByteList
 VAR_OUTPUT
 	DataAddress : POINTER TO BYTE;
 END_VAR
 VAR
 	_ClassName : STRING := __POUNAME();
 	
-	_MemorySize : DINT;
-	_BytesCount : DINT;
+	_Capacity : DINT;
+	_Length : DINT;
 END_VAR]]></Declaration>
     <Implementation>
       <ST><![CDATA[]]></ST>
     </Implementation>
     <Method Name="AppendAny" Id="{fa939ac2-b614-4bc3-8ef3-f524865ffb5f}">
-      <Declaration><![CDATA[METHOD AppendAny : IListOfBytes
+      <Declaration><![CDATA[METHOD AppendAny : IDynamicByteList
 VAR_INPUT
 	data : ANY;
 END_VAR]]></Declaration>
@@ -43,7 +43,7 @@ END_VAR]]></Declaration>
       </Implementation>
     </Method>
     <Method Name="AppendByte" Id="{90a35576-aaee-0fbc-214a-d1c0f81c72fb}">
-      <Declaration><![CDATA[METHOD AppendByte : IListOfBytes
+      <Declaration><![CDATA[METHOD AppendByte : IDynamicByteList
 VAR_INPUT
 	value : BYTE;
 END_VAR
@@ -55,7 +55,7 @@ END_VAR]]></Declaration>
       </Implementation>
     </Method>
     <Method Name="AppendData" Id="{d35c3ee4-7daa-49d5-be43-e476b3efb046}">
-      <Declaration><![CDATA[METHOD AppendData : IListOfBytes
+      <Declaration><![CDATA[METHOD AppendData : IDynamicByteList
 VAR_INPUT
 	data : POINTER TO BYTE;
 	dataSize : UDINT;
@@ -71,16 +71,16 @@ IF data = 0 OR_ELSE dataSize = 0 THEN
 END_IF
 
 // if existing memory is not enough
-IF _BytesCount + TO_DINT(dataSize) > _MemorySize THEN
+IF _Length + TO_DINT(dataSize) > _Capacity THEN
 	// calculate new memory size
-	_MemorySize := _BytesCount + TO_DINT(dataSize);
+	_Capacity := _Length + TO_DINT(dataSize);
 	
 	// allocate new memory
-	newMemory := __NEW(BYTE, TO_UDINT(_MemorySize));
+	newMemory := __NEW(BYTE, TO_UDINT(_Capacity));
 	
 	// copy existing bytes to new memory if needed
-	IF _BytesCount > 0 THEN
-		Tc2_System.MEMCPY(newMemory, DataAddress, TO_UDINT(_BytesCount));		
+	IF _Length > 0 THEN
+		Tc2_System.MEMCPY(newMemory, DataAddress, TO_UDINT(_Length));		
 	END_IF
 	
 	// release old memory
@@ -93,14 +93,14 @@ IF _BytesCount + TO_DINT(dataSize) > _MemorySize THEN
 END_IF
 
 // append new bytes
-Tc2_System.MEMCPY(DataAddress + TO_DWORD(_BytesCount), data, dataSize);
+Tc2_System.MEMCPY(DataAddress + TO_DWORD(_Length), data, dataSize);
 
 // set new bytes count
-_BytesCount := _BytesCount + TO_DINT(dataSize);]]></ST>
+_Length := _Length + TO_DINT(dataSize);]]></ST>
       </Implementation>
     </Method>
     <Method Name="AppendGeneric" Id="{ac72fb80-d130-4ae7-81e5-86ab3708db48}">
-      <Declaration><![CDATA[METHOD AppendGeneric : IListOfBytes
+      <Declaration><![CDATA[METHOD AppendGeneric : IDynamicByteList
 VAR_INPUT
 	data : Core.GENERIC_VALUE;
 END_VAR]]></Declaration>
@@ -108,6 +108,16 @@ END_VAR]]></Declaration>
         <ST><![CDATA[AppendGeneric := AppendData(data.Address, TO_UDINT(data.Size));]]></ST>
       </Implementation>
     </Method>
+    <Property Name="Capacity" Id="{39da2e53-b31d-4366-b174-c1e7fcd2d73a}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+PROPERTY FINAL Capacity : DINT]]></Declaration>
+      <Get Name="Get" Id="{e45b1a1e-b7c6-4e97-befa-5db022de37f9}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[Capacity := _Capacity;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
     <Property Name="ClassName" Id="{3b9bf934-b83c-0948-370d-5e8e28db661a}">
       <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
 PROPERTY ClassName : STRING]]></Declaration>
@@ -119,43 +129,42 @@ PROPERTY ClassName : STRING]]></Declaration>
       </Get>
     </Property>
     <Method Name="Clear" Id="{58795b0c-c9a9-0b7d-1801-4867f25906b7}">
-      <Declaration><![CDATA[METHOD Clear : IListOfBytes
+      <Declaration><![CDATA[METHOD Clear : IDynamicByteList
 VAR_INPUT
 	releaseMemory : BOOL := FALSE;
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[Clear := THIS^;
 
-IF releaseMemory AND_THEN _MemorySize > 0 THEN
+IF releaseMemory AND_THEN _Capacity > 0 THEN
 	__DELETE(DataAddress);
-	_MemorySize := 0;
+	_Capacity := 0;
 END_IF
 
-_BytesCount := 0;]]></ST>
+_Length := 0;]]></ST>
       </Implementation>
     </Method>
-    <Property Name="Count" Id="{d1b0052d-4e1b-09cb-235e-e87df6b9b5a5}">
-      <Declaration><![CDATA[{attribute 'OPC.UA.DA.Property' := '1'}
-{attribute 'monitoring' := 'call'}
-PROPERTY Count : DINT]]></Declaration>
-      <Get Name="Get" Id="{457f3f94-ecd5-03a2-1012-5eb779d04c66}">
-        <Declaration><![CDATA[]]></Declaration>
-        <Implementation>
-          <ST><![CDATA[Count := _BytesCount;]]></ST>
-        </Implementation>
-      </Get>
-    </Property>
     <Method Name="CreateEnumerator" Id="{9eb1bbc5-e145-4b1d-be02-fc14e3a7b7c4}">
       <Declaration><![CDATA[METHOD CreateEnumerator : IEnumerator
 VAR
-	enumerator : POINTER TO ListOfBytesEnumerator;
+	enumerator : POINTER TO DynamicByteListEnumerator;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[enumerator := __NEW(ListOfBytesEnumerator(list := THIS^));
+        <ST><![CDATA[enumerator := __NEW(DynamicByteListEnumerator(list := THIS^));
 
 CreateEnumerator := enumerator^;]]></ST>
       </Implementation>
     </Method>
+    <Property Name="Empty" Id="{8cac260d-f211-4946-9f91-204b369e9bc6}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+PROPERTY FINAL Empty : BOOL]]></Declaration>
+      <Get Name="Get" Id="{cdc3f172-a10e-45a6-be1f-94a4244848e7}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[Empty := _Length <= 0;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
     <Method Name="FB_exit" Id="{58cee31c-ede5-0b41-17b5-f6dfb8c1dea7}">
       <Declaration><![CDATA[METHOD FB_exit : BOOL
 VAR_INPUT
@@ -178,8 +187,8 @@ VAR
 	i : DINT;	
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[IF _BytesCount > 0 THEN
-	FOR i := 0 TO _BytesCount - 1 DO
+        <ST><![CDATA[IF _Length > 0 THEN
+	FOR i := 0 TO _Length - 1 DO
 		IF DataAddress[i] = value THEN
 			index := i;
 			Find := TRUE;
@@ -206,15 +215,25 @@ IF index < 0 THEN
 	exception.ThrowByObject(THIS^, __POUNAME(), __POSITION(), "Index is less then zero");
 END_IF
 
-IF index >= _BytesCount THEN
+IF index >= _Length THEN
 	exception.ThrowByObject(THIS^, __POUNAME(), __POSITION(), "Index is too large");
 END_IF
 
 Get := DataAddress[index];]]></ST>
       </Implementation>
     </Method>
+    <Property Name="Length" Id="{d1b0052d-4e1b-09cb-235e-e87df6b9b5a5}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+PROPERTY FINAL Length : DINT]]></Declaration>
+      <Get Name="Get" Id="{457f3f94-ecd5-03a2-1012-5eb779d04c66}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[Length := _Length;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
     <Method Name="LoadFromAny" Id="{6ca12394-c5fc-0274-1ee4-d0bfc0727c06}">
-      <Declaration><![CDATA[METHOD LoadFromAny : IListOfBytes
+      <Declaration><![CDATA[METHOD LoadFromAny : IDynamicByteList
 VAR_INPUT
 	data : ANY;
 	startIndex : UDINT := 0;
@@ -224,23 +243,24 @@ END_VAR]]></Declaration>
       </Implementation>
     </Method>
     <Method Name="LoadFromData" Id="{9fe65b5e-87b5-0537-23bd-6a15d825d74e}">
-      <Declaration><![CDATA[METHOD LoadFromData : IListOfBytes
+      <Declaration><![CDATA[METHOD LoadFromData : IDynamicByteList
 VAR_INPUT
 	data : POINTER TO BYTE;
 	dataSize : UDINT;
 	startIndex : UDINT := 0;
 END_VAR
 VAR
-	exception : StandardException;
+	exception : Core.ArgumentOutOfRangeException;
+	
 	newMemory : POINTER TO BYTE;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[IF TO_DINT(startIndex) > _BytesCount THEN
-	exception.ThrowByObject(THIS^, __POUNAME(), __POSITION(), "Start index is too large");
+        <ST><![CDATA[IF TO_DINT(startIndex) > _Length THEN
+	exception.ThrowByObject(THIS^, __POUNAME(), __POSITION(), 'startIndex', startIndex);
 END_IF
 
 IF dataSize < 0 THEN
-	exception.ThrowByObject(THIS^, __POUNAME(), __POSITION(), "Source bytes count is less then zero");
+	exception.ThrowByObject(THIS^, __POUNAME(), __POSITION(), 'dataSize', dataSize);
 END_IF
 
 LoadFromData := THIS^;
@@ -249,12 +269,12 @@ IF data = 0 OR_ELSE dataSize = 0 THEN
 	RETURN;
 END_IF
 
-IF TO_DINT(startIndex + dataSize) > _MemorySize THEN
+IF TO_DINT(startIndex + dataSize) > _Capacity THEN
 	// calculate new memory size
-	_MemorySize := TO_DINT(startIndex + dataSize);
+	_Capacity := TO_DINT(startIndex + dataSize);
 	
 	// allocate new memory
-	newMemory := __NEW(BYTE, TO_UDINT(_MemorySize));
+	newMemory := __NEW(BYTE, TO_UDINT(_Capacity));
 	
 	// copy existing bytes to new memory if needed
 	IF startIndex > 0 THEN
@@ -265,7 +285,7 @@ IF TO_DINT(startIndex + dataSize) > _MemorySize THEN
 	Tc2_System.MEMCPY(newMemory + TO_DWORD(startIndex), data, TO_UDINT(dataSize));
 	
 	// set new bytes count
-	_BytesCount := _MemorySize;
+	_Length := _Capacity;
 	
 	// release old memory
 	IF DataAddress <> 0 THEN
@@ -279,12 +299,12 @@ ELSE
 	Tc2_System.MEMCPY(dataAddress + TO_DWORD(startIndex), data, TO_UDINT(dataSize));
 	
 	// set new bytes count
-	_BytesCount := TO_DINT(startIndex + dataSize);	
+	_Length := TO_DINT(startIndex + dataSize);	
 END_IF]]></ST>
       </Implementation>
     </Method>
     <Method Name="LoadFromGeneric" Id="{803d0535-a6e1-4d89-878a-9e90b4d80911}">
-      <Declaration><![CDATA[METHOD LoadFromGeneric : IListOfBytes
+      <Declaration><![CDATA[METHOD LoadFromGeneric : IDynamicByteList
 VAR_INPUT
 	data : Core.GENERIC_VALUE;
 	startIndex : UDINT := 0;
@@ -304,7 +324,7 @@ PROPERTY NamespaceName : STRING]]></Declaration>
       </Get>
     </Property>
     <Method Name="Remove" Id="{bf82b30e-92dd-0d23-0038-cce05024df18}">
-      <Declaration><![CDATA[METHOD Remove : IListOfBytes
+      <Declaration><![CDATA[METHOD Remove : IDynamicByteList
 VAR_INPUT
 	value : BYTE;
 END_VAR
@@ -317,11 +337,11 @@ END_VAR]]></Declaration>
 	exception.ThrowByObject(THIS^, __POUNAME(), __POSITION(), "Dynamic byte array is empty");
 END_IF
 
-IF count < 0 THEN
+IF Length < 0 THEN
 	exception.ThrowByObject(THIS^, __POUNAME(), __POSITION(), "Count is less then zero");
 END_IF
 
-IF index + count > _BytesCount THEN
+IF index + Length > _Length THEN
 	exception.ThrowByObject(THIS^, __POUNAME(), __POSITION(), "Index + count are outside the array bounds");
 END_IF
 
@@ -333,7 +353,7 @@ END_IF]]></ST>
       </Implementation>
     </Method>
     <Method Name="RemoveAt" Id="{13c7901e-f730-033f-2407-dd64a3fc2480}">
-      <Declaration><![CDATA[METHOD RemoveAt : IListOfBytes
+      <Declaration><![CDATA[METHOD RemoveAt : IDynamicByteList
 VAR_INPUT
 	index : DINT;
 	count : DINT := 1;
@@ -355,17 +375,17 @@ IF count < 0 THEN
 	exception.ThrowByObject(THIS^, __POUNAME(), __POSITION(), "Count is less then zero");
 END_IF
 
-IF index + count > _BytesCount THEN
+IF index + count > _Length THEN
 	exception.ThrowByObject(THIS^, __POUNAME(), __POSITION(), "Index + count are outside the array bounds");
 END_IF
 
 RemoveAt := THIS^;
 
 // calculate new memory size
-_MemorySize := _BytesCount - count;
+_Capacity := _Length - count;
 
 // allocate new memory
-newMemory := __NEW(BYTE, TO_UDINT(_MemorySize)); 
+newMemory := __NEW(BYTE, TO_UDINT(_Capacity)); 
 
 // copy leading bytes if needed
 IF index <> 0 THEN
@@ -373,7 +393,7 @@ IF index <> 0 THEN
 END_IF
 
 // copy trailing bytes
-Tc2_System.MEMCPY(newMemory + TO_DWORD(index), DataAddress + TO_DWORD(index + count), TO_UDINT(_BytesCount - index - count));
+Tc2_System.MEMCPY(newMemory + TO_DWORD(index), DataAddress + TO_DWORD(index + count), TO_UDINT(_Length - index - count));
 
 // release old buffer
 __DELETE(DataAddress);
@@ -382,11 +402,11 @@ __DELETE(DataAddress);
 DataAddress := newMemory;
 
 // set bytes count
-_BytesCount := _MemorySize;	]]></ST>
+_Length := _Capacity;	]]></ST>
       </Implementation>
     </Method>
     <Method Name="Resize" Id="{8b327940-8027-042d-2b0a-ccea3f4d165c}">
-      <Declaration><![CDATA[METHOD Resize : IListOfBytes
+      <Declaration><![CDATA[METHOD Resize : IDynamicByteList
 VAR_INPUT
 	newBytesCount : DINT; 
 END_VAR
@@ -402,16 +422,16 @@ END_IF
 Resize := THIS^;
 
 // if existing memory is not enough
-IF newBytesCount > _MemorySize THEN
+IF newBytesCount > _Capacity THEN
 	// calculate new memory size
-	_MemorySize := newBytesCount;
+	_Capacity := newBytesCount;
 	
 	// allocate new memory
-	newMemory := __NEW(BYTE, TO_UDINT(_MemorySize));
+	newMemory := __NEW(BYTE, TO_UDINT(_Capacity));
 	
 	// copy existing bytes to new memory if needed
-	IF _BytesCount > 0 THEN
-		Tc2_System.MEMCPY(newMemory, DataAddress, TO_UDINT(_BytesCount));		
+	IF _Length > 0 THEN
+		Tc2_System.MEMCPY(newMemory, DataAddress, TO_UDINT(_Length));		
 	END_IF
 	
 	// release old memory
@@ -424,7 +444,7 @@ IF newBytesCount > _MemorySize THEN
 END_IF
 
 // set new bytes count
-_BytesCount := newBytesCount;	]]></ST>
+_Length := newBytesCount;	]]></ST>
       </Implementation>
     </Method>
     <Property Name="SelfSize" Id="{eb116396-1c6b-495f-b284-5b142fa86f6c}">
@@ -438,7 +458,7 @@ PROPERTY SelfSize : ULINT]]></Declaration>
       </Get>
     </Property>
     <Method Name="Set" Id="{7b62d34d-7ee9-07a4-2e13-b032abd0cd09}">
-      <Declaration><![CDATA[METHOD Set : IListOfBytes
+      <Declaration><![CDATA[METHOD Set : IDynamicByteList
 VAR_INPUT
 	index : DINT;
 	value : BYTE;
@@ -455,7 +475,7 @@ IF index < 0 THEN
 	exception.ThrowByObject(THIS^, __POUNAME(), __POSITION(), "Index is less then zero");
 END_IF
 
-IF index >= _BytesCount THEN
+IF index >= _Length THEN
 	exception.ThrowByObject(THIS^, __POUNAME(), __POSITION(), "Index is too large");
 END_IF
 
