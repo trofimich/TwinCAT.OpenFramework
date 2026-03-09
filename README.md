@@ -24,7 +24,7 @@ It is based on an error-handling concept that is unique for Structured Text and 
   An abstraction for a basic task that can either complete successfully, be aborted internally, be cancelled externally, or be terminated due to an exception. Tasks can preemptively acquire resources and automatically release them after completion.
 
 - **Task queue**  
-  Tasks queue allows multiple tasks to be executed one after another as a single composite task. The queue can also operate in a mode where it constantly waits for new tasks and places them in the execution queue.
+  Tasks queue allows multiple tasks to be executed one after another as a single composite task. The queue can also operate in a mode where it constantly waits for new tasks and execute them.
 
 - **Working with files**  
   Working with the file system is represented as a set of tasks. Opening and closing files is handled automatically for the functions that require it. All you need to do is define the sequence of tasks, and the dirty work will be done behind the scenes.
