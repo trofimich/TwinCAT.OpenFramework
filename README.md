@@ -12,7 +12,7 @@ It is based on an error-handling concept that is unique for Structured Text and 
   Work with an unknown number of elements at runtime. DynamicList, DynamicByteList, DynamicDictionary and DynamicUniqueSet already supported.
 
 - **Static collections**  
-  The number of elements is defined at instantiation using a generic constant (VAR_GENERIC CONSTANT declaration). StaticQueue already supported.
+  The number of elements is defined at instantiation using a generic constant (VAR_GENERIC CONSTANT declaration). StaticList and StaticQueue already supported.
   
 - **String handling**  
   Convenient string concatenation, replacement, trimming, splitting for STRING and WSTRING types. Support for strings longer than 255 characters and more.
