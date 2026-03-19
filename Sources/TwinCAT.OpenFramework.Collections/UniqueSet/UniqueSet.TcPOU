@@ -1,0 +1,508 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="UniqueSet" Id="{2442738f-11d0-404d-bb8d-7d07fa17599f}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+
+.. <legal notes>
+
+legal notes
+=================
+| SPDX-FileCopyrightText: © 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+| SPDX-License-Identifier: LGPL-3.0-only
+| For details check: LGPL-3.0-only_
+
+.. _LGPL-3.0-only: https://www.gnu.org/licenses/lgpl-3.0.en.html
+
+.. </legal notes>
+
+*)
+
+{attribute 'no_explicit_call' := 'do not call this function block directly'} 
+FUNCTION_BLOCK UniqueSet 
+VAR_GENERIC CONSTANT
+    _StaticCapacity : COLLECTION_LENGTH := 0;
+END_VAR
+EXTENDS Core.Object IMPLEMENTS IUniqueSet
+VAR_INPUT
+	DefaultDynamicAllocationElemetCount : BYTE := 10;	
+END_VAR
+VAR
+	_ClassName : STRING := __POUNAME();
+
+	_ValueValidator : Core.IGenericValueValidator;
+
+	_Array : POINTER TO Core.GENERIC_VALUE;
+	_StaticArray : ARRAY [0.._StaticCapacity - 1] OF Core.GENERIC_VALUE;
+	
+	_DynamicCapacity : DINT;
+	_Length : DINT;
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[]]></ST>
+    </Implementation>
+    <Folder Name="Serviceme mebers" Id="{ccb8ef2f-d434-4cac-96b9-34498b70bbbb}" />
+    <Method Name="AllocateMemory" Id="{27706325-8810-4759-a969-4aa4266a091f}">
+      <Declaration><![CDATA[METHOD PROTECTED AllocateMemory
+VAR_INPUT
+	elementCount : COLLECTION_LENGTH;
+END_VAR
+VAR
+	newMemory : POINTER TO GENERIC_VALUE;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF NOT Dynamic THEN
+	RETURN;
+END_IF
+
+newMemory := __NEW(BYTE, TO_UDINT(SIZEOF(GENERIC_VALUE) * (_DynamicCapacity + elementCount)));
+
+IF _Length > 0 THEN
+	Tc2_System.MEMCPY(newMemory, _Array, TO_UDINT(SIZEOF(GENERIC_VALUE) * _Length));
+END_IF
+ 
+IF _Array <> 0 THEN
+	__DELETE(_Array);
+END_IF
+
+_DynamicCapacity := _DynamicCapacity + elementCount;
+
+_Array := newMemory;]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="Capacity" Id="{442fc8a6-b0bb-403e-8549-1172e75c9349}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+PROPERTY FINAL Capacity : COLLECTION_LENGTH]]></Declaration>
+      <Get Name="Get" Id="{9eba9911-6110-4fbb-bdf5-06f64345afad}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[Capacity := SEL(_StaticCapacity = 0, _StaticCapacity, _DynamicCapacity);]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="ClassName" Id="{467d00f1-7abe-4a3f-b6cd-fe49b224e254}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+PROPERTY ClassName : STRING]]></Declaration>
+      <Get Name="Get" Id="{252ee1d7-9d51-4251-a289-595ab545aa2e}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ClassName := _ClassName;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="Clear" Id="{0def1be0-078f-4e42-b9d9-bacd7c63976c}">
+      <Declaration><![CDATA[METHOD Clear : IUniqueSet
+VAR
+	i : DINT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[Clear := THIS^;
+
+FOR i := 0 TO _Length - 1 DO
+	_Array[i].Release();						
+END_FOR	
+
+_Length := 0;
+_DynamicCapacity := 0;
+
+IF _Array <> 0 AND_THEN Dynamic THEN
+	__DELETE(_Array);	
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="Contains" Id="{12fa0823-e803-4d25-984b-09daa27cbbd8}">
+      <Declaration><![CDATA[METHOD Contains : BOOL
+VAR_INPUT
+	value : ANY;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[Contains := FindIndex(value);]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="ContainsGeneric" Id="{585b7317-248d-43d5-8f74-88f36cb9db8d}">
+      <Declaration><![CDATA[METHOD ContainsGeneric : BOOL
+VAR_INPUT
+	value : GENERIC_VALUE;
+	releaseValue : BOOL := TRUE;
+END_VAR
+VAR
+	anyTypeValue : __SYSTEM.AnyType;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[// todo: 4026.20 bug workaround
+anyTypeValue := value.AsAnyType(); 
+
+ContainsGeneric := FindIndex(anyTypeValue);
+
+IF releaseValue THEN
+	value.Release();
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="CreateEnumerator" Id="{99cd46dc-a609-4207-b9f8-817b6841cc34}">
+      <Declaration><![CDATA[METHOD CreateEnumerator : IEnumerator
+VAR
+	enumerator : POINTER TO UniqueSetEnumerator;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[enumerator := __NEW(UniqueSetEnumerator(uniqueSet := THIS^));
+
+CreateEnumerator := enumerator^;]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="Dynamic" Id="{4f4e7964-b376-49d8-b378-e30233cbcf40}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+PROPERTY FINAL Dynamic : BOOL]]></Declaration>
+      <Get Name="Get" Id="{74b076d1-9110-4644-a20a-753364c2a614}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[Dynamic := _StaticCapacity = 0;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="Empty" Id="{43555ed7-74ac-45b4-80a6-0e3605f3c997}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+PROPERTY FINAL Empty : BOOL]]></Declaration>
+      <Get Name="Get" Id="{226fbd91-6757-4cc9-b8a9-dbade8a27ab4}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[Empty := _Length <= 0;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="FB_exit" Id="{eb4ef8ca-4abf-497c-8a84-8766a913017b}">
+      <Declaration><![CDATA[METHOD FB_exit : BOOL
+VAR_INPUT
+	bInCopyCode : BOOL; // if TRUE, the exit method is called for exiting an instance that is copied afterwards (online change).
+END_VAR
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[Clear();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="FB_init" Id="{e1f857c5-3b42-4120-8d16-dbd9cbb01e62}">
+      <Declaration><![CDATA[METHOD FB_init : BOOL
+VAR_INPUT
+	(* if TRUE, the retain variables are initialized (warm start / cold start)*)
+	bInitRetains	: BOOL;
+	(* if TRUE, the instance afterwards gets moved into the copy code (online change)*)
+	bInCopyCode	: BOOL;
+	valueValidator : IGenericValueValidator;
+END_VAR
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_ValueValidator := valueValidator;
+
+IF NOT Dynamic THEN
+	_Array := ADR(_StaticArray); 
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="FindIndex" Id="{24320c3b-fc49-4954-a0eb-fa84e7ceb897}" FolderPath="Serviceme mebers\">
+      <Declaration><![CDATA[METHOD PROTECTED FindIndex : BOOL
+VAR_INPUT
+	value : __SYSTEM.AnyType;
+END_VAR
+VAR_OUTPUT
+	supposedIndex : DINT; 
+END_VAR
+VAR
+	lastIndex : DINT;
+	minIndex : DINT;
+	maxIndex : DINT;
+
+	currentValue : __SYSTEM.AnyType;
+ 
+	comparer : ByteArrayComparer;
+	comparisionResult : COMPARISION_RESULT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF _Length = 0 THEN
+	RETURN;
+END_IF
+
+lastIndex := _Length - 1;
+minIndex := 0;
+maxIndex := lastIndex;
+supposedIndex := maxIndex / 2;
+
+WHILE minIndex <= maxIndex DO
+	currentValue := _Array[supposedIndex].AsAnyType();
+	
+	comparisionResult := comparer.Compare(currentValue, value);
+	
+	CASE comparisionResult OF
+		// assumed key equals to seached 
+		COMPARISION_RESULT.FIRST_EQUAL_TO_SECOND:
+			FindIndex := TRUE;
+			RETURN;
+
+		// assumed key less than searched, move range to right
+		COMPARISION_RESULT.FIRST_LESS_THAN_SECOND:
+			minIndex := supposedIndex + 1;
+			
+		// assumed key greater than searched, move range to left	
+		COMPARISION_RESULT.FIRST_GREATER_THAN_SECOND:
+			maxIndex := supposedIndex - 1;
+	END_CASE
+	
+	supposedIndex := minIndex + (maxIndex - minIndex) / 2;
+END_WHILE]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="Full" Id="{c3e7f9e9-491d-47ed-b5be-e34cce8561b4}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+PROPERTY FINAL Full : BOOL]]></Declaration>
+      <Get Name="Get" Id="{e784852e-9eaa-4e44-9445-b45c6bf3983e}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[Full := _StaticCapacity <> 0 AND_THEN _Length >= _StaticCapacity;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="GetByIndex" Id="{8e83c179-a293-412f-8b67-0e71bf720692}">
+      <Declaration><![CDATA[METHOD GetByIndex : REFERENCE TO GENERIC_VALUE
+VAR_INPUT
+	index : DINT;
+END_VAR
+VAR
+	argumentOutOfRangeException : ArgumentOutOfRangeException;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF index < 0 OR_ELSE index >= _Length THEN
+	argumentOutOfRangeException.ThrowByObject(THIS^, __POUNAME(), __POSITION(), 'index', index);
+END_IF
+
+GetByIndex REF= _Array[index];]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="GetGenericValuePosition" Id="{080ff3a3-127e-451a-8f0f-949daec3002e}">
+      <Declaration><![CDATA[// Negative value returned if not found
+METHOD GetGenericValuePosition : DINT
+VAR_INPUT
+	value : GENERIC_VALUE;
+	releaseValue : BOOL := TRUE;
+END_VAR
+VAR
+	anyTypeValue : __SYSTEM.AnyType;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[// todo: 4026.20 bug workaround
+anyTypeValue := value.AsAnyType(); 
+
+IF NOT FindIndex(anyTypeValue, supposedIndex => GetGenericValuePosition) THEN
+	GetGenericValuePosition := -1;
+END_IF
+
+IF releaseValue THEN
+	value.Release();
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="GetValuePosition" Id="{d91713d1-b8ba-41d0-9834-7fd09ea4504a}">
+      <Declaration><![CDATA[// Negative value returned if not found
+METHOD GetValuePosition : DINT
+VAR_INPUT
+	value : ANY;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF NOT FindIndex(value, supposedIndex => GetValuePosition) THEN
+	GetValuePosition := -1;
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="Length" Id="{9f5d9338-6134-422e-8cd0-945d2d30e1f6}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+PROPERTY FINAL Length : COLLECTION_LENGTH]]></Declaration>
+      <Get Name="Get" Id="{d61178d6-0b1b-4e5d-a64d-f11834124588}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[Length := _Length;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="NamespaceName" Id="{e508ab9e-2295-4c2b-a61b-fa08b582c6ff}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+PROPERTY NamespaceName : STRING]]></Declaration>
+      <Get Name="Get" Id="{f6e5f586-787d-47e0-877c-e0fccdebc010}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[NamespaceName := CurrentNamespace.Name;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="RemoveAt" Id="{560da408-7178-47ba-9120-b01c5ed8fd70}">
+      <Declaration><![CDATA[METHOD RemoveAt : IUniqueSet
+VAR_INPUT
+	index : DINT;
+END_VAR
+VAR
+	argumentOutOfRangeException : ArgumentOutOfRangeException;
+
+	i : DINT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF index < 0 OR_ELSE index >= _Length THEN
+	argumentOutOfRangeException.ThrowByObject(THIS^, __POUNAME(), __POSITION(), 'index', index);
+END_IF
+
+RemoveAt := THIS^;
+
+_Array[index].Release();
+
+IF index + 2 <= _Length THEN
+	FOR	i := index TO _Length - 2 DO
+		_Array[i] := _Array[i + 1];
+	END_FOR			
+END_IF
+	
+_Array[_Length - 1].Reset();
+
+_Length := _Length - 1;]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="SelfSize" Id="{01bbb837-39f2-4ff6-93e9-d2a4ae7f8d4e}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+PROPERTY SelfSize : ULINT]]></Declaration>
+      <Get Name="Get" Id="{19f2cabd-ffd0-448b-9120-3e4def7ce2d6}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[SelfSize := XSIZEOF(THIS^);]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="SetCopy" Id="{942d6884-b40d-46d4-872b-4443fcd5acea}">
+      <Declaration><![CDATA[METHOD SetCopy : IUniqueSet
+VAR_INPUT
+	value : ANY;
+	isObject : BOOL := FALSE;
+END_VAR
+VAR_OUTPUT
+	index : DINT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[SetCopy := SetGeneric(GenericValueFactory.FromAnyType(value, isObject, GENERIC_MEMORY_MANAGEMENT_BEHAVIOR.CLONE_ORIGINAL_VALUE_AND_OWNS_MEMORY), index => index);]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="SetGeneric" Id="{e49ee7f0-ea9d-45ea-8ca1-9435721d8384}">
+      <Declaration><![CDATA[METHOD SetGeneric : IUniqueSet
+VAR_INPUT
+	value : GENERIC_VALUE;
+END_VAR
+VAR_OUTPUT
+	index : DINT;
+END_VAR
+VAR
+	staticCollectionFullException : Core.StaticCollectionFullException;
+
+	supposedIndex, i : DINT;
+
+	anyTypeValue : __SYSTEM.AnyType;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF _ValueValidator <> 0 THEN
+	_ValueValidator.Validate(GetName(), value);
+END_IF
+
+SetGeneric := THIS^;
+
+// todo: 4026.20 bug workaround
+anyTypeValue := value.AsAnyType(); 
+
+// if equal key found then we need to replace it
+IF FindIndex(anyTypeValue, supposedIndex => supposedIndex) THEN	
+	_Array[supposedIndex].Release(); 
+ELSE
+	IF _Length >= Capacity THEN
+		IF Dynamic THEN
+			AllocateMemory(DefaultDynamicAllocationElemetCount);
+		ELSE
+			staticCollectionFullException.ThrowByObject(THIS^, __POUNAME(), __POSITION(), GetName(), TO_UDINT(Capacity));
+		END_IF
+	END_IF
+		
+	FOR i := _Length - 1 TO supposedIndex BY -1 DO	
+		_Array[i + 1] := _Array[i];
+	END_FOR
+
+	_Length := _Length + 1;
+END_IF
+
+_Array[supposedIndex] := value;
+
+index := supposedIndex;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="TryRemove" Id="{83ed7c56-c31f-46ae-9dc0-2c64a9afa913}">
+      <Declaration><![CDATA[METHOD TryRemove : IUniqueSet
+VAR_INPUT
+	value : ANY;
+	//isObject : BOOL := FALSE;
+END_VAR
+VAR_OUTPUT
+	removed : BOOL;
+END_VAR
+VAR
+	object : POINTER TO Object;
+	
+	index : DINT;
+END_VAR
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[TryRemove := THIS^;
+
+(*IF isObject THEN
+	object := value.pValue;
+	
+	removed := FindIndex(object^.Address, supposedIndex => index);
+ELSE*)
+	removed := FindIndex(value, supposedIndex => index);
+//END_IF
+ 
+IF removed THEN
+	RemoveAt(index);
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="TryRemoveGeneric" Id="{509dc21b-c80c-4a35-ad86-96721cdf54e6}">
+      <Declaration><![CDATA[METHOD TryRemoveGeneric : IUniqueSet
+VAR_INPUT
+	value : GENERIC_VALUE;
+	releaseKey : BOOL := TRUE;
+END_VAR
+VAR_OUTPUT
+	removed : BOOL;
+END_VAR
+VAR
+	index : DINT;
+
+	anyTypeValue : __SYSTEM.AnyType;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[TryRemoveGeneric := THIS^;
+
+// todo: 4026.20 bug workaround
+anyTypeValue := value.AsAnyType(); 
+
+removed := FindIndex(anyTypeValue, supposedIndex => index);
+ 
+IF removed THEN
+	RemoveAt(index);
+END_IF
+
+IF releaseKey THEN
+	value.Release();
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="ValueValidator" Id="{0eab78c2-de3c-427a-9017-e6bb7fd4a1e3}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+PROPERTY FINAL ValueValidator : Core.IGenericValueValidator]]></Declaration>
+      <Get Name="Get" Id="{0626a256-23ca-4414-bd79-e7c4da25d1dd}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ValueValidator := _ValueValidator;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+  </POU>
+</TcPlcObject>

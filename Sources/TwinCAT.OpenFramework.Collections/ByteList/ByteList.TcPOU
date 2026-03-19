@@ -1,0 +1,463 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="ByteList" Id="{44085af7-7241-03f1-3e6d-aeb87f0c58dd}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+
+.. <legal notes>
+
+legal notes
+=================
+| SPDX-FileCopyrightText: © 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+| SPDX-License-Identifier: LGPL-3.0-only
+| For details check: LGPL-3.0-only_
+
+.. _LGPL-3.0-only: https://www.gnu.org/licenses/lgpl-3.0.en.html
+
+.. </legal notes>
+
+*)
+
+{attribute 'no_explicit_call' := 'do not call this function block directly'} 
+{attribute 'enable_dynamic_creation'}
+// Collection of bytes of dynamic size
+FUNCTION_BLOCK ByteList 
+VAR_GENERIC CONSTANT
+    _StaticCapacity : COLLECTION_LENGTH := 0;
+END_VAR
+EXTENDS Core.Object IMPLEMENTS IByteList
+VAR_OUTPUT
+	DataAddress : POINTER TO BYTE;
+END_VAR
+VAR
+	_ClassName : STRING := __POUNAME();
+	
+	_StaticArray : ARRAY [0.._StaticCapacity - 1] OF BYTE;
+	
+	_DynamicCapacity : COLLECTION_LENGTH;
+	_Length : DINT;
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[]]></ST>
+    </Implementation>
+    <Method Name="AllocateMemory" Id="{8ca653b8-50f7-445c-b10d-fbfed66a86d3}">
+      <Declaration><![CDATA[METHOD PROTECTED AllocateMemory
+VAR_INPUT
+	byteCount : COLLECTION_LENGTH;
+END_VAR
+VAR
+	newMemory : POINTER TO GENERIC_KEY_VALUE_PAIR;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF NOT Dynamic THEN
+	RETURN;
+END_IF
+
+newMemory := __NEW(BYTE, TO_UDINT(_DynamicCapacity + byteCount));
+
+IF _Length > 0 THEN
+	Tc2_System.MEMCPY(newMemory, DataAddress, TO_UDINT(_Length));
+END_IF
+ 
+IF DataAddress <> 0 THEN
+	__DELETE(DataAddress);
+END_IF
+
+_DynamicCapacity := _DynamicCapacity + byteCount;
+
+DataAddress := newMemory;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="AppendAny" Id="{fa939ac2-b614-4bc3-8ef3-f524865ffb5f}">
+      <Declaration><![CDATA[METHOD AppendAny : IByteList
+VAR_INPUT
+	data : ANY;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[AppendAny := AppendData(data.pValue, TO_DINT(data.diSize));]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="AppendByte" Id="{90a35576-aaee-0fbc-214a-d1c0f81c72fb}">
+      <Declaration><![CDATA[METHOD AppendByte : IByteList
+VAR_INPUT
+	value : BYTE;
+END_VAR
+VAR
+	newMemory : POINTER TO BYTE;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[AppendByte := AppendData(ADR(value), 1);]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="AppendData" Id="{d35c3ee4-7daa-49d5-be43-e476b3efb046}">
+      <Declaration><![CDATA[METHOD AppendData : IByteList
+VAR_INPUT
+	data : POINTER TO BYTE;
+	dataSize : COLLECTION_LENGTH;
+END_VAR
+VAR
+	staticCollectionFullException : Core.StaticCollectionFullException;
+
+	newMemory : POINTER TO BYTE;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[AppendData := THIS^;
+
+IF data = 0 OR_ELSE dataSize = 0 THEN
+	RETURN;
+END_IF
+
+// if existing memory is not enough
+IF _Length + TO_DINT(dataSize) > Capacity THEN
+	IF Dynamic THEN
+		AllocateMemory(Capacity - _Length + TO_DINT(dataSize));
+	ELSE
+		staticCollectionFullException.ThrowByObject(THIS^, __POUNAME(), __POSITION(), GetName(), TO_UDINT(Capacity));
+	END_IF
+END_IF
+
+// append new bytes
+Tc2_System.MEMCPY(DataAddress + TO_DWORD(_Length), data, TO_UDINT(dataSize));
+
+// set new bytes count
+_Length := _Length + TO_DINT(dataSize);]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="AppendGeneric" Id="{ac72fb80-d130-4ae7-81e5-86ab3708db48}">
+      <Declaration><![CDATA[METHOD AppendGeneric : IByteList
+VAR_INPUT
+	data : Core.GENERIC_VALUE;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[AppendGeneric := AppendData(data.Address, TO_DINT(data.Size));]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="Capacity" Id="{3ae8e9be-a7d0-403a-8d29-c44983ebf381}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+PROPERTY FINAL Capacity : COLLECTION_LENGTH]]></Declaration>
+      <Get Name="Get" Id="{b809a1de-e3ae-4897-8390-093667992014}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[Capacity := SEL(_StaticCapacity = 0, _StaticCapacity, _DynamicCapacity);]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="ClassName" Id="{3b9bf934-b83c-0948-370d-5e8e28db661a}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+PROPERTY ClassName : STRING]]></Declaration>
+      <Get Name="Get" Id="{a74d6b23-00f3-0fef-283c-b96c5cad2f8b}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ClassName := _ClassName;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="Clear" Id="{58795b0c-c9a9-0b7d-1801-4867f25906b7}">
+      <Declaration><![CDATA[METHOD Clear : IByteList
+VAR_INPUT
+	releaseDynamicMemory : BOOL := FALSE;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[Clear := THIS^;
+
+IF releaseDynamicMemory AND_THEN Dynamic AND_THEN _DynamicCapacity > 0 THEN
+	__DELETE(DataAddress);
+	_DynamicCapacity := 0;
+END_IF
+
+_Length := 0;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="CreateEnumerator" Id="{9eb1bbc5-e145-4b1d-be02-fc14e3a7b7c4}">
+      <Declaration><![CDATA[METHOD CreateEnumerator : IEnumerator
+VAR
+	enumerator : POINTER TO ByteListEnumerator;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[enumerator := __NEW(ByteListEnumerator(list := THIS^));
+
+CreateEnumerator := enumerator^;]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="Dynamic" Id="{7fc86655-965e-4584-8395-7f580dc2445d}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+PROPERTY FINAL Dynamic : BOOL]]></Declaration>
+      <Get Name="Get" Id="{8c679524-cf9f-40aa-9def-10c089c4abae}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[Dynamic := _StaticCapacity = 0;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="Empty" Id="{8cac260d-f211-4946-9f91-204b369e9bc6}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+PROPERTY FINAL Empty : BOOL]]></Declaration>
+      <Get Name="Get" Id="{cdc3f172-a10e-45a6-be1f-94a4244848e7}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[Empty := _Length <= 0;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="FB_exit" Id="{58cee31c-ede5-0b41-17b5-f6dfb8c1dea7}">
+      <Declaration><![CDATA[METHOD FB_exit : BOOL
+VAR_INPUT
+	bInCopyCode : BOOL; // if TRUE, the exit method is called for exiting an instance that is copied afterwards (online change).
+END_VAR
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[Clear(TRUE);]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="FB_init" Id="{9b89d2ed-7216-4482-ba21-51df798725b2}">
+      <Declaration><![CDATA[METHOD FB_init : BOOL
+VAR_INPUT
+	(* if TRUE, the retain variables are initialized (warm start / cold start)*)
+	bInitRetains	: BOOL;
+	(* if TRUE, the instance afterwards gets moved into the copy code (online change)*)
+	bInCopyCode	: BOOL;
+END_VAR
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF NOT Dynamic THEN
+	DataAddress := ADR(_StaticArray); 
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="Find" Id="{f870e801-4961-0438-0486-eeff60dc3fea}">
+      <Declaration><![CDATA[METHOD Find : BOOL
+VAR_INPUT
+	value : BYTE;
+END_VAR
+VAR_OUTPUT
+	index : COLLECTION_INDEX;
+END_VAR
+VAR
+	i : DINT;	
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF _Length > 0 THEN
+	FOR i := 0 TO _Length - 1 DO
+		IF DataAddress[i] = value THEN
+			index := i;
+			Find := TRUE;
+			RETURN;
+		END_IF 	
+	END_FOR
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="Full" Id="{fb559251-67ca-4284-974d-f6b046168be3}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+PROPERTY FINAL Full : BOOL]]></Declaration>
+      <Get Name="Get" Id="{a258343f-e2ac-4ae3-91ec-9e66c42b2a82}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[Full := _StaticCapacity <> 0 AND_THEN _Length >= _StaticCapacity;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="Get" Id="{7a2d32dc-2bf1-07fe-3b69-aed2ad5b300d}">
+      <Declaration><![CDATA[METHOD Get : BYTE
+VAR_INPUT
+	index : COLLECTION_INDEX;
+END_VAR
+VAR
+	exception : StandardException;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF DataAddress = 0 THEN
+	exception.ThrowByObject(THIS^, __POUNAME(), __POSITION(), "Dynamic byte array is empty");
+END_IF
+
+IF index < 0 THEN
+	exception.ThrowByObject(THIS^, __POUNAME(), __POSITION(), "Index is less then zero");
+END_IF
+
+IF index >= _Length THEN
+	exception.ThrowByObject(THIS^, __POUNAME(), __POSITION(), "Index is too large");
+END_IF
+
+Get := DataAddress[index];]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="Length" Id="{d1b0052d-4e1b-09cb-235e-e87df6b9b5a5}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+PROPERTY FINAL Length : COLLECTION_LENGTH]]></Declaration>
+      <Get Name="Get" Id="{457f3f94-ecd5-03a2-1012-5eb779d04c66}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[Length := _Length;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="LoadFromAny" Id="{6ca12394-c5fc-0274-1ee4-d0bfc0727c06}">
+      <Declaration><![CDATA[METHOD LoadFromAny : IByteList
+VAR_INPUT
+	data : ANY;
+	startIndex : COLLECTION_INDEX := 0;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[LoadFromAny := LoadFromData(data.pValue, TO_DINT(data.diSize), startIndex);]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="LoadFromData" Id="{9fe65b5e-87b5-0537-23bd-6a15d825d74e}">
+      <Declaration><![CDATA[METHOD LoadFromData : IByteList
+VAR_INPUT
+	data : POINTER TO BYTE;
+	dataSize : COLLECTION_LENGTH;
+	startIndex : COLLECTION_INDEX := 0;
+END_VAR
+VAR
+	exception : Core.ArgumentOutOfRangeException;
+	staticCollectionFullException : Core.StaticCollectionFullException;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF TO_DINT(startIndex) > _Length THEN
+	exception.ThrowByObject(THIS^, __POUNAME(), __POSITION(), 'startIndex', startIndex);
+END_IF
+
+IF dataSize < 0 THEN
+	exception.ThrowByObject(THIS^, __POUNAME(), __POSITION(), 'dataSize', dataSize);
+END_IF
+
+LoadFromData := THIS^;
+ 
+IF data = 0 OR_ELSE dataSize = 0 THEN
+	RETURN;
+END_IF
+
+// if existing memory is not enough
+IF startIndex + TO_DINT(dataSize) > Capacity THEN
+	IF Dynamic THEN
+		AllocateMemory(startIndex + TO_DINT(dataSize) - Capacity);
+	ELSE
+		staticCollectionFullException.ThrowByObject(THIS^, __POUNAME(), __POSITION(), GetName(), TO_UDINT(Capacity));
+	END_IF
+END_IF
+
+// append new bytes
+Tc2_System.MEMCPY(DataAddress + TO_DWORD(startIndex), data, TO_UDINT(dataSize));
+
+// set new bytes count
+_Length := startIndex + TO_DINT(dataSize);	]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="LoadFromGeneric" Id="{803d0535-a6e1-4d89-878a-9e90b4d80911}">
+      <Declaration><![CDATA[METHOD LoadFromGeneric : IByteList
+VAR_INPUT
+	data : Core.GENERIC_VALUE;
+	startIndex : COLLECTION_INDEX := 0;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[LoadFromGeneric := LoadFromData(data.Address, TO_DINT(data.Size), startIndex);]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="NamespaceName" Id="{6affa192-b708-4407-b07b-3f99b221293a}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+PROPERTY NamespaceName : STRING]]></Declaration>
+      <Get Name="Get" Id="{08e774db-64ad-4b08-8c9f-7cf3351a9ee4}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[NamespaceName := CurrentNamespace.Name;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="Remove" Id="{bf82b30e-92dd-0d23-0038-cce05024df18}">
+      <Declaration><![CDATA[METHOD Remove : IByteList
+VAR_INPUT
+	value : BYTE;
+END_VAR
+VAR
+	index : DINT;
+	exception : StandardException;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF DataAddress = 0 THEN
+	exception.ThrowByObject(THIS^, __POUNAME(), __POSITION(), "Dynamic byte array is empty");
+END_IF
+
+IF Length < 0 THEN
+	exception.ThrowByObject(THIS^, __POUNAME(), __POSITION(), "Count is less then zero");
+END_IF
+
+IF index + Length > _Length THEN
+	exception.ThrowByObject(THIS^, __POUNAME(), __POSITION(), "Index + count are outside the array bounds");
+END_IF
+
+Remove := THIS^;
+
+IF Find(value, index => index) THEN
+	RemoveAt(index, 1);
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="RemoveAt" Id="{13c7901e-f730-033f-2407-dd64a3fc2480}">
+      <Declaration><![CDATA[METHOD RemoveAt : IByteList
+VAR_INPUT
+	index : COLLECTION_INDEX;
+	count : COLLECTION_LENGTH := 1;
+END_VAR
+VAR
+	argumentOutOfRangeException : Core.ArgumentOutOfRangeException;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF index < 0 OR_ELSE index >= _Length THEN
+	argumentOutOfRangeException.ThrowByObject(THIS^, __POUNAME(), __POSITION(), 'index', index);
+END_IF
+
+IF count < 0 OR_ELSE index + count > _Length THEN
+	argumentOutOfRangeException.ThrowByObject(THIS^, __POUNAME(), __POSITION(), 'count', count);
+END_IF
+
+RemoveAt := THIS^;
+
+IF count = 0 THEN
+	RETURN;
+END_IF
+
+IF count <> _Length THEN
+	Tc2_System.MEMMOVE(DataAddress + TO_LWORD(index), DataAddress + TO_LWORD(index + count), TO_UDINT(_Length - index - count));
+END_IF
+
+_Length := _Length - count;]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="SelfSize" Id="{eb116396-1c6b-495f-b284-5b142fa86f6c}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+PROPERTY SelfSize : ULINT]]></Declaration>
+      <Get Name="Get" Id="{9d568fff-ebc6-4d27-9dd9-94ca65277b07}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[SelfSize := XSIZEOF(THIS^);]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="Set" Id="{7b62d34d-7ee9-07a4-2e13-b032abd0cd09}">
+      <Declaration><![CDATA[METHOD Set : IByteList
+VAR_INPUT
+	index : COLLECTION_INDEX;
+	value : BYTE;
+END_VAR
+VAR
+	exception : StandardException;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF DataAddress = 0 THEN
+	exception.ThrowByObject(THIS^, __POUNAME(), __POSITION(), "Dynamic byte array is empty");
+END_IF
+
+IF index < 0 THEN
+	exception.ThrowByObject(THIS^, __POUNAME(), __POSITION(), "Index is less then zero");
+END_IF
+
+IF index >= _Length THEN
+	exception.ThrowByObject(THIS^, __POUNAME(), __POSITION(), "Index is too large");
+END_IF
+
+Set := THIS^;
+
+DataAddress[index] := value;]]></ST>
+      </Implementation>
+    </Method>
+  </POU>
+</TcPlcObject>

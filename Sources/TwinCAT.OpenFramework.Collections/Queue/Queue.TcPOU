@@ -1,0 +1,327 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="Queue" Id="{f8cdcc66-7787-4abf-9594-fd0763584f0a}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+
+.. <legal notes>
+
+legal notes
+=================
+| SPDX-FileCopyrightText: © 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+| SPDX-License-Identifier: LGPL-3.0-only
+| For details check: LGPL-3.0-only_
+
+.. _LGPL-3.0-only: https://www.gnu.org/licenses/lgpl-3.0.en.html
+
+.. </legal notes>
+
+*)
+
+{attribute 'no_explicit_call' := 'do not call this function block directly'} 
+FUNCTION_BLOCK FINAL Queue 
+VAR_GENERIC CONSTANT
+	{attribute 'hide'} 
+    _StaticCapacity : COLLECTION_LENGTH := 10;
+END_VAR
+EXTENDS Core.Object IMPLEMENTS IQueue
+VAR_INPUT
+	DefaultDynamicAllocationElemetCount : BYTE := 10;	
+END_VAR
+VAR	
+	_ClassName : STRING := __POUNAME();
+	
+	_ValueValidator : Core.IGenericValueValidator;
+
+	_Array : POINTER TO Core.GENERIC_VALUE;
+	_StaticArray : ARRAY [0.._StaticCapacity - 1] OF Core.GENERIC_VALUE;
+	
+	_DynamicCapacity : COLLECTION_LENGTH;
+	_Length : DINT;
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[]]></ST>
+    </Implementation>
+    <Method Name="AllocateMemory" Id="{76515a11-4abf-480c-afc8-ddd818956f4e}">
+      <Declaration><![CDATA[METHOD PROTECTED AllocateMemory 
+VAR_INPUT
+	elementCount : COLLECTION_LENGTH;
+END_VAR
+VAR	
+	newMemory : POINTER TO GENERIC_VALUE;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF NOT Dynamic THEN
+	RETURN;
+END_IF
+
+newMemory := __NEW(BYTE, TO_UDINT(SIZEOF(GENERIC_VALUE) * (_DynamicCapacity + elementCount)));
+
+IF _Length > 0 THEN
+	Tc2_System.MEMCPY(newMemory, _Array, TO_UDINT(SIZEOF(GENERIC_VALUE) * _Length));
+END_IF
+ 
+IF _Array <> 0 THEN
+	__DELETE(_Array);
+END_IF
+
+_DynamicCapacity := _DynamicCapacity + elementCount;
+
+_Array := newMemory;]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="Capacity" Id="{f85e1219-9384-443f-999f-7ff81fee2ac5}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+PROPERTY FINAL Capacity : COLLECTION_LENGTH]]></Declaration>
+      <Get Name="Get" Id="{6f695828-8662-4cd4-bee7-0e0a9d2f66b3}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[Capacity := SEL(_StaticCapacity = 0, _StaticCapacity, _DynamicCapacity);]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="ClassName" Id="{eb9d1b47-1697-4ddf-a61e-e55f2e16e9a5}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+PROPERTY ClassName : STRING]]></Declaration>
+      <Get Name="Get" Id="{9b8eca91-7210-4e91-b025-425c7f38327e}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ClassName := _ClassName;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="Clear" Id="{962fbdd2-b59a-47e7-b6d5-9a66c3a4f14b}">
+      <Declaration><![CDATA[METHOD Clear : IQueue
+VAR
+	i : DINT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[Clear := THIS^;
+
+FOR i := 0 TO _Length - 1 DO
+	_Array[i].Release();
+END_FOR
+
+_Length := 0;
+_DynamicCapacity := 0;
+
+IF _Array <> 0 AND_THEN Dynamic THEN
+	__DELETE(_Array);	
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="CreateEnumerator" Id="{9097b908-1d6e-4826-bffb-32689d07a98b}">
+      <Declaration><![CDATA[METHOD CreateEnumerator : IEnumerator
+VAR
+	enumerator : POINTER TO StaticEnumerator;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[enumerator := __NEW(StaticEnumerator(queue := THIS^));
+
+CreateEnumerator := enumerator^;]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="Dynamic" Id="{cdb4076b-e2b6-4ff2-b0df-9bd2692c7614}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+PROPERTY FINAL Dynamic : BOOL]]></Declaration>
+      <Get Name="Get" Id="{9f480da4-fc3d-4932-bf2e-352f2e9ee8b7}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[Dynamic := _StaticCapacity = 0;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="Empty" Id="{d3a96e8e-877f-469a-b648-384a5a21bd09}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+PROPERTY FINAL Empty : BOOL]]></Declaration>
+      <Get Name="Get" Id="{eb3ec612-b625-4d9c-97fb-dbaa8a91644d}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[Empty := _Length <= 0;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="EnqueueCopy" Id="{2f5dd9ba-18c9-4b0c-b366-c8cf460a2ad2}">
+      <Declaration><![CDATA[METHOD EnqueueCopy : IQueue
+VAR_INPUT
+	value : ANY;
+	isObject : BOOL := FALSE;
+END_VAR
+VAR
+	genericValue : Core.GENERIC_VALUE;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[genericValue := GenericValueFactory.FromAnyType(value, isObject, GENERIC_MEMORY_MANAGEMENT_BEHAVIOR.CLONE_ORIGINAL_VALUE_AND_OWNS_MEMORY);
+
+__TRY
+	EnqueueCopy := EnqueueGeneric(genericValue);
+__CATCH
+	genericValue.Release();
+	
+	Core.ExceptionManager.ReThrowLastException();
+__ENDTRY]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="EnqueueGeneric" Id="{dc2a8154-c6f2-4c3f-bcdd-f986d98a1e58}">
+      <Declaration><![CDATA[METHOD EnqueueGeneric : IQueue
+VAR_INPUT
+	value : GENERIC_VALUE;
+END_VAR
+VAR
+	staticCollectionFullException : Core.StaticCollectionFullException;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF _ValueValidator <> 0 THEN
+	_ValueValidator.Validate(GetName(), value);
+END_IF
+
+IF _Length >= Capacity THEN
+	IF Dynamic THEN
+		AllocateMemory(DefaultDynamicAllocationElemetCount);
+	ELSE
+		staticCollectionFullException.ThrowByObject(THIS^, __POUNAME(), __POSITION(), GetName(), TO_UDINT(Capacity));
+	END_IF
+END_IF
+
+EnqueueGeneric := THIS^;
+
+IF _ValueValidator <> 0 THEN
+	_ValueValidator.Validate(GetName(), value);
+END_IF
+
+_Array[_Length] := value;
+_Length := _Length + 1;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="FB_exit" Id="{4df468ba-1f84-4a59-ba83-14d5af90b5f7}">
+      <Declaration><![CDATA[METHOD FB_exit : BOOL
+VAR_INPUT
+	bInCopyCode : BOOL; // if TRUE, the exit method is called for exiting an instance that is copied afterwards (online change).
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[Clear();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="FB_init" Id="{2e50edd9-7dab-4fde-a8d2-333e2c01fed4}">
+      <Declaration><![CDATA[METHOD FB_init : BOOL
+VAR_INPUT
+	(* if TRUE, the retain variables are initialized (warm start / cold start)*)
+	bInitRetains	: BOOL;
+	(* if TRUE, the instance afterwards gets moved into the copy code (online change)*)
+	bInCopyCode	: BOOL;
+	valueValidator : IGenericValueValidator;
+END_VAR
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_ValueValidator := valueValidator;
+
+IF NOT Dynamic THEN
+	_Array := ADR(_StaticArray); 
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="Full" Id="{01822963-f18c-44ee-aeff-4d448972b212}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+PROPERTY FINAL Full : BOOL]]></Declaration>
+      <Get Name="Get" Id="{946c8335-0af7-4202-93ca-7552c51f4517}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[Full := _StaticCapacity <> 0 AND_THEN _Length >= _StaticCapacity;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="GetByIndex" Id="{2a4feb2d-2715-46e3-bec1-609604a1f554}">
+      <Declaration><![CDATA[METHOD GetByIndex : REFERENCE TO GENERIC_VALUE
+VAR_INPUT
+	index : COLLECTION_INDEX;
+END_VAR
+VAR
+	argumentOutOfRangeException : ArgumentOutOfRangeException;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF index < 0 OR_ELSE index >= _Length THEN
+	argumentOutOfRangeException.ThrowByObject(THIS^, __POUNAME(), __POSITION(), 'index', index);
+END_IF
+
+GetByIndex REF= _Array[index];]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="Length" Id="{db8b4963-67cb-4cbd-8f81-48286bcd0954}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+PROPERTY FINAL Length : COLLECTION_LENGTH]]></Declaration>
+      <Get Name="Get" Id="{41a7eda1-bced-4b82-852f-839263e1e1c0}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[Length := _Length;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="NamespaceName" Id="{d2752a45-b353-4777-97f8-750a369518f4}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+PROPERTY NamespaceName : STRING]]></Declaration>
+      <Get Name="Get" Id="{1c4e1e8c-0360-4653-b972-58b546c402c1}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[NamespaceName := CurrentNamespace.Name;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="Peek" Id="{6cebb648-29c8-4771-ba86-55fe8c5a9b21}">
+      <Declaration><![CDATA[METHOD Peek : REFERENCE TO Core.GENERIC_VALUE
+VAR
+	queueEmptyException : CollectionEmptyException;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF _Length < 1 THEN
+	queueEmptyException.ThrowByObject(THIS^, __POUNAME(), __POSITION(), GetName());
+END_IF
+
+Peek REF= _Array[0];]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="RemoveFirst" Id="{54ab5e77-3b71-4028-972c-152ddf087fec}">
+      <Declaration><![CDATA[METHOD RemoveFirst : IQueue
+VAR
+	queueEmptyException : CollectionEmptyException;
+
+	i : DINT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF _Length < 1 THEN
+	queueEmptyException.ThrowByObject(THIS^, __POUNAME(), __POSITION(), GetName());
+END_IF
+
+_Array[0].Release();		
+
+IF _Length > 1 THEN
+	Tc2_System.MEMMOVE(ADR(_Array[0]), ADR(_Array[1]), TO_UDINT(SIZEOF(Core.GENERIC_VALUE) * (_Length - 1)));
+	
+	_Array[_Length - 1].Reset();
+END_IF
+
+_Length := _Length - 1;
+
+RemoveFirst := THIS^;]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="SelfSize" Id="{234b0cf7-abf0-4774-8e94-3e6fb2debd40}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+PROPERTY SelfSize : ULINT]]></Declaration>
+      <Get Name="Get" Id="{b1504054-b836-4c00-96f3-0bbd8e9cc835}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[SelfSize := XSIZEOF(THIS^);]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="ValueValidator" Id="{df20ccdb-5b87-4b16-b343-fae9d4e15547}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+PROPERTY FINAL ValueValidator : Core.IGenericValueValidator]]></Declaration>
+      <Get Name="Get" Id="{a3512270-3aaf-4e94-a703-1e97d6fcf874}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ValueValidator := _ValueValidator;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+  </POU>
+</TcPlcObject>
