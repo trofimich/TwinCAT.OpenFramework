@@ -2,7 +2,7 @@
 
 ## 1. General Description
 
-Using `__TRY`, `__CATCH`, `__FINALLY`, and `__ENDTRY`, you can execute a block of code, handle exceptions if they occur, and run finalization logic that is always executed regardless of the outcome.
+Using `__TRY` -> `__CATCH` -> `__FINALLY` -> `__ENDTRY`, you can execute a block of code, handle exceptions if they occur, and run finalization logic that is always executed regardless of the outcome.
 
 ### Important Notes
 
