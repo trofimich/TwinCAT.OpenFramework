@@ -6,7 +6,7 @@ Using `__TRY`, `__CATCH`, `__FINALLY`, and `__ENDTRY`, you can execute a block o
 
 ### Important Notes
 
-1. Not all exceptions can be handled. For example, `__TRY->__CATCH` will **not** protect you from critical memory violations (such as invalid addressing or double-free errors).
+1. Not all exceptions can be handled. For example, `__TRY->__CATCH` will **not** protect you from critical memory violations (such as invalid addressing or double memory releasing).
 
 2. Inside `__CATCH`, you can retrieve an error code.
    This is simply a numeric value. Some error codes are predefined and described in the `__SYSTEM.ExceptionCode` enumeration.
