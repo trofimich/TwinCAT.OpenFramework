@@ -6,7 +6,7 @@ It is based on an error-handling concept that is unique for Structured Text and 
 ## Key Features
 
 - **Advanced exception handling**  
-  An enhanced error management system that makes diagnostics easier by providing not only the message, but also the place and time the problem occurred. Concept described [here](Concepts/Exceptions/TryCatchFinally.md)
+  An enhanced error management system that makes diagnostics easier by providing not only the message, but also the place and time the problem occurred. Concept described [here](Concepts/Exceptions/TryCatchFinally.md).
 
 - **Dynamic and generic static collections**  
   Work with an unknown number of elements at runtime or define static collection size at instantiation using VAR_GENERIC CONSTANT declaration. List, ByteList, Dictionary, UniqueSet and Queue already supported.
