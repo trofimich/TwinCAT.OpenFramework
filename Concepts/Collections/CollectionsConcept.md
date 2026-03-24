@@ -83,7 +83,7 @@ Supports standard queue operations such as enqueue, peek, remove first and clear
 
 ## Usage
 
-![Dynamic list usage](Screenshots/DynamicListUsage.png)
+![Dynamic list usage](DynamicListUsage.png)
 
 ## Examples
 
