@@ -9,7 +9,7 @@ It is based on an error-handling concept that is unique for Structured Text and 
   An enhanced error management system that makes diagnostics easier by providing not only the message, but also the place and time the problem occurred. Concept described [here.](Concepts/Exceptions/ExceptionsConcept.md)
 
 - **Dynamic and generic static collections**  
-  Work with an unknown number of elements at runtime or define static collection size at instantiation using VAR_GENERIC CONSTANT declaration. List, ByteList, Dictionary, UniqueSet and Queue already supported.
+  Work with an unknown number of elements at runtime or define static collection size at instantiation using VAR_GENERIC CONSTANT declaration. List, ByteList, Dictionary, UniqueSet and Queue already supported. Concept described [here.](Concepts/Exceptions/CollectionsConcept.md)
   
 - **String handling**  
   Convenient string concatenation, replacement, trimming, splitting for STRING and WSTRING types. Support for strings longer than 255 characters and more.
