@@ -1,5 +1,7 @@
 # `GENERIC_VALUE` Concept
 
+## 1. General Description
+
 Using `GENERIC_VALUE`, you can store data of any type along with additional metadata, such as the type class and memory management rules.
 
 It is similar to `__SYSTEM.AnyType`, but addresses its shortcomings:
@@ -8,7 +10,7 @@ It is similar to `__SYSTEM.AnyType`, but addresses its shortcomings:
 3) Adds additional, highly useful type classes: for example, `GENERIC_TYPE_CLASS.OBJECT`;
 4) Preserves memory management rules for the stored value.
 
-## Important Notes
+## 2. Important Notes
 
 1. This is a class, not a structure: a class consumes more memory, but provides capabilities that a structure cannot offer.
 
@@ -32,7 +34,7 @@ It is similar to `__SYSTEM.AnyType`, but addresses its shortcomings:
 
 11. Methods whose names start with `Try` never throw exceptions.
 
-## `GenericValueFactory`
+## 3. `GenericValueFactory`
 
 1. This is a static class (program) intended for creating `GENERIC_VALUE` instances from values of specific types.
 
@@ -44,6 +46,6 @@ It is similar to `__SYSTEM.AnyType`, but addresses its shortcomings:
 
 5. The `FromParts` method allows you to manually construct any `GENERIC_VALUE`.
 
-## Usage
+## 4. Usage
 
 Designed for use in classes that operate on multiple data types. A typical example of such classes is collections.

@@ -1,10 +1,10 @@
 # Collections Concept
 
-## Overview
+## 1. General Description
 
 Collections are abstract data types that allow you to store, organize, and manipulate a group of objects as a single entity.
 
-## Built-in Language Options
+## 2. Built-in Language Options
 
 The StructuredText language provides two basic ways to work with collections:
 1. Arrays  
@@ -12,7 +12,7 @@ The StructuredText language provides two basic ways to work with collections:
 
 Both approaches have significant limitations. The `TwinCAT_OpenFramework_Collections` module is designed to overcome these limitations and provide a safer and more convenient way to work with collections.
 
-## Limitations of Arrays and Pointers
+## 3. Limitations of Arrays and Pointers
 
 1. Arrays have a fixed size and are not suitable when the amount of data is unknown in advance.  
 2. Pointers allow working with both static and dynamic data, but type safety and memory management are entirely the developer’s responsibility.  
@@ -21,7 +21,7 @@ Both approaches have significant limitations. The `TwinCAT_OpenFramework_Collect
 5. Implementing collection classes manually is complex and time-consuming.  
 6. There is no support for generics, so typed collections require duplicating the same logic for each data type.  
 
-## Standard Library Solutions
+## 4. Standard Library Solutions
 
 Some standard libraries provide basic collection-like structures, such as:
 - `Tc2_Utilities.FB_MemRingBuffer`  
@@ -29,7 +29,7 @@ Some standard libraries provide basic collection-like structures, such as:
 
 However, these solutions rely on external pointers, are outdated, harder to use, and less safe.
 
-## What `TwinCAT_OpenFramework_Collections` Provides
+## 5. What `TwinCAT_OpenFramework_Collections` Provides
 
 The framework offers ready-to-use implementations of common collection types: ByteList, List, Dictionary, UniqueSet, Queue.
 
@@ -37,7 +37,7 @@ All collections are universal and store values using the `GENERIC_VALUE` type (e
 
 `GENERIC_VALUE` concept described [here.](../Generics/GenericsConcept.md)
 
-## Static and Dynamic Collections
+## 6. Static and Dynamic Collections
 
 Collections can be either static or dynamic:
 
@@ -50,7 +50,7 @@ The actual number of stored elements is available via the `Length` property.
 - For static collections, `Capacity` is defined at declaration time.  
 - For dynamic collections, `Capacity` grows as needed.  
 
-## Key Features
+## 7. Key Features
 
 - Each element is stored as a `GENERIC_VALUE` (except `ByteList`).  
 - A single collection can store values of different types.  
@@ -58,33 +58,33 @@ The actual number of stored elements is available via the `Length` property.
 - Memory management can be delegated to the collection, allowing automatic cleanup when elements are removed.  
 - All collections implement the `IEnumerable` interface, enabling iteration using a `WHILE` loop.  
 
-## Supported Collection Types
+## 8. Supported Collection Types
 
-### 1. ByteList
+### 8.1. ByteList
 A collection optimized for working with bytes.  
 Supports: add (various), clear, replace (various), remove, search, get by index.
 
-### 2. List
+### 8.2. List
 A collection of `GENERIC_VALUE`.  
 Supports: add, clear, replace, insert, remove, search, get by index, sort.
 
-### 3. Dictionary
+### 8.3. Dictionary
 A key-value collection where both key and value are `GENERIC_VALUE`.  
 Keys are unique.  
 Supports: assign, clear, remove, search by key, get value or index by key, get by index.
 
-### 4. UniqueSet
+### 8.4. UniqueSet
 A collection of unique `GENERIC_VALUE` items.  
 Supports: assign, clear, remove, search, get by index.
 
-### 5. Queue
+### 8.5. Queue
 A FIFO (first-in, first-out) collection of `GENERIC_VALUE`.  
 Supports standard queue operations such as enqueue, peek, remove first and clear.
 
-## Usage
+## 6. Usage
 
 ![Dynamic list usage](DynamicListUsage.png)
 
-## Examples
+## 7. Examples
 
 TwinCAT_OpenFramework_Tests -> Test -> Collections
