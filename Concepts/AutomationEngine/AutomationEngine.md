@@ -21,11 +21,7 @@ The lifecycle orchestrator — the **heart of the system**.
 * Initializes all controllers
 * Ensures their cyclic execution
 
-**States:**
-
-* `INITIALIZING`
-* `RUNNING`
-* `INITIALIZATION_FAILED`
+Supported states are: `INITIALIZING`, `RUNNING`, `INITIALIZATION_FAILED`
 
 ### 3.2. AutomationController
 
@@ -36,12 +32,7 @@ The **logic conductor**.
 * Does **not** interact with I/O directly
 * Operates through high-level device methods
 
-**States:**
-
-* `INITIAL`
-* `WORKING`
-* `FAULT`
-* `RESETTING`
+Supported states are: `INITIAL`, `WORKING`, `FAULT`, `RESETTING`
 
 ### 3.3. Device
 
