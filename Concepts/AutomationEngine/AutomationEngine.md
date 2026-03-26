@@ -43,12 +43,7 @@ The **atomic unit** (or node) of the system.
 * Has no knowledge of the overall process
 * Exposes only a control interface
 
-**Device types:**
-
-* Input
-* Output
-* Input/Output
-* Composite
+Supported device types: Input, Output, InputOutput, Composite
 
 ---
 
