@@ -33,13 +33,13 @@ It is based on an error-handling concept that is unique for Structured Text and 
   Simplified serialization and deserialization of structures to and from JSON documents.
 
 - **Basic automation engine**  
-  A ready-to-use state machine: AutomationRunner supports three fundamental states: *Initializing*, *Running*, *InitializationFailed* and can handle multiple AutomationController instances with five fundamental states: *Initial*, *Running*, *Stopping*, *Fault*, *Resetting*
+  A ready-to-use state machine: AutomationRunner supports three fundamental states: *Initializing*, *Running*, *InitializationFailed* and can handle multiple AutomationController instances with five fundamental states: *Initial*, *Running*, *Stopping*, *Fault*, *Resetting*. Concept described [here](Concepts/AutomationEngine.md)
 
 - **Controllable devices**  
-  Ready-made abstractions for interacting with the external world, such as terminals or communication channels.
+  Ready-made abstractions for interacting with the external world, such as terminals or communication channels. Concept described [here](Concepts/AutomationEngine.md) as part of AutomationEngine.
 
 - **Device hierarchy**  
-  Intuitive modeling of complex devices composed of simpler sub-devices, which in turn may be composed of even simpler ones.
+  Intuitive modeling of complex devices composed of simpler sub-devices, which in turn may be composed of even simpler ones. Concept described [here](Concepts/AutomationEngine.md) as part of AutomationEngine.
 
 - **Predefined device implementations**  
   Includes digital and analog I/O; more standard device types such as axes are planned.
