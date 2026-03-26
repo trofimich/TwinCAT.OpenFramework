@@ -83,7 +83,7 @@ To preserve PLC determinism and ensure efficient memory usage, child collections
 Dependencies between nodes are established via the `FB_Init` method.
 
 * Each device receives a reference to its `Parent` during initialization
-* Guarantees a valid and complete object tree **before the first execution cycle**
+* Builds a complete object tree **before the first execution cycle**
 
 ### 7. Advantages
 
