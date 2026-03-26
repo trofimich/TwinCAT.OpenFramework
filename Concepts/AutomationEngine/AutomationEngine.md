@@ -52,17 +52,8 @@ Supported device types: `InputDevice`, `OutputDevice`, `InputOutputDevice`, `Com
 Instead of a flat structure (`Module -> Component`), the system uses **unlimited nesting**:
 
 * A device can be **simple** (sensor, motor) or **composite**
-
-* A composite device consists of other devices:
-
-  * input
-  * output
-  * or other composite devices
-
-* The hierarchy is built using:
-
-  * `Parent` reference
-  * `SubDevices` collection
+* A composite device consists of other devices
+* The hierarchy is built using `Parent` reference and `SubDevices` collection
 
 ---
 
