@@ -38,7 +38,7 @@ Supported states are: `INITIAL`, `WORKING`, `FAULT`, `RESETTING`
 
 The **atomic unit** (or node) of the system.
 
-* Encapsulates interaction with physical signals
+* Encapsulates interaction with physical devices, communication channels, etc.
 * Handles local state and error processing
 * Has no knowledge of the overall process
 * Exposes only a control interface
