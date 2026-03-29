@@ -21,11 +21,7 @@ The lifecycle orchestrator — the **heart of the system**.
 * Initializes all controllers
 * Ensures their cyclic execution
 
-**States:**
-
-* `INITIALIZING`
-* `RUNNING`
-* `INITIALIZATION_FAILED`
+Supported states are: `INITIALIZING`, `RUNNING`, `INITIALIZATION_FAILED`
 
 ### 3.2. AutomationController
 
@@ -36,28 +32,18 @@ The **logic conductor**.
 * Does **not** interact with I/O directly
 * Operates through high-level device methods
 
-**States:**
-
-* `INITIAL`
-* `WORKING`
-* `FAULT`
-* `RESETTING`
+Supported states are: `INITIAL`, `WORKING`, `FAULT`, `RESETTING`
 
 ### 3.3. Device
 
 The **atomic unit** (or node) of the system.
 
-* Encapsulates interaction with physical signals
+* Encapsulates interaction with physical devices, communication channels, etc.
 * Handles local state and error processing
 * Has no knowledge of the overall process
 * Exposes only a control interface
 
-**Device types:**
-
-* Input
-* Output
-* Input/Output
-* Composite
+Supported device types: `InputDevice`, `OutputDevice`, `InputOutputDevice`, `CompositeDevice`
 
 ---
 
@@ -66,17 +52,8 @@ The **atomic unit** (or node) of the system.
 Instead of a flat structure (`Module -> Component`), the system uses **unlimited nesting**:
 
 * A device can be **simple** (sensor, motor) or **composite**
-
-* A composite device consists of other devices:
-
-  * input
-  * output
-  * or other composite devices
-
-* The hierarchy is built using:
-
-  * `Parent` reference
-  * `SubDevices` collection
+* A composite device consists of other devices
+* The hierarchy is built using `Parent` reference and `SubDevices` collection
 
 ---
 
@@ -106,7 +83,7 @@ To preserve PLC determinism and ensure efficient memory usage, child collections
 Dependencies between nodes are established via the `FB_Init` method.
 
 * Each device receives a reference to its `Parent` during initialization
-* Guarantees a valid and complete object tree **before the first execution cycle**
+* Builds a complete object tree **before the first execution cycle**
 
 ### 7. Advantages
 
