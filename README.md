@@ -153,14 +153,6 @@ It encourages:
 
 ---
 
-## 📚 Detailed concepts overview
-
-* [Exception Handling](Concepts/Exceptions/ExceptionsConcept.md)
-* [Automation Engine](Concepts/AutomationEngine/AutomationEngine.md)
-* [Collections and Utilities](Concepts/Collections/CollectionsConcept.md)
-
----
-
 ## 🤝 Contributing
 
 Contributions, ideas, and feedback are welcome.
