@@ -33,6 +33,11 @@ This leads to:
 * slow development
 * high cost of change
 
+Without a structured approach, TwinCAT applications often evolve into:
+- implicit state machines
+- scattered error handling
+- tightly coupled execution logic
+  
 ---
 
 ## 💡 The Solution
@@ -46,16 +51,20 @@ Instead of ad-hoc code, you get:
 * A reusable foundation library
 
 ---
-
+  
 ## 🧱 Architecture
 
 The framework is built around three main layers:
+
+- Execution Layer → "runtime"
+- Programming Model → "language extensions"
+- Foundation Library → "standard library"
 
 ---
 
 ### 1. Execution Layer
 
-Defines how your application runs.
+Defines a predictable and explicit execution model, replacing ad-hoc control flow typical for PLC applications.
 
 Includes concepts like:
 
