@@ -40,7 +40,7 @@ It is based on an error-handling concept that is unique for Structured Text and 
 - **Controllable devices**  
   Ready-made abstractions for interacting with the external world, such as terminals or communication channels. Concept described [here](Concepts/AutomationEngine/AutomationEngine.md) as part of AutomationEngine.
 
-- **Separation of device logic and I/O modelling**
+- **Separation of device logic and I/O modelling**  
   The device classes contain only the logic specific to device operations. The mapping to terminals is performed at the level of terminal models, and then those terminal models are bound to the devices.
   
 - **Device hierarchy**  
