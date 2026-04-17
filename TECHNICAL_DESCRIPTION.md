@@ -40,14 +40,14 @@ It is based on an error-handling concept that is unique for Structured Text and 
 - **Controllable devices**  
   Ready-made abstractions for interacting with the external world, such as terminals or communication channels. Concept described [here](Concepts/AutomationEngine/AutomationEngine.md) as part of AutomationEngine.
 
+- **Separation of device logic and I/O modelling**
+  The device classes contain only the logic specific to device operations. The mapping to terminals is performed at the level of terminal models, and then those terminal models are bound to the devices.
+  
 - **Device hierarchy**  
   Intuitive modeling of complex devices composed of simpler sub-devices, which in turn may be composed of even simpler ones. Concept described [here](Concepts/AutomationEngine/AutomationEngine.md) as part of AutomationEngine.
 
 - **Predefined device implementations**  
   Includes digital and analog I/O; more standard device types such as axes are planned.
-  
-- **Simulation mode for automation engine and devices**  
-  Run your logic in simulation mode without the need for real hardware.
 
 - **Automatic exception logging**  
   Tasks and automation engine automatically catches exceptions and logs them.
