@@ -1,0 +1,452 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="AutomationController" Id="{6b707d9d-36a1-4196-b85e-da052ddd92c8}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+
+.. <legal notes>
+
+legal notes
+=================
+| SPDX-FileCopyrightText: © 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+| SPDX-License-Identifier: LGPL-3.0-only
+| For details check: LGPL-3.0-only_
+
+.. _LGPL-3.0-only: https://www.gnu.org/licenses/lgpl-3.0.en.html
+
+.. </legal notes>
+
+*)
+
+FUNCTION_BLOCK ABSTRACT AutomationController 
+VAR_GENERIC CONSTANT
+    _DeviceCount : INT(0..1000) := 0;
+END_VAR
+EXTENDS AutomationComponent IMPLEMENTS IAutomationController
+VAR
+	_State : AUTOMATION_CONTROLLER_STATE;	
+	_PreviousState : AUTOMATION_CONTROLLER_STATE;	
+
+	_Diagnostics : AUTOMATION_CONTROLLER_DIAGNOSTICS;
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[]]></ST>
+    </Implementation>
+    <Folder Name="Methods to override" Id="{98062533-84f1-4778-83ea-890151ef1ab2}">
+      <Folder Name="Initialization" Id="{ceb990ba-3a7e-4d55-a1af-018a3069f9f8}" />
+    </Folder>
+    <Folder Name="Service memebers" Id="{bc2bc044-7238-493f-aa0a-a1e668775c01}" />
+    <Property Name="DeviceCount" Id="{9220f711-cd6b-4535-afb7-2d29bd70dbf0}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+PROPERTY DeviceCount : INT]]></Declaration>
+      <Get Name="Get" Id="{7ecd62bb-cc61-4886-a3b7-812711794d0b}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[DeviceCount := _DeviceCount;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="Devices" Id="{b6d998b9-573d-4770-83de-0928458fcc43}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+PROPERTY ABSTRACT Devices : REFERENCE TO ARRAY [0.._DeviceCount - 1] OF IDevice]]></Declaration>
+      <Get Name="Get" Id="{b6ba42f9-ee1b-4d18-84e7-5d5ae248c53f}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="Diagnostics" Id="{ae44a594-6f2f-4ebe-bd72-5f06e2091783}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+PROPERTY FINAL Diagnostics : REFERENCE TO AUTOMATION_CONTROLLER_DIAGNOSTICS]]></Declaration>
+      <Get Name="Get" Id="{96434e9f-a856-4786-b840-50d10b34caac}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[Diagnostics REF= _Diagnostics;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="Execute" Id="{0c62a304-be7d-4b17-9ec6-dcdf997a75e1}">
+      <Declaration><![CDATA[METHOD FINAL Execute
+VAR
+	invalidStateException : Core.StandardException;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_PreviousState := _State;
+
+IF NOT Enabled THEN
+	RETURN;
+END_IF
+
+IF _State = AUTOMATION_CONTROLLER_STATE.INITIAL THEN
+	invalidStateException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), "Automation controller is not initialized");
+END_IF
+
+IF _State = AUTOMATION_CONTROLLER_STATE.WORKING AND_THEN HasError THEN
+	recoverAfterError();
+END_IF
+
+handleInputDevices();
+
+handleState();
+
+handleOutputDevices();
+]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="FB_init" Id="{a1254527-72fe-4143-b7e4-b35bdea9829c}">
+      <Declaration><![CDATA[METHOD FB_init : BOOL
+VAR_INPUT
+	(* if TRUE, the retain variables are initialized (warm start / cold start)*)
+	bInitRetains	: BOOL;
+	(* if TRUE, the instance afterwards gets moved into the copy code (online change)*)
+	bInCopyCode	: BOOL;
+	name : WSTRING;
+END_VAR
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_Name := SEL(Core.WideStrings.IsNullOrWhiteSpace(name), name, GetDefaultName());]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="fillErrorLogByError" Id="{db1622c3-17d5-4c3e-9fc6-44f5ab658994}" FolderPath="Service memebers\">
+      <Declaration><![CDATA[METHOD PRIVATE fillErrorLogByError
+VAR_INPUT
+	errorPlace : STRING(39);
+END_VAR
+VAR_IN_OUT
+	targetErrorLog : Core.ERROR;
+	sourceError : Core.ERROR;  
+END_VAR
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF NOT __ISVALIDREF(targetErrorLog) OR_ELSE NOT __ISVALIDREF(sourceError) = 0 THEN
+	RETURN;
+END_IF
+
+_Diagnostics.LastErrorPalce := errorPlace;
+
+targetErrorLog := sourceError;
+
+Core.LogManager.TryLogError(sourceError, "AutomationControllerError");]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="fillErrorLogByException" Id="{c8063572-3da9-4eb4-bd36-833c249f0127}" FolderPath="Service memebers\">
+      <Declaration><![CDATA[METHOD PRIVATE fillErrorLogByException
+VAR_INPUT
+	errorPlace : STRING(39);
+END_VAR
+VAR_IN_OUT
+	targetErrorLog : Core.ERROR;
+	sourceException : Core.IException;  
+END_VAR
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF NOT __ISVALIDREF(targetErrorLog) OR_ELSE sourceException = 0 THEN
+	RETURN;
+END_IF
+
+_Diagnostics.LastErrorPalce := errorPlace;
+
+sourceException.ToError(targetErrorLog);
+
+Core.LogManager.TryLogException(sourceException, "AutomationControllerError");]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="handleInputDevices" Id="{3afa691a-0b78-4083-8d5c-6763cdce34cc}" FolderPath="Service memebers\">
+      <Declaration><![CDATA[METHOD PRIVATE handleInputDevices
+VAR
+	i : DINT;
+	
+	inputDevice : IInputDevice;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF __ISVALIDREF(Devices) AND_THEN _DeviceCount > 0 THEN
+	FOR i := 0 TO _DeviceCount - 1 DO
+		IF NOT Devices[i].Enabled OR_ELSE NOT __QUERYINTERFACE(Devices[i], inputDevice) THEN
+			CONTINUE;
+		END_IF
+		
+		inputDevice.ProcessInput();
+		
+		IF inputDevice.HasError THEN
+			SetError(inputDevice.Error);
+
+			fillErrorLogByError('LastDeviceError', Diagnostics.LastDeviceError, inputDevice.Error);
+					
+			IF _State <> AUTOMATION_CONTROLLER_STATE.FAULT AND_THEN inputDevice.Error.Severity = Core.ERROR_SEVERITY.CRITICAL THEN
+				setState(AUTOMATION_CONTROLLER_STATE.FAULT);				
+			END_IF								
+		END_IF
+	END_FOR
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="handleOutputDevices" Id="{197ab7ad-d8c9-4452-851b-1a8d964c4eac}" FolderPath="Service memebers\">
+      <Declaration><![CDATA[METHOD PRIVATE handleOutputDevices
+VAR
+	i : DINT;
+	
+	outputDevice : IOutputDevice;	
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF __ISVALIDREF(Devices) AND_THEN _DeviceCount > 0 THEN
+	FOR i := 0 TO _DeviceCount - 1 DO
+		IF NOT Devices[i].Enabled OR_ELSE NOT __QUERYINTERFACE(Devices[i], outputDevice) THEN
+			CONTINUE;
+		END_IF
+		
+		outputDevice.ProcessOutput(); 
+		
+		IF outputDevice.HasError THEN
+			fillErrorLogByError('LastDeviceError', Diagnostics.LastDeviceError, outputDevice.Error);
+
+			IF _State <> AUTOMATION_CONTROLLER_STATE.FAULT AND_THEN outputDevice.Error.Severity = Core.ERROR_SEVERITY.CRITICAL THEN
+				setState(AUTOMATION_CONTROLLER_STATE.FAULT);				
+			END_IF								
+		END_IF
+	END_FOR
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="handleState" Id="{06bcadd0-f872-47c0-9bf6-bb0f6fe89b25}" FolderPath="Service memebers\">
+      <Declaration><![CDATA[METHOD PRIVATE handleState
+VAR
+	i : DINT;
+
+	exceptionCode : __SYSTEM.ExceptionCode;
+	exception : Core.IException;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[CASE _State OF
+	AUTOMATION_CONTROLLER_STATE.WORKING:
+		__TRY
+			OnWorking();
+		__CATCH(exceptionCode)
+			exception := Core.ExceptionManager.GetLastException(exceptionCode);	
+
+			fillErrorLogByException('LastWorkingError', Diagnostics.LastWorkingError, exception);			
+				
+			IF exception.Severity = Core.ERROR_SEVERITY.CRITICAL THEN
+				setState(AUTOMATION_CONTROLLER_STATE.FAULT);			
+			END_IF
+		__ENDTRY	
+		
+	AUTOMATION_CONTROLLER_STATE.FAULT:
+		__TRY
+			OnFault();	
+		__CATCH(exceptionCode)
+			exception := Core.ExceptionManager.GetLastException(exceptionCode);
+	
+			fillErrorLogByException('LastFaultError', Diagnostics.LastFaultError, exception);
+		__ENDTRY	
+END_CASE]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="Initialize" Id="{7fd539c5-f38c-4733-8fc6-40b08d7ee113}">
+      <Declaration><![CDATA[METHOD FINAL Initialize : BOOL
+VAR
+	i : DINT;
+
+	exceptionCode : __SYSTEM.ExceptionCode;
+	exception : Core.IException;
+	
+	deviceNotSpecifiedException : Core.DataMemberNotSpecifiedException;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF _State <> AUTOMATION_CONTROLLER_STATE.INITIAL THEN
+	RETURN;
+END_IF
+
+__TRY
+	IF _DeviceCount > 0 AND_THEN NOT __ISVALIDREF(Devices) THEN
+		deviceNotSpecifiedException.Throw(Namespacename, ClassName, __POUNAME(), __POSITION(), 'Devices');
+	END_IF
+	
+	OnPreDeviceInitializing();
+	
+	Initialize := TRUE;
+
+	IF _DeviceCount > 0 THEN
+		FOR i := 0 TO _DeviceCount - 1 DO
+			IF Devices[i] = 0 THEN
+				deviceNotSpecifiedException.Throw(Namespacename, ClassName, __POUNAME(), __POSITION(), Core.Strings.Concat255('Devices[', TO_STRING(i), ']'));			
+			END_IF
+			
+			Initialize := Initialize AND Devices[i].Initialize();
+		END_FOR
+	END_IF
+
+	Initialize := Initialize AND OnPostDeviceInitializing();
+	
+	IF Initialize THEN
+		setState(AUTOMATION_CONTROLLER_STATE.WORKING);
+	END_IF	
+__CATCH(exceptionCode)
+	setState(AUTOMATION_CONTROLLER_STATE.FAULT);
+	
+	exception := Core.ExceptionManager.GetLastException(exceptionCode);
+					
+	SetException(exception);
+	
+	fillErrorLogByException('InitializationError', Diagnostics.InitializationError, exception);					
+__ENDTRY]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="OnFault" Id="{9370487f-7fea-43ae-9cc1-aae11a25ede9}" FolderPath="Methods to override\">
+      <Declaration><![CDATA[METHOD PROTECTED OnFault]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="OnPostDeviceInitializing" Id="{32dd909d-10a1-4293-948a-a0f830b1d641}" FolderPath="Methods to override\Initialization\">
+      <Declaration><![CDATA[METHOD PROTECTED OnPostDeviceInitializing : BOOL]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[OnPostDeviceInitializing := TRUE;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="OnPreDeviceInitializing" Id="{a106ef67-e153-43f0-874c-4510eb9d2394}" FolderPath="Methods to override\Initialization\">
+      <Declaration><![CDATA[METHOD PROTECTED OnPreDeviceInitializing]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="OnRecover" Id="{b4f78e71-4a9a-4c57-bfdd-e9a095fd809c}" FolderPath="Methods to override\">
+      <Declaration><![CDATA[METHOD PROTECTED OnRecover]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="OnReset" Id="{25c5ef73-f7e0-4474-9f24-c9b2873b9bf4}" FolderPath="Methods to override\">
+      <Declaration><![CDATA[METHOD PROTECTED OnReset]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="OnResetting" Id="{7d4edabc-cee2-4408-9279-4bc560def81b}" FolderPath="Methods to override\">
+      <Declaration><![CDATA[METHOD PROTECTED OnResetting : BOOL]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[OnResetting := TRUE;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="OnWorking" Id="{15890617-65bf-4831-998b-d505cf7381fa}" FolderPath="Methods to override\">
+      <Declaration><![CDATA[METHOD PROTECTED ABSTRACT OnWorking]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="recoverAfterError" Id="{32daa7cc-e957-415b-bebe-619a212814e9}" FolderPath="Service memebers\">
+      <Declaration><![CDATA[METHOD PRIVATE recoverAfterError
+VAR
+	i : DINT;
+	
+	exceptionCode : __SYSTEM.ExceptionCode;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_Error.Clear();
+
+IF __ISVALIDREF(Devices) AND_THEN _DeviceCount > 0 THEN
+	FOR i := 0 TO _DeviceCount - 1 DO
+		IF Devices[i].Enabled THEN
+			Devices[i].Recover();
+			
+			IF Devices[i].HasError THEN
+				SetError(Devices[i].Error);
+			END_IF
+		END_IF
+	END_FOR
+END_IF
+
+__TRY
+	OnRecover();
+__CATCH(exceptionCode)	
+	SetException(Core.ExceptionManager.GetLastException(exceptionCode));	
+__ENDTRY]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="Reset" Id="{c4091b78-c503-448a-b168-64ce7c8d7581}">
+      <Declaration><![CDATA[METHOD FINAL Reset
+VAR
+	i : DINT;
+	
+	exceptionCode : __SYSTEM.ExceptionCode;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_Error.Clear();
+
+IF __ISVALIDREF(Devices) AND_THEN _DeviceCount > 0 THEN
+	FOR i := 0 TO _DeviceCount - 1 DO
+		IF Devices[i].Enabled THEN 
+			Devices[i].Reset();
+
+			IF Devices[i].HasError THEN
+				SetError(Devices[i].Error);
+				RETURN;
+			END_IF				
+		END_IF
+	END_FOR
+END_IF
+
+__TRY
+	OnReset();
+
+	setState(AUTOMATION_CONTROLLER_STATE.WORKING);
+__CATCH(exceptionCode)	
+	SetException(Core.ExceptionManager.GetLastException(exceptionCode));	
+__ENDTRY]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="setState" Id="{7e5ac7e2-185d-4ec3-b6e7-9e31ed957150}" FolderPath="Service memebers\">
+      <Declaration><![CDATA[METHOD PRIVATE setState
+VAR_INPUT
+	state : AUTOMATION_CONTROLLER_STATE;
+END_VAR
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_PreviousState := _State;
+_State := state;]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="State" Id="{f3ab473a-80e6-4bd6-b784-752a1cb14670}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+PROPERTY FINAL State : AUTOMATION_CONTROLLER_STATE]]></Declaration>
+      <Get Name="Get" Id="{7d4b34b5-9ddf-46c0-9b80-9ef6df164cce}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[State := _State;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="StateChanged" Id="{df57cb91-bcfb-434c-b076-da350d47a94b}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+PROPERTY FINAL StateChanged : BOOL]]></Declaration>
+      <Get Name="Get" Id="{fca28ea5-bb0d-4c86-a0a2-b255a2719311}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[StateChanged := _State <> _PreviousState;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="StateName" Id="{c6b0684d-331d-4488-826f-68a209136e66}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+PROPERTY StateName : STRING]]></Declaration>
+      <Get Name="Get" Id="{86174601-bf03-442e-9801-071bb0514f22}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[StateName := TO_STRING(_State);]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="TryGetDeviceByIndex" Id="{bea4890c-e5b0-44c2-89ba-2e9681a90b7f}">
+      <Declaration><![CDATA[METHOD FINAL TryGetDeviceByIndex : IDevice
+VAR_INPUT
+	index : BYTE;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF index < 0 OR_ELSE index >= _DeviceCount OR_ELSE NOT __ISVALIDREF(Devices) THEN
+	RETURN;
+END_IF
+
+TryGetDeviceByIndex := Devices[index];]]></ST>
+      </Implementation>
+    </Method>
+  </POU>
+</TcPlcObject>
