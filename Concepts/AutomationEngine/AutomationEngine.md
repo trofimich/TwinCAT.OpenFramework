@@ -32,7 +32,7 @@ The **logic conductor**.
 * Does **not** interact with I/O directly
 * Operates through high-level device methods
 
-Supported states are: `INITIAL`, `WORKING`, `FAULT`, `RESETTING`
+Supported states are: `INITIAL`, `WORKING`, `FAULT`
 
 ### 3.3. Device
 
