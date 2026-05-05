@@ -1,0 +1,187 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="AutomationRunner" Id="{91ad6e09-e217-437d-b360-1103f460a0a5}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+
+.. <legal notes>
+
+legal notes
+=================
+| SPDX-FileCopyrightText: © 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+| SPDX-License-Identifier: LGPL-3.0-only
+| For details check: LGPL-3.0-only_
+
+.. _LGPL-3.0-only: https://www.gnu.org/licenses/lgpl-3.0.en.html
+
+.. </legal notes>
+
+*)
+
+{attribute 'no_explicit_call' := 'do not call this function block directly'} 
+FUNCTION_BLOCK AutomationRunner EXTENDS Core.Object IMPLEMENTS IAutomationRunner
+VAR_OUTPUT
+	InitializationErrorMessage : Core.ERROR_MESSAGE;
+END_VAR
+VAR
+	_ClassName : STRING := __POUNAME();
+
+	_State : AUTOMATION_RUNNER_STATE;
+END_VAR
+VAR_STAT
+	{attribute 'hide'} 
+    _InstanceCounter : BYTE := 0;
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[]]></ST>
+    </Implementation>
+    <Property Name="ClassName" Id="{12ea2f4d-4597-416e-8305-e7d74fbf4c45}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+PROPERTY ClassName : STRING]]></Declaration>
+      <Get Name="Get" Id="{9841726e-851b-4678-a1b5-99c8a1cc58e0}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ClassName := _ClassName;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="CodeExecutionPhase" Id="{efb7b0b9-70db-41a4-b4ff-ce52174473b3}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+PROPERTY FINAL CodeExecutionPhase : BOOL]]></Declaration>
+      <Get Name="Get" Id="{cecc6bd9-038a-46c9-8b45-fbc1f53aeac6}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[CodeExecutionPhase := GlobalState.CodeExecutionPhase;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="CycleCounter" Id="{48d69b36-ca3c-42e8-81f7-1847fca33118}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+PROPERTY FINAL CycleCounter : LWORD]]></Declaration>
+      <Get Name="Get" Id="{57f068b8-2ae6-4baf-833c-f4f9332269cb}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[CycleCounter := GlobalState.CycleCounter;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="Execute" Id="{16952208-3067-4c16-b350-7fd85c7e6a7d}">
+      <Declaration><![CDATA[METHOD FINAL Execute
+VAR_IN_OUT CONSTANT
+	controllers : ARRAY [*] OF IAutomationController;
+END_VAR
+VAR
+	i : DINT;
+			
+	initialized : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[GlobalState.CodeExecutionPhase := TRUE;
+
+Core.SystemDateTimeManager.Execute();		
+
+Core.LogManager.Execute();
+
+IF Core.SystemDateTimeManager.SystemTimeValid THEN
+	CASE _State OF
+		AUTOMATION_RUNNER_STATE.INITIALIZING:
+			IF UPPER_BOUND(controllers, 1) - LOWER_BOUND(controllers, 1) < 0 THEN
+				_State := AUTOMATION_RUNNER_STATE.INITIALIZATION_FAILED;		
+				InitializationErrorMessage := "No controllers to run";
+				RETURN;		
+			END_IF
+
+			initialized := TRUE;
+			
+			FOR i := LOWER_BOUND(controllers, 1) TO UPPER_BOUND(controllers, 1) DO
+				IF Controllers[i] = 0 THEN
+					_State := AUTOMATION_RUNNER_STATE.INITIALIZATION_FAILED;
+					InitializationErrorMessage := Core.WideStrings.Concat255("controller[", TO_WSTRING(i), "] is null");
+					EXIT;					
+				END_IF
+
+				Controllers[i].Initialize();
+				
+				CASE Controllers[i].State OF
+					AUTOMATION_CONTROLLER_STATE.FAULT:
+						_State := AUTOMATION_RUNNER_STATE.INITIALIZATION_FAILED;
+						InitializationErrorMessage := Core.WideStrings.Concat255("controller[", TO_WSTRING(i), "] failed");
+						EXIT;
+						
+					AUTOMATION_CONTROLLER_STATE.INITIAL:
+						initialized := FALSE;						
+				END_CASE
+			END_FOR		
+			
+			IF initialized THEN
+				_State := AUTOMATION_RUNNER_STATE.RUNNING;
+			END_IF
+		
+		AUTOMATION_RUNNER_STATE.RUNNING:
+			FOR i := LOWER_BOUND(controllers, 1) TO UPPER_BOUND(controllers, 1) DO
+				Controllers[i].Execute();			
+			END_FOR		
+	END_CASE
+
+END_IF
+
+Core.ExceptionManager.Cleanup();
+Core.DynamicMemoryManager.CleanupMemory();
+
+GlobalState.CycleCounter := GlobalState.CycleCounter + 1;
+GlobalState.CodeExecutionPhase := FALSE;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="FB_init" Id="{9dcb424f-eaa9-4a0f-923f-5afac333563a}">
+      <Declaration><![CDATA[METHOD FB_init : BOOL
+VAR_INPUT
+	(* if TRUE, the retain variables are initialized (warm start / cold start)*)
+	bInitRetains	: BOOL;
+	(* if TRUE, the instance afterwards gets moved into the copy code (online change)*)
+	bInCopyCode	: BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_InstanceCounter := _InstanceCounter + 1;]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="NamespaceName" Id="{d334c947-0a4c-4dfb-8401-47625a37779f}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+PROPERTY NamespaceName : STRING]]></Declaration>
+      <Get Name="Get" Id="{bed6e691-78c8-4572-bc37-6f5114bddb38}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[NamespaceName := CurrentNamespace.Name;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="SelfSize" Id="{15159a07-9ebc-498d-b2b1-558ebf3db84b}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+PROPERTY SelfSize : ULINT]]></Declaration>
+      <Get Name="Get" Id="{8ba632cf-a14d-49ee-bd64-3903af43dc94}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[SelfSize := XSIZEOF(THIS^);]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="State" Id="{01547c3c-4426-4f09-bee4-07d5ec475004}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+PROPERTY FINAL State : AUTOMATION_RUNNER_STATE]]></Declaration>
+      <Get Name="Get" Id="{4d2a4364-3afa-4b24-8a3f-64df284a4352}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[State := _State;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="StateName" Id="{06754117-469e-4960-a8f1-83200cc43cd1}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+PROPERTY StateName : STRING]]></Declaration>
+      <Get Name="Get" Id="{ba601b6a-9ce0-457e-ac1f-5e869698dcb9}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[StateName := TO_STRING(_State);]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+  </POU>
+</TcPlcObject>

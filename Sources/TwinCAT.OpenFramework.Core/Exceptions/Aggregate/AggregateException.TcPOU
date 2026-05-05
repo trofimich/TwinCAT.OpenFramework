@@ -22,6 +22,7 @@ legal notes
 FUNCTION_BLOCK AggregateException EXTENDS Exception IMPLEMENTS IAggregateException
 VAR
 	_ClassName : STRING := __POUNAME();
+	
 	_InnerExceptions : POINTER TO IException;
 	_InnerExceptionCount : UINT;
 END_VAR]]></Declaration>
@@ -175,9 +176,8 @@ END_IF]]></ST>
     <Method Name="GetMessage" Id="{76c9ffdd-6b67-4a44-aa6c-571f736f1a93}">
       <Declaration><![CDATA[METHOD GetMessage : ERROR_MESSAGE
 VAR_INPUT
-	showLocalTimestamp : BOOL := FALSE;
-	showUtcTimestamp : BOOL := FALSE;
 	showSource : BOOL := FALSE;
+	timestampDisplayMode : TIMESTAMP_DISPLAY_MODE := TIMESTAMP_DISPLAY_MODE.NONE;
 END_VAR
 VAR
 	stringBuilder : WideStringBuilder;
@@ -191,9 +191,9 @@ END_VAR]]></Declaration>
 	.Append(_InnerExceptionCount)
 	.AppendString(Exceptions.AGGREGATE_EXCEPTION_SUFFIX);
 
-IF showLocalTimestamp OR_ELSE showUtcTimestamp THEN
+IF timestampDisplayMode <> TIMESTAMP_DISPLAY_MODE.NONE THEN
 	stringBuilder.AppendString(Exceptions.TIME_PREFIX);
-	AppendTimestampDescription(stringBuilder, showLocalTimestamp, showUtcTimestamp, _LocalTimestamp, _UtcTimestamp);
+	AppendTimestampDescription(stringBuilder, timestampDisplayMode, _LocalTimestamp, _UtcTimestamp);
 END_IF
 
 IF showSource THEN
@@ -204,7 +204,7 @@ END_IF
 FOR i := 0 TO _InnerExceptionCount - 1 DO
 	innerException := _InnerExceptions[i];
 	
-	innerExceptionMessage := innerException.GetMessage(showLocalTimestamp, showUtcTimestamp, showSource);
+	innerExceptionMessage := innerException.GetMessage(showSource, timestampDisplayMode);
 	
 	stringBuilder
 		.AppendString255(WideStrings.NewLine)
@@ -215,6 +215,18 @@ FOR i := 0 TO _InnerExceptionCount - 1 DO
 END_FOR		
 
 stringBuilder.AssignToString(GetMessage);]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="GetRootException" Id="{3947d49e-1dd5-493f-96aa-4bb6602d0186}">
+      <Declaration><![CDATA[METHOD FINAL GetRootException : IException]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF _InnerExceptionCount > 0 THEN
+	GetRootException := GetInnerException(0);
+	
+	GetRootException := GetRootException.GetRootException();
+ELSE
+	GetRootException := THIS^;
+END_IF]]></ST>
       </Implementation>
     </Method>
     <Property Name="InnerExceptionCount" Id="{734e1c9b-9746-493a-8ce4-7a56d60ff952}">
@@ -279,6 +291,49 @@ END_VAR]]></Declaration>
 ELSE
 	Throw(Exceptions.UNSPECIFIED_SOURCE, Exceptions.UNSPECIFIED_SOURCE, sourceMethodName, sourcePosition);
 END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="ToError" Id="{d4ff76fe-085d-4302-a17b-b20e40bfa8ce}">
+      <Declaration><![CDATA[METHOD ToError
+VAR_IN_OUT CONSTANT
+	targetError : ERROR;
+END_VAR
+VAR_INPUT
+	severity : ERROR_SEVERITY;	
+END_VAR
+VAR
+	rootException : IException;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF NOT __ISVALIDREF(targetError) THEN
+	RETURN;
+END_IF
+
+IF _InnerExceptionCount <= 0 THEN
+	targetError.Fill(
+		severity,
+		GetSourceDescription(),
+		Exceptions.UNSPECIFIED_SOURCE,
+		"Empty aggregate exception (zero inner exceptions)",
+		"",
+		LocalTimestamp,
+		UtcTimestamp
+	);
+	
+	RETURN;
+END_IF
+
+rootException := GetInnerException(0);
+
+targetError.Fill(
+	severity,
+	Strings.Concat255(TO_STRING(_InnerExceptionCount), ' exceptions occured'),
+	rootException.GetSourceDescription(),
+	GetMessage(),
+	rootException.GetMessage(),
+	LocalTimestamp,
+	UtcTimestamp
+);]]></ST>
       </Implementation>
     </Method>
   </POU>
