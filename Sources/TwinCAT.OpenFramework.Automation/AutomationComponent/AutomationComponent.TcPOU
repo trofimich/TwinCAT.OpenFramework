@@ -20,30 +20,129 @@ legal notes
 FUNCTION_BLOCK ABSTRACT AutomationComponent EXTENDS Core.Object IMPLEMENTS IAutomationComponent
 VAR
 	_Name : WSTRING;
+
+	_Parent : IParentAutomationComponent;
 	
 	_Enabled : BOOL := TRUE;
 	
 	_ExceptionSeverityResolver : Core.IExceptionSeverityResolver;
+	
+	_OperationalState : OPERATIONAL_STATE;	
+	_OperationalStateReason : WSTRING(255);	
+
+	_InitializationTimer : Tc2_Standard.TON;
 	
 	_Error : Core.ERROR;
 END_VAR]]></Declaration>
     <Implementation>
       <ST><![CDATA[]]></ST>
     </Implementation>
+    <Folder Name="MembersToOverride" Id="{4de05775-7645-48a4-a52c-fd6f5df57e0a}">
+      <Folder Name="Disable" Id="{6b20c619-c34d-4cfe-837d-5610095db22e}" />
+      <Folder Name="Enable" Id="{5f6d993c-ed55-43ec-8695-103564140e0d}" />
+      <Folder Name="Execute" Id="{8b1a2ad4-edb5-41ef-ac33-98eb7d27d61c}" />
+      <Folder Name="Initialization" Id="{ceb990ba-3a7e-4d55-a1af-018a3069f9f8}" />
+      <Folder Name="Recover" Id="{e634e265-1169-4c94-be12-8c2aba6db471}" />
+      <Folder Name="Reset" Id="{003cc016-63c3-45f5-83a5-ccc4de40c6ed}" />
+    </Folder>
     <Folder Name="Service methods" Id="{2407a0ab-9cfa-412f-8f97-557822eedcca}" />
+    <Method Name="DoRecover" Id="{d0fb6471-c42a-444a-b8e5-c9978c9d7c43}" FolderPath="Service methods\">
+      <Declaration><![CDATA[METHOD PROTECTED FINAL DoRecover
+VAR
+	exceptionCode : __SYSTEM.ExceptionCode;
+	exception : Core.IException;	
+	severity : Core.ERROR_SEVERITY;
+	
+	i : Core.INT_INDEX;
+		
+	child : IChildAutomationComponent;	
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_Error.Clear();
+
+__TRY
+	OnBeforeChildrenRecover();
+__CATCH(exceptionCode)		
+	exception := Core.ExceptionManager.GetLastException(exceptionCode);
+					
+	severity := _ExceptionSeverityResolver.GetSeverity(exception, 'OnBeforeChildrenRecover');
+
+	SetException(exception, severity);
+
+	IF severity = Core.ERROR_SEVERITY.CRITICAL THEN
+		SetState(OPERATIONAL_STATE.FAULTED, "OnBeforeChildrenRecover error");		
+	END_IF
+__ENDTRY
+
+FOR i := 0 TO InternalChildCount - 1 DO
+	child := InternalTryGetChildByIndex(i);
+	
+	IF child.Enabled AND_THEN child.OperationalState = OPERATIONAL_STATE.OPERATIONAL AND_THEN child.HasError THEN
+		child.Recover();
+		
+		IF child.HasError AND_THEN child.Error.Severity = Core.ERROR_SEVERITY.CRITICAL THEN
+			SetError(child.Error);
+			SetState(OPERATIONAL_STATE.FAULTED, "Child Recover error");		
+		END_IF
+	END_IF
+END_FOR
+
+__TRY
+	OnAfterChildrenRecover();
+__CATCH(exceptionCode)		
+	exception := Core.ExceptionManager.GetLastException(exceptionCode);
+					
+	severity := _ExceptionSeverityResolver.GetSeverity(exception, 'OnAfterChildrenRecover');
+
+	SetException(exception, severity);
+
+	IF severity = Core.ERROR_SEVERITY.CRITICAL THEN
+		SetState(OPERATIONAL_STATE.FAULTED, "OnAfterChildrenRecover error");		
+	END_IF
+__ENDTRY]]></ST>
+      </Implementation>
+    </Method>
     <Property Name="Enabled" Id="{aa3b4270-b240-4ce9-898f-afdfb0a11b5d}">
       <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
-PROPERTY Enabled : BOOL]]></Declaration>
+PROPERTY FINAL Enabled : BOOL]]></Declaration>
       <Get Name="Get" Id="{cbdce78d-e4f1-4903-acbe-f5f5552fc11c}">
         <Declaration><![CDATA[]]></Declaration>
         <Implementation>
           <ST><![CDATA[Enabled := _Enabled;]]></ST>
         </Implementation>
       </Get>
-      <Set Name="Set" Id="{137c3adb-a47c-4b4a-8abd-989fbe2150ce}">
-        <Declaration><![CDATA[]]></Declaration>
+      <Set Name="Set" Id="{c2ea677c-f5dd-4c98-93ce-34ce7d6752db}">
+        <Declaration><![CDATA[VAR
+	i : Core.INT_INDEX;
+	
+	child : IChildAutomationComponent;
+END_VAR]]></Declaration>
         <Implementation>
-          <ST><![CDATA[_Enabled := Enabled;]]></ST>
+          <ST><![CDATA[IF _Enabled = Enabled THEN
+	RETURN;
+END_IF
+
+IF Enabled THEN
+	OnBeforeChildrenEnable();
+ELSE
+	OnBeforeChildrenDisable();
+END_IF
+
+FOR i := 0 TO InternalChildCount - 1 DO
+	child := InternalTryGetChildByIndex(i);
+	
+	IF child <> 0 THEN
+		child.Enabled := Enabled;
+	END_IF
+END_FOR
+
+IF Enabled THEN
+	OnAfterChildrenEnable();
+ELSE
+	OnAfterChildrenDisable();
+END_IF
+
+_Enabled := Enabled;]]></ST>
         </Implementation>
       </Set>
     </Property>
@@ -77,6 +176,85 @@ END_IF]]></ST>
         </Implementation>
       </Set>
     </Property>
+    <Method Name="Execute" Id="{0c62a304-be7d-4b17-9ec6-dcdf997a75e1}">
+      <Declaration><![CDATA[METHOD FINAL Execute
+VAR
+	exceptionCode : __SYSTEM.ExceptionCode;
+	exception : Core.IException;	
+	severity : Core.ERROR_SEVERITY;
+	
+	i : Core.INT_INDEX;
+		
+	child : IChildAutomationComponent;	
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF NOT Enabled OR_ELSE (_OperationalState <> OPERATIONAL_STATE.OPERATIONAL AND_THEN _OperationalState <> OPERATIONAL_STATE.FAULTED) THEN
+	RETURN;
+END_IF
+
+// automatic non-critical error recovering
+IF _OperationalState = OPERATIONAL_STATE.OPERATIONAL AND_THEN HasError AND_THEN _Error.Severity <> Core.ERROR_SEVERITY.CRITICAL THEN
+	DoRecover();
+END_IF
+
+// before execute processing
+__TRY
+	OnBeforeExecute();
+__CATCH(exceptionCode)		
+	exception := Core.ExceptionManager.GetLastException(exceptionCode);
+					
+	severity := _ExceptionSeverityResolver.GetSeverity(exception, 'OnBeforeExecute');
+
+	SetException(exception, severity);
+
+	IF severity = Core.ERROR_SEVERITY.CRITICAL THEN
+		SetState(OPERATIONAL_STATE.FAULTED, "OnBeforeExecute error");		
+	END_IF
+__ENDTRY
+
+// execution processing
+CASE _OperationalState OF
+	OPERATIONAL_STATE.OPERATIONAL:
+		__TRY
+			OnWorking();
+		__CATCH(exceptionCode)
+			exception := Core.ExceptionManager.GetLastException(exceptionCode);	
+
+			severity := _ExceptionSeverityResolver.GetSeverity(exception, 'OnWorking');
+
+			SetException(exception, severity);
+		
+			IF severity = Core.ERROR_SEVERITY.CRITICAL THEN
+				SetState(OPERATIONAL_STATE.FAULTED, "OnWorking error");		
+			END_IF
+		__ENDTRY	
+		
+	OPERATIONAL_STATE.FAULTED:
+		__TRY
+			OnFault();	
+		__CATCH(exceptionCode)
+			exception := Core.ExceptionManager.GetLastException(exceptionCode);
+
+			severity := _ExceptionSeverityResolver.GetSeverity(exception, 'OnFault');	
+		__ENDTRY	
+END_CASE
+
+// after execute processing
+__TRY
+	OnAfterExecute();
+__CATCH(exceptionCode)		
+	exception := Core.ExceptionManager.GetLastException(exceptionCode);
+					
+	severity := _ExceptionSeverityResolver.GetSeverity(exception, 'OnAfterExecute');
+
+	SetException(exception, severity);
+
+	IF severity = Core.ERROR_SEVERITY.CRITICAL THEN
+		SetState(OPERATIONAL_STATE.FAULTED, "OnAfterExecute error");		
+	END_IF
+__ENDTRY]]></ST>
+      </Implementation>
+    </Method>
     <Method Name="FB_init" Id="{bf2ff865-6631-4d1d-87f4-db36001851c5}">
       <Declaration><![CDATA[METHOD FB_init : BOOL
 VAR_INPUT
@@ -92,6 +270,16 @@ END_VAR]]></Declaration>
 _ExceptionSeverityResolver := Core.Exceptions.AnyExceptionToCriticalSeverityResolver;]]></ST>
       </Implementation>
     </Method>
+    <Property Name="HasChildren" Id="{a95e62dc-41eb-4a8e-9edd-0f2051314ffc}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+PROPERTY FINAL HasChildren : BOOL]]></Declaration>
+      <Get Name="Get" Id="{d8081265-9c5a-4966-b3ca-cf25aa8e61d4}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[HasChildren := InternalChildCount > 0;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
     <Property Name="HasError" Id="{b058a64f-59a4-414d-b578-01945ffe1e29}">
       <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
 PROPERTY FINAL HasError : BOOL]]></Declaration>
@@ -102,8 +290,104 @@ PROPERTY FINAL HasError : BOOL]]></Declaration>
         </Implementation>
       </Get>
     </Property>
+    <Property Name="HasParent" Id="{0cb60557-4b37-468e-b5b8-462763379c8a}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+PROPERTY FINAL HasParent : BOOL]]></Declaration>
+      <Get Name="Get" Id="{8cd25382-dc82-45c5-aba6-b17ec5a71249}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[HasParent := _Parent <> 0;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="InitializationTimeout" Id="{9b430821-2485-45c1-aea1-812b2962dbb2}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+PROPERTY FINAL InitializationTimeout : TIME]]></Declaration>
+      <Get Name="Get" Id="{87c850fb-dc27-4c26-beea-f228fa9042e3}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[InitializationTimeout := _InitializationTimer.PT;]]></ST>
+        </Implementation>
+      </Get>
+      <Set Name="Set" Id="{496bac58-2886-40a5-a9c9-db583b496ce0}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[_InitializationTimer.PT := InitializationTimeout;]]></ST>
+        </Implementation>
+      </Set>
+    </Property>
     <Method Name="Initialize" Id="{dc8b4ac8-c6c4-4b95-8f4f-93a38c521c55}">
-      <Declaration><![CDATA[METHOD ABSTRACT Initialize : BOOL]]></Declaration>
+      <Declaration><![CDATA[METHOD FINAL Initialize : BOOL
+VAR
+	i : Core.INT_INDEX;
+	
+	parent : IChildAutomationComponent;
+	child : IChildAutomationComponent;
+	
+	exceptionCode : __SYSTEM.ExceptionCode;
+	exception : Core.IException;
+	
+	initializationTimeoutException : Core.TimeoutException;
+	notSpecifiedException : Core.DataMemberNotSpecifiedException;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF _OperationalState <> OPERATIONAL_STATE.INITIALIZING THEN
+	RETURN;
+END_IF
+
+__TRY
+	_InitializationTimer(IN := TRUE, PT := Parameters.InitializationTimeout);
+	
+	IF _InitializationTimer.Q THEN		
+		initializationTimeoutException.ThrowByObject(THIS^, __POUNAME(), __POSITION(), _InitializationTimer.PT, Core.WideStrings.Concat255("Initialization timeout ", TO_WSTRING(_InitializationTimer.PT), " elapsed"));
+	END_IF
+	
+	IF __QUERYINTERFACE(THIS^, parent) AND_THEN NOT parent.HasParent THEN
+		notSpecifiedException.ThrowByObject(THIS^, __POUNAME(), __POSITION(), 'Parent');			
+	END_IF
+
+	OnBeforeChildrenInitializing();
+	
+	Initialize := TRUE;
+
+	FOR i := 0 TO InternalChildCount - 1 DO
+		child := InternalTryGetChildByIndex(i);
+
+		IF child = 0 THEN
+			notSpecifiedException.ThrowByObject(THIS^, __POUNAME(), __POSITION(), Core.Strings.Concat255('Child[', TO_STRING(i), ']'));			
+		END_IF
+			
+		Initialize := Initialize AND child.Initialize();
+	END_FOR
+
+	Initialize := Initialize AND OnAfterChildrenInitializing();
+	
+	IF Initialize THEN
+		SetState(OPERATIONAL_STATE.OPERATIONAL, "Successfull initialization");
+	END_IF	
+__CATCH(exceptionCode)
+	SetState(OPERATIONAL_STATE.INVALID, "Initialization error");
+	
+	exception := Core.ExceptionManager.GetLastException(exceptionCode);
+	
+	SetException(exception, Core.ERROR_SEVERITY.CRITICAL);					
+__ENDTRY]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="InternalChildCount" Id="{48592299-9873-4fd4-a89b-0b10113bb731}" FolderPath="MembersToOverride\">
+      <Declaration><![CDATA[PROPERTY PROTECTED ABSTRACT InternalChildCount : Core.INT_INDEX]]></Declaration>
+      <Get Name="Get" Id="{d250ce9f-9499-4092-9f4a-64dad379bfb6}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="InternalTryGetChildByIndex" Id="{0aedfa61-b8d1-4753-b34c-92d16e1d7656}" FolderPath="MembersToOverride\">
+      <Declaration><![CDATA[METHOD PROTECTED ABSTRACT InternalTryGetChildByIndex : IChildAutomationComponent
+VAR_INPUT
+	index : Core.INT_INDEX;
+END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[]]></ST>
       </Implementation>
@@ -118,16 +402,185 @@ PROPERTY FINAL Name : WSTRING]]></Declaration>
         </Implementation>
       </Get>
     </Property>
-    <Method Name="Reset" Id="{d9e3b1b6-5f1c-4e0c-b7fb-2f75b7f46fbb}">
-      <Declaration><![CDATA[METHOD ABSTRACT Reset]]></Declaration>
+    <Method Name="OnAfterChildrenDisable" Id="{0b99ab48-a5b8-4236-ae81-3b3496bdbac8}" FolderPath="MembersToOverride\Disable\">
+      <Declaration><![CDATA[METHOD PROTECTED OnAfterChildrenDisable]]></Declaration>
       <Implementation>
         <ST><![CDATA[]]></ST>
       </Implementation>
     </Method>
-    <Method Name="SetError" Id="{6f8f029d-583e-404e-bcbb-a9053e0cd357}" FolderPath="Service methods\">
-      <Declaration><![CDATA[METHOD PROTECTED FINAL SetError
+    <Method Name="OnAfterChildrenEnable" Id="{c9292f54-f6bd-41f1-80ca-b6aa19f0a74d}" FolderPath="MembersToOverride\Enable\">
+      <Declaration><![CDATA[METHOD PROTECTED OnAfterChildrenEnable]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="OnAfterChildrenInitializing" Id="{32dd909d-10a1-4293-948a-a0f830b1d641}" FolderPath="MembersToOverride\Initialization\">
+      <Declaration><![CDATA[METHOD PROTECTED OnAfterChildrenInitializing : BOOL]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[OnAfterChildrenInitializing := TRUE;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="OnAfterChildrenRecover" Id="{2841caf8-ba16-42d8-899d-5e43203a50e2}" FolderPath="MembersToOverride\Recover\">
+      <Declaration><![CDATA[METHOD PROTECTED OnAfterChildrenRecover]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="OnAfterChildrenReset" Id="{e99dc11f-2fff-4f0d-9b7f-f60ddb158f59}" FolderPath="MembersToOverride\Reset\">
+      <Declaration><![CDATA[METHOD PROTECTED OnAfterChildrenReset]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="OnAfterExecute" Id="{cf5426d2-8f3f-4cad-968b-343295c1f1ce}" FolderPath="MembersToOverride\Execute\">
+      <Declaration><![CDATA[METHOD PROTECTED OnAfterExecute]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="OnBeforeChildrenDisable" Id="{7d63757b-d20a-4b70-b223-bea491030dd5}" FolderPath="MembersToOverride\Disable\">
+      <Declaration><![CDATA[METHOD PROTECTED OnBeforeChildrenDisable]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="OnBeforeChildrenEnable" Id="{f25ef58d-dbea-406d-85ab-4371c5209204}" FolderPath="MembersToOverride\Enable\">
+      <Declaration><![CDATA[METHOD PROTECTED OnBeforeChildrenEnable]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="OnBeforeChildrenInitializing" Id="{a106ef67-e153-43f0-874c-4510eb9d2394}" FolderPath="MembersToOverride\Initialization\">
+      <Declaration><![CDATA[METHOD PROTECTED OnBeforeChildrenInitializing]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="OnBeforeChildrenRecover" Id="{3f51010e-a26b-4d3f-aaf4-c28bf367aace}" FolderPath="MembersToOverride\Recover\">
+      <Declaration><![CDATA[METHOD PROTECTED OnBeforeChildrenRecover]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="OnBeforeChildrenReset" Id="{f127d7bf-1e1c-4701-bc19-60ecb7f497a3}" FolderPath="MembersToOverride\Reset\">
+      <Declaration><![CDATA[METHOD PROTECTED OnBeforeChildrenReset]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="OnBeforeExecute" Id="{4313043a-b910-4e6c-b517-63b5fbe06b14}" FolderPath="MembersToOverride\Execute\">
+      <Declaration><![CDATA[METHOD PROTECTED OnBeforeExecute]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="OnFault" Id="{943bf15e-e2cd-4ae2-b01b-f23e857b86e9}" FolderPath="MembersToOverride\">
+      <Declaration><![CDATA[METHOD PROTECTED OnFault]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="OnOperationalStateChanged" Id="{857776d0-e8bc-4fac-912b-ac03ab5cdf30}" FolderPath="MembersToOverride\">
+      <Declaration><![CDATA[METHOD PROTECTED OnOperationalStateChanged
+VAR_INPUT
+	previousState : OPERATIONAL_STATE;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="OnWorking" Id="{415dab63-745c-4ed0-b9cc-5fc4260ae225}" FolderPath="MembersToOverride\">
+      <Declaration><![CDATA[METHOD PROTECTED OnWorking]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="OperationalState" Id="{f3ab473a-80e6-4bd6-b784-752a1cb14670}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+PROPERTY FINAL OperationalState : OPERATIONAL_STATE]]></Declaration>
+      <Get Name="Get" Id="{7d4b34b5-9ddf-46c0-9b80-9ef6df164cce}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[OperationalState := _OperationalState;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="OperationalStateReason" Id="{f68dd7cb-5882-4a97-880b-c0e34a9a06a5}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+PROPERTY FINAL OperationalStateReason : REFERENCE TO WSTRING(255)]]></Declaration>
+      <Get Name="Get" Id="{165bb29f-d77b-4b59-a0e9-8113a39adaab}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[OperationalStateReason REF= _OperationalStateReason;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="Reset" Id="{d9e3b1b6-5f1c-4e0c-b7fb-2f75b7f46fbb}">
+      <Declaration><![CDATA[METHOD FINAL Reset
+VAR
+	exceptionCode : __SYSTEM.ExceptionCode;
+	exception : Core.IException;	
+	severity : Core.ERROR_SEVERITY;
+	
+	i : Core.INT_INDEX;
+		
+	child : IChildAutomationComponent;	
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF NOT Enabled OR_ELSE _OperationalState <> OPERATIONAL_STATE.FAULTED THEN
+	RETURN;
+END_IF
+
+_Error.Clear();
+
+__TRY
+	OnBeforeChildrenReset();
+__CATCH(exceptionCode)		
+	exception := Core.ExceptionManager.GetLastException(exceptionCode);
+					
+	severity := _ExceptionSeverityResolver.GetSeverity(exception, 'OnBeforeChildrenReset');
+
+	SetException(exception, severity);
+
+	IF severity = Core.ERROR_SEVERITY.CRITICAL THEN
+		SetState(OPERATIONAL_STATE.FAULTED, "OnBeforeChildrenReset error");		
+	END_IF
+__ENDTRY
+
+FOR i := 0 TO InternalChildCount - 1 DO
+	child := InternalTryGetChildByIndex(i);
+	
+	IF child.Enabled AND_THEN child.OperationalState = OPERATIONAL_STATE.OPERATIONAL AND_THEN child.HasError THEN
+		child.Reset();
+		
+		IF child.HasError AND_THEN child.Error.Severity = Core.ERROR_SEVERITY.CRITICAL THEN
+			SetError(child.Error);
+			SetState(OPERATIONAL_STATE.FAULTED, "Child Reset error");		
+		END_IF
+	END_IF
+END_FOR
+
+__TRY
+	OnAfterChildrenReset();
+	
+	SetState(OPERATIONAL_STATE.OPERATIONAL, "Reset");
+__CATCH(exceptionCode)		
+	exception := Core.ExceptionManager.GetLastException(exceptionCode);
+					
+	severity := _ExceptionSeverityResolver.GetSeverity(exception, 'OnAfterChildrenReset');
+
+	SetException(exception, severity);
+
+	IF severity = Core.ERROR_SEVERITY.CRITICAL THEN
+		SetState(OPERATIONAL_STATE.FAULTED, "OnAfterChildrenReset error");		
+	END_IF
+__ENDTRY]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="SetError" Id="{db1622c3-17d5-4c3e-9fc6-44f5ab658994}" FolderPath="Service methods\">
+      <Declaration><![CDATA[METHOD PROTECTED SetError
 VAR_IN_OUT CONSTANT
-	error : Core.ERROR;
+	error : Core.ERROR;  
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[IF NOT __ISVALIDREF(error) OR_ELSE error.Empty THEN
@@ -136,23 +589,55 @@ END_IF
 
 IF _Error.Empty OR_ELSE _Error.Severity < error.Severity THEN
 	_Error := error;
+	
+	Core.LogManager.TryLogError(_Error);
 END_IF]]></ST>
       </Implementation>
     </Method>
-    <Method Name="SetException" Id="{edf4ab75-cac1-432d-a0c8-24c661bfc686}" FolderPath="Service methods\">
+    <Method Name="SetException" Id="{c8063572-3da9-4eb4-bd36-833c249f0127}" FolderPath="Service methods\">
       <Declaration><![CDATA[METHOD PROTECTED SetException
+VAR_IN_OUT CONSTANT
+	exception : Core.IException;  
+END_VAR
 VAR_INPUT
-	exception : Core.IException;
-	severity : Core.ERROR_SEVERITY; 
+	severity : Core.ERROR_SEVERITY;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[IF exception = 0 OR_ELSE exception.Empty THEN
+        <ST><![CDATA[IF NOT __ISVALIDREF(exception) OR_ELSE exception.Empty THEN
 	RETURN;
 END_IF
 
 IF _Error.Empty OR_ELSE _Error.Severity < severity THEN
 	exception.ToError(_Error, severity);
+	
+	Core.LogManager.TryLogError(_Error);
 END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="SetState" Id="{7e5ac7e2-185d-4ec3-b6e7-9e31ed957150}" FolderPath="Service methods\">
+      <Declaration><![CDATA[METHOD PROTECTED SetState
+VAR_INPUT
+	state : OPERATIONAL_STATE;
+	reason : WSTRING(255);
+END_VAR
+VAR
+	previousState : OPERATIONAL_STATE;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_OperationalStateReason := reason;
+
+IF _OperationalState = state THEN
+	RETURN;
+END_IF
+
+previousState := _OperationalState;
+
+_OperationalState := state;
+
+__TRY
+	OnOperationalStateChanged(previousState);
+__CATCH
+__ENDTRY]]></ST>
       </Implementation>
     </Method>
   </POU>
