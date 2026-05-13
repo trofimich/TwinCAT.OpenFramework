@@ -35,7 +35,7 @@ It is based on an error-handling concept that is unique for Structured Text and 
   Simplified serialization and deserialization of structures to and from JSON documents.
 
 - **Basic automation engine**  
-  A ready-to-use state machine: AutomationRunner supports three fundamental states: *Initializing*, *Running*, *InitializationFailed* and can handle multiple AutomationController instances with five fundamental states: *Initial*, *Running*, *Stopping*, *Fault*. Concept described [here](Concepts/AutomationEngine/AutomationEngine.md)
+  A ready-to-use state machine: AutomationRunner supports three fundamental states: *INITIALIZING*, *RUNNING*, *INITIALIZATION_FAILED* and can handle multiple AutomationComponent instances with four fundamental states: *INITIALIZING*, *OPERATIONAL*, *FAULTED*, *INVALID*. Concept described [here](Concepts/AutomationEngine/AutomationEngine.md)
 
 - **Controllable devices**  
   Ready-made abstractions for interacting with the external world, such as terminals or communication channels. Concept described [here](Concepts/AutomationEngine/AutomationEngine.md) as part of AutomationEngine.
