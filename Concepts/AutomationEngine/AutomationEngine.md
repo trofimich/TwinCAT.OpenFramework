@@ -23,18 +23,26 @@ The lifecycle orchestrator — the **heart of the system**.
 
 Supported states are: `INITIALIZING`, `RUNNING`, `INITIALIZATION_FAILED`
 
-### 3.2. AutomationController
+### 3.2. AutomationComponent
+
+The base class for all other automation components.
+
+Supported states are: 
+* `INITIALIZING` - state immediately after program start; performs initialization logic
+* `OPERATIONAL` - normal operational state after successful initialization
+* `FAULTED` - state entered after a critical error occurs in the OPERATIONAL state; reset is required to return to the OPERATIONAL state
+* `INVALID` - state entered when initialization cannot be completed successfully
+* 
+### 3.3. AutomationController (extends AutomationComponent)
 
 The **logic conductor**.
 
-* Owns a set of devices
+* Owns a set of children (devices)
 * Manipulates them to perform a specific technological task
 * Does **not** interact with I/O directly
 * Operates through high-level device methods
 
-Supported states are: `INITIAL`, `WORKING`, `FAULT`
-
-### 3.3. Device
+### 3.4. Device (extends AutomationComponent)
 
 The **atomic unit** (or node) of the system.
 
@@ -53,7 +61,7 @@ Instead of a flat structure (`Module -> Component`), the system uses **unlimited
 
 * A device can be **simple** (sensor, motor) or **composite**
 * A composite device consists of other devices
-* The hierarchy is built using `Parent` reference and `SubDevices` collection
+* The hierarchy is built using `Parent` reference and `Children` collection
 
 ---
 
@@ -132,13 +140,10 @@ This architecture mirrors the **physical structure of a machine** in code.
 Example:
 
 * A conveyor with three sections:
-
-  * One `AutomationController`
-  * Controls one `CompositeDevice` (Conveyor)
-
-    * Contains three `CompositeDevices` (Sections)
-
-      * Each contains its own `Devices` (Motors and Sensors)
+	* One `AutomationController`
+  		* Controls one `CompositeDevice` (Conveyor)
+    		* Contains three `CompositeDevices` (Sections)
+      			* Each contains its own `Devices` (Motors and Sensors)
 	  
 ---
 
