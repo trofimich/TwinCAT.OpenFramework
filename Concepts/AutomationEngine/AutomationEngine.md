@@ -6,7 +6,7 @@ This is a deterministic PLC architectural platform designed to build modular con
 
 ---
 
-## 2. Architecture: `AutomationRunner -> AutomationController -> Device`
+## 2. Architecture: `AutomationRunner -> AutomationController -> Composite Device 1 -> Nested Composite Device N -> Nested Simple Device`
 
 At its core, this concept enforces a strict separation between **infrastructure code** (how hardware works) and **technological logic** (what the machine should do) through a rigid hierarchy of static objects.
 
