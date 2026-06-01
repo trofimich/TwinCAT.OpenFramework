@@ -14,7 +14,7 @@ It is based on an error-handling concept that is unique for Structured Text and 
   Work with an unknown number of elements at runtime or define static collection size at instantiation using VAR_GENERIC CONSTANT declaration. List, ByteList, Dictionary, UniqueSet and Queue already supported. Concept described [here.](Concepts/Collections/CollectionsConcept.md)
   
 - **String handling**  
-  Convenient string concatenation, replacement, trimming, splitting for STRING and WSTRING types. Support for strings longer than 255 characters and more.
+  Convenient string concatenation, replacement, trimming, splitting, joining for STRING and WSTRING types. Support for strings longer than 255 characters and more.
 
 - **Logging system**  
   A convenient logging system with advanced filtering capabilities based on topics and support for custom logger implementations. Simple logging to text files is already implemented.
