@@ -29,8 +29,8 @@ The base class for all other automation components.
 
 Supported states are: 
 * `INITIALIZING` - state immediately after program start; performs initialization logic
-* `OPERATIONAL` - normal operational state after successful initialization
-* `FAULTED` - state entered after a critical error occurs in the OPERATIONAL state; reset is required to return to the OPERATIONAL state
+* `WORKING` - normal working state after successful initialization
+* `STOPPED` - state entered after a critical error occurs in the WORKING state or Stop method call; reset is required to return to the WORKING state
 * `INVALID` - state entered when initialization cannot be completed successfully
 * 
 ### 3.3. AutomationController (extends AutomationComponent)
