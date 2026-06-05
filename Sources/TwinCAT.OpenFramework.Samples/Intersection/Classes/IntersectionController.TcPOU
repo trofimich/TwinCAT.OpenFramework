@@ -1,6 +1,6 @@
 ﻿<?xml version="1.0" encoding="utf-8"?>
 <TcPlcObject Version="1.1.0.1">
-  <POU Name="SignalControlledIntersectionAutomationController" Id="{d0f0aa39-ea76-461a-8fa3-dba15b8635a6}" SpecialFunc="None">
+  <POU Name="IntersectionController" Id="{d0f0aa39-ea76-461a-8fa3-dba15b8635a6}" SpecialFunc="None">
     <Declaration><![CDATA[(*
 
 .. <legal notes>
@@ -18,7 +18,7 @@ legal notes
 *)
 
 {attribute 'no_explicit_call' := 'do not call this function block directly'} 
-FUNCTION_BLOCK SignalControlledIntersectionAutomationController EXTENDS TOF_Automation.AutomationController<7>
+FUNCTION_BLOCK IntersectionController EXTENDS TOF_Automation.AutomationController<7>
 VAR CONSTANT
 	RED_GREEN_LIGHT_INTERVAL : TIME := T#4000MS;
 	YELLOW_LIGHT_INTERVAL : TIME := T#1000MS;
@@ -28,13 +28,14 @@ VAR CONSTANT
 END_VAR
 VAR_INPUT
 	ThrowTestExceptionRequest : BOOL;
+	IsTestExceptionCritical : BOOL;
 	TestExceptionMessage : STRING := 'Test error message';
 
 	ResetRequest : BOOL;
 END_VAR
 VAR_OUTPUT	
-	IntersectionMode : SIGNAL_CONTROLLED_INTERSECTION_MODE;
-	IntersectionState : SIGNAL_CONTROLLED_INTERSECTION_STATE;
+	IntersectionMode : INTERSECTION_MODE;
+	IntersectionState : INTERSECTION_STATE;
 
 	{region "Devices"}
 	
@@ -186,8 +187,8 @@ _FlashingYellowLightTimer.Interval := FLASHING_YELLOW_LIGHT_INTERVAL;
 bindIO();]]></ST>
       </Implementation>
     </Method>
-    <Method Name="OnFault" Id="{6fcc8089-8d26-4d23-ab84-876516fe47cb}" FolderPath="Overriden methods\">
-      <Declaration><![CDATA[METHOD PROTECTED OnFault
+    <Method Name="OnBeforeChildrenStopped" Id="{0516e5db-6b58-48f7-b149-9edab8091cfe}" FolderPath="Overriden methods\">
+      <Declaration><![CDATA[METHOD PROTECTED OnBeforeChildrenStopped
 ]]></Declaration>
       <Implementation>
         <ST><![CDATA[startIdelingMode();
@@ -199,17 +200,8 @@ IF ResetRequest THEN
 END_IF]]></ST>
       </Implementation>
     </Method>
-    <Method Name="OnOperationalStateChanged" Id="{dfa58b81-4624-4688-b85b-fa55f112c836}" FolderPath="Overriden methods\">
-      <Declaration><![CDATA[METHOD PROTECTED OnOperationalStateChanged
-VAR_INPUT
-	previousState : TOF_Automation.OPERATIONAL_STATE;
-END_VAR]]></Declaration>
-      <Implementation>
-        <ST><![CDATA[_OperationalStateChanged := TRUE;]]></ST>
-      </Implementation>
-    </Method>
-    <Method Name="OnWorking" Id="{89569639-43c3-4fe5-81a2-97d1904a242b}" FolderPath="Overriden methods\">
-      <Declaration><![CDATA[METHOD PROTECTED OnWorking
+    <Method Name="OnBeforeChildrenWorking" Id="{a2091fd1-b3c2-4408-9e2a-b795dd68dcf8}" FolderPath="Overriden methods\">
+      <Declaration><![CDATA[METHOD PROTECTED OnBeforeChildrenWorking
 VAR
 	testException : TOF_Core.StandardException;
 END_VAR]]></Declaration>
@@ -232,10 +224,10 @@ IF _OperationalStateChanged OR_ELSE WorkingModeSwitch.Changed OR_ELSE BlinkingYe
 	RETURN;
 ELSE
 	CASE IntersectionMode OF
-		SIGNAL_CONTROLLED_INTERSECTION_MODE.NORMAL:
+		INTERSECTION_MODE.NORMAL:
 			processNormalMode();
 		
-		SIGNAL_CONTROLLED_INTERSECTION_MODE.BLINKING_YELLOW:
+		INTERSECTION_MODE.BLINKING_YELLOW:
 			processBlinkingYellowMode();
 	END_CASE
 END_IF
@@ -244,6 +236,26 @@ IF ThrowTestExceptionRequest THEN
 	ThrowTestExceptionRequest := FALSE;
 	testException.ThrowByObject(THIS^, __POUNAME(), __POSITION(), TO_WSTRING(TestExceptionMessage), 0);
 END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="OnGetExceptionSeverity" Id="{df1557a7-a67b-4f16-b8d6-1609709f69ba}" FolderPath="Overriden methods\">
+      <Declaration><![CDATA[METHOD PROTECTED OnGetExceptionSeverity : TOF_Automation.Core.ERROR_SEVERITY
+VAR_INPUT
+	exception	: TOF_Automation.Core.IException;
+	catchPoint	: TOF_Automation.AUTOMATION_COMPONENT_EXCEPTION_CATCH_POINT;
+END_VAR
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[OnGetExceptionSeverity := SEL(IsTestExceptionCritical, TOF_Automation.Core.ERROR_SEVERITY.ERROR, TOF_Automation.Core.ERROR_SEVERITY.CRITICAL);]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="OnOperationalStateChanged" Id="{dfa58b81-4624-4688-b85b-fa55f112c836}" FolderPath="Overriden methods\">
+      <Declaration><![CDATA[METHOD PROTECTED OnOperationalStateChanged
+VAR_INPUT
+	previousState : TOF_Automation.OPERATIONAL_STATE;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_OperationalStateChanged := TRUE;]]></ST>
       </Implementation>
     </Method>
     <Property Name="OperationalStateName" Id="{af99d547-78da-4f00-96bd-32d0d0304681}">
@@ -260,10 +272,10 @@ PROPERTY OperationalStateName : STRING(16)]]></Declaration>
       <Declaration><![CDATA[METHOD PRIVATE processBlinkingYellowMode]]></Declaration>
       <Implementation>
         <ST><![CDATA[IF _FlashingYellowLightTimer.Elapsed THEN
-	IF IntersectionState = SIGNAL_CONTROLLED_INTERSECTION_STATE.ALL_YELLOW THEN
-		IntersectionState := SIGNAL_CONTROLLED_INTERSECTION_STATE.ALL_OFF;
+	IF IntersectionState = INTERSECTION_STATE.ALL_YELLOW THEN
+		IntersectionState := INTERSECTION_STATE.ALL_OFF;
 	ELSE
-		IntersectionState := SIGNAL_CONTROLLED_INTERSECTION_STATE.ALL_YELLOW;
+		IntersectionState := INTERSECTION_STATE.ALL_YELLOW;
 	END_IF
 	
 	startFlashingYellowLightTimer();
@@ -276,37 +288,37 @@ END_IF]]></ST>
       <Declaration><![CDATA[METHOD processNormalMode]]></Declaration>
       <Implementation>
         <ST><![CDATA[CASE IntersectionState OF
-	SIGNAL_CONTROLLED_INTERSECTION_STATE._1_3_GREEN_AND_2_4_RED:
+	INTERSECTION_STATE._1_3_GREEN_AND_2_4_RED:
 		IF _RedGreenLightTimer.Elapsed THEN
 			startYellowLightTimer();
-			IntersectionState := SIGNAL_CONTROLLED_INTERSECTION_STATE._1_3_YELLOW_AND_2_4_YELLOW;
+			IntersectionState := INTERSECTION_STATE._1_3_YELLOW_AND_2_4_YELLOW;
 			updateTraficLights();
 		END_IF
  
-	SIGNAL_CONTROLLED_INTERSECTION_STATE._1_3_YELLOW_AND_2_4_YELLOW:
+	INTERSECTION_STATE._1_3_YELLOW_AND_2_4_YELLOW:
 		IF _YellowLightTimer.Elapsed THEN
 			startRedGreenLightTimer();
-			IntersectionState := SIGNAL_CONTROLLED_INTERSECTION_STATE._2_4_GREEN_AND_1_3_RED;
+			IntersectionState := INTERSECTION_STATE._2_4_GREEN_AND_1_3_RED;
 			updateTraficLights();
 		END_IF
 	
-	SIGNAL_CONTROLLED_INTERSECTION_STATE._2_4_GREEN_AND_1_3_RED:
+	INTERSECTION_STATE._2_4_GREEN_AND_1_3_RED:
 		IF _RedGreenLightTimer.Elapsed THEN
 			startYellowLightTimer();
-			IntersectionState := SIGNAL_CONTROLLED_INTERSECTION_STATE._2_4_YELLOW_AND_1_3_YELLOW;
+			IntersectionState := INTERSECTION_STATE._2_4_YELLOW_AND_1_3_YELLOW;
 			updateTraficLights();
 		END_IF
 	
-	SIGNAL_CONTROLLED_INTERSECTION_STATE._2_4_YELLOW_AND_1_3_YELLOW:
+	INTERSECTION_STATE._2_4_YELLOW_AND_1_3_YELLOW:
 		IF _YellowLightTimer.Elapsed THEN
 			startRedGreenLightTimer();
-			IntersectionState := SIGNAL_CONTROLLED_INTERSECTION_STATE._1_3_GREEN_AND_2_4_RED;
+			IntersectionState := INTERSECTION_STATE._1_3_GREEN_AND_2_4_RED;
 			updateTraficLights();
 		END_IF
 	
 	ELSE
 		startRedGreenLightTimer();
-		IntersectionState := SIGNAL_CONTROLLED_INTERSECTION_STATE._1_3_GREEN_AND_2_4_RED;
+		IntersectionState := INTERSECTION_STATE._1_3_GREEN_AND_2_4_RED;
 		updateTraficLights();
 END_CASE]]></ST>
       </Implementation>
@@ -329,8 +341,8 @@ _YellowLightTimer.Cancel();
 
 startFlashingYellowLightTimer();
 
-IntersectionMode := SIGNAL_CONTROLLED_INTERSECTION_MODE.BLINKING_YELLOW;
-IntersectionState := SIGNAL_CONTROLLED_INTERSECTION_STATE.ALL_YELLOW;
+IntersectionMode := INTERSECTION_MODE.BLINKING_YELLOW;
+IntersectionState := INTERSECTION_STATE.ALL_YELLOW;
 
 updateTraficLights();]]></ST>
       </Implementation>
@@ -350,8 +362,8 @@ _FlashingYellowLightTimer.Restart();]]></ST>
 _YellowLightTimer.Cancel();
 _FlashingYellowLightTimer.Cancel();
 
-IntersectionMode := SIGNAL_CONTROLLED_INTERSECTION_MODE.IDELING;
-IntersectionState := SIGNAL_CONTROLLED_INTERSECTION_STATE.ALL_OFF;
+IntersectionMode := INTERSECTION_MODE.IDELING;
+IntersectionState := INTERSECTION_STATE.ALL_OFF;
 
 updateTraficLights();]]></ST>
       </Implementation>
@@ -364,8 +376,8 @@ updateTraficLights();]]></ST>
 _YellowLightTimer.Cancel();
 _FlashingYellowLightTimer.Cancel();
 
-IntersectionMode := SIGNAL_CONTROLLED_INTERSECTION_MODE.NORMAL;
-IntersectionState := SIGNAL_CONTROLLED_INTERSECTION_STATE._1_3_GREEN_AND_2_4_RED;
+IntersectionMode := INTERSECTION_MODE.NORMAL;
+IntersectionState := INTERSECTION_STATE._1_3_GREEN_AND_2_4_RED;
 
 updateTraficLights();]]></ST>
       </Implementation>
@@ -390,27 +402,27 @@ _YellowLightTimer.Restart();]]></ST>
       <Declaration><![CDATA[METHOD PRIVATE updateTraficLights]]></Declaration>
       <Implementation>
         <ST><![CDATA[CASE IntersectionState OF
-	SIGNAL_CONTROLLED_INTERSECTION_STATE.ALL_OFF:
+	INTERSECTION_STATE.ALL_OFF:
 		TrafficLight1.SetLight(TRAFFIC_LIGHT_COLOR.NO_COLOR);
 		TrafficLight2.SetLight(TRAFFIC_LIGHT_COLOR.NO_COLOR);
 		TrafficLight3.SetLight(TRAFFIC_LIGHT_COLOR.NO_COLOR);
 		TrafficLight4.SetLight(TRAFFIC_LIGHT_COLOR.NO_COLOR);
 	
-	SIGNAL_CONTROLLED_INTERSECTION_STATE.ALL_YELLOW, 
-	SIGNAL_CONTROLLED_INTERSECTION_STATE._1_3_YELLOW_AND_2_4_YELLOW,
-	SIGNAL_CONTROLLED_INTERSECTION_STATE._2_4_YELLOW_AND_1_3_YELLOW:
+	INTERSECTION_STATE.ALL_YELLOW, 
+	INTERSECTION_STATE._1_3_YELLOW_AND_2_4_YELLOW,
+	INTERSECTION_STATE._2_4_YELLOW_AND_1_3_YELLOW:
 		TrafficLight1.SetLight(TRAFFIC_LIGHT_COLOR.YELLOW);
 		TrafficLight2.SetLight(TRAFFIC_LIGHT_COLOR.YELLOW);
 		TrafficLight3.SetLight(TRAFFIC_LIGHT_COLOR.YELLOW);
 		TrafficLight4.SetLight(TRAFFIC_LIGHT_COLOR.YELLOW);
 	
-	SIGNAL_CONTROLLED_INTERSECTION_STATE._1_3_GREEN_AND_2_4_RED:
+	INTERSECTION_STATE._1_3_GREEN_AND_2_4_RED:
 		TrafficLight1.SetLight(TRAFFIC_LIGHT_COLOR.GREEN);
 		TrafficLight2.SetLight(TRAFFIC_LIGHT_COLOR.RED);
 		TrafficLight3.SetLight(TRAFFIC_LIGHT_COLOR.GREEN);
 		TrafficLight4.SetLight(TRAFFIC_LIGHT_COLOR.RED);
 	
-	SIGNAL_CONTROLLED_INTERSECTION_STATE._2_4_GREEN_AND_1_3_RED:
+	INTERSECTION_STATE._2_4_GREEN_AND_1_3_RED:
 		TrafficLight1.SetLight(TRAFFIC_LIGHT_COLOR.RED);
 		TrafficLight2.SetLight(TRAFFIC_LIGHT_COLOR.GREEN);
 		TrafficLight3.SetLight(TRAFFIC_LIGHT_COLOR.RED);
