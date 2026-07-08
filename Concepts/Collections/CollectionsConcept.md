@@ -73,7 +73,7 @@ A key-value collection where both key and value are `GENERIC_VALUE`.
 Keys are unique.  
 Supports: assign, clear, remove, search by key, get value or index by key, get by index.
 
-### 8.4. UniqueSet
+### 8.4. UniqueDataSet
 A collection of unique `GENERIC_VALUE` items.  
 Supports: assign, clear, remove, search, get by index.
 
