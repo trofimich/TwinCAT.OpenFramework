@@ -47,33 +47,32 @@ Method to control the traffic light by passing a color to activate.
 
 ---
 
-## 3. Implement the Automation Module: `SignalControlledIntersectionAutomationController`
+## 3. Implement the Automation Module: `IntersectionController`
 
-This module contains logic for interaction between six devices:
+This module contains logic for interaction between seven devices:
   - ON/OFF input
   - Mode switch (standard vs blinking yellow)
+  - Switch speed adjuster
   - Four traffic lights
-It inherits from `TOF_AutomationEngine.AutomationController<6>`.
-It Implements abstract members: `ClassName`, `Size`, `Devices`, `StartRequest`
-Overrides: `StopRequest`, `OnInitialize`, `OnStop`, `OnRun`, `OnFault`
+It inherits from `TOF_AutomationEngine.AutomationController<7>`.
+It implements public properties: `Children`, `ClassName`, `NamespaceName`, `OperationalStateName`, `SelfSize`
+Overrides: `OnBeforeChildrenInitializing`, `OnBeforeChildrenStopped`, `OnBeforeChildrenWorking`, `OnGetExceptionSeverity`, `OnOperationalStateChanged`
+Also some constants and variables for intersection devices modeling and control organization.
 
-#### 3.1. StartRequest  
-Signals the engine to enter RUN state. Returns the value of the ON/OFF switch.
+#### 3.1. OnBeforeChildrenInitializing  
+Called cyclically by engine in `INITIALIZING` operational state. Initializes internal timers and bind devices to hardware (I/O terminal) models.
 
-#### 3.2. StopRequest  
-Signals the engine to enter STOPPED state. Returns the inverted value of the ON/OFF switch.
+#### 3.2. OnBeforeChildrenStopped  
+Called cyclicallyd by engine in `STOPPED` operational state. Turns off all traffic lights.
 
-#### 3.3. OnInitialize  
-Used during initialization phase. Returns `TRUE` once initialization is complete. In this case, sets timer values in one cycle.
+#### 3.3. OnBeforeChildrenWorking  
+Called cyclicallyd by engine in `WORKING` operational state. Implements core traffic light logic.
 
-#### 3.4. OnRun  
-Method called cyclically while in RUN state. Contains core traffic light logic.
+#### 3.4. OnGetExceptionSeverity  
+Called automatically by engine to resolve severity for exception. Used to demonstrate exception mechanism.
 
-#### 3.5. OnStop  
-Called cyclically in STOPPED state. Turns off all traffic lights.
-
-#### 3.6. OnFault
-Called cyclically in FAULTED state. Turns off all traffic lights.
+#### 3.5. OnOperationalStateChanged  
+Called automatically by engine after operational state change. Used for internal logic.
 
 ---
 
