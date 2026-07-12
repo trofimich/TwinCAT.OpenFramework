@@ -47,7 +47,7 @@ Method to control the traffic light by passing a color to activate.
 
 ---
 
-## 3. Implement the Automation Module: `IntersectionController`
+## 3. Implement the controller: `IntersectionController`
 
 This module contains logic for interaction between seven devices:
   - ON/OFF input
@@ -76,19 +76,23 @@ Called automatically by engine after operational state change. Used for internal
 
 ---
 
-## 4. Implement the Automation Runner: `SignalControlledIntersectionAutomationRunner`
+## 4. Implement I/O model: `Terminals`
 
-This runner manages automation modules. It controls one instance of `SignalControlledIntersectionAutomationController` and inherits from `TOF_AutomationEngine.AutomationRunner<1>`.
-
-Implements:
-- `ClassName`
-- `Size`
-- `AutomationUnits` – returns array of controlled automation units (1 element)
-- `FB_Init` – enables simulation mode (for demo project without real terminals)
+This class contain model of physical equipment:
+#### 4.1. DI_1 - digital output termial (EL1018).  
+#### 4.2. DO_2 - digital input terminal (EL2409).
+#### 4.3. AI_3 - analog input terminal (EL3001).
 
 ---
 
-## 5. MAIN Program Setup
+## 5. Visualization elements (optional)
+
+#### 5.1. TrafficLight - control to represent single traffic light
+#### 6.2. Intersection - control to represent whole intersection
+
+---
+
+## 6. MAIN Program Setup
 
 In the `MAIN` program:
 - Create instance of `SignalControlledIntersectionAutomationRunner`
