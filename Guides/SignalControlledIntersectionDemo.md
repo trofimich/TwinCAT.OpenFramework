@@ -1,5 +1,7 @@
 # Signal-Controlled Intersection Automation – Technical Guide
 
+This description shows how to create simple application using `TwinCAT_OpenFramework_Automation` library
+
 ## 1. Enumeration Definitions
 
 ### 1.1. SIGNAL_CONTROLLED_INTERSECTION_MODE  
