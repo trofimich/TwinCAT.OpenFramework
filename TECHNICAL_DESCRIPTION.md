@@ -13,14 +13,14 @@ It bridges the gap between traditional PLC programming and modern software engin
 To make large-scale application development manageable, the framework's features are divided into three main pillars:
 
 ### 1. Enterprise-Grade Automation Architecture
-*   **Basic Automation Engine:** A ready-to-use state machine. `AutomationRunner` handles top-level execution states (Initializing, Running, Failed), while managing multiple `AutomationComponent` instances with their own lifecycles.
-*   **Controllable Devices & Hierarchy:** Intuitive modeling of complex machines composed of nested sub-devices. Ready-made abstractions for interacting with the external world (e.g., digital and analog I/O, axes).
+*   **Basic Automation Engine:** A ready-to-use state machine. `AutomationRunner` handles top-level execution states (Initializing, Running, Failed), while managing multiple `AutomationComponent` instances with their own lifecycles. *Concept described [here](Concepts/AutomationEngine/AutomationEngine.md).*
+*   **Controllable Devices & Hierarchy:** Intuitive modeling of complex machines composed of nested sub-devices. Ready-made abstractions for interacting with the external world (e.g., digital and analog I/O, axes). *Concept described [here](Concepts/AutomationEngine/AutomationEngine.md).*
 *   **I/O Separation:** Device classes contain *only* business logic. Physical mapping is done at the terminal model level, meaning hardware changes don't require rewriting device logic.
-*   **Workflow Engine:** A powerful engine for composing complex, dynamic execution scenarios (Sequence, IfThenElse, While, WaitAndPick, TryCatch, etc.). Custom activities can be easily integrated.
+*   **Workflow Engine:** A powerful engine for composing complex, dynamic execution scenarios (Sequence, IfThenElse, While, WaitAndPick, TryCatch). Custom activities can be easily integrated.
 
 ### 2. Modern IT Practices in PLC
-*   **Advanced Exception Handling:** An error management system unique to Structured Text. It provides not just the error code, but the exact context, place, and time the problem occurred, drastically reducing troubleshooting time.
-*   **Dynamic and Generic Static Collections:** Break free from rigid arrays. Support for `List`, `ByteList`, `Dictionary`, `UniqueDataSet`, and `Queue` — working with an unknown number of elements at runtime or defining static sizes at instantiation.
+*   **Advanced Exception Handling:** An error management system unique to Structured Text. It provides not just the error code, but the exact context, place, and time the problem occurred, drastically reducing troubleshooting time. *Concept described [here](Concepts/Exceptions/ExceptionsConcept.md).*
+*   **Dynamic and Generic Static Collections:** Break free from rigid arrays. Support for `List`, `ByteList`, `Dictionary`, `UniqueDataSet`, and `Queue` — working with an unknown number of elements at runtime or defining static sizes at instantiation. *Concept described [here](Concepts/Collections/CollectionsConcept.md).*
 *   **Tasks & Queues:** Abstractions for asynchronous operations. Tasks can be aborted, cancelled, or fail with exceptions. The Task Queue allows composing multiple tasks into continuous sequences or background workers.
 *   **JSON Support:** Native, simplified serialization and deserialization of PLC structures to and from JSON documents, crucial for IT/MES/ERP integration.
 
@@ -58,7 +58,7 @@ You don't have to start from scratch. The repository includes:
 ## 📈 Roadmap & Community
 
 TwinCAT.OpenFramework is an actively evolving open-source project. Future development focuses on:
-*   Wrapping more standard libraries in OOP-style interfaces.
+*   Wrapping more standard Beckhoff libraries in OOP-style interfaces.
 *   Broadening unit test coverage (TcUnit-based).
 *   Expanding enterprise-level documentation.
 
