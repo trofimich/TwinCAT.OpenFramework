@@ -4,10 +4,10 @@ This description shows how to create simple application using `TwinCAT_OpenFrame
 
 ## 1. Enumeration Definitions
 
-### 1.1. SIGNAL_CONTROLLED_INTERSECTION_MODE  
+### 1.1. INTERSECTION_MODE  
 Defines the general control mode of the intersection.
 
-### 1.2. SIGNAL_CONTROLLED_INTERSECTION_STATE  
+### 1.2. INTERSECTION_STATE  
 Defines the current state of the intersection. Based on this state, the logic activates appropriate signals on four traffic lights. 
 The values `ALL_YELLOW`, `_1_3_YELLOW_AND_2_4_YELLOW`, and `_2_4_YELLOW_AND_1_3_YELLOW` are similar because they turn on yellow on all traffic lights, but carry additional information to determine the next state transition.
 
@@ -18,26 +18,31 @@ Defines the state of a single traffic light.
 
 ## 2. Implement the TrafficLight Device
 
-The TrafficLight device consists of three standard internal `DigitalOutput` devices (for red, yellow, and green). It inherits from the abstract class `TOF_Automation.OutputDevice<3>`, indicating that it includes 3 internal subdevices.
+The TrafficLight device consists of three standard `DigitalOutput` sub-devices (for red, yellow, and green light). It inherits from the abstract class `TOF_Automation.CompositeDevice<3>`, where `<3>` indicates that it includes 3 subdevices.
 
-Inheritance requires implementation of:
-- Three abstract properties: `ClassName`, `Size`, `SubDevices`
-- One abstract method: `OnUpdateOutputsFromState`
-- One custom method: `SetLight`
+Implementation consists of:
+- Properties: `BoundToIO`, `Children`, `ClassName`, `NamespaceName`, `SelfSize`
+- Methods: `BindToIO`, `SetLight`
 
-#### 2.1. ClassName  
-Required by the framework, returns the name of the current class (function block). Used for exception reporting.
+#### 2.1. BoundToIO  
+Required by `IIOBindable` interface. Indicates if all lights (digital outputs) are mapped to I/O models (terminal variables).
 
-#### 2.2. Size  
-Used by the framework to manage dynamic memory.
+#### 2.2. Children  
+Required by ancestor (`CompositeDevice`). Returns a reference to the array containing sub-devices (digital outputs for turning on the lights).
 
-#### 2.3. SubDevices  
-Returns a reference to the array containing actual internal devices (digital outputs for turning on the light indicators).
+#### 2.3. ClassName  
+Required by the framework. Returns the name of the current class (function block). Used for exception reporting.
 
-#### 2.4. OnUpdateOutputsFromState  
-Responsible for passing internal virtual device data to terminals or external objects. At the traffic light level, this does nothing. Actions are already implemented in `Devices.IO` library.
+#### 2.4. NamespaceName  
+Required by the framework. Returns the namespace of the current class (function block). Used for exception reporting.
 
-#### 2.5. SetLight  
+#### 2.5. SelfSize  
+Required by the framework. Used in case of dynamic memory management.
+
+#### 2.6. BindToIO  
+Creates mapping from lights (digital outputs) to I/O terminal variables.
+
+#### 2.7. SetLight  
 Method to control the traffic light by passing a color to activate.
 
 ---
