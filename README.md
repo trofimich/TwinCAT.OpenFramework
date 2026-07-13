@@ -8,41 +8,30 @@ TwinCAT.OpenFramework is a modular framework that introduces architecture, execu
 
 It brings structured software engineering practices into the TwinCAT ecosystem.
 
-More technical descrition you can find [here](TECHNICAL_DESCRIPTION.md)
+More technical description you can find [here](TECHNICAL_DESCRIPTION.md)
 
 ---
 
 ## 🚨 The Problem
 
-As TwinCAT projects grow, they often become:
+As TwinCAT projects grow, they often evolve into implicit state machines with scattered error handling. They become:
 
 * Hard to maintain and extend
 * Tightly coupled
 * Filled with repetitive patterns
 * Lacking clear architectural boundaries
 
-Typical PLC code mixes:
-
-* execution flow
-* business logic
-* error handling
-
-This leads to:
+Typical PLC code mixes execution flow, business logic, and error handling. This leads to:
 
 * fragile systems
 * slow development
-* high cost of change
+* high cost of change and maintenance
 
-Without a structured approach, TwinCAT applications often evolve into:
-- implicit state machines
-- scattered error handling
-- tightly coupled execution logic
-  
 ---
 
 ## 💡 The Solution
 
-TwinCAT.OpenFramework provides a **unified platform** for PLC development, similar in spirit to modern software frameworks.
+TwinCAT.OpenFramework provides a **unified platform** for PLC development, similar in spirit to modern IT software frameworks.
 
 Instead of ad-hoc code, you get:
 
@@ -112,72 +101,22 @@ This layer reduces boilerplate and standardizes common operations.
 
 ## 🔥 What You Gain
 
-* 📐 Clear and scalable architecture
-* 🔁 Reusable components
-* 🧠 Easier reasoning about program flow
-* 📉 Less repetitive code
-* ⚡ Faster development in medium and large projects
+* 📐 **Clear and scalable architecture**
+* 🔁 **Reusable components** (write once, use across projects)
+* 📉 **Lower maintenance costs** (less repetitive code, faster commissioning)
+* 🤝 **Easier onboarding** (standardized OOP approaches help new developers join faster)
+* ⚡ **Faster development** for medium and large projects
 
 ---
 
-## 🚀 Example
+## 🚀 Example: Structured Error Handling
 
-```
+Instead of unexpected machine stops or untraceable bugs, the framework allows graceful error recovery and structured logging, directly reducing equipment downtime:
+
+```iecst
 __TRY
     controller.Execute();
 __CATCH(errorCode)
     exception := TOF_Core.ExceptionManager.GetLastException(errorCode);
     TOF_Core.LogManager.TryLogException(exception);
 __ENDTRY
-```
-
----
-
-## 📌 Use Cases
-
-* Medium and large TwinCAT projects
-* Complex automation systems
-* Long-lifecycle industrial applications
-* Teams that need maintainable code
-
----
-
-## ⚠️ Trade-offs
-
-* Requires learning new concepts
-* Adds abstraction layer
-* May be unnecessary for small/simple projects
-
----
-
-## 🧭 Philosophy
-
-TwinCAT.OpenFramework treats PLC development as **software engineering**, not just control scripting.
-
-It encourages:
-
-* separation of concerns
-* structured execution
-* reusable design
-
----
-
-## 🤝 Contributing
-
-Contributions, ideas, and feedback are welcome.
-
----
-
-## ⭐ Support
-
-If this project is useful:
-
-* Star the repository
-* Share it
-* Use it in your projects
-
----
-
-## 📫 Contact
-
-Open an issue or reach out via GitHub.

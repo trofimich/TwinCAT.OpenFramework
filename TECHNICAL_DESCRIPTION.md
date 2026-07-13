@@ -1,166 +1,85 @@
 ![TwinCAT Open Framework](Icons/Icon_128.png)
 
-# TwinCAT Framework 
+# TwinCAT.OpenFramework: Technical Capabilities
 
-This is **object-oriented framework** developed for **TwinCAT 3.1.4026+**, which provides a set of ready-to-use, scalable components for industrial automation.
-It is based on an error-handling concept that is unique for Structured Text and resembles the approach used in general-purpose languages like C# or Java.
+This is an **object-oriented framework** developed for **TwinCAT 3.1.4026+**, providing a set of ready-to-use, scalable components for industrial automation. 
 
-## Key Features
-
-- **Advanced exception handling**  
-  An enhanced error management system that makes diagnostics easier by providing not only the message, but also the place and time the problem occurred. Concept described [here.](Concepts/Exceptions/ExceptionsConcept.md)
-
-- **Dynamic and generic static collections**  
-  Work with an unknown number of elements at runtime or define static collection size at instantiation using VAR_GENERIC CONSTANT declaration. List, ByteList, Dictionary, UniqueSet and Queue already supported. Concept described [here.](Concepts/Collections/CollectionsConcept.md)
-  
-- **String handling**  
-  Convenient string concatenation, replacement, trimming, splitting, joining for STRING and WSTRING types. Support for strings longer than 255 characters and more.
-
-- **Logging system**  
-  A convenient logging system with advanced filtering capabilities based on topics and support for custom logger implementations. Simple logging to text files is already implemented.
-
-- **Tasks**  
-  An abstraction for a basic task that can either complete successfully, be aborted internally, be cancelled externally, or be terminated due to an exception. Tasks can preemptively acquire resources and automatically release them after completion.
-
-- **Task queue**  
-  Tasks queue allows multiple tasks to be executed one after another as a single composite task. The queue can also operate in a mode where it constantly waits for new tasks and execute them.
-
-- **Working with files**  
-  Working with the file system is represented as a set of tasks. Opening and closing files is handled automatically for the functions that require it. All you need to do is define the sequence of tasks, and the dirty work will be done behind the scenes.
-
-- **Workflow engine**  
-  A powerful engine for executing complex scenarios that can be composed dynamically. Basic activities such as Sequence, IfThenElse, While, WaitForVariableValue, WaitAndPick, TryCatch, etc., are already supported. Custom activities can also be created to meet individual requirements.
-  
-- **JSON support**  
-  Simplified serialization and deserialization of structures to and from JSON documents.
-
-- **Basic automation engine**  
-  A ready-to-use state machine: AutomationRunner supports three fundamental states: `INITIALIZING`, `RUNNING`, `INITIALIZATION_FAILED` and can handle multiple AutomationComponent instances with four fundamental states: `INITIALIZING`, `OPERATIONAL`, `FAULTED`, `INVALID`. Concept described [here](Concepts/AutomationEngine/AutomationEngine.md)
-
-- **Controllable devices**  
-  Ready-made abstractions for interacting with the external world, such as terminals or communication channels. Concept described [here](Concepts/AutomationEngine/AutomationEngine.md) as part of AutomationEngine.
-
-- **Separation of device logic and I/O modelling**  
-  The device classes contain only the logic specific to device operations. The mapping to terminals is performed at the level of terminal models, and then those terminal models are bound to the devices.
-  
-- **Device hierarchy**  
-  Intuitive modeling of complex devices composed of simpler sub-devices, which in turn may be composed of even simpler ones. Concept described [here](Concepts/AutomationEngine/AutomationEngine.md) as part of AutomationEngine.
-
-- **Predefined device implementations**  
-  Includes digital and analog I/O; more standard device types such as axes are planned.
-
-- **Automatic exception logging**  
-  Tasks and automation engine automatically catches exceptions and logs them.
-
-- **Modular architecture**  
-  Use only the parts of the framework you need — no need to include everything.
-
-- **Modern technologies and features**  
-  Practical examples of object-oriented programming and the latest compiler features.
+It bridges the gap between traditional PLC programming and modern software engineering, bringing IT-standard approaches (like those in C# or Java) directly into Structured Text.
 
 ---
 
-## 🚀 Visual comparision of some features:
+## 🛠️ Core Capabilities
 
-  - Simple string concatenation is [here](Screenshots/FunctionalityComparision/SimpleConcat.png)
-    
-  - Long string concatenation is [here](Screenshots/FunctionalityComparision/ConcatLongString.png)
-    
-  - Dynamic collection is [here](Screenshots/FunctionalityComparision/List.png)
-    
-  - Logging is [here](Screenshots/FunctionalityComparision/Logging.png)
-    
-  - Error handling is [here](Screenshots/FunctionalityComparision/Exceptions.png)
+To make large-scale application development manageable, the framework's features are divided into three main pillars:
 
----
+### 1. Enterprise-Grade Automation Architecture
+*   **Basic Automation Engine:** A ready-to-use state machine. `AutomationRunner` handles top-level execution states (Initializing, Running, Failed), while managing multiple `AutomationComponent` instances with their own lifecycles. *Concept described [here](Concepts/AutomationEngine/AutomationEngine.md).*
+*   **Controllable Devices & Hierarchy:** Intuitive modeling of complex machines composed of nested sub-devices. Ready-made abstractions for interacting with the external world (e.g., digital and analog I/O, axes). *Concept described [here](Concepts/AutomationEngine/AutomationEngine.md).*
+*   **I/O Separation:** Device classes contain *only* business logic. Physical mapping is done at the terminal model level, meaning hardware changes don't require rewriting device logic.
+*   **Workflow Engine:** A powerful engine for composing complex, dynamic execution scenarios (Sequence, IfThenElse, While, WaitAndPick, TryCatch). Custom activities can be easily integrated.
 
-## 🧪 Are there examples?
+### 2. Modern IT Practices in PLC
+*   **Advanced Exception Handling:** An error management system unique to Structured Text. It provides not just the error code, but the exact context, place, and time the problem occurred, drastically reducing troubleshooting time. *Concept described [here](Concepts/Exceptions/ExceptionsConcept.md).*
+*   **Dynamic and Generic Static Collections:** Break free from rigid arrays. Support for `List`, `ByteList`, `Dictionary`, `UniqueDataSet`, and `Queue` — working with an unknown number of elements at runtime or defining static sizes at instantiation. *Concept described [here](Concepts/Collections/CollectionsConcept.md).*
+*   **Tasks & Queues:** Abstractions for asynchronous operations. Tasks can be aborted, cancelled, or fail with exceptions. The Task Queue allows composing multiple tasks into continuous sequences or background workers.
+*   **JSON Support:** Native, simplified serialization and deserialization of PLC structures to and from JSON documents, crucial for IT/MES/ERP integration.
 
-Yes, there are two projects:  
-- **`TwinCAT.OpenFramework.Tests`** — it contains unit tests and examples for specific classes.
-- **`TwinCAT.OpenFramework.Samples`** — it contains demo application with simple visualization. ![Read guid here.](Guides/SignalControlledIntersectionDemo.md)
-
----
-
-## 🔍 How to get started?
-
-1. Install the latest **TwinCAT XAE**  
-2. Clone [TwinCAT.OpenFramework repository](https://github.com/trofimich/TwinCAT.OpenFramework.git)
-3. Open the solution in `TwinCAT.OpenFramework`
+### 3. Developer Productivity Tools
+*   **Advanced String Handling:** Convenient manipulation (concatenation, trimming, splitting, joining) for `STRING` and `WSTRING`, including support for strings larger than 255 characters.
+*   **Modular Logging System:** Topic-based filtering with support for custom logger implementations (e.g., simple file logging is provided out of the box). Exception logging is handled automatically by the engine.
+*   **File System Abstraction:** File operations are represented as safe, sequence-based tasks. Resource management (opening/closing files) is handled automatically behind the scenes.
 
 ---
 
-## 📈 What are the future plans?
+## 🚀 Visual Feature Comparison
 
-- 🧱 Add new possibilities and wrap more standard libraries in OOP-style interfaces
-- 🧪 Broaden **unit test** coverage (TcUnit-based)
-- 📚 Improve documentation and examples
-
----
-
-## 🧱 Why do all classes inherit from `Object`?
-
-Structured Text doesn't provide a universal base class for function blocks.  
-To manage **dynamic memory deallocation**, we must know the actual type of the pointer.
-
-- If the pointer refers to an FB, deallocation must occur via that FB pointer
-- Otherwise, TwinCAT won't call the `FB_Exit` method
-
-That's why we enforce inheritance from our own base class — `Object`.
+Seeing is believing. Compare traditional ST approaches with the framework:
+*   [Simple string concatenation](Screenshots/FunctionalityComparision/SimpleConcat.png)
+*   [Long string concatenation](Screenshots/FunctionalityComparision/ConcatLongString.png)
+*   [Dynamic collections](Screenshots/FunctionalityComparision/List.png)
+*   [Structured Logging](Screenshots/FunctionalityComparision/Logging.png)
+*   [Exception Handling](Screenshots/FunctionalityComparision/Exceptions.png)
 
 ---
 
-## 🗂 Why this library structure?
+## 🧪 Examples & Getting Started
 
-Designing one involves hard tradeoffs: architectural purity vs. usability.  
-The current structure is the result of many iterations and refactorings.  
-If you have suggestions — I’m all ears.
+You don't have to start from scratch. The repository includes:
+1.  **`TwinCAT.OpenFramework.Tests`** — Unit tests and usage examples for specific classes.
+2.  **`TwinCAT.OpenFramework.Samples`** — A complete demo application with visualization (e.g., [Signal-Controlled Intersection Demo](Guides/SignalControlledIntersectionDemo.md)).
 
----
-
-## ⏱ What’s the development pace?
-
-Development speed depends on:
-
-1. Personal motivation  
-2. Free time availability  
-3. TwinCAT-related projects at my job  
-4. Interest and feedback from other people
+**To try it out:**
+1. Install the latest **TwinCAT XAE**.
+2. Clone the [TwinCAT.OpenFramework repository](https://github.com/trofimich/TwinCAT.OpenFramework.git).
+3. Open the solution and run the samples.
 
 ---
 
-## 🤝 I want to help — how?
+## 📈 Roadmap & Community
 
-Currently you can:
+TwinCAT.OpenFramework is an actively evolving open-source project. Future development focuses on:
+*   Wrapping more standard Beckhoff libraries in OOP-style interfaces.
+*   Broadening unit test coverage (TcUnit-based).
+*   Expanding enterprise-level documentation.
 
-- Share your remarks and ideas
-- Help to write tests
-- Help to create documentation  
-- Project visibility and outreach
-
-If you're a fan of OOP, TwinCAT, or just want to help — get in touch!  
-Also, if you're experienced in software architecture and have suggestions, I'd love to hear them.
+**Want to contribute?** 
+Whether you want to share architectural ideas, request features, or contribute code, feedback is highly appreciated. Open an issue or reach out via GitHub.
 
 ---
 
-## ⚠️ Known Issues
+## 💡 Technical Notes
 
-- Beckhoff currently use compiler from CoDeSys and this compiler has some issues:
-  - incorrect behavior related to methods with optional parameters in some cases
-  - incorrect memory deallocation in __TRY / __CATCH block in some cases
-  - compiler regresson in TC 3.1.4026.19 related to custom exception throwing, but workaround was implemented
-  - compiler regression in TC 3.1.4026.20 related to __SYSTEM.AnyType handling, but workaround was implemented
-
-These issues aren't critical, and Beckhoff is aware and investigating solutions
+**Why do all classes inherit from `Object`?**
+Structured Text doesn't provide a universal base class for function blocks. To manage **dynamic memory deallocation** safely and ensure TwinCAT calls the `FB_Exit` method, we enforce inheritance from a unified base class (`Object`). This guarantees memory safety across dynamic collections.
 
 ---
 
 ## 🖼️ Screenshots 
 
+*(Visualizations of Workflow Engine, Collections, and File Manager)*
 ![Signal-controlled intersection visualization](Screenshots/SignalControlledIntersection.png)
 ![Demo workflow visualization](Screenshots/DemoWorkflow.png)
 ![File manager test](Screenshots/FileManager.png)
 ![Collections test](Screenshots/TestCollections.png)
 ![Exceptions test](Screenshots/TestExceptions.png)
 ![Workflow creation](Screenshots/WorkflowCreation.png)
-
