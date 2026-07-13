@@ -16,7 +16,7 @@ To make large-scale application development manageable, the framework's features
 *   **Basic Automation Engine:** A ready-to-use state machine. `AutomationRunner` handles top-level execution states (Initializing, Running, Failed), while managing multiple `AutomationComponent` instances with their own lifecycles. *Concept described [here](Concepts/AutomationEngine/AutomationEngine.md).*
 *   **Controllable Devices & Hierarchy:** Intuitive modeling of complex machines composed of nested sub-devices. Ready-made abstractions for interacting with the external world (e.g., digital and analog I/O, axes). *Concept described [here](Concepts/AutomationEngine/AutomationEngine.md).*
 *   **I/O Separation:** Device classes contain *only* business logic. Physical mapping is done at the terminal model level, meaning hardware changes don't require rewriting device logic.
-*   **Workflow Engine:** A powerful engine for composing complex, dynamic execution scenarios (Sequence, IfThenElse, While, WaitAndPick, TryCatch). Custom activities can be easily integrated.
+*   **Workflow Engine:** A powerful engine for composing complex, dynamic execution scenarios (Sequence, IfThenElse, While, WaitAndPick, TryCatch, etc.). Custom activities can be easily integrated.
 
 ### 2. Modern IT Practices in PLC
 *   **Advanced Exception Handling:** An error management system unique to Structured Text. It provides not just the error code, but the exact context, place, and time the problem occurred, drastically reducing troubleshooting time. *Concept described [here](Concepts/Exceptions/ExceptionsConcept.md).*
