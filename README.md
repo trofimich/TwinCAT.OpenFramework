@@ -2,13 +2,16 @@
 
 # TwinCAT.OpenFramework
 
-**A structured application framework for TwinCAT (IEC 61131-3)**
+**A structured application framework for TwinCAT (IEC 61131-3)** is an architectural template and extended standard library that brings modern software engineering practices to Beckhoff PLCs, providing a standardized way to model hardware machines and eliminating the chaos of scattered utility functions.
 
-TwinCAT.OpenFramework is a modular framework that introduces architecture, execution model, and reusable libraries for building scalable PLC applications.
+### Why use this framework?
 
-It brings structured software engineering practices into the TwinCAT ecosystem.
-
-More technical description you can find [here](TECHNICAL_DESCRIPTION.md)
+1. **Organized Utility Classes:** Replaces scattered standard functions with logically grouped static methods (e.g., a `Strings` program providing `.GetLength()`, `.Concat()`, `.Replace()`, `.Split()`, `.Join()`).
+2. **Advanced Data Structures:** Adds crucial missing functionality, such as powerful and easy-to-use dynamic collections.
+3. **Exception Handling:** Establishes a robust mechanism for exception handling, error tracking, and system logging.
+4. **Unified Interfaces:** Provides standard interfaces and ready-to-use implementations for common services, such as `ILogger`, IO terminal models, devices.
+5. **Standardized Machine Modeling:** Offers a unified architectural approach to building a software model of your hardware. It standardizes system initialization, I/O interaction, error handling, and logging across your entire project.
+6. **And many more** You can find technical description [here](TECHNICAL_DESCRIPTION.md)
 
 ---
 
