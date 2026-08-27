@@ -1,0 +1,592 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="IntersectionController" Id="{d0f0aa39-ea76-461a-8fa3-dba15b8635a6}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+
+.. <legal notes>
+
+legal notes
+=================
+| SPDX-FileCopyrightText: © 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+| SPDX-License-Identifier: LGPL-3.0-only
+| For details check: LGPL-3.0-only_
+
+.. _LGPL-3.0-only: https://www.gnu.org/licenses/lgpl-3.0.en.html
+
+.. </legal notes>
+
+*)
+
+{attribute 'no_explicit_call' := 'do not call this function block directly'} 
+FUNCTION_BLOCK IntersectionController EXTENDS TOF_Automation.AutomationController<7>
+VAR	
+	{attribute 'hide'} 
+	_ClassName : STRING := __POUNAME();
+
+	{attribute 'hide'} 
+	_Mode : INTERSECTION_MODE;
+	{attribute 'hide'} 
+	_State : INTERSECTION_STATE;
+	{attribute 'hide'} 
+	_NextState : INTERSECTION_STATE;
+	
+	{region "Device instances"}
+	
+	{attribute 'hide'} 
+	_WorkingModeSwitch : TOF_Devices_IO.DigitalInput("WorkingModeSwitch", THIS^);
+	
+	{attribute 'hide'} 
+	_BlinkingYellowModeSwitch : TOF_Devices_IO.DigitalInput("BlinkingYellowModeSwitch", THIS^);
+	
+	{attribute 'hide'} 
+	_SpeedAdjusterConverter : TOF_Devices_IO.StaticRangeAnalogValueConverter(
+		minAnalogValue := -20,
+		maxAnalogValue := +20,
+		minRawValue := TOF_Devices_IO.RawAnalogValues.FromInt16(TOF_Core.SignedInt16.MIN_VALUE),
+		maxRawValue := TOF_Devices_IO.RawAnalogValues.FromInt16(TOF_Core.SignedInt16.MAX_VALUE)
+	);
+	{attribute 'hide'} 
+	_SwitchSpeedAdjuster : TOF_Devices_IO.AnalogInput("SwitchSpeedAdjuster", THIS^, _SpeedAdjusterConverter);
+	
+	{attribute 'hide'} 
+	_TrafficLight1 : TrafficLight("TrafficLight1", THIS^);
+	{attribute 'hide'} 
+	_TrafficLight2 : TrafficLight("TrafficLight2", THIS^);
+	{attribute 'hide'} 
+	_TrafficLight3 : TrafficLight("TrafficLight3", THIS^);
+	{attribute 'hide'} 
+	_TrafficLight4 : TrafficLight("TrafficLight4", THIS^);
+	
+ 	{endregion} 	
+
+	{region "Device related collections"}
+
+	{attribute 'hide'} 
+	_Devices : ARRAY [0.._ChildCount - 1] OF TOF_Automation.IChildAutomationComponent := 
+	[
+		_WorkingModeSwitch, 
+		_BlinkingYellowModeSwitch, 
+		_SwitchSpeedAdjuster, 
+		_TrafficLight1, 
+		_TrafficLight2, 
+		_TrafficLight3, 
+		_TrafficLight4
+	];
+
+	{attribute 'hide'} 
+	_TrafficLights : ARRAY [1..IntersectionConstants.TRAFFIC_LIGHTS_PER_GROUP * 2] OF ITrafficLight :=
+	[
+		_TrafficLight1, 
+		_TrafficLight2, 
+		_TrafficLight3,		
+		_TrafficLight4		
+	];
+	
+	{attribute 'hide'} 
+	_SignalGroup1 : ARRAY [1..IntersectionConstants.TRAFFIC_LIGHTS_PER_GROUP] OF ITrafficLight :=
+	[
+		_TrafficLight1, 
+		_TrafficLight3		
+	];
+	
+	{attribute 'hide'} 
+	_SignalGroup2 : ARRAY [1..IntersectionConstants.TRAFFIC_LIGHTS_PER_GROUP] OF ITrafficLight :=
+	[
+		_TrafficLight2, 
+		_TrafficLight4		
+	];
+	
+ 	{endregion} 	
+	
+	{region "Timers"}
+	
+	_RedGreenLightTimer : TOF_Timers.Timer;
+	_YellowLightTimer : TOF_Timers.Timer;
+
+	_FlashingYellowLightTimer : TOF_Timers.Timer;
+	
+	{endregion}
+END_VAR
+VAR_INPUT
+	ThrowTestExceptionRequest : BOOL;
+	IsTestExceptionCritical : BOOL;
+	TestExceptionMessage : STRING := 'Test error message';
+
+	ResetRequest : BOOL;
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[]]></ST>
+    </Implementation>
+    <Folder Name="Overriden methods" Id="{13702960-9d99-4885-a6ce-63462aae1b07}" />
+    <Folder Name="Service methods" Id="{856d71ee-39f1-4125-9914-d1908aaa9de4}">
+      <Folder Name="Process mode" Id="{9df05ec4-b756-4783-a76b-40e885978be7}" />
+      <Folder Name="Start mode" Id="{5736814f-405d-4520-8342-b8d268de143f}" />
+      <Folder Name="Start timer" Id="{c16a13e4-4c94-4831-b2dc-b8960e14f551}" />
+    </Folder>
+    <Method Name="bindIO" Id="{1bc433ca-8d0e-4452-8e3c-75449de42a8a}" FolderPath="Service methods\">
+      <Declaration><![CDATA[METHOD PRIVATE bindIO]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_WorkingModeSwitch.BindToIO(
+	TerminalModels.DI_1.Channel_1
+);
+
+_BlinkingYellowModeSwitch.BindToIO(
+	TerminalModels.DI_1.Channel_2
+);
+
+_SwitchSpeedAdjuster.BindToInt16IO(TerminalModels.AI_3.Channel_1);
+
+_TrafficLight1.BindToIO(
+	redLightRawValue 	:= TerminalModels.DO_2.Channel_1,
+	yellowLightRawValue := TerminalModels.DO_2.Channel_2,
+	greenLightRawValue 	:= TerminalModels.DO_2.Channel_3	
+);
+_TrafficLight2.BindToIO(
+	redLightRawValue 	:= TerminalModels.DO_2.Channel_4,
+	yellowLightRawValue := TerminalModels.DO_2.Channel_5,
+	greenLightRawValue 	:= TerminalModels.DO_2.Channel_6	
+);
+_TrafficLight3.BindToIO(
+	redLightRawValue 	:= TerminalModels.DO_2.Channel_7,
+	yellowLightRawValue := TerminalModels.DO_2.Channel_8,
+	greenLightRawValue 	:= TerminalModels.DO_2.Channel_9	
+);
+_TrafficLight4.BindToIO(
+	redLightRawValue 	:= TerminalModels.DO_2.Channel_10,
+	yellowLightRawValue := TerminalModels.DO_2.Channel_11,
+	greenLightRawValue 	:= TerminalModels.DO_2.Channel_12	
+);]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="BlinkingYellowModeSwitch" Id="{a4a71e1a-5dc0-41c8-b6e2-0a340d126fcd}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+PROPERTY FINAL BlinkingYellowModeSwitch : TOF_Devices_IO.IDigitalInput]]></Declaration>
+      <Get Name="Get" Id="{35f9ad22-fa01-46e2-a2ae-83a8496cef6a}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[BlinkingYellowModeSwitch := _BlinkingYellowModeSwitch;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="calculateCorrectedInterval" Id="{51d751ca-80fc-4362-91e8-31296f350aff}" FolderPath="Service methods\">
+      <Declaration><![CDATA[METHOD PRIVATE calculateCorrectedInterval : TIME
+VAR_INPUT
+	originalInterval : TIME;
+	correctionPercent : SINT(-50..50);
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF correctionPercent = 0 THEN
+	calculateCorrectedInterval := originalInterval;
+ELSIF correctionPercent > 0 THEN
+	calculateCorrectedInterval := originalInterval + TO_TIME(TO_INT(originalInterval) * correctionPercent / 100);
+ELSE
+	calculateCorrectedInterval := originalInterval - TO_TIME(TO_INT(originalInterval) * -correctionPercent / 100);
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="Children" Id="{edb09d7e-eaa4-4ee7-bf71-f499880b4098}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+PROPERTY FINAL Children : REFERENCE TO ARRAY [0.._ChildCount - 1] OF TOF_Automation.IChildAutomationComponent]]></Declaration>
+      <Get Name="Get" Id="{90a76f6a-9caa-4ca6-88e8-931aff742de9}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[Children REF= _Devices;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="ClassName" Id="{533645c9-51ab-4278-b915-2be070529db7}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{1aae8f98-7140-4915-9ec0-3cdf6e26caf7}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ClassName REF= _ClassName;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="executeTimers" Id="{dfed4c3f-27bc-4f55-8a83-85a2d79b2492}" FolderPath="Service methods\">
+      <Declaration><![CDATA[METHOD PRIVATE executeTimers]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_RedGreenLightTimer.Execute();
+_YellowLightTimer.Execute();
+_FlashingYellowLightTimer.Execute();]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="Mode" Id="{70c7bc2d-0923-4507-922c-273224e7708a}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+PROPERTY FINAL Mode : INTERSECTION_MODE]]></Declaration>
+      <Get Name="Get" Id="{0c285f66-f61a-47a3-955f-b140c5836c96}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[Mode := _Mode;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="NamespaceName" Id="{b7a7d419-b6f1-4dfe-b4b4-ae9ac4b21e47}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+PROPERTY NamespaceName : STRING]]></Declaration>
+      <Get Name="Get" Id="{225fc0aa-c40a-4b1c-a5e5-ec5ea749c036}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[NamespaceName := CurrentNamespace.Name;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="NextState" Id="{74da6e54-f63b-42c5-9611-7719f4839f3d}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+PROPERTY FINAL NextState : INTERSECTION_STATE]]></Declaration>
+      <Get Name="Get" Id="{234ef350-20ca-4de9-8f19-1c73cd4395de}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[NextState := _NextState;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="OnBeforeChildrenInitializing" Id="{d14266f5-308f-4ec2-bbd3-dd4787db6449}" FolderPath="Overriden methods\">
+      <Declaration><![CDATA[METHOD PROTECTED OnBeforeChildrenInitializing  
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_RedGreenLightTimer.Interval := IntersectionConstants.RED_GREEN_LIGHT_INTERVAL;
+_YellowLightTimer.Interval := IntersectionConstants.YELLOW_LIGHT_INTERVAL;
+
+_FlashingYellowLightTimer.Interval := IntersectionConstants.FLASHING_YELLOW_LIGHT_INTERVAL;
+
+bindIO();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="OnBeforeChildrenStopped" Id="{0516e5db-6b58-48f7-b149-9edab8091cfe}" FolderPath="Overriden methods\">
+      <Declaration><![CDATA[METHOD PROTECTED OnBeforeChildrenStopped
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[startIdelingMode();
+
+IF ResetRequest THEN
+	ResetRequest := FALSE;
+	
+	Reset();
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="OnBeforeChildrenWorking" Id="{a2091fd1-b3c2-4408-9e2a-b795dd68dcf8}" FolderPath="Overriden methods\">
+      <Declaration><![CDATA[METHOD PROTECTED OnBeforeChildrenWorking
+VAR
+	testException : TOF_Core.StandardException;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[executeTimers();
+
+IF _WorkingModeSwitch.Changed OR_ELSE _BlinkingYellowModeSwitch.Changed THEN
+	startMode();
+	
+	RETURN;
+ELSE
+	CASE _Mode OF
+		INTERSECTION_MODE.NORMAL:
+			processNormalMode();
+		
+		INTERSECTION_MODE.BLINKING_YELLOW:
+			processBlinkingYellowMode();
+	END_CASE
+END_IF
+
+IF ThrowTestExceptionRequest THEN
+	ThrowTestExceptionRequest := FALSE;
+	
+	testException.ThrowByObject(THIS^, __POUNAME(), __POSITION(), TO_WSTRING(TestExceptionMessage), 0);
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="OnGetExceptionSeverity" Id="{df1557a7-a67b-4f16-b8d6-1609709f69ba}" FolderPath="Overriden methods\">
+      <Declaration><![CDATA[METHOD PROTECTED OnGetExceptionSeverity : TOF_Automation.Core.ERROR_SEVERITY
+VAR_INPUT
+	exception : TOF_Automation.Core.IException;
+	catchPoint : TOF_Automation.AUTOMATION_COMPONENT_EXCEPTION_CATCH_POINT;
+END_VAR
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[OnGetExceptionSeverity := SEL(IsTestExceptionCritical, TOF_Automation.Core.ERROR_SEVERITY.ERROR, TOF_Automation.Core.ERROR_SEVERITY.CRITICAL);]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="OnOperationalStateChanged" Id="{dfa58b81-4624-4688-b85b-fa55f112c836}" FolderPath="Overriden methods\">
+      <Declaration><![CDATA[METHOD PROTECTED OnOperationalStateChanged
+VAR_INPUT
+	previousState : TOF_Automation.OPERATIONAL_STATE;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[startMode();]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="OperationalStateName" Id="{af99d547-78da-4f00-96bd-32d0d0304681}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+PROPERTY OperationalStateName : STRING(16)]]></Declaration>
+      <Get Name="Get" Id="{7a068cfa-95a9-4134-b604-ea1c07f183d2}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[OperationalStateName := TO_STRING(_OperationalState);]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="processBlinkingYellowMode" Id="{62fb35a3-197f-483b-a168-1d68d2c02c71}" FolderPath="Service methods\Process mode\">
+      <Declaration><![CDATA[METHOD PRIVATE processBlinkingYellowMode]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF _FlashingYellowLightTimer.Elapsed THEN
+	IF _State = INTERSECTION_STATE.ALL_YELLOW THEN
+		setState(
+			state := INTERSECTION_STATE.ALL_OFF, 
+			nextState := INTERSECTION_STATE.ALL_YELLOW
+		);		
+	ELSE
+		setState(
+			state := INTERSECTION_STATE.ALL_YELLOW, 
+			nextState := INTERSECTION_STATE.ALL_OFF
+		);		
+	END_IF
+	
+	startFlashingYellowLightTimer();
+	
+	updateTraficLights();
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="processNormalMode" Id="{a778b296-2e19-469e-8475-30ab670a6dcd}" FolderPath="Service methods\Process mode\">
+      <Declaration><![CDATA[METHOD processNormalMode]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[CASE _State OF
+	INTERSECTION_STATE.GROUP1_GREEN_GROUP2_RED:
+		IF _RedGreenLightTimer.Elapsed THEN
+			startYellowLightTimer();
+			
+			setState(
+				state := INTERSECTION_STATE.ALL_YELLOW, 
+				nextState := INTERSECTION_STATE.GROUP1_RED_GROUP2_GREEN
+			);
+			
+			updateTraficLights();
+		END_IF
+	
+	INTERSECTION_STATE.GROUP1_RED_GROUP2_GREEN:
+		IF _RedGreenLightTimer.Elapsed THEN
+			startYellowLightTimer();
+			
+			setState(
+				state := INTERSECTION_STATE.ALL_YELLOW, 
+				nextState := INTERSECTION_STATE.GROUP1_GREEN_GROUP2_RED
+			);
+			
+			updateTraficLights();
+		END_IF
+	
+	INTERSECTION_STATE.ALL_YELLOW:
+		IF _YellowLightTimer.Elapsed THEN
+			startRedGreenLightTimer();
+			
+			setState(
+				state := _NextState, 
+				nextState := INTERSECTION_STATE.ALL_YELLOW
+			);
+			
+			updateTraficLights();
+		END_IF
+END_CASE]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="SelfSize" Id="{db85e590-8997-4b56-bd9a-8e5dd4df70fe}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+PROPERTY SelfSize : ULINT]]></Declaration>
+      <Get Name="Get" Id="{f6ab4eca-dad6-4656-bd85-433d2bf1854b}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[SelfSize := XSIZEOF(THIS^);]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="setState" Id="{5c2f2c55-d0ba-4b8a-8df7-9cfa51071236}" FolderPath="Service methods\">
+      <Declaration><![CDATA[METHOD INTERNAL setState
+VAR_INPUT
+	state : INTERSECTION_STATE;
+	nextState : INTERSECTION_STATE;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_State := state;
+_NextState := nextState;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="setTrafficLigtsColor" Id="{32bd3844-8f88-48f3-a224-ac959493d17c}" FolderPath="Service methods\">
+      <Declaration><![CDATA[METHOD PRIVATE setTrafficLigtsColor
+VAR_IN_OUT CONSTANT
+	frafficLights : ARRAY [*] OF ITrafficLight;
+END_VAR
+VAR_INPUT
+	light : TRAFFIC_LIGHT_COLOR;
+END_VAR
+VAR
+	i : DINT;
+END_VAR
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[FOR i := LOWER_BOUND(frafficLights, 1) TO UPPER_BOUND(frafficLights, 1) DO
+	frafficLights[i].SetLight(light);
+END_FOR]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="SignalGroup1" Id="{4843127a-b5f8-4288-9d56-ada883c49d57}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+PROPERTY FINAL SignalGroup1 : REFERENCE TO ARRAY [1..IntersectionConstants.TRAFFIC_LIGHTS_PER_GROUP] OF ITrafficLight]]></Declaration>
+      <Get Name="Get" Id="{1a4eb1b3-0819-4585-b390-ed321667e91d}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[SignalGroup1 REF= _SignalGroup1;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="SignalGroup2" Id="{ecc07983-e080-4dca-9104-b4c59dd18f5a}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+PROPERTY FINAL SignalGroup2 : REFERENCE TO ARRAY [1..IntersectionConstants.TRAFFIC_LIGHTS_PER_GROUP] OF ITrafficLight]]></Declaration>
+      <Get Name="Get" Id="{8facf4b3-e9c7-4a51-887f-6cbb040d8e61}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[SignalGroup2 REF= _SignalGroup1;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="startBlinkingYellowMode" Id="{338031f0-6ea3-4eea-a4fb-410b4cc13072}" FolderPath="Service methods\Start mode\">
+      <Declaration><![CDATA[METHOD PRIVATE startBlinkingYellowMode]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_RedGreenLightTimer.Cancel();
+_YellowLightTimer.Cancel();
+
+startFlashingYellowLightTimer();
+
+_Mode := INTERSECTION_MODE.BLINKING_YELLOW;
+_State := INTERSECTION_STATE.ALL_YELLOW;
+
+updateTraficLights();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="startFlashingYellowLightTimer" Id="{96309d45-677b-4977-9f1c-e21c0143efbb}" FolderPath="Service methods\Start timer\">
+      <Declaration><![CDATA[METHOD PRIVATE startFlashingYellowLightTimer]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_FlashingYellowLightTimer.Interval := calculateCorrectedInterval(IntersectionConstants.FLASHING_YELLOW_LIGHT_INTERVAL, TO_SINT(IntersectionConstants.SWITCH_SPEED_FACTOR * _SwitchSpeedAdjuster.Value));
+
+_FlashingYellowLightTimer.Restart();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="startIdelingMode" Id="{8ddb5609-6544-4dcc-b972-500abb23f0f5}" FolderPath="Service methods\Start mode\">
+      <Declaration><![CDATA[METHOD startIdelingMode]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_RedGreenLightTimer.Cancel();
+_YellowLightTimer.Cancel();
+_FlashingYellowLightTimer.Cancel();
+
+_Mode := INTERSECTION_MODE.IDELING;
+_State := INTERSECTION_STATE.ALL_OFF;
+
+updateTraficLights();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="startMode" Id="{7a7d5ebb-876c-475e-adf9-9517420ae539}" FolderPath="Service methods\Start mode\">
+      <Declaration><![CDATA[METHOD PRIVATE startMode]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF NOT _WorkingModeSwitch.Value THEN
+	startIdelingMode();
+ELSE
+	IF _BlinkingYellowModeSwitch.Value THEN
+		startBlinkingYellowMode();
+	ELSE
+		startNormalMode();
+	END_IF	
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="startNormalMode" Id="{bfa9afc6-d6b0-4dbc-b2b3-10d6e8a939c6}" FolderPath="Service methods\Start mode\">
+      <Declaration><![CDATA[METHOD startNormalMode]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[startRedGreenLightTimer();
+
+_YellowLightTimer.Cancel();
+_FlashingYellowLightTimer.Cancel();
+
+_Mode := INTERSECTION_MODE.NORMAL;
+_State := INTERSECTION_STATE.GROUP1_GREEN_GROUP2_RED;
+
+updateTraficLights();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="startRedGreenLightTimer" Id="{50f36714-64fe-4212-afb9-2e8a39734cfd}" FolderPath="Service methods\Start timer\">
+      <Declaration><![CDATA[METHOD PRIVATE startRedGreenLightTimer]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_RedGreenLightTimer.Interval := calculateCorrectedInterval(IntersectionConstants.RED_GREEN_LIGHT_INTERVAL, TO_SINT(IntersectionConstants.SWITCH_SPEED_FACTOR * _SwitchSpeedAdjuster.Value));
+
+_RedGreenLightTimer.Restart();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="startYellowLightTimer" Id="{75f70f4d-af10-457d-91be-f1022c3b5646}" FolderPath="Service methods\Start timer\">
+      <Declaration><![CDATA[METHOD PRIVATE startYellowLightTimer]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_YellowLightTimer.Interval := calculateCorrectedInterval(IntersectionConstants.YELLOW_LIGHT_INTERVAL, TO_SINT(IntersectionConstants.SWITCH_SPEED_FACTOR * _SwitchSpeedAdjuster.Value));
+
+_YellowLightTimer.Restart();]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="State" Id="{0d41ded4-f538-4005-aa70-f221d58f38a5}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+PROPERTY FINAL State : INTERSECTION_STATE]]></Declaration>
+      <Get Name="Get" Id="{7519eabe-1cc3-4af8-82b3-a2f8425fe098}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[State := _State;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="SwitchSpeedAdjuster" Id="{06dddc90-cb5c-4f31-9411-86ecae41141b}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+PROPERTY FINAL SwitchSpeedAdjuster : TOF_Devices_IO.IAnalogInput]]></Declaration>
+      <Get Name="Get" Id="{af2782fd-129d-48e7-9c55-29dba0d016f0}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[SwitchSpeedAdjuster := _SwitchSpeedAdjuster;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="TrafficLights" Id="{1eb64023-b212-4c31-8a8b-6a8402e94081}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+PROPERTY FINAL TrafficLights : REFERENCE TO ARRAY [1..IntersectionConstants.TRAFFIC_LIGHTS_PER_GROUP * 2] OF ITrafficLight]]></Declaration>
+      <Get Name="Get" Id="{d43f39e5-1277-4211-984b-d6561c34e197}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[TrafficLights REF= _TrafficLights;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="updateTraficLights" Id="{f60cca55-65f4-4222-8c1f-0c67e0a9c589}" FolderPath="Service methods\">
+      <Declaration><![CDATA[METHOD PRIVATE updateTraficLights]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[CASE _State OF
+	INTERSECTION_STATE.ALL_OFF:
+		setTrafficLigtsColor(_TrafficLights, TRAFFIC_LIGHT_COLOR.NO_COLOR);
+	
+	INTERSECTION_STATE.ALL_YELLOW:
+		setTrafficLigtsColor(_TrafficLights, TRAFFIC_LIGHT_COLOR.YELLOW);
+	
+	INTERSECTION_STATE.GROUP1_GREEN_GROUP2_RED:
+		setTrafficLigtsColor(_SignalGroup1, TRAFFIC_LIGHT_COLOR.GREEN);
+		setTrafficLigtsColor(_SignalGroup2, TRAFFIC_LIGHT_COLOR.RED);
+	
+	INTERSECTION_STATE.GROUP1_RED_GROUP2_GREEN:
+		setTrafficLigtsColor(_SignalGroup1, TRAFFIC_LIGHT_COLOR.RED);
+		setTrafficLigtsColor(_SignalGroup2, TRAFFIC_LIGHT_COLOR.GREEN);
+END_CASE]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="WorkingModeSwitch" Id="{c6426b4a-cc28-41ca-ab55-394b24ab5039}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+PROPERTY FINAL WorkingModeSwitch : TOF_Devices_IO.IDigitalInput]]></Declaration>
+      <Get Name="Get" Id="{2f3df52f-dc14-4983-9392-94054660fe17}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[WorkingModeSwitch := _WorkingModeSwitch;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+  </POU>
+</TcPlcObject>
