@@ -40,6 +40,7 @@ END_VAR]]></Declaration>
     <Implementation>
       <ST><![CDATA[]]></ST>
     </Implementation>
+    <Folder Name="Service methods" Id="{3188279f-4192-4144-9219-d1281be18b24}" />
     <Method Name="AllocateMemory" Id="{7805ad4a-1088-4228-99dd-d8b7fe4579c3}">
       <Declaration><![CDATA[METHOD PROTECTED AllocateMemory 
 VAR_INPUT
@@ -507,6 +508,72 @@ FOR i := _Length - 1 TO 0 BY -1 DO
 END_FOR]]></ST>
       </Implementation>
     </Method>
+    <Method Name="restoreHeapFrom" Id="{1a1c5c77-8af0-4f17-a539-272de7e4b0a4}" FolderPath="Service methods\">
+      <Declaration><![CDATA[METHOD PRIVATE restoreHeapFrom
+VAR_INPUT
+    rootIndex : DINT;
+    heapSize : DINT;
+    comparer : Core.IComparer;
+    direction : Core.SORT_DIRECTION;
+END_VAR
+VAR
+    currentIndex : DINT;
+    childIndex : DINT;
+    selectedIndex : DINT;
+
+    comparisonResult : Core.COMPARISION_RESULT;
+
+    value1, value2 : __SYSTEM.AnyType;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[currentIndex := rootIndex;
+
+WHILE (currentIndex * 2 + 1) < heapSize DO
+    childIndex := currentIndex * 2 + 1;
+    selectedIndex := currentIndex;
+
+    value1 := _Array[selectedIndex].AsAnyType();
+    value2 := _Array[childIndex].AsAnyType();
+
+    comparisonResult := comparer.Compare(value1, value2);
+
+    IF direction = Core.SORT_DIRECTION.ASCENDING THEN
+        IF comparisonResult = Core.COMPARISION_RESULT.FIRST_LESS_THAN_SECOND THEN
+            selectedIndex := childIndex;
+        END_IF
+    ELSE
+        IF comparisonResult = Core.COMPARISION_RESULT.FIRST_GREATER_THAN_SECOND THEN
+            selectedIndex := childIndex;
+        END_IF
+    END_IF
+
+    IF (childIndex + 1) < heapSize THEN
+        value1 := _Array[selectedIndex].AsAnyType();
+        value2 := _Array[childIndex + 1].AsAnyType();
+
+        comparisonResult := comparer.Compare(value1, value2);
+
+        IF direction = Core.SORT_DIRECTION.ASCENDING THEN
+            IF comparisonResult = Core.COMPARISION_RESULT.FIRST_LESS_THAN_SECOND THEN
+                selectedIndex := childIndex + 1;
+            END_IF
+        ELSE
+            IF comparisonResult = Core.COMPARISION_RESULT.FIRST_GREATER_THAN_SECOND THEN
+                selectedIndex := childIndex + 1;
+            END_IF
+        END_IF
+    END_IF
+
+    IF selectedIndex = currentIndex THEN
+        RETURN;
+    END_IF
+
+    Swap(currentIndex, selectedIndex);
+	
+    currentIndex := selectedIndex;
+END_WHILE]]></ST>
+      </Implementation>
+    </Method>
     <Property Name="SelfSize" Id="{b8f1c23e-6bde-4d17-b77f-f3d1373a6f6b}">
       <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
 PROPERTY SelfSize : ULINT]]></Declaration>
@@ -572,52 +639,73 @@ VAR_INPUT
 	direction : Core.SORT_DIRECTION := Core.SORT_DIRECTION.ASCENDING;
 END_VAR
 VAR
-	argumentNullException : Core.ArgumentNotSpecifiedException;
-	
-	replaced : BOOL;
-	
-	i : DINT;
-	
-	comparisionResult : Core.COMPARISION_RESULT;
-	
-	value1, value2 : __SYSTEM.AnyType;
+    argumentNullException : Core.ArgumentNotSpecifiedException;
+
+    i : DINT;
+    j : DINT;
+    startIndex : DINT;
+    endIndex : DINT;
+
+    comparisonResult : Core.COMPARISION_RESULT;
+
+    value1, value2 : __SYSTEM.AnyType;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[IF comparer = 0 THEN
-	argumentNullException.ThrowByObject(THIS^, __POUNAME(), __POSITION(), 'comparer');
+        <ST><![CDATA[Sort := THIS^;
+
+IF _Length <= 1 THEN
+    RETURN;
 END_IF
 
-Sort := THIS^;
+// Insertion sort is faster for small lists, otherwise use heap sort
+IF _Length <= 16 THEN
+    FOR i := 1 TO _Length - 1 DO
+        j := i;
 
-// todo: implement more effective sorting
-REPEAT
-	replaced := FALSE;
+        WHILE j > 0 DO
+            value1 := _Array[j - 1].AsAnyType();
+            value2 := _Array[j].AsAnyType();
+
+            comparisonResult := comparer.Compare(value1, value2);
+
+            IF direction = Core.SORT_DIRECTION.ASCENDING THEN
+                IF comparisonResult <> Core.COMPARISION_RESULT.FIRST_GREATER_THAN_SECOND THEN
+                    EXIT;
+                END_IF
+            ELSE
+                IF comparisonResult <> Core.COMPARISION_RESULT.FIRST_LESS_THAN_SECOND THEN
+                    EXIT;
+                END_IF
+            END_IF
+
+            Swap(j - 1, j);
+			
+            j := j - 1;
+        END_WHILE
+    END_FOR
+
+    RETURN;
+END_IF
+
+// Build heap
+startIndex := (_Length / 2) - 1;
+
+WHILE startIndex >= 0 DO
+    restoreHeapFrom(startIndex, _Length, comparer, direction);
 	
-	IF _Length > 1 THEN
-		FOR i := 0 TO _Length - 2 DO
-			value1 := _Array[i].AsAnyType();
-			value2 := _Array[i + 1].AsAnyType();
-			
-			comparisionResult := comparer.Compare(value1, value2);
-			
-			IF direction = Core.SORT_DIRECTION.ASCENDING THEN
-				IF comparisionResult = Core.COMPARISION_RESULT.FIRST_GREATER_THAN_SECOND THEN
-					Swap(i, i + 1);
-					replaced := TRUE;
-				END_IF
-			ELSE
-				IF comparisionResult = Core.COMPARISION_RESULT.FIRST_LESS_THAN_SECOND THEN
-					Swap(i, i + 1);
-					replaced := TRUE;
-				END_IF			
-			END_IF
-		END_FOR		
-	END_IF
-UNTIL
-	NOT replaced
-END_REPEAT
+    startIndex := startIndex - 1;
+END_WHILE
 
-]]></ST>
+// Extract heap root into the final sorted position
+endIndex := _Length - 1;
+
+WHILE endIndex > 0 DO
+    Swap(0, endIndex);
+	
+    restoreHeapFrom(0, endIndex, comparer, direction);
+	
+    endIndex := endIndex - 1;
+END_WHILE]]></ST>
       </Implementation>
     </Method>
     <Method Name="Swap" Id="{eb0e8297-edd7-472f-a573-82e2ae740339}">
