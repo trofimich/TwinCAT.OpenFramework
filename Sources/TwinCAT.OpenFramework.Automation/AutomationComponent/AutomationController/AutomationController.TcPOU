@@ -20,9 +20,15 @@ legal notes
 FUNCTION_BLOCK ABSTRACT AutomationController 
 VAR_GENERIC CONSTANT
 	{attribute 'hide'} 
-    _ChildCount : Core.INT_INDEX := 0;
+    _ChildCount : Core.INT_LENGTH := 0;
 END_VAR
-EXTENDS AutomationComponent IMPLEMENTS IParentAutomationComponent]]></Declaration>
+EXTENDS AutomationComponent IMPLEMENTS IAutomationController
+VAR
+	{attribute 'hide'} 
+	_Plugins : POINTER TO IAutomationControllerPlugin;
+	{attribute 'hide'} 
+	_PluginCount : Core.INT_LENGTH;
+END_VAR]]></Declaration>
     <Implementation>
       <ST><![CDATA[]]></ST>
     </Implementation>
@@ -31,9 +37,24 @@ EXTENDS AutomationComponent IMPLEMENTS IParentAutomationComponent]]></Declaratio
       <Folder Name="ProcessOutput" Id="{5f362344-8bb9-467e-b80b-e33887713368}" />
     </Folder>
     <Folder Name="Overriden members" Id="{c5ec7856-9826-474b-a801-c545bcc0d575}" />
+    <Method Name="AssingPlugins" Id="{898fe1ab-4afc-4d2c-b446-7bee770fabf4}">
+      <Declaration><![CDATA[METHOD PROTECTED FINAL AssingPlugins 
+VAR_INPUT
+	plugins : ARRAY [*] OF IAutomationControllerPlugin;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_Plugins := plugins;
+
+IF plugins <> 0 THEN
+	_PluginCount := TO_INT(1 + UPPER_BOUND(plugins, 1) - LOWER_BOUND(plugins, 1));
+ELSE
+	_PluginCount := 0;
+END_IF]]></ST>
+      </Implementation>
+    </Method>
     <Property Name="ChildCount" Id="{9220f711-cd6b-4535-afb7-2d29bd70dbf0}">
       <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
-PROPERTY FINAL ChildCount : Core.INT_INDEX]]></Declaration>
+PROPERTY FINAL ChildCount : Core.INT_LENGTH]]></Declaration>
       <Get Name="Get" Id="{7ecd62bb-cc61-4886-a3b7-812711794d0b}">
         <Declaration><![CDATA[]]></Declaration>
         <Implementation>
@@ -88,11 +109,13 @@ END_IF]]></ST>
 VAR
 	exceptionCode : __SYSTEM.ExceptionCode;
 	exception : Core.IException;	
-	severity : Core.ERROR_SEVERITY;
+	exceptionHandlingResult : PROBLEM_HANDLING_RESULT;
 
 	i : Core.INT_INDEX;
 	
 	child : IChildAutomationComponent;
+	
+	plugin : IAutomationControllerPlugin;
 	
 	outputDevice : IOutputDevice;	
 END_VAR]]></Declaration>
@@ -102,13 +125,9 @@ END_VAR]]></Declaration>
 __CATCH(exceptionCode)		
 	exception := Core.ExceptionManager.GetLastException(exceptionCode);
 					
-	severity := OnGetExceptionSeverity(exception, AUTOMATION_COMPONENT_EXCEPTION_CATCH_POINT.ON_BEFORE_CHILDREN_PROCESS_OUTPUT);
+	exceptionHandlingResult := OnHandleException(exception, EXCEPTION_CATCH_POINT.ON_BEFORE_CHILDREN_PROCESS_OUTPUT);
 
-	HandleException(exception, severity);
-
-	IF severity = Core.ERROR_SEVERITY.CRITICAL THEN
-		SetOperationalState(OPERATIONAL_STATE.STOPPED, "OnBeforeDevicesProcessOutput error");		
-	END_IF
+	ProcessException(exception, exceptionHandlingResult, "OnBeforeDevicesProcessOutput error");
 __ENDTRY
 
 FOR i := 0 TO ChildCount - 1 DO
@@ -120,12 +139,10 @@ FOR i := 0 TO ChildCount - 1 DO
 
 	outputDevice.ProcessOutput(); 
 	
-	IF outputDevice.HasError THEN
-		SetError(outputDevice.Error);
-
-		IF _OperationalState <> OPERATIONAL_STATE.INVALID AND_THEN outputDevice.Error.Severity = Core.ERROR_SEVERITY.CRITICAL THEN
-			SetOperationalState(OPERATIONAL_STATE.INVALID, "Child ProcessOutput error");				
-		END_IF								
+	IF outputDevice.HasError AND_THEN outputDevice.Error.Severity = Core.ERROR_SEVERITY.CRITICAL THEN
+		exceptionHandlingResult := OnHandleChildCriticalError(outputDevice);
+		
+		ProcessChildError(outputDevice.Error, exceptionHandlingResult, Core.WideStrings.Concat255("Child[", TO_WSTRING(i), "(", outputDevice.Name, ")].ProcessOutput error"));
 	END_IF
 END_FOR
 
@@ -134,14 +151,26 @@ __TRY
 __CATCH(exceptionCode)		
 	exception := Core.ExceptionManager.GetLastException(exceptionCode);
 					
-	severity := OnGetExceptionSeverity(exception, AUTOMATION_COMPONENT_EXCEPTION_CATCH_POINT.ON_AFTER_CHILDREN_PROCESS_OUTPUT);
+	exceptionHandlingResult := OnHandleException(exception, EXCEPTION_CATCH_POINT.ON_AFTER_CHILDREN_PROCESS_OUTPUT);
 
-	HandleException(exception, severity);
+	ProcessException(exception, exceptionHandlingResult, "OnAfterDevicesProcessOutput error");
+__ENDTRY
 
-	IF severity = Core.ERROR_SEVERITY.CRITICAL THEN
-		SetOperationalState(OPERATIONAL_STATE.STOPPED, "OnAfterDevicesProcessOutput error");		
+FOR i := 0 TO PluginCount - 1 DO
+	plugin := TryGetPluginByIndex(i);
+	
+	IF plugin <> 0 THEN
+		__TRY
+			plugin.OnAfterControllerExecute(THIS^);
+		__CATCH(exceptionCode)		
+			exception := Core.ExceptionManager.GetLastException(exceptionCode);
+							
+			exceptionHandlingResult := OnHandleException(exception, EXCEPTION_CATCH_POINT.ON_AFTER_EXECUTE_PLUGINS);
+		
+			ProcessException(exception, exceptionHandlingResult, Core.WideStrings.Concat255("plugin[", TO_WSTRING(i), "].OnAfterControllerExecute error"));
+		__ENDTRY		
 	END_IF
-__ENDTRY]]></ST>
+END_FOR]]></ST>
       </Implementation>
     </Method>
     <Method Name="OnBeforeChildrenInitializing" Id="{96a6f588-939f-4fde-a4b8-d8f2002a7ef4}" FolderPath="Overriden members\">
@@ -172,27 +201,41 @@ END_IF]]></ST>
 VAR
 	exceptionCode : __SYSTEM.ExceptionCode;
 	exception : Core.IException;	
-	severity : Core.ERROR_SEVERITY;
+	exceptionHandlingResult : PROBLEM_HANDLING_RESULT;
 
 	i : Core.INT_INDEX;
 
 	child : IChildAutomationComponent;
 	
+	plugin : IAutomationControllerPlugin;
+	
 	inputDevice : IInputDevice;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[__TRY
+        <ST><![CDATA[FOR i := 0 TO PluginCount - 1 DO
+	plugin := TryGetPluginByIndex(i);
+	
+	IF plugin <> 0 THEN
+		__TRY
+			plugin.OnBeforeControllerExecute(THIS^);
+		__CATCH(exceptionCode)		
+			exception := Core.ExceptionManager.GetLastException(exceptionCode);
+							
+			exceptionHandlingResult := OnHandleException(exception, EXCEPTION_CATCH_POINT.ON_BEFORE_EXECUTE_PLUGINS);
+		
+			ProcessException(exception, exceptionHandlingResult, Core.WideStrings.Concat255("plugin[", TO_WSTRING(i), "].OnBeforeControllerExecute error"));
+		__ENDTRY		
+	END_IF
+END_FOR
+
+__TRY
 	OnBeforeDevicesProcessInput();
 __CATCH(exceptionCode)		
 	exception := Core.ExceptionManager.GetLastException(exceptionCode);
 					
-	severity := OnGetExceptionSeverity(exception, AUTOMATION_COMPONENT_EXCEPTION_CATCH_POINT.ON_BEFORE_CHILDREN_PROCESS_INPUT);
+	exceptionHandlingResult := OnHandleException(exception, EXCEPTION_CATCH_POINT.ON_BEFORE_CHILDREN_PROCESS_INPUT);
 
-	HandleException(exception, severity);
-
-	IF severity = Core.ERROR_SEVERITY.CRITICAL THEN
-		SetOperationalState(OPERATIONAL_STATE.STOPPED, "OnBeforeDevicesProcessInput error");		
-	END_IF
+	ProcessException(exception, exceptionHandlingResult, "OnBeforeDevicesProcessInput error");
 __ENDTRY
 
 FOR i := 0 TO ChildCount - 1 DO
@@ -203,14 +246,12 @@ FOR i := 0 TO ChildCount - 1 DO
 	END_IF
 
 	inputDevice.ProcessInput(); 
-	
-	IF inputDevice.HasError THEN
-		SetError(inputDevice.Error);
 
-		IF _OperationalState <> OPERATIONAL_STATE.INVALID AND_THEN inputDevice.Error.Severity = Core.ERROR_SEVERITY.CRITICAL THEN
-			SetOperationalState(OPERATIONAL_STATE.INVALID, "Child ProcessInput error");				
-		END_IF								
-	END_IF
+	IF inputDevice.HasError AND_THEN inputDevice.Error.Severity = Core.ERROR_SEVERITY.CRITICAL THEN
+		exceptionHandlingResult := OnHandleChildCriticalError(inputDevice);
+		
+		ProcessChildError(inputDevice.Error, exceptionHandlingResult, Core.WideStrings.Concat255("Child[", TO_WSTRING(i), "(", inputDevice.Name, ")].ProcessInput error"));
+	END_IF	
 END_FOR
 
 __TRY
@@ -218,16 +259,22 @@ __TRY
 __CATCH(exceptionCode)		
 	exception := Core.ExceptionManager.GetLastException(exceptionCode);
 					
-	severity := OnGetExceptionSeverity(exception, AUTOMATION_COMPONENT_EXCEPTION_CATCH_POINT.ON_AFTER_CHILDREN_PROCESS_INPUT);
+	exceptionHandlingResult := OnHandleException(exception, EXCEPTION_CATCH_POINT.ON_AFTER_CHILDREN_PROCESS_INPUT);
 
-	HandleException(exception, severity);
-
-	IF severity = Core.ERROR_SEVERITY.CRITICAL THEN
-		SetOperationalState(OPERATIONAL_STATE.STOPPED, "OnAfterDevicesProcessInput error");		
-	END_IF
+	ProcessException(exception, exceptionHandlingResult, "OnAfterDevicesProcessInput error");
 __ENDTRY]]></ST>
       </Implementation>
     </Method>
+    <Property Name="PluginCount" Id="{c48dfd84-c0df-4e03-b68e-6081a02a9f8d}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+PROPERTY FINAL PluginCount : Core.INT_LENGTH]]></Declaration>
+      <Get Name="Get" Id="{5dc2143c-2fd9-40fa-82bb-d9ba834aa42a}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[PluginCount := _PluginCount;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
     <Method Name="TryGetChildByIndex" Id="{41e536e8-bb48-46c8-b4d8-f8835e391a1a}">
       <Declaration><![CDATA[METHOD FINAL TryGetChildByIndex : IChildAutomationComponent
 VAR_INPUT
@@ -235,6 +282,17 @@ VAR_INPUT
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[TryGetChildByIndex := InternalTryGetChildByIndex(index);]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="TryGetPluginByIndex" Id="{b96b6560-7aba-4b72-8158-2ea48dd1ce51}">
+      <Declaration><![CDATA[METHOD TryGetPluginByIndex : IAutomationControllerPlugin
+VAR_INPUT
+	index : Core.INT_INDEX;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF _PluginCount > index THEN
+	TryGetPluginByIndex := _Plugins[index];
+END_IF]]></ST>
       </Implementation>
     </Method>
   </POU>

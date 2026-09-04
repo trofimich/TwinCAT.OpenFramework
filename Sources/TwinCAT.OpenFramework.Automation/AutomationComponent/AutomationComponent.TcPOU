@@ -95,7 +95,7 @@ __ENDTRY]]></ST>
 VAR
 	exceptionCode : __SYSTEM.ExceptionCode;
 	exception : Core.IException;	
-	severity : Core.ERROR_SEVERITY;
+	exceptionHandlingResult : PROBLEM_HANDLING_RESULT;
 
 	i : Core.INT_INDEX;
 	
@@ -107,17 +107,25 @@ END_VAR]]></Declaration>
 __CATCH(exceptionCode)
 	exception := Core.ExceptionManager.GetLastException(exceptionCode);	
 
-	severity := OnGetExceptionSeverity(exception, AUTOMATION_COMPONENT_EXCEPTION_CATCH_POINT.ON_BEFORE_CHILDREN_STOPPED);
+	exceptionHandlingResult := OnHandleException(exception, EXCEPTION_CATCH_POINT.ON_BEFORE_CHILDREN_STOPPED);
 
-	Core.LogManager.TryLogException(exception, severity, "AutomationComponent", "AutomationComponent.OnBeforeChildrenStopped");
+	Core.LogManager.TryLogException(exception, GetErrorSeverityByExceptionHandlingResult(exceptionHandlingResult), "AutomationComponent", "AutomationComponent.OnBeforeChildrenStopped");
 __ENDTRY	
 
 FOR i := 0 TO InternalChildCount - 1 DO
 	child := InternalTryGetChildByIndex(i);
 	
-	IF child.Enabled AND_THEN (child.OperationalState = OPERATIONAL_STATE.WORKING OR_ELSE child.OperationalState = OPERATIONAL_STATE.STOPPED) THEN
-		child.Execute();
+	IF NOT child.Enabled THEN
+		CONTINUE;
 	END_IF
+	
+	CASE child.OperationalState OF
+		OPERATIONAL_STATE.WORKING:			
+			child.Stop(Core.WideStrings.Concat255("Parent device (", Name, ") stopped"));
+		
+		OPERATIONAL_STATE.STOPPED:
+			child.Execute();
+	END_CASE
 END_FOR
 
 __TRY
@@ -125,9 +133,9 @@ __TRY
 __CATCH(exceptionCode)
 	exception := Core.ExceptionManager.GetLastException(exceptionCode);	
 
-	severity := OnGetExceptionSeverity(exception, AUTOMATION_COMPONENT_EXCEPTION_CATCH_POINT.ON_AFTER_CHILDREN_STOPPED);
+	exceptionHandlingResult := OnHandleException(exception, EXCEPTION_CATCH_POINT.ON_AFTER_CHILDREN_STOPPED);
 
-	Core.LogManager.TryLogException(exception, severity, "AutomationComponent", "AutomationComponent.OnAfterChildrenStopped");
+	Core.LogManager.TryLogException(exception, GetErrorSeverityByExceptionHandlingResult(exceptionHandlingResult), "AutomationComponent", "AutomationComponent.OnAfterChildrenStopped");
 __ENDTRY]]></ST>
       </Implementation>
     </Method>
@@ -136,7 +144,7 @@ __ENDTRY]]></ST>
 VAR
 	exceptionCode : __SYSTEM.ExceptionCode;
 	exception : Core.IException;	
-	severity : Core.ERROR_SEVERITY;
+	exceptionHandlingResult : PROBLEM_HANDLING_RESULT;
 
 	i : Core.INT_INDEX;
 	
@@ -152,12 +160,11 @@ IF _OperationalState = OPERATIONAL_STATE.WORKING AND_THEN HasError AND_THEN _Err
 	__CATCH(exceptionCode)		
 		exception := Core.ExceptionManager.GetLastException(exceptionCode);
 						
-		severity := OnGetExceptionSeverity(exception, AUTOMATION_COMPONENT_EXCEPTION_CATCH_POINT.ON_RECOVER);
+		exceptionHandlingResult := OnHandleException(exception, EXCEPTION_CATCH_POINT.ON_RECOVER);
 	
-		HandleException(exception, severity);
+		ProcessException(exception, exceptionHandlingResult, "OnRecover error");
 	
-		IF severity = Core.ERROR_SEVERITY.CRITICAL THEN
-			SetOperationalState(OPERATIONAL_STATE.STOPPED, "OnRecover error");		
+		IF exceptionHandlingResult = PROBLEM_HANDLING_RESULT.SET_ERROR_AND_STOP_COMPONENT THEN
 			RETURN;
 		END_IF		
 	__ENDTRY
@@ -168,12 +175,11 @@ __TRY
 __CATCH(exceptionCode)
 	exception := Core.ExceptionManager.GetLastException(exceptionCode);	
 
-	severity := OnGetExceptionSeverity(exception, AUTOMATION_COMPONENT_EXCEPTION_CATCH_POINT.ON_BEFORE_CHILDREN_WORKING);
+	exceptionHandlingResult := OnHandleException(exception, EXCEPTION_CATCH_POINT.ON_BEFORE_CHILDREN_WORKING);
 
-	HandleException(exception, severity);
+	ProcessException(exception, exceptionHandlingResult, "OnBeforeChildrenWorking error");
 
-	IF severity = Core.ERROR_SEVERITY.CRITICAL THEN
-		SetOperationalState(OPERATIONAL_STATE.STOPPED, "OnBeforeChildrenWorking error");
+	IF exceptionHandlingResult = PROBLEM_HANDLING_RESULT.SET_ERROR_AND_STOP_COMPONENT THEN
 		RETURN;		
 	END_IF
 __ENDTRY	
@@ -185,8 +191,10 @@ FOR i := 0 TO InternalChildCount - 1 DO
 		child.Execute();
 		
 		IF child.HasError AND_THEN child.Error.Severity = Core.ERROR_SEVERITY.CRITICAL THEN
-			SetError(child.Error);
-			SetOperationalState(OPERATIONAL_STATE.STOPPED, Core.WideStrings.Concat255("Child[", TO_WSTRING(i), "(", child.Name, ")].Execute error"));		
+			exceptionHandlingResult := OnHandleChildCriticalError(child);
+			
+			ProcessChildError(child.Error, exceptionHandlingResult, Core.WideStrings.Concat255("Child[", TO_WSTRING(i), "](", child.Name, ").Execute error"));
+			
 			RETURN;
 		END_IF
 	END_IF
@@ -197,12 +205,11 @@ __TRY
 __CATCH(exceptionCode)
 	exception := Core.ExceptionManager.GetLastException(exceptionCode);	
 
-	severity := OnGetExceptionSeverity(exception, AUTOMATION_COMPONENT_EXCEPTION_CATCH_POINT.ON_AFTER_CHILDREN_WORKING);
+	exceptionHandlingResult := OnHandleException(exception, EXCEPTION_CATCH_POINT.ON_AFTER_CHILDREN_WORKING);
 
-	HandleException(exception, severity);
+	ProcessException(exception, exceptionHandlingResult, "OnAfterChildrenWorking error");
 
-	IF severity = Core.ERROR_SEVERITY.CRITICAL THEN
-		SetOperationalState(OPERATIONAL_STATE.STOPPED, "OnAfterChildrenWorking error");
+	IF exceptionHandlingResult = PROBLEM_HANDLING_RESULT.SET_ERROR_AND_STOP_COMPONENT THEN
 		RETURN;		
 	END_IF
 __ENDTRY]]></ST>
@@ -285,7 +292,7 @@ PROPERTY FINAL Error : REFERENCE TO Core.ERROR ]]></Declaration>
 VAR
 	exceptionCode : __SYSTEM.ExceptionCode;
 	exception : Core.IException;	
-	severity : Core.ERROR_SEVERITY;
+	exceptionHandlingResult : PROBLEM_HANDLING_RESULT;
 	
 	i : Core.INT_INDEX;
 		
@@ -302,13 +309,9 @@ __TRY
 __CATCH(exceptionCode)		
 	exception := Core.ExceptionManager.GetLastException(exceptionCode);
 					
-	severity := OnGetExceptionSeverity(exception, AUTOMATION_COMPONENT_EXCEPTION_CATCH_POINT.ON_BEFORE_EXECUTE);
+	exceptionHandlingResult := OnHandleException(exception, EXCEPTION_CATCH_POINT.ON_BEFORE_EXECUTE);
 
-	HandleException(exception, severity);
-
-	IF severity = Core.ERROR_SEVERITY.CRITICAL THEN
-		SetOperationalState(OPERATIONAL_STATE.STOPPED, "OnBeforeExecute error");		
-	END_IF
+	ProcessException(exception, exceptionHandlingResult, "OnBeforeExecute error");
 __ENDTRY
 
 // execution processing
@@ -326,13 +329,9 @@ __TRY
 __CATCH(exceptionCode)		
 	exception := Core.ExceptionManager.GetLastException(exceptionCode);
 					
-	severity := OnGetExceptionSeverity(exception, AUTOMATION_COMPONENT_EXCEPTION_CATCH_POINT.ON_AFTER_EXECUTE);
+	exceptionHandlingResult := OnHandleException(exception, EXCEPTION_CATCH_POINT.ON_AFTER_EXECUTE);
 
-	HandleException(exception, severity);
-
-	IF severity = Core.ERROR_SEVERITY.CRITICAL THEN
-		SetOperationalState(OPERATIONAL_STATE.STOPPED, "OnAfterExecute error");		
-	END_IF
+	ProcessException(exception, exceptionHandlingResult, "OnAfterExecute error");
 __ENDTRY]]></ST>
       </Implementation>
     </Method>
@@ -349,37 +348,19 @@ END_VAR]]></Declaration>
         <ST><![CDATA[_Name := SEL(Core.WideStrings.IsNullOrWhiteSpace(name), name, GetDefaultName());]]></ST>
       </Implementation>
     </Method>
-    <Method Name="HandleException" Id="{c8063572-3da9-4eb4-bd36-833c249f0127}" FolderPath="Service methods\">
-      <Declaration><![CDATA[METHOD INTERNAL HandleException
-VAR_IN_OUT CONSTANT
-	exception : Core.IException;  
-END_VAR
+    <Method Name="GetErrorSeverityByExceptionHandlingResult" Id="{ed18cbec-df2d-4a7e-8a3e-186ce11ba646}" FolderPath="Service methods\">
+      <Declaration><![CDATA[METHOD PROTECTED GetErrorSeverityByExceptionHandlingResult : Core.ERROR_SEVERITY
 VAR_INPUT
-	severity : Core.ERROR_SEVERITY;
+	exceptionHandlingResult : PROBLEM_HANDLING_RESULT;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[IF NOT __ISVALIDREF(exception) OR_ELSE exception.Empty THEN
-	RETURN;
-END_IF
-
-// SetException called in place of first errror occurance, so it should be always logged 
-Core.LogManager.TryLogException(exception, severity);
-
-IF _Error.Empty OR_ELSE _Error.Severity < severity THEN
-	exception.ToError(_Error, severity);
+        <ST><![CDATA[IF exceptionHandlingResult = PROBLEM_HANDLING_RESULT.SET_ERROR_AND_STOP_COMPONENT THEN
+	GetErrorSeverityByExceptionHandlingResult := Core.ERROR_SEVERITY.CRITICAL;
+ELSE
+	GetErrorSeverityByExceptionHandlingResult := Core.ERROR_SEVERITY.ERROR;
 END_IF]]></ST>
       </Implementation>
     </Method>
-    <Property Name="HasChildren" Id="{a95e62dc-41eb-4a8e-9edd-0f2051314ffc}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
-PROPERTY FINAL HasChildren : BOOL]]></Declaration>
-      <Get Name="Get" Id="{d8081265-9c5a-4966-b3ca-cf25aa8e61d4}">
-        <Declaration><![CDATA[]]></Declaration>
-        <Implementation>
-          <ST><![CDATA[HasChildren := InternalChildCount > 0;]]></ST>
-        </Implementation>
-      </Get>
-    </Property>
     <Property Name="HasError" Id="{b058a64f-59a4-414d-b578-01945ffe1e29}">
       <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
 PROPERTY FINAL HasError : BOOL]]></Declaration>
@@ -387,16 +368,6 @@ PROPERTY FINAL HasError : BOOL]]></Declaration>
         <Declaration><![CDATA[]]></Declaration>
         <Implementation>
           <ST><![CDATA[HasError := _Error.HasError;]]></ST>
-        </Implementation>
-      </Get>
-    </Property>
-    <Property Name="HasParent" Id="{0cb60557-4b37-468e-b5b8-462763379c8a}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
-PROPERTY FINAL HasParent : BOOL]]></Declaration>
-      <Get Name="Get" Id="{8cd25382-dc82-45c5-aba6-b17ec5a71249}">
-        <Declaration><![CDATA[]]></Declaration>
-        <Implementation>
-          <ST><![CDATA[HasParent := _Parent <> 0;]]></ST>
         </Implementation>
       </Get>
     </Property>
@@ -421,7 +392,8 @@ PROPERTY FINAL InitializationTimeout : TIME]]></Declaration>
 VAR
 	i : Core.INT_INDEX;
 	
-	parent : IChildAutomationComponent;
+	thisAsParentComponent : IChildAutomationComponent;
+	parent : IAutomationComponent;
 	child : IChildAutomationComponent;
 	
 	exceptionCode : __SYSTEM.ExceptionCode;
@@ -442,8 +414,8 @@ __TRY
 		initializationTimeoutException.ThrowByObject(THIS^, __POUNAME(), __POSITION(), _InitializationTimer.PT, Core.WideStrings.Concat255("Initialization timeout ", TO_WSTRING(_InitializationTimer.PT), " elapsed"));
 	END_IF
 	
-	IF __QUERYINTERFACE(THIS^, parent) AND_THEN NOT parent.HasParent THEN
-		notSpecifiedException.ThrowByObject(THIS^, __POUNAME(), __POSITION(), 'Parent');			
+	IF __QUERYINTERFACE(THIS^, thisAsParentComponent) AND_THEN (parent := thisAsParentComponent.Parent) = 0 THEN
+		notSpecifiedException.ThrowByObject(THIS^, __POUNAME(), __POSITION(), 'Parent');						
 	END_IF
 
 	OnBeforeChildrenInitializing();
@@ -466,11 +438,9 @@ __TRY
 		SetOperationalState(OPERATIONAL_STATE.WORKING, "Successfull initialization");
 	END_IF	
 __CATCH(exceptionCode)
-	SetOperationalState(OPERATIONAL_STATE.INVALID, "Initialization error");
-	
 	exception := Core.ExceptionManager.GetLastException(exceptionCode);
 	
-	HandleException(exception, Core.ERROR_SEVERITY.CRITICAL);					
+	ProcessException(exception, PROBLEM_HANDLING_RESULT.SET_ERROR, "Initialization error");					
 __ENDTRY]]></ST>
       </Implementation>
     </Method>
@@ -586,14 +556,23 @@ PROPERTY FINAL Name : WSTRING]]></Declaration>
         <ST><![CDATA[]]></ST>
       </Implementation>
     </Method>
-    <Method Name="OnGetExceptionSeverity" Id="{87b0a3c8-193a-4865-97c2-6832dad62146}" FolderPath="MembersToOverride\">
-      <Declaration><![CDATA[METHOD PROTECTED OnGetExceptionSeverity : Core.ERROR_SEVERITY
+    <Method Name="OnHandleChildCriticalError" Id="{868ea08c-1f5c-4470-9908-de07808c2f03}" FolderPath="MembersToOverride\">
+      <Declaration><![CDATA[METHOD PROTECTED OnHandleChildCriticalError : PROBLEM_HANDLING_RESULT
 VAR_INPUT
-	exception : Core.IException;
-	catchPoint : AUTOMATION_COMPONENT_EXCEPTION_CATCH_POINT;
+	childWithError : IAutomationComponent;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[OnGetExceptionSeverity := Parameters.DefaultExceptionSeverity;]]></ST>
+        <ST><![CDATA[OnHandleChildCriticalError := PROBLEM_HANDLING_RESULT.SET_ERROR_AND_STOP_COMPONENT;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="OnHandleException" Id="{59eb3e56-7ef7-4c6b-b9ff-720fe6e1ce6b}" FolderPath="MembersToOverride\">
+      <Declaration><![CDATA[METHOD PROTECTED OnHandleException : PROBLEM_HANDLING_RESULT
+VAR_INPUT
+	exception : Core.IException;
+	exceptionCatchPoint : EXCEPTION_CATCH_POINT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[OnHandleException := PROBLEM_HANDLING_RESULT.SET_ERROR_AND_STOP_COMPONENT;]]></ST>
       </Implementation>
     </Method>
     <Method Name="OnOperationalStateChanged" Id="{857776d0-e8bc-4fac-912b-ac03ab5cdf30}" FolderPath="MembersToOverride\">
@@ -631,12 +610,88 @@ PROPERTY FINAL OperationalStateReason : REFERENCE TO WSTRING(255)]]></Declaratio
         </Implementation>
       </Get>
     </Property>
+    <Method Name="ProcessChildError" Id="{e1152de1-f1c9-4a35-b5d4-d750be2cb24f}" FolderPath="Service methods\">
+      <Declaration><![CDATA[METHOD PROTECTED ProcessChildError
+VAR_INPUT
+	childError : REFERENCE TO Core.ERROR;  
+	childErrorHandlingResult : PROBLEM_HANDLING_RESULT;	
+	childErrorSourceHint : WSTRING(255);
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF NOT __ISVALIDREF(childError) OR_ELSE childError.Empty OR_ELSE childError.Severity <> Core.ERROR_SEVERITY.CRITICAL THEN
+	RETURN;
+END_IF
+
+IF OperationalState <> OPERATIONAL_STATE.INITIALIZING THEN
+	CASE childErrorHandlingResult OF
+		PROBLEM_HANDLING_RESULT.SET_ERROR:
+			IF _Error.Empty THEN
+				_Error := childError;
+				_Error.SetSeverity(Core.ERROR_SEVERITY.ERROR);
+			END_IF		
+		
+		PROBLEM_HANDLING_RESULT.SET_ERROR_AND_STOP_COMPONENT:
+			IF _Error.Empty OR_ELSE _Error.Severity < Core.ERROR_SEVERITY.CRITICAL THEN
+				_Error := childError;
+				_Error.SetSeverity(Core.ERROR_SEVERITY.CRITICAL);
+			END_IF	
+			
+			IF OperationalState = OPERATIONAL_STATE.WORKING THEN
+				Stop(childErrorSourceHint);		
+			END_IF
+	END_CASE
+ELSE
+	_Error := childError;
+	
+	SetOperationalState(OPERATIONAL_STATE.INVALID, childErrorSourceHint);		
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="ProcessException" Id="{c8063572-3da9-4eb4-bd36-833c249f0127}" FolderPath="Service methods\">
+      <Declaration><![CDATA[METHOD PROTECTED ProcessException
+VAR_INPUT
+	exception : Core.IException;  
+	exceptionHandlingResult : PROBLEM_HANDLING_RESULT;	
+	exceptionSourceHint : WSTRING(255);
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF exception = 0 OR_ELSE exception.Empty THEN
+	RETURN;
+END_IF
+
+IF OperationalState <> OPERATIONAL_STATE.INITIALIZING THEN
+	Core.LogManager.TryLogException(exception, GetErrorSeverityByExceptionHandlingResult(exceptionHandlingResult));
+	
+	CASE exceptionHandlingResult OF
+		PROBLEM_HANDLING_RESULT.SET_ERROR:
+			IF _Error.Empty THEN
+				exception.ToError(_Error, Core.ERROR_SEVERITY.ERROR);
+			END_IF		
+		
+		PROBLEM_HANDLING_RESULT.SET_ERROR_AND_STOP_COMPONENT:
+			IF _Error.Empty OR_ELSE _Error.Severity < Core.ERROR_SEVERITY.CRITICAL THEN
+				exception.ToError(_Error, Core.ERROR_SEVERITY.CRITICAL);
+			END_IF	
+			
+			IF OperationalState = OPERATIONAL_STATE.WORKING THEN
+				Stop(exceptionSourceHint);		
+			END_IF
+	END_CASE
+ELSE
+	Core.LogManager.TryLogException(exception, Core.ERROR_SEVERITY.CRITICAL);
+			
+	exception.ToError(_Error, Core.ERROR_SEVERITY.CRITICAL);
+
+	Stop(exceptionSourceHint);		
+END_IF]]></ST>
+      </Implementation>
+    </Method>
     <Method Name="Reset" Id="{d9e3b1b6-5f1c-4e0c-b7fb-2f75b7f46fbb}">
       <Declaration><![CDATA[METHOD FINAL Reset
 VAR
 	exceptionCode : __SYSTEM.ExceptionCode;
 	exception : Core.IException;	
-	severity : Core.ERROR_SEVERITY;
+	exceptionHandlingResult : PROBLEM_HANDLING_RESULT;
 	
 	i : Core.INT_INDEX;
 		
@@ -654,12 +709,11 @@ __TRY
 __CATCH(exceptionCode)		
 	exception := Core.ExceptionManager.GetLastException(exceptionCode);
 					
-	severity := OnGetExceptionSeverity(exception, AUTOMATION_COMPONENT_EXCEPTION_CATCH_POINT.ON_BEFORE_CHILDREN_RESET);
+	exceptionHandlingResult := OnHandleException(exception, EXCEPTION_CATCH_POINT.ON_BEFORE_CHILDREN_RESET);
 
-	HandleException(exception, severity);
+	ProcessException(exception, exceptionHandlingResult, "OnBeforeChildrenReset error");
 
-	IF severity = Core.ERROR_SEVERITY.CRITICAL THEN
-		SetOperationalState(OPERATIONAL_STATE.STOPPED, "OnBeforeChildrenReset error");		
+	IF exceptionHandlingResult = PROBLEM_HANDLING_RESULT.SET_ERROR_AND_STOP_COMPONENT THEN
 		RETURN;
 	END_IF
 __ENDTRY
@@ -667,12 +721,14 @@ __ENDTRY
 FOR i := 0 TO InternalChildCount - 1 DO
 	child := InternalTryGetChildByIndex(i);
 	
-	IF child.Enabled AND_THEN child.OperationalState = OPERATIONAL_STATE.WORKING AND_THEN child.HasError THEN
+	IF child.Enabled THEN
 		child.Reset();
 		
 		IF child.HasError AND_THEN child.Error.Severity = Core.ERROR_SEVERITY.CRITICAL THEN
-			SetError(child.Error);
-			SetOperationalState(OPERATIONAL_STATE.STOPPED, "Child Reset error");		
+			exceptionHandlingResult := OnHandleChildCriticalError(child);
+			
+			ProcessChildError(child.Error, exceptionHandlingResult, Core.WideStrings.Concat255("Child[", TO_WSTRING(i), "(", child.Name, ")].Reset error"));
+
 			RETURN;
 		END_IF
 	END_IF
@@ -685,32 +741,14 @@ __TRY
 __CATCH(exceptionCode)		
 	exception := Core.ExceptionManager.GetLastException(exceptionCode);
 					
-	severity := OnGetExceptionSeverity(exception, AUTOMATION_COMPONENT_EXCEPTION_CATCH_POINT.ON_AFTER_CHILDREN_RESET);
+	exceptionHandlingResult := OnHandleException(exception, EXCEPTION_CATCH_POINT.ON_AFTER_CHILDREN_RESET);
 
-	HandleException(exception, severity);
+	ProcessException(exception, exceptionHandlingResult, "OnAfterChildrenReset error");
 
-	IF severity = Core.ERROR_SEVERITY.CRITICAL THEN
-		SetOperationalState(OPERATIONAL_STATE.STOPPED, "OnAfterChildrenReset error");
-		RETURN;		
+	IF exceptionHandlingResult = PROBLEM_HANDLING_RESULT.SET_ERROR_AND_STOP_COMPONENT THEN
+		RETURN;
 	END_IF
 __ENDTRY]]></ST>
-      </Implementation>
-    </Method>
-    <Method Name="SetError" Id="{db1622c3-17d5-4c3e-9fc6-44f5ab658994}" FolderPath="Service methods\">
-      <Declaration><![CDATA[METHOD INTERNAL SetError
-VAR_IN_OUT CONSTANT
-	error : Core.ERROR;  
-END_VAR]]></Declaration>
-      <Implementation>
-        <ST><![CDATA[IF NOT __ISVALIDREF(error) OR_ELSE error.Empty THEN
-	RETURN;
-END_IF
-
-// error set when exception occured in the child, so it should not be logged 
-
-IF _Error.Empty OR_ELSE _Error.Severity < error.Severity THEN
-	_Error := error;
-END_IF]]></ST>
       </Implementation>
     </Method>
     <Method Name="SetOperationalState" Id="{7e5ac7e2-185d-4ec3-b6e7-9e31ed957150}" FolderPath="Service methods\">
@@ -764,8 +802,8 @@ FOR i := 0 TO InternalChildCount - 1 DO
 	__TRY
 		child := InternalTryGetChildByIndex(i); 
 		
-		IF child.Enabled THEN		
-			child.Stop(Core.WideStrings.Concat255("Parent stopped. Reason: ", reason));
+		IF child.Enabled AND_THEN child.OperationalState = OPERATIONAL_STATE.WORKING THEN		
+			child.Stop(Core.WideStrings.Concat255("Parent (", Name, ") stopped. Reason: ", reason));
 		END_IF			
 	__CATCH(exceptionCode)
 		exception := Core.ExceptionManager.GetLastException(exceptionCode);	
