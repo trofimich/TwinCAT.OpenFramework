@@ -1,0 +1,691 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="BranchAutomationComponent" Id="{179de9c8-6fc8-497c-b86e-77d22d7559c0}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+
+.. <legal notes>
+
+legal notes
+=================
+| SPDX-FileCopyrightText: © 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+| SPDX-License-Identifier: LGPL-3.0-only
+| For details check: LGPL-3.0-only_
+
+.. _LGPL-3.0-only: https://www.gnu.org/licenses/lgpl-3.0.en.html
+
+.. </legal notes>
+
+*)
+
+FUNCTION_BLOCK ABSTRACT BranchAutomationComponent EXTENDS AutomationComponent IMPLEMENTS IParentAutomationComponent]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[]]></ST>
+    </Implementation>
+    <Folder Name="Methods to override" Id="{cd048a51-ca56-4e6a-a6d5-8403d28a5210}">
+      <Folder Name="Disable" Id="{130fe9f2-bbd8-4e60-9441-ddfd0141901c}" />
+      <Folder Name="Enable" Id="{12f5b865-199a-4dd7-8e41-d5e800625ca6}" />
+      <Folder Name="Execute" Id="{00a453a1-ad8f-47bb-bef6-a6ffcd171789}" />
+      <Folder Name="Initialization" Id="{d6d336d9-ef91-4b1f-bae4-1c2454b8f6d6}" />
+      <Folder Name="ProcessInput" Id="{b9bdcde8-d227-4337-a914-5de245b36712}" />
+      <Folder Name="ProcessOutput" Id="{73c2ab09-04ff-4721-ad1b-e6cc785a336c}" />
+      <Folder Name="Reset" Id="{7dcb29a2-9973-4885-9f74-1038a5aa2891}" />
+      <Folder Name="Stopped" Id="{02b22b82-b6c1-49fb-bdb0-d1a9b5d33b8b}" />
+      <Folder Name="Working" Id="{ece9848d-4500-41ec-adca-c07b101d42a5}" />
+    </Folder>
+    <Folder Name="Service methods" Id="{dfdc20d0-90da-4ee2-b28a-a82ad223cd59}" />
+    <Property Name="ChildCount" Id="{c2bf4044-8c3f-4694-b502-03d7c6837fdf}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+PROPERTY ABSTRACT ChildCount : Core.INT_LENGTH]]></Declaration>
+      <Get Name="Get" Id="{f5f13569-9317-494e-8ad7-d932f7599918}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="Disable" Id="{9f8a3623-08ea-465f-bfda-4ce58abe2bf9}">
+      <Declaration><![CDATA[METHOD FINAL Disable
+VAR
+	i : INT;
+	
+	child : IChildAutomationComponent;
+END_VAR
+VAR_INST
+	disabling : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF NOT _Enabled OR_ELSE disabling THEN
+	RETURN;
+END_IF
+
+disabling := TRUE;
+
+__TRY
+	OnBeforeChildrenDisable();
+	
+	FOR i := 0 TO ChildCount - 1 DO
+		child := TryGetChildByIndex(i);
+		
+		IF child <> 0 THEN
+			child.Disable();
+		END_IF
+	END_FOR
+	
+	OnAfterChildrenDisable();
+	
+	_Enabled := FALSE;
+	
+	disabling := FALSE;	
+__CATCH		
+	disabling := FALSE;
+	
+	Core.ExceptionManager.ReThrowLastException();
+__ENDTRY]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="doStop" Id="{15f6ef78-2e2a-4e13-b736-238af397f6d5}" FolderPath="Service methods\">
+      <Declaration><![CDATA[METHOD PRIVATE FINAL doStop
+VAR
+	exceptionCode : __SYSTEM.ExceptionCode;
+	exception : Core.IException;	
+	exceptionHandlingResult : PROBLEM_HANDLING_RESULT;
+
+	i : INT;
+	
+	child : IChildAutomationComponent;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[__TRY
+	OnBeforeChildrenStopped();
+__CATCH(exceptionCode)
+	exception := Core.ExceptionManager.GetLastException(exceptionCode);	
+
+	exceptionHandlingResult := OnHandleException(exception, EXCEPTION_CATCH_POINT.ON_BEFORE_CHILDREN_STOPPED);
+
+	Core.LogManager.TryLogException(exception, GetErrorSeverityByExceptionHandlingResult(exceptionHandlingResult), "AutomationComponent", "AutomationComponent.OnBeforeChildrenStopped");
+__ENDTRY	
+
+FOR i := 0 TO ChildCount - 1 DO
+	child := TryGetChildByIndex(i);
+	
+	IF NOT child.Enabled THEN
+		CONTINUE;
+	END_IF
+	
+	CASE child.OperationalState OF
+		OPERATIONAL_STATE.WORKING:			
+			child.Stop(Core.WideStrings.Concat255("Parent device (", Name, ") stopped"));
+		
+		OPERATIONAL_STATE.STOPPED:
+			child.Execute();
+	END_CASE
+END_FOR
+
+__TRY
+	OnAfterChildrenStopped();
+__CATCH(exceptionCode)
+	exception := Core.ExceptionManager.GetLastException(exceptionCode);	
+
+	exceptionHandlingResult := OnHandleException(exception, EXCEPTION_CATCH_POINT.ON_AFTER_CHILDREN_STOPPED);
+
+	Core.LogManager.TryLogException(exception, GetErrorSeverityByExceptionHandlingResult(exceptionHandlingResult), "AutomationComponent", "AutomationComponent.OnAfterChildrenStopped");
+__ENDTRY]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="doWork" Id="{1d2f758e-1d18-4c35-861d-3d2b41e9834b}" FolderPath="Service methods\">
+      <Declaration><![CDATA[METHOD PRIVATE doWork
+VAR
+	exceptionCode : __SYSTEM.ExceptionCode;
+	exception : Core.IException;	
+	exceptionHandlingResult : PROBLEM_HANDLING_RESULT;
+
+	i : INT;
+	
+	child : IChildAutomationComponent;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[// automatic non-critical error recovering
+IF _OperationalState = OPERATIONAL_STATE.WORKING AND_THEN HasError AND_THEN _Error.Severity <> Core.ERROR_SEVERITY.CRITICAL THEN
+	_Error.Clear();
+	
+	__TRY
+		OnRecover();
+	__CATCH(exceptionCode)		
+		exception := Core.ExceptionManager.GetLastException(exceptionCode);
+						
+		exceptionHandlingResult := OnHandleException(exception, EXCEPTION_CATCH_POINT.ON_RECOVER);
+	
+		ProcessException(exception, exceptionHandlingResult, "OnRecover error");
+	
+		IF exceptionHandlingResult = PROBLEM_HANDLING_RESULT.SET_ERROR_AND_STOP_COMPONENT THEN
+			RETURN;
+		END_IF		
+	__ENDTRY
+END_IF
+
+__TRY
+	OnBeforeChildrenWorking();
+__CATCH(exceptionCode)
+	exception := Core.ExceptionManager.GetLastException(exceptionCode);	
+
+	exceptionHandlingResult := OnHandleException(exception, EXCEPTION_CATCH_POINT.ON_BEFORE_CHILDREN_WORKING);
+
+	ProcessException(exception, exceptionHandlingResult, "OnBeforeChildrenWorking error");
+
+	IF exceptionHandlingResult = PROBLEM_HANDLING_RESULT.SET_ERROR_AND_STOP_COMPONENT THEN
+		RETURN;		
+	END_IF
+__ENDTRY	
+
+FOR i := 0 TO ChildCount - 1 DO
+	child := TryGetChildByIndex(i);
+	
+	IF child.Enabled AND_THEN (child.OperationalState = OPERATIONAL_STATE.WORKING OR_ELSE child.OperationalState = OPERATIONAL_STATE.STOPPED) THEN
+		child.Execute();
+		
+		IF child.HasError AND_THEN child.Error.Severity = Core.ERROR_SEVERITY.CRITICAL THEN
+			exceptionHandlingResult := OnHandleChildCriticalError(child);
+			
+			ProcessChildError(child.Error, exceptionHandlingResult, Core.WideStrings.Concat255("Child[", TO_WSTRING(i), "](", child.Name, ").Execute error"));
+			
+			RETURN;
+		END_IF
+	END_IF
+END_FOR
+
+__TRY
+	OnAfterChildrenWorking();
+__CATCH(exceptionCode)
+	exception := Core.ExceptionManager.GetLastException(exceptionCode);	
+
+	exceptionHandlingResult := OnHandleException(exception, EXCEPTION_CATCH_POINT.ON_AFTER_CHILDREN_WORKING);
+
+	ProcessException(exception, exceptionHandlingResult, "OnAfterChildrenWorking error");
+
+	IF exceptionHandlingResult = PROBLEM_HANDLING_RESULT.SET_ERROR_AND_STOP_COMPONENT THEN
+		RETURN;		
+	END_IF
+__ENDTRY]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="Enable" Id="{b0e28423-49d5-443f-99e6-226254fcb577}">
+      <Declaration><![CDATA[METHOD FINAL Enable
+VAR_INPUT
+	includeChildren : BOOL := TRUE;
+END_VAR
+VAR
+	i : INT;
+	
+	child : IChildAutomationComponent;
+
+	exceptionCode : __SYSTEM.ExceptionCode;
+	exception : Core.IException;	
+END_VAR
+VAR_INST
+	enabling : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF _Enabled OR_ELSE enabling THEN
+	RETURN;
+END_IF
+
+enabling := TRUE;
+
+__TRY
+	OnBeforeChildrenEnable();
+	
+	IF includeChildren THEN
+		FOR i := 0 TO ChildCount - 1 DO
+			child := TryGetChildByIndex(i);
+			
+			IF child <> 0 THEN
+				child.Enable(includeChildren);
+			END_IF
+		END_FOR	
+	END_IF
+	
+	OnAfterChildrenEnable();
+	
+	_Enabled := TRUE;
+	
+	enabling := FALSE;
+__CATCH		
+	enabling := FALSE;
+	
+	Core.ExceptionManager.ReThrowLastException();
+__ENDTRY]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="Execute" Id="{25cb1f34-284f-498c-958b-8dfda7cade8f}">
+      <Declaration><![CDATA[METHOD FINAL Execute]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF NOT Enabled OR_ELSE (_OperationalState <> OPERATIONAL_STATE.WORKING AND_THEN _OperationalState <> OPERATIONAL_STATE.STOPPED) THEN
+	RETURN;
+END_IF
+
+OnPreExecute();
+
+processInputs();
+
+CASE _OperationalState OF
+	OPERATIONAL_STATE.WORKING:
+		doWork();
+		
+	OPERATIONAL_STATE.STOPPED:
+		doStop();	
+END_CASE
+
+processOutputs();
+
+OnPostExecute();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="Initialize" Id="{24ac7d54-bfdf-430c-8d4e-40b667f55780}">
+      <Declaration><![CDATA[METHOD FINAL Initialize : BOOL
+VAR
+	i : INT;
+		
+	child : IChildAutomationComponent;
+	
+	exceptionCode : __SYSTEM.ExceptionCode;
+	exception : Core.IException;
+	
+	initializationTimeoutException : Core.TimeoutException;
+	notSpecifiedException : Core.DataMemberNotSpecifiedException;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF _OperationalState <> OPERATIONAL_STATE.INITIALIZING THEN
+	Initialize := _OperationalState <> OPERATIONAL_STATE.INVALID;
+
+	RETURN;
+END_IF
+
+__TRY
+	IF NOT _InitializationTimer.IN THEN
+		Validate();
+	END_IF
+	
+	_InitializationTimer(IN := TRUE, PT := Parameters.InitializationTimeout);
+	
+	IF _InitializationTimer.Q THEN;		
+		initializationTimeoutException.ThrowByObject(THIS^, __POUNAME(), __POSITION(), _InitializationTimer.PT, Core.WideStrings.Concat255("Initialization timeout ", TO_WSTRING(_InitializationTimer.PT), " elapsed"));
+	END_IF
+	
+	OnBeforeChildrenInitializing();
+	
+	Initialize := TRUE;
+
+	FOR i := 0 TO ChildCount - 1 DO
+		child := TryGetChildByIndex(i);
+
+		IF child = 0 THEN
+			notSpecifiedException.ThrowByObject(THIS^, __POUNAME(), __POSITION(), Core.Strings.Concat255('Child[', TO_STRING(i), ']'));			
+		END_IF
+			
+		Initialize := Initialize AND child.Initialize();
+	END_FOR
+
+	Initialize := Initialize AND OnAfterChildrenInitializing();
+	
+	IF Initialize THEN
+		SetOperationalState(OPERATIONAL_STATE.WORKING, "Successfull initialization");
+	END_IF	
+__CATCH(exceptionCode)
+	exception := Core.ExceptionManager.GetLastException(exceptionCode);
+	
+	ProcessException(exception, PROBLEM_HANDLING_RESULT.SET_ERROR, "Initialization error");					
+__ENDTRY]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="OnAfterChildrenDisable" Id="{de10d49d-578e-4a7a-b30d-dcbe7eaa67f7}" FolderPath="Methods to override\Disable\">
+      <Declaration><![CDATA[METHOD PROTECTED OnAfterChildrenDisable]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="OnAfterChildrenEnable" Id="{1165a2a7-239a-4bb5-8f3e-e6462d0c1950}" FolderPath="Methods to override\Enable\">
+      <Declaration><![CDATA[METHOD PROTECTED OnAfterChildrenEnable]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="OnAfterChildrenInitializing" Id="{6cb14155-7a84-4dd3-a575-77b653934285}" FolderPath="Methods to override\Initialization\">
+      <Declaration><![CDATA[METHOD PROTECTED OnAfterChildrenInitializing : BOOL]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[OnAfterChildrenInitializing := TRUE;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="OnAfterChildrenReset" Id="{862eb02e-c3cf-4f11-b4d0-51cfeec05381}" FolderPath="Methods to override\Reset\">
+      <Declaration><![CDATA[METHOD PROTECTED OnAfterChildrenReset]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="OnAfterChildrenStopped" Id="{70429f04-2ec5-4d13-94eb-bfee5c047e97}" FolderPath="Methods to override\Stopped\">
+      <Declaration><![CDATA[METHOD PROTECTED OnAfterChildrenStopped]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="OnAfterChildrenWorking" Id="{c97b3a73-c5a9-4482-b28b-882d1d016cd1}" FolderPath="Methods to override\Working\">
+      <Declaration><![CDATA[METHOD PROTECTED OnAfterChildrenWorking]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="OnAfterDevicesProcessInput" Id="{9165bde5-0cf4-4a88-9520-d7dda6cae7ea}" FolderPath="Methods to override\ProcessInput\">
+      <Declaration><![CDATA[METHOD PROTECTED OnAfterDevicesProcessInput]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="OnAfterDevicesProcessOutput" Id="{4df73bdb-052a-4635-a8e1-07d1334a7f95}" FolderPath="Methods to override\ProcessOutput\">
+      <Declaration><![CDATA[METHOD PROTECTED OnAfterDevicesProcessOutput]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="OnBeforeChildrenDisable" Id="{428df434-53b8-4491-9aab-b3a5dd9e3feb}" FolderPath="Methods to override\Disable\">
+      <Declaration><![CDATA[METHOD PROTECTED OnBeforeChildrenDisable]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="OnBeforeChildrenEnable" Id="{fcc3dec2-5834-4636-9cdd-9eea9043bf97}" FolderPath="Methods to override\Enable\">
+      <Declaration><![CDATA[METHOD PROTECTED OnBeforeChildrenEnable]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="OnBeforeChildrenInitializing" Id="{3ece4d5d-78d2-4a1b-b7aa-ac08b09e6b07}" FolderPath="Methods to override\Initialization\">
+      <Declaration><![CDATA[METHOD PROTECTED OnBeforeChildrenInitializing]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="OnBeforeChildrenReset" Id="{aa65b3fc-dc5d-407d-aeaa-d2722c18b445}" FolderPath="Methods to override\Reset\">
+      <Declaration><![CDATA[METHOD PROTECTED OnBeforeChildrenReset]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="OnBeforeChildrenStopped" Id="{0d5d7b0c-eb69-4a7f-b28d-1c85b2de514f}" FolderPath="Methods to override\Stopped\">
+      <Declaration><![CDATA[METHOD PROTECTED OnBeforeChildrenStopped]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="OnBeforeChildrenWorking" Id="{613da739-79e2-4ee2-9175-e0e13072ef84}" FolderPath="Methods to override\Working\">
+      <Declaration><![CDATA[METHOD PROTECTED OnBeforeChildrenWorking]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="OnBeforeDevicesProcessInput" Id="{e3339694-bd0c-4309-8526-150debf56b72}" FolderPath="Methods to override\ProcessInput\">
+      <Declaration><![CDATA[METHOD PROTECTED OnBeforeDevicesProcessInput]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="OnBeforeDevicesProcessOutput" Id="{baf4b6a4-5565-4d9c-bcf1-5adeadee9802}" FolderPath="Methods to override\ProcessOutput\">
+      <Declaration><![CDATA[METHOD PROTECTED OnBeforeDevicesProcessOutput]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="OnHandleChildCriticalError" Id="{839f293e-9205-4a6f-838b-d14dd86be61e}" FolderPath="Methods to override\">
+      <Declaration><![CDATA[METHOD PROTECTED OnHandleChildCriticalError : PROBLEM_HANDLING_RESULT
+VAR_INPUT
+	childWithError : IAutomationComponent;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[OnHandleChildCriticalError := PROBLEM_HANDLING_RESULT.SET_ERROR_AND_STOP_COMPONENT;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="OnHandleException" Id="{29c90bad-df55-4870-9c1d-40408bd01466}" FolderPath="Methods to override\">
+      <Declaration><![CDATA[METHOD PROTECTED OnHandleException : PROBLEM_HANDLING_RESULT
+VAR_INPUT
+	exception : Core.IException;
+	exceptionCatchPoint : EXCEPTION_CATCH_POINT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[OnHandleException := PROBLEM_HANDLING_RESULT.SET_ERROR_AND_STOP_COMPONENT;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="OnPostExecute" Id="{84b329ef-503d-46aa-959d-1e51716064ee}" FolderPath="Methods to override\Execute\">
+      <Declaration><![CDATA[METHOD PROTECTED OnPostExecute]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="OnPreExecute" Id="{a21a9af0-faff-4c04-9440-53aa1ff069b9}" FolderPath="Methods to override\Execute\">
+      <Declaration><![CDATA[METHOD PROTECTED OnPreExecute]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="OnRecover" Id="{4fd00d17-dbcf-4903-91de-2486b0cb165f}" FolderPath="Methods to override\">
+      <Declaration><![CDATA[METHOD PROTECTED OnRecover]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="processInputs" Id="{f4b382a5-61c7-4fc2-8dd7-c14e4c747422}" FolderPath="Service methods\">
+      <Declaration><![CDATA[METHOD PRIVATE FINAL processInputs
+VAR
+	exceptionCode : __SYSTEM.ExceptionCode;
+	exception : Core.IException;	
+	exceptionHandlingResult : PROBLEM_HANDLING_RESULT;
+
+	i : Core.INT_INDEX;
+
+	child : IChildAutomationComponent;
+	
+	inputDevice : IInputDevice;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[__TRY
+	OnBeforeDevicesProcessInput();
+__CATCH(exceptionCode)		
+	exception := Core.ExceptionManager.GetLastException(exceptionCode);
+					
+	exceptionHandlingResult := OnHandleException(exception, EXCEPTION_CATCH_POINT.ON_BEFORE_CHILDREN_PROCESS_INPUT);
+
+	ProcessException(exception, exceptionHandlingResult, "OnBeforeDevicesProcessInput error");
+__ENDTRY
+
+FOR i := 0 TO ChildCount - 1 DO
+	child := TryGetChildByIndex(i);
+
+	IF NOT child.Enabled OR_ELSE NOT __QUERYINTERFACE(child, inputDevice) THEN
+		CONTINUE;
+	END_IF
+
+	inputDevice.ProcessInput(); 
+
+	IF inputDevice.HasError AND_THEN inputDevice.Error.Severity = Core.ERROR_SEVERITY.CRITICAL THEN
+		exceptionHandlingResult := OnHandleChildCriticalError(inputDevice);
+		
+		ProcessChildError(inputDevice.Error, exceptionHandlingResult, Core.WideStrings.Concat255("Child[", TO_WSTRING(i), "(", inputDevice.Name, ")].ProcessInput error"));
+	END_IF	
+END_FOR
+
+__TRY
+	OnAfterDevicesProcessInput();
+__CATCH(exceptionCode)		
+	exception := Core.ExceptionManager.GetLastException(exceptionCode);
+					
+	exceptionHandlingResult := OnHandleException(exception, EXCEPTION_CATCH_POINT.ON_AFTER_CHILDREN_PROCESS_INPUT);
+
+	ProcessException(exception, exceptionHandlingResult, "OnAfterDevicesProcessInput error");
+__ENDTRY]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="processOutputs" Id="{95a8f436-d6af-4bcd-974f-69577ba853fe}" FolderPath="Service methods\">
+      <Declaration><![CDATA[METHOD PRIVATE FINAL processOutputs
+VAR
+	exceptionCode : __SYSTEM.ExceptionCode;
+	exception : Core.IException;	
+	exceptionHandlingResult : PROBLEM_HANDLING_RESULT;
+
+	i : Core.INT_INDEX;
+	
+	child : IChildAutomationComponent;
+	
+	outputDevice : IOutputDevice;	
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[__TRY
+	OnBeforeDevicesProcessOutput();
+__CATCH(exceptionCode)		
+	exception := Core.ExceptionManager.GetLastException(exceptionCode);
+					
+	exceptionHandlingResult := OnHandleException(exception, EXCEPTION_CATCH_POINT.ON_BEFORE_CHILDREN_PROCESS_OUTPUT);
+
+	ProcessException(exception, exceptionHandlingResult, "OnBeforeDevicesProcessOutput error");
+__ENDTRY
+
+FOR i := 0 TO ChildCount - 1 DO
+	child := TryGetChildByIndex(i);
+	
+	IF NOT child.Enabled OR_ELSE NOT __QUERYINTERFACE(child, outputDevice) THEN
+		CONTINUE;
+	END_IF
+
+	outputDevice.ProcessOutput(); 
+	
+	IF outputDevice.HasError AND_THEN outputDevice.Error.Severity = Core.ERROR_SEVERITY.CRITICAL THEN
+		exceptionHandlingResult := OnHandleChildCriticalError(outputDevice);
+		
+		ProcessChildError(outputDevice.Error, exceptionHandlingResult, Core.WideStrings.Concat255("Child[", TO_WSTRING(i), "(", outputDevice.Name, ")].ProcessOutput error"));
+	END_IF
+END_FOR
+
+__TRY
+	OnAfterDevicesProcessOutput();
+__CATCH(exceptionCode)		
+	exception := Core.ExceptionManager.GetLastException(exceptionCode);
+					
+	exceptionHandlingResult := OnHandleException(exception, EXCEPTION_CATCH_POINT.ON_AFTER_CHILDREN_PROCESS_OUTPUT);
+
+	ProcessException(exception, exceptionHandlingResult, "OnAfterDevicesProcessOutput error");
+__ENDTRY]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="Reset" Id="{0fac72fb-ac13-45be-8a20-c7e96145e4d2}">
+      <Declaration><![CDATA[METHOD FINAL Reset
+VAR
+	exceptionCode : __SYSTEM.ExceptionCode;
+	exception : Core.IException;	
+	exceptionHandlingResult : PROBLEM_HANDLING_RESULT;
+	
+	i : INT;
+		
+	child : IChildAutomationComponent;	
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF NOT Enabled OR_ELSE _OperationalState <> OPERATIONAL_STATE.STOPPED THEN
+	RETURN;
+END_IF
+
+_Error.Clear();
+
+__TRY
+	OnBeforeChildrenReset();
+__CATCH(exceptionCode)		
+	exception := Core.ExceptionManager.GetLastException(exceptionCode);
+					
+	exceptionHandlingResult := OnHandleException(exception, EXCEPTION_CATCH_POINT.ON_BEFORE_CHILDREN_RESET);
+
+	ProcessException(exception, exceptionHandlingResult, "OnBeforeChildrenReset error");
+
+	IF exceptionHandlingResult = PROBLEM_HANDLING_RESULT.SET_ERROR_AND_STOP_COMPONENT THEN
+		RETURN;
+	END_IF
+__ENDTRY
+
+FOR i := 0 TO ChildCount - 1 DO
+	child := TryGetChildByIndex(i);
+	
+	IF child.Enabled THEN
+		child.Reset();
+		
+		IF child.HasError AND_THEN child.Error.Severity = Core.ERROR_SEVERITY.CRITICAL THEN
+			exceptionHandlingResult := OnHandleChildCriticalError(child);
+			
+			ProcessChildError(child.Error, exceptionHandlingResult, Core.WideStrings.Concat255("Child[", TO_WSTRING(i), "(", child.Name, ")].Reset error"));
+
+			RETURN;
+		END_IF
+	END_IF
+END_FOR
+
+__TRY
+	OnAfterChildrenReset();
+	
+	SetOperationalState(OPERATIONAL_STATE.WORKING, "Reset");
+__CATCH(exceptionCode)		
+	exception := Core.ExceptionManager.GetLastException(exceptionCode);
+					
+	exceptionHandlingResult := OnHandleException(exception, EXCEPTION_CATCH_POINT.ON_AFTER_CHILDREN_RESET);
+
+	ProcessException(exception, exceptionHandlingResult, "OnAfterChildrenReset error");
+
+	IF exceptionHandlingResult = PROBLEM_HANDLING_RESULT.SET_ERROR_AND_STOP_COMPONENT THEN
+		RETURN;
+	END_IF
+__ENDTRY]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="Stop" Id="{da5c54bb-6397-492a-8106-733766e78f84}">
+      <Declaration><![CDATA[METHOD FINAL Stop
+VAR_INPUT
+	reason : WSTRING(255) := "External stop";
+END_VAR
+VAR
+	exceptionCode : __SYSTEM.ExceptionCode;
+	exception : Core.IException;	
+
+	i : INT;
+	
+	child : IChildAutomationComponent;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF NOT _Enabled OR_ELSE _OperationalState <> OPERATIONAL_STATE.WORKING THEN
+	RETURN;
+END_IF
+
+SetOperationalState(OPERATIONAL_STATE.STOPPED, reason);
+
+FOR i := 0 TO ChildCount - 1 DO
+	__TRY
+		child := TryGetChildByIndex(i); 
+		
+		IF child.Enabled AND_THEN child.OperationalState = OPERATIONAL_STATE.WORKING THEN		
+			child.Stop(Core.WideStrings.Concat255("Parent (", Name, ") stopped. Reason: ", reason));
+		END_IF			
+	__CATCH(exceptionCode)
+		exception := Core.ExceptionManager.GetLastException(exceptionCode);	
+		
+		Core.LogManager.TryLogException(exception, Core.ERROR_SEVERITY.CRITICAL, "AutomationComponent", "AutomationComponent.Stop");
+	__ENDTRY
+END_FOR]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="TryGetChildByIndex" Id="{37f2f3fc-162d-4554-90ba-2cd93bca68c5}">
+      <Declaration><![CDATA[METHOD ABSTRACT TryGetChildByIndex : IChildAutomationComponent
+VAR_INPUT
+	index : Core.INT_INDEX;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="Validate" Id="{58f157ed-c4fb-44bd-b2b9-b50da01a7f12}" FolderPath="Methods to override\">
+      <Declaration><![CDATA[METHOD PROTECTED ABSTRACT Validate]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[]]></ST>
+      </Implementation>
+    </Method>
+  </POU>
+</TcPlcObject>

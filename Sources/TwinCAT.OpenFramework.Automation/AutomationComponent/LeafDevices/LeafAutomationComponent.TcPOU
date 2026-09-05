@@ -1,0 +1,373 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="LeafAutomationComponent" Id="{7c21300f-1ad4-4217-9d49-d0f060249ecb}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+
+.. <legal notes>
+
+legal notes
+=================
+| SPDX-FileCopyrightText: © 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+| SPDX-License-Identifier: LGPL-3.0-only
+| For details check: LGPL-3.0-only_
+
+.. _LGPL-3.0-only: https://www.gnu.org/licenses/lgpl-3.0.en.html
+
+.. </legal notes>
+
+*)
+
+FUNCTION_BLOCK ABSTRACT LeafAutomationComponent EXTENDS AutomationComponent IMPLEMENTS IChildAutomationComponent
+VAR
+	{attribute 'hide'} 
+	_Parent : IParentAutomationComponent;
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[]]></ST>
+    </Implementation>
+    <Folder Name="Methods to override" Id="{ca4cde0e-9a44-45fe-a0e4-7b7ca4e0c8a7}" />
+    <Folder Name="Service members" Id="{81a3b43d-cdb7-4e7a-83bc-cc98c2841ff6}" />
+    <Method Name="Disable" Id="{e7be34cc-e7d9-4568-8b6a-522ee606d568}">
+      <Declaration><![CDATA[METHOD FINAL Disable
+VAR
+	i : Core.INT_INDEX;
+	
+	child : IChildAutomationComponent;
+END_VAR
+VAR_INST
+	disabling : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF NOT _Enabled OR_ELSE disabling THEN
+	RETURN;
+END_IF
+
+disabling := TRUE;
+
+__TRY
+	OnDisable();
+	
+	_Enabled := FALSE;
+	
+	disabling := FALSE;	
+__CATCH		
+	disabling := FALSE;
+	
+	Core.ExceptionManager.ReThrowLastException();
+__ENDTRY]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="doStop" Id="{f333eb21-b71b-4972-8498-b93becfb200d}" FolderPath="Service members\">
+      <Declaration><![CDATA[METHOD PRIVATE FINAL doStop
+VAR
+	exceptionCode : __SYSTEM.ExceptionCode;
+	exception : Core.IException;	
+	exceptionHandlingResult : PROBLEM_HANDLING_RESULT;
+
+	i : Core.INT_INDEX;
+	
+	child : IChildAutomationComponent;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[__TRY
+	OnStopped();
+__CATCH(exceptionCode)
+	exception := Core.ExceptionManager.GetLastException(exceptionCode);	
+
+	exceptionHandlingResult := OnHandleException(exception, EXCEPTION_CATCH_POINT.ON_BEFORE_CHILDREN_STOPPED);
+
+	Core.LogManager.TryLogException(exception, GetErrorSeverityByExceptionHandlingResult(exceptionHandlingResult), "AutomationComponent", "AutomationComponent.OnStopped");
+__ENDTRY	]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="doWork" Id="{46f293df-6067-4ed2-89a9-1abc8005afc8}" FolderPath="Service members\">
+      <Declaration><![CDATA[METHOD PRIVATE FINAL doWork
+VAR
+	exceptionCode : __SYSTEM.ExceptionCode;
+	exception : Core.IException;	
+	exceptionHandlingResult : PROBLEM_HANDLING_RESULT;
+
+	i : Core.INT_INDEX;
+	
+	child : IChildAutomationComponent;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[// automatic non-critical error recovering
+IF _OperationalState = OPERATIONAL_STATE.WORKING AND_THEN HasError AND_THEN _Error.Severity <> Core.ERROR_SEVERITY.CRITICAL THEN
+	_Error.Clear();
+	
+	__TRY
+		OnRecover();
+	__CATCH(exceptionCode)		
+		exception := Core.ExceptionManager.GetLastException(exceptionCode);
+						
+		exceptionHandlingResult := OnHandleException(exception, EXCEPTION_CATCH_POINT.ON_RECOVER);
+	
+		ProcessException(exception, exceptionHandlingResult, "OnRecover error");
+	
+		IF exceptionHandlingResult = PROBLEM_HANDLING_RESULT.SET_ERROR_AND_STOP_COMPONENT THEN
+			RETURN;
+		END_IF		
+	__ENDTRY
+END_IF
+
+__TRY
+	OnWorking();
+__CATCH(exceptionCode)
+	exception := Core.ExceptionManager.GetLastException(exceptionCode);	
+
+	exceptionHandlingResult := OnHandleException(exception, EXCEPTION_CATCH_POINT.ON_BEFORE_CHILDREN_WORKING);
+
+	ProcessException(exception, exceptionHandlingResult, "OnBeforeChildrenWorking error");
+
+	IF exceptionHandlingResult = PROBLEM_HANDLING_RESULT.SET_ERROR_AND_STOP_COMPONENT THEN
+		RETURN;		
+	END_IF
+__ENDTRY]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="Enable" Id="{f7b45f9a-e580-4c1c-b27c-81b9ee1ab687}">
+      <Declaration><![CDATA[METHOD FINAL Enable
+VAR_INPUT
+	includeChildren : BOOL := TRUE;
+END_VAR
+VAR
+	i : Core.INT_INDEX;
+	
+	child : IChildAutomationComponent;
+
+	exceptionCode : __SYSTEM.ExceptionCode;
+	exception : Core.IException;	
+END_VAR
+VAR_INST
+	enabling : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF _Enabled OR_ELSE enabling THEN
+	RETURN;
+END_IF
+
+enabling := TRUE;
+
+__TRY
+	OnEnable();
+	
+	IF _Parent <> 0 AND_THEN NOT _Parent.Enabled THEN
+		_Parent.Enable(FALSE);
+	END_IF
+	
+	_Enabled := TRUE;
+	
+	enabling := FALSE;
+__CATCH		
+	enabling := FALSE;
+	
+	Core.ExceptionManager.ReThrowLastException();
+__ENDTRY]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="Execute" Id="{54d74276-cad2-4fd8-8917-0010f6191e07}">
+      <Declaration><![CDATA[METHOD FINAL Execute
+VAR
+	inputDevice : IInputDevice;	
+	outputDevice : IOutputDevice;	
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF NOT Enabled OR_ELSE (_OperationalState <> OPERATIONAL_STATE.WORKING AND_THEN _OperationalState <> OPERATIONAL_STATE.STOPPED) THEN
+	RETURN;
+END_IF
+
+IF __QUERYINTERFACE(THIS^, inputDevice) THEN
+	inputDevice.ProcessInput();
+END_IF
+
+CASE _OperationalState OF
+	OPERATIONAL_STATE.WORKING:
+		doWork();
+		
+	OPERATIONAL_STATE.STOPPED:
+		doStop();	
+END_CASE
+
+IF __QUERYINTERFACE(THIS^, outputDevice) THEN
+	outputDevice.ProcessOutput();
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="FB_init" Id="{3ffe21cc-32bd-4767-9934-eaac8121d03b}">
+      <Declaration><![CDATA[METHOD FB_init : BOOL
+VAR_INPUT
+	(* if TRUE, the retain variables are initialized (warm start / cold start)*)
+	bInitRetains	: BOOL;
+	(* if TRUE, the instance afterwards gets moved into the copy code (online change)*)
+	bInCopyCode	: BOOL;
+	name : WSTRING;
+	parent : IParentAutomationComponent;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_Parent := parent;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="Initialize" Id="{3f657450-0a0b-4d21-8c85-c39655b515b8}">
+      <Declaration><![CDATA[METHOD FINAL Initialize : BOOL
+VAR
+	i : Core.INT_INDEX;
+	
+	thisAsParentComponent : IChildAutomationComponent;
+	parent : IAutomationComponent;
+	child : IChildAutomationComponent;
+	
+	exceptionCode : __SYSTEM.ExceptionCode;
+	exception : Core.IException;
+	
+	initializationTimeoutException : Core.TimeoutException;
+	notSpecifiedException : Core.DataMemberNotSpecifiedException;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF _OperationalState <> OPERATIONAL_STATE.INITIALIZING THEN
+	Initialize := _OperationalState <> OPERATIONAL_STATE.INVALID;
+	
+	RETURN;
+END_IF
+
+__TRY
+	_InitializationTimer(IN := TRUE, PT := Parameters.InitializationTimeout);
+	
+	IF _InitializationTimer.Q THEN		
+		initializationTimeoutException.ThrowByObject(THIS^, __POUNAME(), __POSITION(), _InitializationTimer.PT, Core.WideStrings.Concat255("Initialization timeout ", TO_WSTRING(_InitializationTimer.PT), " elapsed"));
+	END_IF
+	
+	IF __QUERYINTERFACE(THIS^, thisAsParentComponent) AND_THEN (parent := thisAsParentComponent.Parent) = 0 THEN
+		notSpecifiedException.ThrowByObject(THIS^, __POUNAME(), __POSITION(), 'Parent');						
+	END_IF
+
+	Initialize := OnInitializing();
+	
+	IF Initialize THEN
+		SetOperationalState(OPERATIONAL_STATE.WORKING, "Successfull initialization");
+	END_IF	
+__CATCH(exceptionCode)
+	exception := Core.ExceptionManager.GetLastException(exceptionCode);
+	
+	ProcessException(exception, PROBLEM_HANDLING_RESULT.SET_ERROR, "Initialization error");					
+__ENDTRY]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="OnDisable" Id="{da5e244e-35a1-47cd-8144-7c7c3577035d}" FolderPath="Methods to override\">
+      <Declaration><![CDATA[METHOD PROTECTED OnDisable]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="OnEnable" Id="{7ab79cf0-ed24-4ab4-b074-f58d9b879980}" FolderPath="Methods to override\">
+      <Declaration><![CDATA[METHOD PROTECTED OnEnable]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="OnHandleException" Id="{da7bc9d0-a837-4507-a946-cf4521973f6b}" FolderPath="Methods to override\">
+      <Declaration><![CDATA[METHOD PROTECTED OnHandleException : PROBLEM_HANDLING_RESULT
+VAR_INPUT
+	exception : Core.IException;
+	exceptionCatchPoint : EXCEPTION_CATCH_POINT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[OnHandleException := PROBLEM_HANDLING_RESULT.SET_ERROR_AND_STOP_COMPONENT;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="OnInitializing" Id="{87d0edb2-3f9d-4cdc-be5a-51ee4854c5ea}" FolderPath="Methods to override\">
+      <Declaration><![CDATA[METHOD PROTECTED OnInitializing : BOOL]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[OnInitializing := TRUE;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="OnRecover" Id="{7c8c3e9b-0187-45e1-b338-ec8bdbe346a5}" FolderPath="Methods to override\">
+      <Declaration><![CDATA[METHOD PROTECTED OnRecover]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="OnReset" Id="{1437f653-2dca-4516-a643-9a7052ba8f91}" FolderPath="Methods to override\">
+      <Declaration><![CDATA[METHOD PROTECTED OnReset]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="OnStopped" Id="{38cbad82-8eb7-4619-bb79-98729012ae5d}" FolderPath="Methods to override\">
+      <Declaration><![CDATA[METHOD PROTECTED OnStopped]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="OnWorking" Id="{02692fef-98a0-451c-b7a8-b233e155c1c5}" FolderPath="Methods to override\">
+      <Declaration><![CDATA[METHOD PROTECTED OnWorking]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="Parent" Id="{8fb3d4d7-c400-4c92-9c99-1346029f28e7}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+PROPERTY FINAL Parent : IParentAutomationComponent]]></Declaration>
+      <Get Name="Get" Id="{91af78c8-f2e0-4384-ac9d-b26f89ba6059}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[Parent := _Parent;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="Reset" Id="{39108ecc-e8fc-41d2-84a8-8d829dba9e49}">
+      <Declaration><![CDATA[METHOD FINAL Reset
+VAR
+	exceptionCode : __SYSTEM.ExceptionCode;
+	exception : Core.IException;	
+	exceptionHandlingResult : PROBLEM_HANDLING_RESULT;
+	
+	i : Core.INT_INDEX;
+		
+	child : IChildAutomationComponent;	
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF NOT Enabled OR_ELSE _OperationalState <> OPERATIONAL_STATE.STOPPED THEN
+	RETURN;
+END_IF
+
+_Error.Clear();
+
+__TRY
+	OnReset();
+__CATCH(exceptionCode)		
+	exception := Core.ExceptionManager.GetLastException(exceptionCode);
+					
+	exceptionHandlingResult := OnHandleException(exception, EXCEPTION_CATCH_POINT.ON_BEFORE_CHILDREN_RESET);
+
+	ProcessException(exception, exceptionHandlingResult, "OnReset error");
+
+	IF exceptionHandlingResult = PROBLEM_HANDLING_RESULT.SET_ERROR_AND_STOP_COMPONENT THEN
+		RETURN;
+	END_IF
+__ENDTRY]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="Stop" Id="{73828ae5-99ee-4c51-a656-702f6c6b2044}">
+      <Declaration><![CDATA[METHOD FINAL Stop
+VAR_INPUT
+	reason : WSTRING(255) := "External stop";
+END_VAR
+VAR
+	exceptionCode : __SYSTEM.ExceptionCode;
+	exception : Core.IException;	
+
+	i : Core.INT_INDEX;
+	
+	child : IChildAutomationComponent;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF NOT _Enabled OR_ELSE _OperationalState <> OPERATIONAL_STATE.WORKING THEN
+	RETURN;
+END_IF
+
+SetOperationalState(OPERATIONAL_STATE.STOPPED, reason);]]></ST>
+      </Implementation>
+    </Method>
+  </POU>
+</TcPlcObject>
