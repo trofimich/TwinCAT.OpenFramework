@@ -26,7 +26,6 @@ END_VAR]]></Declaration>
       <ST><![CDATA[]]></ST>
     </Implementation>
     <Folder Name="Methods to override" Id="{ca4cde0e-9a44-45fe-a0e4-7b7ca4e0c8a7}" />
-    <Folder Name="Service members" Id="{81a3b43d-cdb7-4e7a-83bc-cc98c2841ff6}" />
     <Method Name="Disable" Id="{e7be34cc-e7d9-4568-8b6a-522ee606d568}">
       <Declaration><![CDATA[METHOD FINAL Disable
 VAR
@@ -54,75 +53,6 @@ __CATCH
 	disabling := FALSE;
 	
 	Core.ExceptionManager.ReThrowLastException();
-__ENDTRY]]></ST>
-      </Implementation>
-    </Method>
-    <Method Name="doStop" Id="{f333eb21-b71b-4972-8498-b93becfb200d}" FolderPath="Service members\">
-      <Declaration><![CDATA[METHOD PRIVATE FINAL doStop
-VAR
-	exceptionCode : __SYSTEM.ExceptionCode;
-	exception : Core.IException;	
-	exceptionHandlingResult : PROBLEM_HANDLING_RESULT;
-
-	i : Core.INT_INDEX;
-	
-	child : IChildAutomationComponent;
-END_VAR]]></Declaration>
-      <Implementation>
-        <ST><![CDATA[__TRY
-	OnStopped();
-__CATCH(exceptionCode)
-	exception := Core.ExceptionManager.GetLastException(exceptionCode);	
-
-	exceptionHandlingResult := OnHandleException(exception, EXCEPTION_CATCH_POINT.BEFORE_CHILDREN_STOPPED);
-
-	Core.LogManager.TryLogException(exception, GetErrorSeverityByExceptionHandlingResult(exceptionHandlingResult), "AutomationComponent", "AutomationComponent.OnStopped");
-__ENDTRY	]]></ST>
-      </Implementation>
-    </Method>
-    <Method Name="doWork" Id="{46f293df-6067-4ed2-89a9-1abc8005afc8}" FolderPath="Service members\">
-      <Declaration><![CDATA[METHOD PRIVATE FINAL doWork
-VAR
-	exceptionCode : __SYSTEM.ExceptionCode;
-	exception : Core.IException;	
-	exceptionHandlingResult : PROBLEM_HANDLING_RESULT;
-
-	i : Core.INT_INDEX;
-	
-	child : IChildAutomationComponent;
-END_VAR]]></Declaration>
-      <Implementation>
-        <ST><![CDATA[// automatic non-critical error recovering
-IF _OperationalState = OPERATIONAL_STATE.WORKING AND_THEN HasError AND_THEN _Error.Severity <> Core.ERROR_SEVERITY.CRITICAL THEN
-	_Error.Clear();
-	
-	__TRY
-		OnRecover();
-	__CATCH(exceptionCode)		
-		exception := Core.ExceptionManager.GetLastException(exceptionCode);
-						
-		exceptionHandlingResult := OnHandleException(exception, EXCEPTION_CATCH_POINT.RECOVER);
-	
-		ProcessException(exception, exceptionHandlingResult, "OnRecover error");
-	
-		IF exceptionHandlingResult = PROBLEM_HANDLING_RESULT.SET_ERROR_AND_STOP_COMPONENT THEN
-			RETURN;
-		END_IF		
-	__ENDTRY
-END_IF
-
-__TRY
-	OnWorking();
-__CATCH(exceptionCode)
-	exception := Core.ExceptionManager.GetLastException(exceptionCode);	
-
-	exceptionHandlingResult := OnHandleException(exception, EXCEPTION_CATCH_POINT.BEFORE_CHILDREN_WORKING);
-
-	ProcessException(exception, exceptionHandlingResult, "OnBeforeChildrenWorking error");
-
-	IF exceptionHandlingResult = PROBLEM_HANDLING_RESULT.SET_ERROR_AND_STOP_COMPONENT THEN
-		RETURN;		
-	END_IF
 __ENDTRY]]></ST>
       </Implementation>
     </Method>
@@ -171,6 +101,10 @@ __ENDTRY]]></ST>
 VAR
 	inputDevice : IInputDevice;	
 	outputDevice : IOutputDevice;	
+
+	exceptionCode : __SYSTEM.ExceptionCode;
+	exception : Core.IException;	
+	exceptionHandlingResult : PROBLEM_HANDLING_RESULT;
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[IF NOT Enabled OR_ELSE (_OperationalState <> OPERATIONAL_STATE.WORKING AND_THEN _OperationalState <> OPERATIONAL_STATE.STOPPED) THEN
@@ -183,10 +117,49 @@ END_IF
 
 CASE _OperationalState OF
 	OPERATIONAL_STATE.WORKING:
-		doWork();
+		// automatic non-critical error recovering
+		IF _OperationalState = OPERATIONAL_STATE.WORKING AND_THEN HasError AND_THEN _Error.Severity <> Core.ERROR_SEVERITY.CRITICAL THEN
+			_Error.Clear();
+			
+			__TRY
+				OnRecover();
+			__CATCH(exceptionCode)		
+				exception := Core.ExceptionManager.GetLastException(exceptionCode);
+								
+				exceptionHandlingResult := OnHandleException(exception, EXCEPTION_CATCH_POINT.RECOVER);
+			
+				ProcessException(exception, exceptionHandlingResult, "OnRecover error");
+			
+				IF exceptionHandlingResult = PROBLEM_HANDLING_RESULT.SET_ERROR_AND_STOP_COMPONENT THEN
+					RETURN;
+				END_IF		
+			__ENDTRY
+		END_IF
+		
+		__TRY
+			OnWorking();
+		__CATCH(exceptionCode)
+			exception := Core.ExceptionManager.GetLastException(exceptionCode);	
+		
+			exceptionHandlingResult := OnHandleException(exception, EXCEPTION_CATCH_POINT.BEFORE_CHILDREN_WORKING);
+		
+			ProcessException(exception, exceptionHandlingResult, "OnBeforeChildrenWorking error");
+		
+			IF exceptionHandlingResult = PROBLEM_HANDLING_RESULT.SET_ERROR_AND_STOP_COMPONENT THEN
+				RETURN;		
+			END_IF
+		__ENDTRY
 		
 	OPERATIONAL_STATE.STOPPED:
-		doStop();	
+		__TRY
+			OnStopped();
+		__CATCH(exceptionCode)
+			exception := Core.ExceptionManager.GetLastException(exceptionCode);	
+		
+			exceptionHandlingResult := OnHandleException(exception, EXCEPTION_CATCH_POINT.BEFORE_CHILDREN_STOPPED);
+		
+			Core.LogManager.TryLogException(exception, GetErrorSeverityByExceptionHandlingResult(exceptionHandlingResult), "AutomationComponent", "AutomationComponent.OnStopped");
+		__ENDTRY	
 END_CASE
 
 IF __QUERYINTERFACE(THIS^, outputDevice) THEN
@@ -265,26 +238,10 @@ __ENDTRY]]></ST>
         <ST><![CDATA[]]></ST>
       </Implementation>
     </Method>
-    <Method Name="OnHandleException" Id="{da7bc9d0-a837-4507-a946-cf4521973f6b}" FolderPath="Methods to override\">
-      <Declaration><![CDATA[METHOD PROTECTED OnHandleException : PROBLEM_HANDLING_RESULT
-VAR_INPUT
-	exception : Core.IException;
-	exceptionCatchPoint : EXCEPTION_CATCH_POINT;
-END_VAR]]></Declaration>
-      <Implementation>
-        <ST><![CDATA[OnHandleException := PROBLEM_HANDLING_RESULT.SET_ERROR_AND_STOP_COMPONENT;]]></ST>
-      </Implementation>
-    </Method>
     <Method Name="OnInitializing" Id="{87d0edb2-3f9d-4cdc-be5a-51ee4854c5ea}" FolderPath="Methods to override\">
       <Declaration><![CDATA[METHOD PROTECTED OnInitializing : BOOL]]></Declaration>
       <Implementation>
         <ST><![CDATA[OnInitializing := TRUE;]]></ST>
-      </Implementation>
-    </Method>
-    <Method Name="OnRecover" Id="{7c8c3e9b-0187-45e1-b338-ec8bdbe346a5}" FolderPath="Methods to override\">
-      <Declaration><![CDATA[METHOD PROTECTED OnRecover]]></Declaration>
-      <Implementation>
-        <ST><![CDATA[]]></ST>
       </Implementation>
     </Method>
     <Method Name="OnReset" Id="{1437f653-2dca-4516-a643-9a7052ba8f91}" FolderPath="Methods to override\">

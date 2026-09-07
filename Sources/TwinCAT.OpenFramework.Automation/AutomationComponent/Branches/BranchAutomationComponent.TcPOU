@@ -220,6 +220,9 @@ VAR
 
 	exceptionCode : __SYSTEM.ExceptionCode;
 	exception : Core.IException;	
+	
+	thisAsChildAutomationComponent : IChildAutomationComponent;
+	parent : IParentAutomationComponent;
 END_VAR
 VAR_INST
 	enabling : BOOL;
@@ -245,6 +248,13 @@ __TRY
 	END_IF
 	
 	OnAfterChildrenEnable();
+	
+	IF __QUERYINTERFACE(THIS^, thisAsChildAutomationComponent) 
+		AND_THEN (parent := thisAsChildAutomationComponent.Parent) <> 0 
+		AND_THEN NOT parent.Enabled 
+	THEN
+		thisAsChildAutomationComponent.Parent.Enable(FALSE);
+	END_IF
 	
 	_Enabled := TRUE;
 	
@@ -282,8 +292,6 @@ __CATCH
 	END_IF		
 __ENDTRY
 
-processInputs();
-
 CASE _OperationalState OF
 	OPERATIONAL_STATE.WORKING:
 		doWork();
@@ -291,8 +299,6 @@ CASE _OperationalState OF
 	OPERATIONAL_STATE.STOPPED:
 		doStop();	
 END_CASE
-
-processOutputs();
 
 __TRY
 	OnAfterExecute();
@@ -477,128 +483,10 @@ __ENDTRY]]></ST>
     <Method Name="OnHandleChildCriticalError" Id="{839f293e-9205-4a6f-838b-d14dd86be61e}" FolderPath="Methods to override\">
       <Declaration><![CDATA[METHOD PROTECTED OnHandleChildCriticalError : PROBLEM_HANDLING_RESULT
 VAR_INPUT
-	childWithError : IAutomationComponent;
+	childWithError : IChildAutomationComponent;
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[OnHandleChildCriticalError := PROBLEM_HANDLING_RESULT.SET_ERROR_AND_STOP_COMPONENT;]]></ST>
-      </Implementation>
-    </Method>
-    <Method Name="OnHandleException" Id="{29c90bad-df55-4870-9c1d-40408bd01466}" FolderPath="Methods to override\">
-      <Declaration><![CDATA[METHOD PROTECTED OnHandleException : PROBLEM_HANDLING_RESULT
-VAR_INPUT
-	exception : Core.IException;
-	exceptionCatchPoint : EXCEPTION_CATCH_POINT;
-END_VAR]]></Declaration>
-      <Implementation>
-        <ST><![CDATA[OnHandleException := PROBLEM_HANDLING_RESULT.SET_ERROR_AND_STOP_COMPONENT;]]></ST>
-      </Implementation>
-    </Method>
-    <Method Name="OnRecover" Id="{4fd00d17-dbcf-4903-91de-2486b0cb165f}" FolderPath="Methods to override\">
-      <Declaration><![CDATA[METHOD PROTECTED OnRecover]]></Declaration>
-      <Implementation>
-        <ST><![CDATA[]]></ST>
-      </Implementation>
-    </Method>
-    <Method Name="processInputs" Id="{f4b382a5-61c7-4fc2-8dd7-c14e4c747422}" FolderPath="Service methods\">
-      <Declaration><![CDATA[METHOD PRIVATE FINAL processInputs
-VAR
-	exceptionCode : __SYSTEM.ExceptionCode;
-	exception : Core.IException;	
-	exceptionHandlingResult : PROBLEM_HANDLING_RESULT;
-
-	i : Core.INT_INDEX;
-
-	child : IChildAutomationComponent;
-	
-	inputDevice : IInputDevice;
-END_VAR]]></Declaration>
-      <Implementation>
-        <ST><![CDATA[__TRY
-	OnBeforeDevicesProcessInput();
-__CATCH(exceptionCode)		
-	exception := Core.ExceptionManager.GetLastException(exceptionCode);
-					
-	exceptionHandlingResult := OnHandleException(exception, EXCEPTION_CATCH_POINT.BEFORE_CHILDREN_PROCESS_INPUT);
-
-	ProcessException(exception, exceptionHandlingResult, "OnBeforeDevicesProcessInput error");
-__ENDTRY
-
-FOR i := 0 TO ChildCount - 1 DO
-	child := TryGetChildByIndex(i);
-
-	IF NOT child.Enabled OR_ELSE NOT __QUERYINTERFACE(child, inputDevice) THEN
-		CONTINUE;
-	END_IF
-
-	inputDevice.ProcessInput(); 
-
-	IF inputDevice.HasError AND_THEN inputDevice.Error.Severity = Core.ERROR_SEVERITY.CRITICAL THEN
-		exceptionHandlingResult := OnHandleChildCriticalError(inputDevice);
-		
-		ProcessChildError(inputDevice.Error, exceptionHandlingResult, Core.WideStrings.Concat255("Child[", TO_WSTRING(i), "(", inputDevice.Name, ")].ProcessInput error"));
-	END_IF	
-END_FOR
-
-__TRY
-	OnAfterDevicesProcessInput();
-__CATCH(exceptionCode)		
-	exception := Core.ExceptionManager.GetLastException(exceptionCode);
-					
-	exceptionHandlingResult := OnHandleException(exception, EXCEPTION_CATCH_POINT.AFTER_CHILDREN_PROCESS_INPUT);
-
-	ProcessException(exception, exceptionHandlingResult, "OnAfterDevicesProcessInput error");
-__ENDTRY]]></ST>
-      </Implementation>
-    </Method>
-    <Method Name="processOutputs" Id="{95a8f436-d6af-4bcd-974f-69577ba853fe}" FolderPath="Service methods\">
-      <Declaration><![CDATA[METHOD PRIVATE FINAL processOutputs
-VAR
-	exceptionCode : __SYSTEM.ExceptionCode;
-	exception : Core.IException;	
-	exceptionHandlingResult : PROBLEM_HANDLING_RESULT;
-
-	i : Core.INT_INDEX;
-	
-	child : IChildAutomationComponent;
-	
-	outputDevice : IOutputDevice;	
-END_VAR]]></Declaration>
-      <Implementation>
-        <ST><![CDATA[__TRY
-	OnBeforeDevicesProcessOutput();
-__CATCH(exceptionCode)		
-	exception := Core.ExceptionManager.GetLastException(exceptionCode);
-					
-	exceptionHandlingResult := OnHandleException(exception, EXCEPTION_CATCH_POINT.BEFORE_CHILDREN_PROCESS_OUTPUT);
-
-	ProcessException(exception, exceptionHandlingResult, "OnBeforeDevicesProcessOutput error");
-__ENDTRY
-
-FOR i := 0 TO ChildCount - 1 DO
-	child := TryGetChildByIndex(i);
-	
-	IF NOT child.Enabled OR_ELSE NOT __QUERYINTERFACE(child, outputDevice) THEN
-		CONTINUE;
-	END_IF
-
-	outputDevice.ProcessOutput(); 
-	
-	IF outputDevice.HasError AND_THEN outputDevice.Error.Severity = Core.ERROR_SEVERITY.CRITICAL THEN
-		exceptionHandlingResult := OnHandleChildCriticalError(outputDevice);
-		
-		ProcessChildError(outputDevice.Error, exceptionHandlingResult, Core.WideStrings.Concat255("Child[", TO_WSTRING(i), "(", outputDevice.Name, ")].ProcessOutput error"));
-	END_IF
-END_FOR
-
-__TRY
-	OnAfterDevicesProcessOutput();
-__CATCH(exceptionCode)		
-	exception := Core.ExceptionManager.GetLastException(exceptionCode);
-					
-	exceptionHandlingResult := OnHandleException(exception, EXCEPTION_CATCH_POINT.AFTER_CHILDREN_PROCESS_OUTPUT);
-
-	ProcessException(exception, exceptionHandlingResult, "OnAfterDevicesProcessOutput error");
-__ENDTRY]]></ST>
       </Implementation>
     </Method>
     <Method Name="Reset" Id="{0fac72fb-ac13-45be-8a20-c7e96145e4d2}">
