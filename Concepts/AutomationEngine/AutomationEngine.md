@@ -2,7 +2,7 @@
 
 ## 1. General Description
 
-This is a deterministic PLC architectural platform designed to build modular control systems ranging from standalone machines to complex production lines. It provides built-in error handling, logging, multi-level simulation, and selective node disabling within nested component hierarchies.
+This is a deterministic PLC architectural platform designed to build modular control systems ranging from standalone machines to complex production lines. It provides built-in error handling, logging, event propagation, permission check, multi-level simulation, and selective node disabling within nested component hierarchies.
 
 ---
 
