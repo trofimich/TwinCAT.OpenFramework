@@ -2,7 +2,7 @@
 
 ## 1. General Description
 
-This is a deterministic PLC architectural platform designed to build modular control systems ranging from standalone machines to complex production lines. It provides built-in error handling, logging, multi-level simulation, and selective node disabling within nested component hierarchies.
+This is a deterministic PLC architectural platform designed to build modular control systems ranging from standalone machines to complex production lines. It provides built-in error handling, logging, event propagation, permission check, multi-level simulation, and selective node disabling within nested component hierarchies.
 
 ---
 
@@ -86,12 +86,13 @@ To preserve PLC determinism and ensure efficient memory usage, child collections
 
 ---
 
-## 6. Dependency Injection
+### 6. Dependency Injection
 
-Dependencies between nodes are established via the `FB_Init` method.
+Dependencies are established via the `FB_Init` method and some properties.
 
 * Each device receives a reference to its `Parent` during initialization
 * Builds a complete object tree **before the first execution cycle**
+* Custom ActionPermissionPolicy can be set to implement the permissions check you need before calling actions.
 
 ### 7. Advantages
 

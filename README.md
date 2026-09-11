@@ -10,7 +10,7 @@
 2. **Advanced Data Structures:** Adds crucial missing functionality, such as powerful and easy-to-use dynamic collections.
 3. **Exception Handling:** Establishes a robust mechanism for exception handling, error tracking, and system logging.
 4. **Unified Interfaces:** Provides standard interfaces and ready-to-use implementations for common services, such as `ILogger`, IO terminal models, devices.
-5. **Standardized Machine Modeling:** Offers a unified architectural approach to building a software model of your hardware. It standardizes system initialization, I/O interaction, error handling, and logging across your entire project.
+5. **Standardized Machine Modeling:** Offers a unified architectural approach to building a software model of your hardware. It standardizes system initialization, I/O interaction, error handling, logging, events dispatching and permission check across your entire project.
 6. **And many more** You can find technical description [here](TECHNICAL_DESCRIPTION.md)
 
 ---
