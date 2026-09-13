@@ -34,6 +34,9 @@ VAR
 	
 	{attribute 'hide'} 
 	_Error : Core.ERROR;
+	
+	{attribute 'hide'} 
+	_ExceptionHandlingPolicy : Core.IExceptionHandlingPolicy;
 END_VAR]]></Declaration>
     <Implementation>
       <ST><![CDATA[]]></ST>
@@ -75,6 +78,22 @@ PROPERTY FINAL Error : REFERENCE TO Core.ERROR ]]></Declaration>
         </Implementation>
       </Get>
     </Property>
+    <Property Name="ExceptionHandlingPolicy" Id="{e064b9d3-6917-45e3-8d79-01a4add07dcf}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+PROPERTY FINAL ExceptionHandlingPolicy : Core.IExceptionHandlingPolicy]]></Declaration>
+      <Get Name="Get" Id="{94ab69af-76bc-482e-a529-660a7e83bff5}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ExceptionHandlingPolicy := _ExceptionHandlingPolicy;]]></ST>
+        </Implementation>
+      </Get>
+      <Set Name="Set" Id="{aced67c1-ebd6-481b-9292-25eecf0c2d60}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[_ExceptionHandlingPolicy := ExceptionHandlingPolicy;]]></ST>
+        </Implementation>
+      </Set>
+    </Property>
     <Method Name="Execute" Id="{0c62a304-be7d-4b17-9ec6-dcdf997a75e1}">
       <Declaration><![CDATA[METHOD ABSTRACT Execute]]></Declaration>
       <Implementation>
@@ -91,16 +110,18 @@ VAR_INPUT
 	name : WSTRING;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[_Name := SEL(Core.WideStrings.IsNullOrWhiteSpace(name), name, GetDefaultName());]]></ST>
+        <ST><![CDATA[_Name := SEL(Core.WideStrings.IsNullOrWhiteSpace(name), name, GetDefaultName());
+
+_ExceptionHandlingPolicy := Core.ExceptionHandlingPolicies.SetErrorAndStop;]]></ST>
       </Implementation>
     </Method>
     <Method Name="GetErrorSeverityByExceptionHandlingResult" Id="{98732844-72c9-4551-a282-65985e6af1f9}" FolderPath="Service methods\">
-      <Declaration><![CDATA[METHOD PROTECTED GetErrorSeverityByExceptionHandlingResult : Core.ERROR_SEVERITY
+      <Declaration><![CDATA[METHOD PROTECTED FINAL GetErrorSeverityByExceptionHandlingResult : Core.ERROR_SEVERITY
 VAR_INPUT
-	exceptionHandlingResult : PROBLEM_HANDLING_RESULT;
+	exceptionHandlingResult : Core.EXCEPTION_REACTION;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[IF exceptionHandlingResult = PROBLEM_HANDLING_RESULT.SET_ERROR_AND_STOP_COMPONENT THEN
+        <ST><![CDATA[IF exceptionHandlingResult = Core.EXCEPTION_REACTION.SET_ERROR_AND_STOP THEN
 	GetErrorSeverityByExceptionHandlingResult := Core.ERROR_SEVERITY.CRITICAL;
 ELSE
 	GetErrorSeverityByExceptionHandlingResult := Core.ERROR_SEVERITY.ERROR;
@@ -174,14 +195,18 @@ END_VAR]]></Declaration>
         <ST><![CDATA[]]></ST>
       </Implementation>
     </Method>
-    <Method Name="OnHandleException" Id="{29c90bad-df55-4870-9c1d-40408bd01466}" FolderPath="Methods to override\">
-      <Declaration><![CDATA[METHOD PROTECTED OnHandleException : PROBLEM_HANDLING_RESULT
+    <Method Name="OnHandleException" Id="{29c90bad-df55-4870-9c1d-40408bd01466}" FolderPath="Service methods\">
+      <Declaration><![CDATA[METHOD PROTECTED FINAL OnHandleException : Core.EXCEPTION_REACTION
 VAR_INPUT
 	exception : Core.IException;
-	exceptionCatchPoint : EXCEPTION_CATCH_POINT;
+	failedMethodName : STRING(255);
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[OnHandleException := PROBLEM_HANDLING_RESULT.SET_ERROR_AND_STOP_COMPONENT;]]></ST>
+        <ST><![CDATA[IF _ExceptionHandlingPolicy <> 0 THEN
+	OnHandleException := _ExceptionHandlingPolicy.HandleException(exception, THIS^, failedMethodName);
+ELSE
+	OnHandleException := Core.EXCEPTION_REACTION.SET_ERROR_AND_STOP;
+END_IF]]></ST>
       </Implementation>
     </Method>
     <Method Name="OnOperationalStateChanged" Id="{dd76bd0f-568b-4bbf-812c-974cfb78aee7}" FolderPath="Methods to override\">
@@ -223,7 +248,7 @@ PROPERTY FINAL OperationalStateReason : REFERENCE TO WSTRING(255)]]></Declaratio
       <Declaration><![CDATA[METHOD PROTECTED ProcessChildError
 VAR_INPUT
 	childError : REFERENCE TO Core.ERROR;  
-	childErrorHandlingResult : PROBLEM_HANDLING_RESULT;	
+	childErrorHandlingResult : Core.EXCEPTION_REACTION;	
 	childErrorSourceHint : WSTRING(255);
 END_VAR]]></Declaration>
       <Implementation>
@@ -233,13 +258,13 @@ END_IF
 
 IF OperationalState <> OPERATIONAL_STATE.INITIALIZING THEN
 	CASE childErrorHandlingResult OF
-		PROBLEM_HANDLING_RESULT.SET_ERROR:
+		Core.EXCEPTION_REACTION.SET_ERROR_AND_CONTINUE:
 			IF _Error.Empty THEN
 				_Error := childError;
 				_Error.SetSeverity(Core.ERROR_SEVERITY.ERROR);
 			END_IF		
 		
-		PROBLEM_HANDLING_RESULT.SET_ERROR_AND_STOP_COMPONENT:
+		Core.EXCEPTION_REACTION.SET_ERROR_AND_STOP:
 			IF _Error.Empty OR_ELSE _Error.Severity < Core.ERROR_SEVERITY.CRITICAL THEN
 				_Error := childError;
 				_Error.SetSeverity(Core.ERROR_SEVERITY.CRITICAL);
@@ -260,7 +285,7 @@ END_IF]]></ST>
       <Declaration><![CDATA[METHOD PROTECTED ProcessException
 VAR_INPUT
 	exception : Core.IException;  
-	exceptionHandlingResult : PROBLEM_HANDLING_RESULT;	
+	exceptionHandlingResult : Core.EXCEPTION_REACTION;	
 	exceptionSourceHint : WSTRING(255);
 END_VAR]]></Declaration>
       <Implementation>
@@ -272,12 +297,12 @@ IF OperationalState <> OPERATIONAL_STATE.INITIALIZING THEN
 	Core.LogManager.TryLogException(exception, GetErrorSeverityByExceptionHandlingResult(exceptionHandlingResult));
 	
 	CASE exceptionHandlingResult OF
-		PROBLEM_HANDLING_RESULT.SET_ERROR:
+		Core.EXCEPTION_REACTION.SET_ERROR_AND_CONTINUE:
 			IF _Error.Empty THEN
 				exception.ToError(_Error, Core.ERROR_SEVERITY.ERROR);
 			END_IF		
 		
-		PROBLEM_HANDLING_RESULT.SET_ERROR_AND_STOP_COMPONENT:
+		Core.EXCEPTION_REACTION.SET_ERROR_AND_STOP:
 			IF _Error.Empty OR_ELSE _Error.Severity < Core.ERROR_SEVERITY.CRITICAL THEN
 				exception.ToError(_Error, Core.ERROR_SEVERITY.CRITICAL);
 			END_IF	
