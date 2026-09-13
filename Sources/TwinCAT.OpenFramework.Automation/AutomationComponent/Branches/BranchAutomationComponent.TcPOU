@@ -19,7 +19,11 @@ legal notes
 
 FUNCTION_BLOCK ABSTRACT BranchAutomationComponent EXTENDS AutomationComponent IMPLEMENTS IParentAutomationComponent
 VAR
+	{attribute 'hide'} 
 	_ActionPermissionPolicy : Core.IActionPermissionPolicy;
+	
+	{attribute 'hide'} 
+	_ChildCriticalErrorHandlingPolicy : IChildCriticalErrorHandlingPolicy;
 END_VAR]]></Declaration>
     <Implementation>
       <ST><![CDATA[]]></ST>
@@ -93,6 +97,22 @@ PROPERTY ABSTRACT ChildCount : Core.INT_LENGTH]]></Declaration>
         </Implementation>
       </Get>
     </Property>
+    <Property Name="ChildCriticalErrorHandlingPolicy" Id="{3c828eac-4e06-47fc-b519-0e61d3544213}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+PROPERTY FINAL ChildCriticalErrorHandlingPolicy : IChildCriticalErrorHandlingPolicy]]></Declaration>
+      <Get Name="Get" Id="{d119ddbe-a698-4e00-b0b9-ea9b786b87e1}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ChildCriticalErrorHandlingPolicy := _ChildCriticalErrorHandlingPolicy;]]></ST>
+        </Implementation>
+      </Get>
+      <Set Name="Set" Id="{7450d937-3922-4934-8807-87711ddf39ab}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[_ChildCriticalErrorHandlingPolicy := ChildCriticalErrorHandlingPolicy;]]></ST>
+        </Implementation>
+      </Set>
+    </Property>
     <Method Name="Disable" Id="{9f8a3623-08ea-465f-bfda-4ce58abe2bf9}">
       <Declaration><![CDATA[METHOD FINAL Disable
 VAR
@@ -138,7 +158,7 @@ __ENDTRY]]></ST>
 VAR
 	exceptionCode : __SYSTEM.ExceptionCode;
 	exception : Core.IException;	
-	exceptionHandlingResult : Core.EXCEPTION_REACTION;
+	exceptionReaction : Core.EXCEPTION_REACTION;
 
 	i : INT;
 	
@@ -150,9 +170,9 @@ END_VAR]]></Declaration>
 __CATCH(exceptionCode)
 	exception := Core.ExceptionManager.GetLastException(exceptionCode);	
 
-	exceptionHandlingResult := OnHandleException(exception, 'OnBeforeChildrenStopped');
+	exceptionReaction := OnHandleException(exception, 'OnBeforeChildrenStopped');
 
-	Core.LogManager.TryLogException(exception, GetErrorSeverityByExceptionHandlingResult(exceptionHandlingResult), "AutomationComponent", "AutomationComponent.OnBeforeChildrenStopped");
+	Core.LogManager.TryLogException(exception, GetErrorSeverityByExceptionReaction(exceptionReaction), "AutomationComponent", "AutomationComponent.OnBeforeChildrenStopped");
 __ENDTRY	
 
 FOR i := 0 TO ChildCount - 1 DO
@@ -176,9 +196,9 @@ __TRY
 __CATCH(exceptionCode)
 	exception := Core.ExceptionManager.GetLastException(exceptionCode);	
 
-	exceptionHandlingResult := OnHandleException(exception, 'OnAfterChildrenStopped');
+	exceptionReaction := OnHandleException(exception, 'OnAfterChildrenStopped');
 
-	Core.LogManager.TryLogException(exception, GetErrorSeverityByExceptionHandlingResult(exceptionHandlingResult), "AutomationComponent", "AutomationComponent.OnAfterChildrenStopped");
+	Core.LogManager.TryLogException(exception, GetErrorSeverityByExceptionReaction(exceptionReaction), "AutomationComponent", "AutomationComponent.OnAfterChildrenStopped");
 __ENDTRY]]></ST>
       </Implementation>
     </Method>
@@ -187,7 +207,9 @@ __ENDTRY]]></ST>
 VAR
 	exceptionCode : __SYSTEM.ExceptionCode;
 	exception : Core.IException;	
-	exceptionHandlingResult : Core.EXCEPTION_REACTION;
+	exceptionReaction : Core.EXCEPTION_REACTION;
+
+	childCriticalErrorReaction : CHILD_CRITICAL_ERROR_REACTION;
 
 	i : INT;
 	
@@ -203,11 +225,11 @@ IF _OperationalState = OPERATIONAL_STATE.WORKING AND_THEN HasError AND_THEN _Err
 	__CATCH(exceptionCode)		
 		exception := Core.ExceptionManager.GetLastException(exceptionCode);
 						
-		exceptionHandlingResult := OnHandleException(exception, 'OnRecover');
+		exceptionReaction := OnHandleException(exception, 'OnRecover');
 	
-		ProcessException(exception, exceptionHandlingResult, "OnRecover error");
+		ProcessException(exception, exceptionReaction, "OnRecover error");
 	
-		IF exceptionHandlingResult = Core.EXCEPTION_REACTION.SET_ERROR_AND_STOP THEN
+		IF exceptionReaction = Core.EXCEPTION_REACTION.SET_ERROR_AND_STOP THEN
 			RETURN;
 		END_IF		
 	__ENDTRY
@@ -218,11 +240,11 @@ __TRY
 __CATCH(exceptionCode)
 	exception := Core.ExceptionManager.GetLastException(exceptionCode);	
 
-	exceptionHandlingResult := OnHandleException(exception, 'OnBeforeChildrenWorking');
+	exceptionReaction := OnHandleException(exception, 'OnBeforeChildrenWorking');
 
-	ProcessException(exception, exceptionHandlingResult, "OnBeforeChildrenWorking error");
+	ProcessException(exception, exceptionReaction, "OnBeforeChildrenWorking error");
 
-	IF exceptionHandlingResult = Core.EXCEPTION_REACTION.SET_ERROR_AND_STOP THEN
+	IF exceptionReaction = Core.EXCEPTION_REACTION.SET_ERROR_AND_STOP THEN
 		RETURN;		
 	END_IF
 __ENDTRY	
@@ -234,9 +256,9 @@ FOR i := 0 TO ChildCount - 1 DO
 		child.Execute();
 		
 		IF child.HasError AND_THEN child.Error.Severity = Core.ERROR_SEVERITY.CRITICAL THEN
-			exceptionHandlingResult := OnHandleChildCriticalError(child);
+			childCriticalErrorReaction := HandleChildCriticalError(child);
 			
-			ProcessChildError(child.Error, exceptionHandlingResult, Core.WideStrings.Concat255("Child[", TO_WSTRING(i), "](", child.Name, ").Execute error"));
+			ProcessChildError(child.Error, childCriticalErrorReaction, Core.WideStrings.Concat255("Child[", TO_WSTRING(i), "](", child.Name, ").Execute error"));
 			
 			RETURN;
 		END_IF
@@ -248,11 +270,11 @@ __TRY
 __CATCH(exceptionCode)
 	exception := Core.ExceptionManager.GetLastException(exceptionCode);	
 
-	exceptionHandlingResult := OnHandleException(exception, 'OnAfterChildrenWorking');
+	exceptionReaction := OnHandleException(exception, 'OnAfterChildrenWorking');
 
-	ProcessException(exception, exceptionHandlingResult, "OnAfterChildrenWorking error");
+	ProcessException(exception, exceptionReaction, "OnAfterChildrenWorking error");
 
-	IF exceptionHandlingResult = Core.EXCEPTION_REACTION.SET_ERROR_AND_STOP THEN
+	IF exceptionReaction = Core.EXCEPTION_REACTION.SET_ERROR_AND_STOP THEN
 		RETURN;		
 	END_IF
 __ENDTRY]]></ST>
@@ -321,7 +343,7 @@ __ENDTRY]]></ST>
 VAR
 	exceptionCode : __SYSTEM.ExceptionCode;
 	exception : Core.IException;
-	exceptionHandlingResult : Core.EXCEPTION_REACTION;
+	exceptionReaction : Core.EXCEPTION_REACTION;
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[IF NOT Enabled OR_ELSE (_OperationalState <> OPERATIONAL_STATE.WORKING AND_THEN _OperationalState <> OPERATIONAL_STATE.STOPPED) THEN
@@ -333,11 +355,11 @@ __TRY
 __CATCH		
 	exception := Core.ExceptionManager.GetLastException(exceptionCode);
 						
-	exceptionHandlingResult := OnHandleException(exception, 'OnBeforeExecute');
+	exceptionReaction := OnHandleException(exception, 'OnBeforeExecute');
 
-	ProcessException(exception, exceptionHandlingResult, "OnRecover error");
+	ProcessException(exception, exceptionReaction, "OnRecover error");
 
-	IF exceptionHandlingResult = Core.EXCEPTION_REACTION.SET_ERROR_AND_STOP THEN
+	IF exceptionReaction = Core.EXCEPTION_REACTION.SET_ERROR_AND_STOP THEN
 		RETURN;
 	END_IF		
 __ENDTRY
@@ -355,11 +377,11 @@ __TRY
 __CATCH		
 	exception := Core.ExceptionManager.GetLastException(exceptionCode);
 						
-	exceptionHandlingResult := OnHandleException(exception, 'OnAfterExecute');
+	exceptionReaction := OnHandleException(exception, 'OnAfterExecute');
 
-	ProcessException(exception, exceptionHandlingResult, "OnRecover error");
+	ProcessException(exception, exceptionReaction, "OnRecover error");
 
-	IF exceptionHandlingResult = Core.EXCEPTION_REACTION.SET_ERROR_AND_STOP THEN
+	IF exceptionReaction = Core.EXCEPTION_REACTION.SET_ERROR_AND_STOP THEN
 		RETURN;
 	END_IF		
 __ENDTRY]]></ST>
@@ -375,7 +397,22 @@ VAR_INPUT
 	name : WSTRING;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[_ActionPermissionPolicy := Core.ActionPermissionsPolicies.AllowAll;]]></ST>
+        <ST><![CDATA[_ActionPermissionPolicy := Core.ActionPermissionsPolicies.AllowAll;
+
+_ChildCriticalErrorHandlingPolicy := ChildCriticalErrorHandlingPolicies.SetErrorAndStop;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="HandleChildCriticalError" Id="{839f293e-9205-4a6f-838b-d14dd86be61e}" FolderPath="Service methods\">
+      <Declaration><![CDATA[METHOD PROTECTED FINAL HandleChildCriticalError : CHILD_CRITICAL_ERROR_REACTION
+VAR_INPUT
+	childWithError : IChildAutomationComponent;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF _ChildCriticalErrorHandlingPolicy <> 0 THEN
+	HandleChildCriticalError := _ChildCriticalErrorHandlingPolicy.HandleChildCriticalError(childWithError, THIS^);
+ELSE
+	HandleChildCriticalError := CHILD_CRITICAL_ERROR_REACTION.SET_ERROR_AND_STOP;
+END_IF]]></ST>
       </Implementation>
     </Method>
     <Method Name="Initialize" Id="{24ac7d54-bfdf-430c-8d4e-40b667f55780}">
@@ -543,15 +580,6 @@ __ENDTRY]]></ST>
         <ST><![CDATA[]]></ST>
       </Implementation>
     </Method>
-    <Method Name="OnHandleChildCriticalError" Id="{839f293e-9205-4a6f-838b-d14dd86be61e}" FolderPath="Methods to override\">
-      <Declaration><![CDATA[METHOD PROTECTED OnHandleChildCriticalError : Core.EXCEPTION_REACTION
-VAR_INPUT
-	childWithError : IChildAutomationComponent;
-END_VAR]]></Declaration>
-      <Implementation>
-        <ST><![CDATA[OnHandleChildCriticalError := Core.EXCEPTION_REACTION.SET_ERROR_AND_STOP;]]></ST>
-      </Implementation>
-    </Method>
     <Method Name="RequestActionPermission" Id="{38f3c430-f1b8-4bc0-bb7e-4f38474d7b81}">
       <Declaration><![CDATA[METHOD FINAL RequestActionPermission : BOOL
 VAR_INPUT
@@ -583,7 +611,9 @@ END_IF]]></ST>
 VAR
 	exceptionCode : __SYSTEM.ExceptionCode;
 	exception : Core.IException;	
-	exceptionHandlingResult : Core.EXCEPTION_REACTION;
+	exceptionReaction : Core.EXCEPTION_REACTION;
+	
+	childCriticalErrorReaction : CHILD_CRITICAL_ERROR_REACTION;
 	
 	i : INT;
 		
@@ -601,11 +631,11 @@ __TRY
 __CATCH(exceptionCode)		
 	exception := Core.ExceptionManager.GetLastException(exceptionCode);
 					
-	exceptionHandlingResult := OnHandleException(exception, 'OnBeforeChildrenReset');
+	exceptionReaction := OnHandleException(exception, 'OnBeforeChildrenReset');
 
-	ProcessException(exception, exceptionHandlingResult, "OnBeforeChildrenReset error");
+	ProcessException(exception, exceptionReaction, "OnBeforeChildrenReset error");
 
-	IF exceptionHandlingResult = Core.EXCEPTION_REACTION.SET_ERROR_AND_STOP THEN
+	IF exceptionReaction = Core.EXCEPTION_REACTION.SET_ERROR_AND_STOP THEN
 		RETURN;
 	END_IF
 __ENDTRY
@@ -617,9 +647,9 @@ FOR i := 0 TO ChildCount - 1 DO
 		child.Reset();
 		
 		IF child.HasError AND_THEN child.Error.Severity = Core.ERROR_SEVERITY.CRITICAL THEN
-			exceptionHandlingResult := OnHandleChildCriticalError(child);
+			childCriticalErrorReaction := HandleChildCriticalError(child);
 			
-			ProcessChildError(child.Error, exceptionHandlingResult, Core.WideStrings.Concat255("Child[", TO_WSTRING(i), "(", child.Name, ")].Reset error"));
+			ProcessChildError(child.Error, childCriticalErrorReaction, Core.WideStrings.Concat255("Child[", TO_WSTRING(i), "(", child.Name, ")].Reset error"));
 
 			RETURN;
 		END_IF
@@ -633,11 +663,11 @@ __TRY
 __CATCH(exceptionCode)		
 	exception := Core.ExceptionManager.GetLastException(exceptionCode);
 					
-	exceptionHandlingResult := OnHandleException(exception, 'OnAfterChildrenReset');
+	exceptionReaction := OnHandleException(exception, 'OnAfterChildrenReset');
 
-	ProcessException(exception, exceptionHandlingResult, "OnAfterChildrenReset error");
+	ProcessException(exception, exceptionReaction, "OnAfterChildrenReset error");
 
-	IF exceptionHandlingResult = Core.EXCEPTION_REACTION.SET_ERROR_AND_STOP THEN
+	IF exceptionReaction = Core.EXCEPTION_REACTION.SET_ERROR_AND_STOP THEN
 		RETURN;
 	END_IF
 __ENDTRY]]></ST>
