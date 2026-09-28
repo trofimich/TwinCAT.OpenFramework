@@ -41,6 +41,13 @@ VAR
 	_SendBuffer : TOF_Collections.ByteList<0>;
 	
 	_LogFileCounter : UDINT;
+	
+	{attribute 'hide'} 
+	_CreateDirectoryException : TOF_Core.StandardException;
+	{attribute 'hide'} 
+	_LogNewMessageException : TOF_Core.StandardException;
+	{attribute 'hide'} 
+	_FilePathOverflowException : TOF_Core.StringOwerflowException;	
 END_VAR]]></Declaration>
     <Implementation>
       <ST><![CDATA[]]></ST>
@@ -71,9 +78,6 @@ PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
       <Declaration><![CDATA[METHOD PRIVATE createCurrentFilePath : Tc2_System.T_MaxString
 VAR
 	stringBuilder : TOF_Core.StringBuilder;
-END_VAR
-VAR
-	filePathOverflowException : TOF_Core.StringOwerflowException;
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[stringBuilder
@@ -87,7 +91,7 @@ END_VAR]]></Declaration>
 	.AppendString255('.log');
 	
 IF stringBuilder.StringLength > 255 THEN
-	filePathOverflowException.ThrowByObject(THIS^, __POUNAME(), __POSITION(), 'CurrentFilePath', stringBuilder.StringLength, 255);  
+	_FilePathOverflowException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), 'CurrentFilePath', stringBuilder.StringLength, 255);  
 END_IF
 
 stringBuilder.AssignToString(createCurrentFilePath); ]]></ST>
@@ -125,9 +129,7 @@ PROPERTY ErrorMessage : REFERENCE TO TOF_Core.ERROR_MESSAGE]]></Declaration>
     </Property>
     <Method Name="Execute" Id="{17cdfc70-e5ab-42fe-ab86-0d76e3d26166}">
       <Declaration><![CDATA[METHOD Execute
-VAR
-	createDirectoryException : TOF_Core.StandardException;
-	
+VAR	
 	exceptionCode : __SYSTEM.ExceptionCode;
 	exception : TOF_Core.IException;
 END_VAR]]></Declaration>
@@ -146,7 +148,7 @@ END_VAR]]></Declaration>
 				IF _CreateDirectoryIfNotExists.FinalStopReason.WorkDone THEN					
 					_State := SIMPLE_TEXT_FILE_LOGGER_STATE.LOGGING;
 				ELSE			
-					createDirectoryException.ThrowByObject(THIS^, __POUNAME(), __POSITION(), "Log directory not created");
+					_CreateDirectoryException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), "Log directory not created");
 				END_IF
 			END_IF	
 			
@@ -154,7 +156,7 @@ END_VAR]]></Declaration>
 			_FileContentManager.Execute();
 			
 			IF _FileContentManager.State.Stopped AND_THEN _FileContentManager.FinalStopReason.Failure THEN					
-				createDirectoryException.ThrowByObject(THIS^, __POUNAME(), __POSITION(), _FileContentManager.FinalStopReason.Message);
+				_CreateDirectoryException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), _FileContentManager.FinalStopReason.Message);
 			END_IF	
 			
 			tryLogNewMessages();
@@ -162,7 +164,7 @@ END_VAR]]></Declaration>
 __CATCH(exceptionCode)
 	_State := SIMPLE_TEXT_FILE_LOGGER_STATE.FAILED;
 	
-	exception := TOF_Core.ExceptionManager.GetLastException(exceptionCode);
+	exception := TOF_Core.ExceptionManager.GetLastException(exceptionCode, NamespaceName, __POUNAME(), __POSITION());
 	
 	_ErrorMessage := exception.GetMessage();
 	
@@ -340,8 +342,6 @@ _MessageBuffer.AppendGeneric(TOF_Core.GenericValueFactory.FromWStringValue(textT
       <Declaration><![CDATA[METHOD PRIVATE tryLogNewMessages
 VAR
 	message : TOF_Core.GENERIC_VALUE;
-	
-	exception : TOF_Core.StandardException;
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[IF _MessageBuffer.Length = 0 OR_ELSE _FileContentManager.PendingTaskCount > 0 THEN
@@ -349,11 +349,11 @@ END_VAR]]></Declaration>
 END_IF
 
 IF NOT _WriteBytesTask.State.Ready AND_THEN NOT _WriteBytesTask.State.Stopped THEN
-	exception.ThrowByObject(THIS^, __POUNAME(), __POSITION(), TOF_Core.WideStrings.Concat255("WriteBytesTask has invalid state '", TO_WSTRING(_WriteBytesTask.State.Value), "'"));
+	_LogNewMessageException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), TOF_Core.WideStrings.Concat255("WriteBytesTask has invalid state '", TO_WSTRING(_WriteBytesTask.State.Value), "'"));
 END_IF
  
 IF _WriteBytesTask.State.Stopped AND_THEN NOT _WriteBytesTask.FinalStopReason.WorkDone THEN
-	exception.ThrowByObject(THIS^, __POUNAME(), __POSITION(), TOF_Core.WideStrings.Concat255("WriteBytesTask has invalid stop reason '", TO_WSTRING(_WriteBytesTask.FinalStopReason.Value), "'"));	
+	_LogNewMessageException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), TOF_Core.WideStrings.Concat255("WriteBytesTask has invalid stop reason '", TO_WSTRING(_WriteBytesTask.FinalStopReason.Value), "'"));	
 END_IF
 
 IF _RecordsPerFile >= _MaxRecordsPerFile AND_THEN _FileContentManager.State.Running THEN

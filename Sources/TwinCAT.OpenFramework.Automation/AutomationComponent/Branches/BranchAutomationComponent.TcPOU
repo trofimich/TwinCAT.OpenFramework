@@ -168,7 +168,7 @@ END_VAR]]></Declaration>
         <ST><![CDATA[__TRY
 	OnBeforeChildrenStopped();
 __CATCH(exceptionCode)
-	exception := TOF_Core.ExceptionManager.GetLastException(exceptionCode);	
+	exception := TOF_Core.ExceptionManager.GetLastException(exceptionCode, NamespaceName, __POUNAME(), __POSITION());	
 
 	exceptionReaction := OnHandleException(exception, 'OnBeforeChildrenStopped');
 
@@ -194,7 +194,7 @@ END_FOR
 __TRY
 	OnAfterChildrenStopped();
 __CATCH(exceptionCode)
-	exception := TOF_Core.ExceptionManager.GetLastException(exceptionCode);	
+	exception := TOF_Core.ExceptionManager.GetLastException(exceptionCode, NamespaceName, __POUNAME(), __POSITION());	
 
 	exceptionReaction := OnHandleException(exception, 'OnAfterChildrenStopped');
 
@@ -223,7 +223,7 @@ IF _OperationalState = OPERATIONAL_STATE.WORKING AND_THEN HasError AND_THEN _Err
 	__TRY
 		OnRecover();
 	__CATCH(exceptionCode)		
-		exception := TOF_Core.ExceptionManager.GetLastException(exceptionCode);
+		exception := TOF_Core.ExceptionManager.GetLastException(exceptionCode, NamespaceName, __POUNAME(), __POSITION());
 						
 		exceptionReaction := OnHandleException(exception, 'OnRecover');
 	
@@ -238,7 +238,7 @@ END_IF
 __TRY
 	OnBeforeChildrenWorking();
 __CATCH(exceptionCode)
-	exception := TOF_Core.ExceptionManager.GetLastException(exceptionCode);	
+	exception := TOF_Core.ExceptionManager.GetLastException(exceptionCode, NamespaceName, __POUNAME(), __POSITION());	
 
 	exceptionReaction := OnHandleException(exception, 'OnBeforeChildrenWorking');
 
@@ -268,7 +268,7 @@ END_FOR
 __TRY
 	OnAfterChildrenWorking();
 __CATCH(exceptionCode)
-	exception := TOF_Core.ExceptionManager.GetLastException(exceptionCode);	
+	exception := TOF_Core.ExceptionManager.GetLastException(exceptionCode, NamespaceName, __POUNAME(), __POSITION());	
 
 	exceptionReaction := OnHandleException(exception, 'OnAfterChildrenWorking');
 
@@ -339,7 +339,8 @@ __ENDTRY]]></ST>
       </Implementation>
     </Method>
     <Method Name="Execute" Id="{25cb1f34-284f-498c-958b-8dfda7cade8f}">
-      <Declaration><![CDATA[METHOD FINAL Execute
+      <Declaration><![CDATA[{attribute 'estimated-stack-usage' := '99'}
+METHOD FINAL Execute
 VAR
 	exceptionCode : __SYSTEM.ExceptionCode;
 	exception : TOF_Core.IException;
@@ -353,7 +354,7 @@ END_IF
 __TRY
 	OnBeforeExecute();
 __CATCH		
-	exception := TOF_Core.ExceptionManager.GetLastException(exceptionCode);
+	exception := TOF_Core.ExceptionManager.GetLastException(exceptionCode, NamespaceName, __POUNAME(), __POSITION());
 						
 	exceptionReaction := OnHandleException(exception, 'OnBeforeExecute');
 
@@ -375,7 +376,7 @@ END_CASE
 __TRY
 	OnAfterExecute();
 __CATCH		
-	exception := TOF_Core.ExceptionManager.GetLastException(exceptionCode);
+	exception := TOF_Core.ExceptionManager.GetLastException(exceptionCode, NamespaceName, __POUNAME(), __POSITION());
 						
 	exceptionReaction := OnHandleException(exception, 'OnAfterExecute');
 
@@ -387,29 +388,32 @@ __CATCH
 __ENDTRY]]></ST>
       </Implementation>
     </Method>
-    <Method Name="FB_init" Id="{4a720468-7c63-48ee-b944-4db3d35d557c}">
-      <Declaration><![CDATA[METHOD FB_init : BOOL
-VAR_INPUT
-	(* if TRUE, the retain variables are initialized (warm start / cold start)*)
-	bInitRetains	: BOOL;
-	(* if TRUE, the instance afterwards gets moved into the copy code (online change)*)
-	bInCopyCode	: BOOL;
-	name : WSTRING;
+    <Method Name="GetEffectiveChildCriticalErrorHandlingPolicy" Id="{55fce35a-19c7-40fd-957d-85f956745e18}">
+      <Declaration><![CDATA[METHOD GetEffectiveChildCriticalErrorHandlingPolicy : IChildCriticalErrorHandlingPolicy
+VAR
+	thisAsChildAutomationComponent : IChildAutomationComponent;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[_ActionPermissionPolicy := TOF_Core.ActionPermissionsPolicies.AllowAll;
-
-_ChildCriticalErrorHandlingPolicy := ChildCriticalErrorHandlingPolicies.SetErrorAndStop;]]></ST>
+        <ST><![CDATA[IF _ChildCriticalErrorHandlingPolicy <> 0 THEN
+	GetEffectiveChildCriticalErrorHandlingPolicy := _ChildCriticalErrorHandlingPolicy;
+ELSIF __QUERYINTERFACE(THIS^, thisAsChildAutomationComponent) AND_THEN thisAsChildAutomationComponent.Parent <> 0 THEN
+	GetEffectiveChildCriticalErrorHandlingPolicy := thisAsChildAutomationComponent.Parent.GetEffectiveChildCriticalErrorHandlingPolicy();
+END_IF]]></ST>
       </Implementation>
     </Method>
     <Method Name="HandleChildCriticalError" Id="{839f293e-9205-4a6f-838b-d14dd86be61e}" FolderPath="Service methods\">
       <Declaration><![CDATA[METHOD PROTECTED FINAL HandleChildCriticalError : CHILD_CRITICAL_ERROR_REACTION
 VAR_INPUT
 	childWithError : IChildAutomationComponent;
+END_VAR
+VAR
+	effectiveChildCriticalErrorHandlingPolicy : IChildCriticalErrorHandlingPolicy;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[IF _ChildCriticalErrorHandlingPolicy <> 0 THEN
-	HandleChildCriticalError := _ChildCriticalErrorHandlingPolicy.HandleChildCriticalError(childWithError, THIS^);
+        <ST><![CDATA[effectiveChildCriticalErrorHandlingPolicy := GetEffectiveChildCriticalErrorHandlingPolicy();
+
+IF effectiveChildCriticalErrorHandlingPolicy <> 0 THEN
+	HandleChildCriticalError := effectiveChildCriticalErrorHandlingPolicy.HandleChildCriticalError(childWithError, THIS^);
 ELSE
 	HandleChildCriticalError := CHILD_CRITICAL_ERROR_REACTION.SET_ERROR_AND_STOP;
 END_IF]]></ST>
@@ -435,17 +439,7 @@ END_VAR]]></Declaration>
 	RETURN;
 END_IF
 
-__TRY
-	IF NOT _InitializationTimer.IN THEN
-		Validate();
-	END_IF
-	
-	_InitializationTimer(IN := TRUE, PT := Parameters.InitializationTimeout);
-	
-	IF _InitializationTimer.Q THEN;		
-		initializationTimeoutException.ThrowByObject(THIS^, __POUNAME(), __POSITION(), _InitializationTimer.PT, TOF_Core.WideStrings.Concat255("Initialization timeout ", TO_WSTRING(_InitializationTimer.PT), " elapsed"));
-	END_IF
-	
+__TRY	
 	OnBeforeChildrenInitializing();
 	
 	Initialize := TRUE;
@@ -454,7 +448,7 @@ __TRY
 		child := TryGetChildByIndex(i);
 
 		IF child = 0 THEN
-			notSpecifiedException.ThrowByObject(THIS^, __POUNAME(), __POSITION(), TOF_Core.Strings.Concat255('Child[', TO_STRING(i), ']'));			
+			notSpecifiedException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), TOF_Core.Strings.Concat255('Child[', TO_STRING(i), ']'));			
 		END_IF
 			
 		Initialize := Initialize AND child.Initialize();
@@ -464,9 +458,19 @@ __TRY
 	
 	IF Initialize THEN
 		SetOperationalState(OPERATIONAL_STATE.WORKING, "Successfull initialization");
+	ELSE
+		IF NOT _InitializationTimer.IN THEN
+			Validate();
+		END_IF
+		
+		_InitializationTimer(IN := TRUE, PT := Parameters.InitializationTimeout);
+		
+		IF _InitializationTimer.Q THEN;		
+			initializationTimeoutException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), _InitializationTimer.PT, "Initialization");
+		END_IF		
 	END_IF	
 __CATCH(exceptionCode)
-	exception := TOF_Core.ExceptionManager.GetLastException(exceptionCode);
+	exception := TOF_Core.ExceptionManager.GetLastException(exceptionCode, NamespaceName, __POUNAME(), __POSITION());
 	
 	ProcessException(exception, TOF_Core.EXCEPTION_REACTION.SET_ERROR_AND_CONTINUE, "Initialization error");					
 __ENDTRY]]></ST>
@@ -490,6 +494,18 @@ __ENDTRY]]></ST>
         <ST><![CDATA[OnAfterChildrenInitializing := TRUE;]]></ST>
       </Implementation>
     </Method>
+    <Method Name="OnAfterChildrenProcessInput" Id="{9165bde5-0cf4-4a88-9520-d7dda6cae7ea}" FolderPath="Methods to override\ProcessInput\">
+      <Declaration><![CDATA[METHOD PROTECTED OnAfterChildrenProcessInput]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="OnAfterChildrenProcessOutput" Id="{4df73bdb-052a-4635-a8e1-07d1334a7f95}" FolderPath="Methods to override\ProcessOutput\">
+      <Declaration><![CDATA[METHOD PROTECTED OnAfterChildrenProcessOutput]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[]]></ST>
+      </Implementation>
+    </Method>
     <Method Name="OnAfterChildrenReset" Id="{862eb02e-c3cf-4f11-b4d0-51cfeec05381}" FolderPath="Methods to override\Reset\">
       <Declaration><![CDATA[METHOD PROTECTED OnAfterChildrenReset]]></Declaration>
       <Implementation>
@@ -504,18 +520,6 @@ __ENDTRY]]></ST>
     </Method>
     <Method Name="OnAfterChildrenWorking" Id="{c97b3a73-c5a9-4482-b28b-882d1d016cd1}" FolderPath="Methods to override\Working\">
       <Declaration><![CDATA[METHOD PROTECTED OnAfterChildrenWorking]]></Declaration>
-      <Implementation>
-        <ST><![CDATA[]]></ST>
-      </Implementation>
-    </Method>
-    <Method Name="OnAfterDevicesProcessInput" Id="{9165bde5-0cf4-4a88-9520-d7dda6cae7ea}" FolderPath="Methods to override\ProcessInput\">
-      <Declaration><![CDATA[METHOD PROTECTED OnAfterDevicesProcessInput]]></Declaration>
-      <Implementation>
-        <ST><![CDATA[]]></ST>
-      </Implementation>
-    </Method>
-    <Method Name="OnAfterDevicesProcessOutput" Id="{4df73bdb-052a-4635-a8e1-07d1334a7f95}" FolderPath="Methods to override\ProcessOutput\">
-      <Declaration><![CDATA[METHOD PROTECTED OnAfterDevicesProcessOutput]]></Declaration>
       <Implementation>
         <ST><![CDATA[]]></ST>
       </Implementation>
@@ -544,6 +548,18 @@ __ENDTRY]]></ST>
         <ST><![CDATA[]]></ST>
       </Implementation>
     </Method>
+    <Method Name="OnBeforeChildrenProcessInput" Id="{e3339694-bd0c-4309-8526-150debf56b72}" FolderPath="Methods to override\ProcessInput\">
+      <Declaration><![CDATA[METHOD PROTECTED OnBeforeChildrenProcessInput]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="OnBeforeChildrenProcessOutput" Id="{baf4b6a4-5565-4d9c-bcf1-5adeadee9802}" FolderPath="Methods to override\ProcessOutput\">
+      <Declaration><![CDATA[METHOD PROTECTED OnBeforeChildrenProcessOutput]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[]]></ST>
+      </Implementation>
+    </Method>
     <Method Name="OnBeforeChildrenReset" Id="{aa65b3fc-dc5d-407d-aeaa-d2722c18b445}" FolderPath="Methods to override\Reset\">
       <Declaration><![CDATA[METHOD PROTECTED OnBeforeChildrenReset]]></Declaration>
       <Implementation>
@@ -558,18 +574,6 @@ __ENDTRY]]></ST>
     </Method>
     <Method Name="OnBeforeChildrenWorking" Id="{613da739-79e2-4ee2-9175-e0e13072ef84}" FolderPath="Methods to override\Working\">
       <Declaration><![CDATA[METHOD PROTECTED OnBeforeChildrenWorking]]></Declaration>
-      <Implementation>
-        <ST><![CDATA[]]></ST>
-      </Implementation>
-    </Method>
-    <Method Name="OnBeforeDevicesProcessInput" Id="{e3339694-bd0c-4309-8526-150debf56b72}" FolderPath="Methods to override\ProcessInput\">
-      <Declaration><![CDATA[METHOD PROTECTED OnBeforeDevicesProcessInput]]></Declaration>
-      <Implementation>
-        <ST><![CDATA[]]></ST>
-      </Implementation>
-    </Method>
-    <Method Name="OnBeforeDevicesProcessOutput" Id="{baf4b6a4-5565-4d9c-bcf1-5adeadee9802}" FolderPath="Methods to override\ProcessOutput\">
-      <Declaration><![CDATA[METHOD PROTECTED OnBeforeDevicesProcessOutput]]></Declaration>
       <Implementation>
         <ST><![CDATA[]]></ST>
       </Implementation>
@@ -627,7 +631,7 @@ _Error.Clear();
 __TRY
 	OnBeforeChildrenReset();
 __CATCH(exceptionCode)		
-	exception := TOF_Core.ExceptionManager.GetLastException(exceptionCode);
+	exception := TOF_Core.ExceptionManager.GetLastException(exceptionCode, NamespaceName, __POUNAME(), __POSITION());
 					
 	exceptionReaction := OnHandleException(exception, 'OnBeforeChildrenReset');
 
@@ -659,7 +663,7 @@ __TRY
 	
 	SetOperationalState(OPERATIONAL_STATE.WORKING, "Reset");
 __CATCH(exceptionCode)		
-	exception := TOF_Core.ExceptionManager.GetLastException(exceptionCode);
+	exception := TOF_Core.ExceptionManager.GetLastException(exceptionCode, NamespaceName, __POUNAME(), __POSITION());
 					
 	exceptionReaction := OnHandleException(exception, 'OnAfterChildrenReset');
 
@@ -699,7 +703,7 @@ FOR i := 0 TO ChildCount - 1 DO
 			child.Stop(TOF_Core.WideStrings.Concat255("Parent (", Name, ") stopped. Reason: ", reason));
 		END_IF			
 	__CATCH(exceptionCode)
-		exception := TOF_Core.ExceptionManager.GetLastException(exceptionCode);	
+		exception := TOF_Core.ExceptionManager.GetLastException(exceptionCode, NamespaceName, __POUNAME(), __POSITION());	
 		
 		TOF_Core.LogManager.TryLogException(exception, TOF_Core.ERROR_SEVERITY.CRITICAL, "AutomationComponent", "AutomationComponent.Stop");
 	__ENDTRY
