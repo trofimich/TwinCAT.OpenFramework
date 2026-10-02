@@ -26,8 +26,9 @@ VAR
 	{attribute 'hide'} 
 	_State : TASK_STATE;	
 	{attribute 'hide'} 
-	_StateChanged : BOOL;
-	
+	_CancelRequested : BOOL;
+	{attribute 'hide'} 
+	_StateChanged : BOOL;	
 	{attribute 'hide'} 
 	_RunningSubstate : TASK_RUNNING_SUBSTATE;
 
@@ -74,55 +75,29 @@ END_VAR]]></Declaration>
 	RETURN;
 END_IF
 
-IF _RunningSubstate = TASK_RUNNING_SUBSTATE.RESOURCE_RELEASING THEN
+IF _CancelRequested OR_ELSE _RunningSubstate = TASK_RUNNING_SUBSTATE.RESOURCE_RELEASING THEN
 	refuseReason := "Task already stopping";
 	RETURN;
 END_IF
 
+_CancelRequested := TRUE;
 _OriginalStopReason := TASK_STOP_REASON.EXTERNAL_CANCEL;
 _OriginalStopReasonMessage := "Cancelled by external logic";
 
-safeCallOnBeforeStop();
-
-tmpResourceManager := ResourceManager;
-
-CASE _RunningSubstate OF
-	TASK_RUNNING_SUBSTATE.RESOURCE_ACQUIRING:						
-		__TRY
-			setRunningSubstate(TASK_RUNNING_SUBSTATE.RESOURCE_RELEASING);
-
-			tmpResourceManager.ReleaseResource();
-			
-			IF NOT tmpResourceManager.ResourceAcquired THEN
-				setStoppedState(_OriginalStopReason, _OriginalStopReasonMessage);
-				
-				safeCallOnAfterStop();
-			END_IF
-		__CATCH(exceptionCode)
-			exception := TOF_Core.ExceptionManager.GetLastException(exceptionCode, NamespaceName, __POUNAME(), __POSITION());
-
-			IF tmpResourceManager = 0 OR_ELSE NOT tmpResourceManager.ResourceAcquired THEN				
-				setStoppedState(TASK_STOP_REASON.FAILURE, exception.GetMessage());
-				
-				safeCallOnAfterStop();
-			ELSE
-				setRunningSubstate(TASK_RUNNING_SUBSTATE.RESOURCE_RELEASING);
-			END_IF
-		__ENDTRY
-			
-	TASK_RUNNING_SUBSTATE.PROCESSING:
-		IF tmpResourceManager = 0 OR_ELSE NOT tmpResourceManager.ResourceAcquired THEN
-			setStoppedState(_OriginalStopReason, _OriginalStopReasonMessage);
-			
-			safeCallOnAfterStop();
-		ELSE				
-			setRunningSubstate(TASK_RUNNING_SUBSTATE.RESOURCE_RELEASING);	
-		END_IF			
-END_CASE	
-	
-Cancel := TRUE;]]></ST>
+Cancel := TRUE;	
+]]></ST>
       </Implementation>
     </Method>
+    <Property Name="CanStop" Id="{19b7a8e6-cb7f-4dd6-9dfa-c8509dc0776e}" FolderPath="Members to override\">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+PROPERTY PROTECTED CanStop : BOOL]]></Declaration>
+      <Get Name="Get" Id="{4f6e66ad-6cba-4d6f-9811-a70a85a5aa56}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[CanStop := TRUE;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
     <Method Name="Execute" Id="{0c44d2a0-6aaa-455c-bf4e-d065a6e8ebfd}">
       <Declaration><![CDATA[METHOD FINAL Execute ]]></Declaration>
       <Implementation>
@@ -209,22 +184,38 @@ END_CASE
     <Method Name="handleRunning" Id="{0c0b3c2d-2039-40cf-90c1-1bc48ceedfa2}" FolderPath="Service members\">
       <Declaration><![CDATA[METHOD PRIVATE handleRunning
 VAR
-	runningResult : TASK_PROCESSING_STATE;
-	
-	tmpResourceManager : TOF_Core.IResourceManager;
+	taskProcessingState : TASK_PROCESSING_STATE;
 
 	exceptionCode : __SYSTEM.ExceptionCode;	
 	exception : TOF_Core.IException;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[tmpResourceManager := ResourceManager;
-
+        <ST><![CDATA[IF _CancelRequested AND_THEN CanStop THEN
+	_CancelRequested := FALSE;
+	
+	safeCallOnBeforeStop();
+	
+	CASE _RunningSubstate OF
+		TASK_RUNNING_SUBSTATE.RESOURCE_ACQUIRING:						
+			setRunningSubstate(TASK_RUNNING_SUBSTATE.RESOURCE_RELEASING);
+				
+		TASK_RUNNING_SUBSTATE.PROCESSING:
+			IF ReleaseResourceRequired THEN
+				setRunningSubstate(TASK_RUNNING_SUBSTATE.RESOURCE_RELEASING);
+			ELSE	
+				setStoppedState(_OriginalStopReason, _OriginalStopReasonMessage);
+				
+				safeCallOnAfterStop();
+			END_IF			
+	END_CASE
+END_IF
+	
 CASE _RunningSubstate OF
 	TASK_RUNNING_SUBSTATE.RESOURCE_ACQUIRING:
 		__TRY
-			tmpResourceManager.AcquireResource();
+			resourceManager.AcquireResource();
 			
-			IF tmpResourceManager.ResourceAcquired THEN
+			IF resourceManager.ResourceAcquired THEN
 				setRunningSubstate(TASK_RUNNING_SUBSTATE.PROCESSING);
 			END_IF
 		__CATCH(exceptionCode)
@@ -238,30 +229,30 @@ CASE _RunningSubstate OF
 
 			safeCallOnBeforeStop();
 					
-			IF tmpResourceManager = 0 OR_ELSE NOT tmpResourceManager.ResourceAcquired THEN				
+			IF ReleaseResourceRequired THEN				
+				setRunningSubstate(TASK_RUNNING_SUBSTATE.RESOURCE_RELEASING);
+			ELSE
 				setStoppedState(TASK_STOP_REASON.FAILURE, _TemporaryErrorMessage);
 				
 				safeCallOnAfterStop();
-			ELSE
-				setRunningSubstate(TASK_RUNNING_SUBSTATE.RESOURCE_RELEASING);
 			END_IF
 		__ENDTRY
 	
 	TASK_RUNNING_SUBSTATE.PROCESSING:
 		__TRY
-			OnRunning(processingState => runningResult, _OriginalStopReasonMessage);
+			OnRunning(processingState => taskProcessingState, _OriginalStopReasonMessage);
 	
-			IF runningResult <> TASK_PROCESSING_STATE.BUSY THEN
-				_OriginalStopReason := GetStopReasonByProcessingState(runningResult);
+			IF taskProcessingState <> TASK_PROCESSING_STATE.BUSY THEN
+				_OriginalStopReason := GetStopReasonByProcessingState(taskProcessingState);
 				
 				safeCallOnBeforeStop();
 				
-				IF tmpResourceManager = 0 OR_ELSE NOT tmpResourceManager.ResourceAcquired THEN
+				IF ReleaseResourceRequired THEN				
+					setRunningSubstate(TASK_RUNNING_SUBSTATE.RESOURCE_RELEASING);
+				ELSE
 					setStoppedState(_OriginalStopReason, _OriginalStopReasonMessage);
 	
 					safeCallOnAfterStop();
-				ELSE
-					setRunningSubstate(TASK_RUNNING_SUBSTATE.RESOURCE_RELEASING);
 				END_IF
 			END_IF
 		__CATCH(exceptionCode)
@@ -275,20 +266,20 @@ CASE _RunningSubstate OF
 					
 			safeCallOnBeforeStop();
 			
-			IF tmpResourceManager = 0 OR_ELSE NOT tmpResourceManager.ResourceAcquired THEN
+			IF ReleaseResourceRequired THEN
+				setRunningSubstate(TASK_RUNNING_SUBSTATE.RESOURCE_RELEASING);
+			ELSE
 				setStoppedState(_OriginalStopReason, _OriginalStopReasonMessage);	
 
 				safeCallOnAfterStop();
-			ELSE
-				setRunningSubstate(TASK_RUNNING_SUBSTATE.RESOURCE_RELEASING);
 			END_IF
 		__ENDTRY
 	
 	TASK_RUNNING_SUBSTATE.RESOURCE_RELEASING:
 		__TRY
-			tmpResourceManager.ReleaseResource();
+			resourceManager.ReleaseResource();
 			
-			IF NOT tmpResourceManager.ResourceAcquired THEN
+			IF NOT resourceManager.ResourceAcquired THEN
 				setStoppedState(_OriginalStopReason, _OriginalStopReasonMessage);
 				
 				safeCallOnAfterStop();
@@ -306,7 +297,8 @@ CASE _RunningSubstate OF
 				
 			safeCallOnAfterStop();
 		__ENDTRY
-END_CASE	]]></ST>
+END_CASE	
+]]></ST>
       </Implementation>
     </Method>
     <Property Name="Name" Id="{4e451f29-f53d-4bcf-8f0a-083cf67f553b}">
@@ -370,6 +362,16 @@ PROPERTY FINAL OriginalStopReason : REFERENCE TO TaskStopReason]]></Declaration>
         <Declaration><![CDATA[]]></Declaration>
         <Implementation>
           <ST><![CDATA[OriginalStopReason REF= _OriginalStopReasonObject;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="ReleaseResourceRequired" Id="{f0fd2b26-a815-4a05-9799-39dece9b0738}" FolderPath="Service members\">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+PROPERTY PROTECTED FINAL ReleaseResourceRequired : BOOL]]></Declaration>
+      <Get Name="Get" Id="{146f8d24-87e8-452d-aa8d-94dc970b416d}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ReleaseResourceRequired := ResourceManager <> 0 AND_THEN ResourceManager.ResourceAcquired;]]></ST>
         </Implementation>
       </Get>
     </Property>
@@ -509,6 +511,7 @@ END_VAR]]></Declaration>
 	_StateChanged := TRUE;	
 END_IF 
 
+_CancelRequested := FALSE;
 _RunningSubstate := TASK_RUNNING_SUBSTATE.PROCESSING;
 
 _OriginalStopReason := TASK_STOP_REASON.WORK_DONE;
@@ -564,6 +567,8 @@ END_VAR
       <Declaration><![CDATA[METHOD PRIVATE FINAL setStoppedState
 VAR_INPUT
 	finalStopReason : TASK_STOP_REASON;
+END_VAR
+VAR_IN_OUT CONSTANT
 	finalStopReasonMessage : TOF_Core.ERROR_MESSAGE;
 END_VAR
 VAR CONSTANT
@@ -621,9 +626,7 @@ END_IF
 
 IF safeCallOnBeforeStart(refuseReason) THEN
 	setRunningState();
-
-	handleRunning();
-
+	
 	Start := TRUE;
 END_IF]]></ST>
       </Implementation>

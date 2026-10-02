@@ -41,11 +41,12 @@ VAR
 	memberNotSpecifiedException : TOF_Core.DataMemberNotSpecifiedException;
 	openFileException : TOF_Core.StandardException;
 	
-	errorMessageBuilder : TOF_Core.WideStringBuilder;	
+	messageBuilder : TOF_Core.WideStringBuilder;
+	message : TOF_Core.ERROR_MESSAGE;	
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[IF NOT _FileOpen.bExecute THEN
-	TOF_Core.LogManager.TryLogMessage(TOF_Core.WideStrings.Concat255("Attempt to open file '", TO_WSTRING(_FileOpen.sPathName), "'"), TOF_Core.LOG_CATEGORY.INFORMATION, "FileHandleResourceManager", "FileHandleResourceManager.AcquireResource", "FileHandleResourceManager.AcquireResource.Start");	
+	TOF_Core.LogManager.TryLogMessage(TOF_Core.WideStrings.Concat255("Attempt to open file '", TO_WSTRING(_FileOpen.sPathName), "'"), TOF_Core.LOG_CATEGORY.INFORMATION, TO_WSTRING(ClassName), TO_WSTRING(__POUNAME()));	
 END_IF
 
 IF TOF_Core.Strings.IsNullOrWhiteSpace(_FileOpen.sPathName) THEN
@@ -56,18 +57,25 @@ _FileClose(bExecute := FALSE);
 _FileOpen(bExecute := TRUE);
 	
 IF _FileOpen.bError THEN
-	errorMessageBuilder
+	messageBuilder
 		.AppendString("Error while open file '")
 		.Append(_FileOpen.sPathName)
-		.AppendString("'");
+		.AppendString("'")
+		.AssignToString(message);
 
-	openFileException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), errorMessageBuilder.ToString255(), _FileOpen.nErrId);		
+	openFileException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), message, _FileOpen.nErrId);		
 END_IF
 
 IF NOT _FileOpen.bBusy AND_THEN _FileOpen.hFile > 0 THEN
 	_FileHandleAcquired := TRUE;
+	
+	messageBuilder
+		.AppendString("File '")
+		.AppendString255(TO_WSTRING(_FileOpen.sPathName))
+		.AppendString("' open")
+		.AssignToString(message);
 
-	TOF_Core.LogManager.TryLogMessage(TOF_Core.WideStrings.Concat255("File '", TO_WSTRING(_FileOpen.sPathName), "' open"), TOF_Core.LOG_CATEGORY.INFORMATION, "FileHandleResourceManager", "FileHandleResourceManager.AcquireResource", "FileHandleResourceManager.AcquireResource.Done");
+	TOF_Core.LogManager.TryLogMessage(message, TOF_Core.LOG_CATEGORY.INFORMATION, TO_WSTRING(ClassName), TO_WSTRING(__POUNAME()));
 END_IF]]></ST>
       </Implementation>
     </Method>
@@ -107,7 +115,7 @@ VAR_INPUT
 END_VAR
 ]]></Declaration>
       <Implementation>
-        <ST><![CDATA[IF ResourceAcquired THEN
+        <ST><![CDATA[IF _FileHandleAcquired THEN
 	_FileClose(hFile := _FileOpen.hFile, bExecute := TRUE);
 	_FileOpen(bExecute := FALSE);	
 END_IF]]></ST>
@@ -189,24 +197,48 @@ PROPERTY PathType : Tc2_System.E_OpenPath]]></Declaration>
       </Set>
     </Property>
     <Method Name="ReleaseResource" Id="{a4a50be3-0dfc-44f6-bb5a-f1a98beada52}">
-      <Declaration><![CDATA[METHOD ReleaseResource]]></Declaration>
+      <Declaration><![CDATA[METHOD ReleaseResource
+VAR	
+	messageBuilder : TOF_Core.WideStringBuilder;
+	message : TOF_Core.ERROR_MESSAGE;	
+END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[IF NOT _FileClose.bExecute THEN
-	TOF_Core.LogManager.TryLogMessage(TOF_Core.WideStrings.Concat255("Attempt to close file '", TO_WSTRING(_FileOpen.sPathName), "'"), TOF_Core.LOG_CATEGORY.INFORMATION, "FileHandleResourceManager", "FileHandleResourceManager.FileCloseAttempt", "FileHandleResourceManager.FileCloseAttempt.Start");	
+	TOF_Core.LogManager.TryLogMessage(TOF_Core.WideStrings.Concat255("Attempt to close file '", TO_WSTRING(_FileOpen.sPathName), "'"), TOF_Core.LOG_CATEGORY.INFORMATION, TO_WSTRING(ClassName), TO_WSTRING(__POUNAME()));	
 END_IF
 
-IF _FileOpen.hFile <> 0 THEN
-	_FileClose.hFile := _FileOpen.hFile;
+IF NOT _FileHandleAcquired THEN
+	_FileOpen(bExecute := FALSE);
+	
+	RETURN;
 END_IF
 
-_FileClose(bExecute := TRUE);
-_FileOpen(bExecute := FALSE);
+_FileClose(hFile := _FileOpen.hFile, bExecute := TRUE);
 
-IF NOT _FileClose.bBusy OR_ELSE _FileOpen.hFile = 0 THEN
+IF NOT _FileClose.bBusy THEN
 	_FileHandleAcquired := FALSE;
+	
+	_FileOpen(bExecute := FALSE);
 
-	TOF_Core.LogManager.TryLogMessage(TOF_Core.WideStrings.Concat255("File '", TO_WSTRING(_FileOpen.sPathName), "' closed"), TOF_Core.LOG_CATEGORY.INFORMATION, "FileHandleResourceManager", "FileHandleResourceManager.FileCloseAttempt", "FileHandleResourceManager.FileCloseAttempt.Done");	
-END_IF]]></ST>
+	IF _FileClose.bError THEN
+		messageBuilder
+			.AppendString("Error while closing file '")
+			.Append(_FileOpen.sPathName)
+			.AppendString("'")
+			.AssignToString(message);
+	
+		TOF_Core.LogManager.TryLogMessage(message, TOF_Core.LOG_CATEGORY.ERROR, TO_WSTRING(ClassName), "FileHandleResourceManager.AcquireResource", "FileHandleResourceManager.AcquireResource.Done");
+	ELSE
+		messageBuilder
+			.AppendString("File '")
+			.AppendString255(TO_WSTRING(_FileOpen.sPathName))
+			.AppendString("' closed")
+			.AssignToString(message);
+	
+		TOF_Core.LogManager.TryLogMessage(message, TOF_Core.LOG_CATEGORY.INFORMATION, TO_WSTRING(ClassName), TO_WSTRING(__POUNAME()));
+	END_IF
+END_IF 
+]]></ST>
       </Implementation>
     </Method>
     <Property Name="ResourceAcquired" Id="{976b6166-7716-4306-abdc-0df2c42fb7a2}">
