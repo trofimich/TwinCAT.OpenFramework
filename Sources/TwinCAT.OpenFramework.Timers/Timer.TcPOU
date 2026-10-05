@@ -26,14 +26,12 @@ VAR
 	
 	{attribute 'hide'} 
 	_Timer : Tc2_Standard.TON;
-	
-	{attribute 'hide'} 
-	_Triggered : BOOL;
 END_VAR]]></Declaration>
     <Implementation>
       <ST><![CDATA[]]></ST>
     </Implementation>
     <Folder Name="Overriden" Id="{e8e109c1-c323-41d3-976d-ad132843052d}" />
+    <Folder Name="Service methods" Id="{17c60b3b-2ccc-4ae2-b3fd-3cb473267b3a}" />
     <Property Name="ClassName" Id="{0828dabd-7de7-477c-986f-c786e04b967d}">
       <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
 PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
@@ -90,12 +88,20 @@ PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
         </Implementation>
       </Get>
     </Property>
+    <Method Name="OnBeforeStart" Id="{2b402ec3-9cc6-4215-98ac-29e0f381dbf7}" FolderPath="Overriden\">
+      <Declaration><![CDATA[(* Anchor the positive interval to Start, without waiting for Execute.
+A zero interval keeps the existing completion-without-trigger behavior. *)
+METHOD PROTECTED OnBeforeStart]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF _Timer.PT > T#0S THEN
+	_Timer(IN := TRUE);
+END_IF]]></ST>
+      </Implementation>
+    </Method>
     <Method Name="OnReset" Id="{73360413-ae55-4852-9d32-e7e3c5d9b238}" FolderPath="Overriden\">
       <Declaration><![CDATA[METHOD PROTECTED OnReset ]]></Declaration>
       <Implementation>
-        <ST><![CDATA[_Triggered := FALSE;
-
-_Timer(IN := FALSE);]]></ST>
+        <ST><![CDATA[_Timer(IN := FALSE);]]></ST>
       </Implementation>
     </Method>
     <Method Name="OnRunning" Id="{7ef78b76-773d-489d-bd9b-3058c24424bd}" FolderPath="Overriden\">
@@ -105,21 +111,12 @@ VAR_OUTPUT
 END_VAR
 VAR_IN_OUT
 	stopReasonMessage : TOF_Core.ERROR_MESSAGE;
-END_VAR
-VAR
-	previousQ : BOOL;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[_Triggered := FALSE; 
-
-previousQ := _Timer.Q;
-
-IF _Timer.PT > T#0S THEN
+        <ST><![CDATA[IF _Timer.PT > T#0S THEN
 	_Timer(IN := TRUE);
 	
 	IF _timer.Q THEN
-		_Triggered := NOT previousQ;
- 
 		processingState := TOF_Tasks.TASK_PROCESSING_STATE.DONE;
 	END_IF
 ELSE
@@ -127,21 +124,37 @@ ELSE
 END_IF]]></ST>
       </Implementation>
     </Method>
-    <Method Name="OnStopped" Id="{172a0e6b-d77e-4c6e-89e4-ecb0b76ee00f}" FolderPath="Overriden\">
-      <Declaration><![CDATA[METHOD PROTECTED OnStopped
-]]></Declaration>
+    <Method Name="prepareRestart" Id="{3cef7253-4ef2-453f-abbd-64f6cb774bfb}" FolderPath="Service methods\">
+      <Declaration><![CDATA[(* Advance stopping once, without waiting in a loop.
+A descendant with asynchronous cleanup may require further Execute calls
+before a restart can succeed. Call from the lifecycle owner, outside callbacks. *)
+METHOD PRIVATE prepareRestart : BOOL]]></Declaration>
       <Implementation>
-        <ST><![CDATA[_Triggered := FALSE;]]></ST>
+        <ST><![CDATA[IF State.Running THEN
+	// Cancel may refuse because stopping is already in progress; advance it anyway.
+	Cancel();
+	
+	Execute();
+
+	IF State.Running THEN
+		RETURN;
+	END_IF
+END_IF
+
+prepareRestart := Reset();]]></ST>
       </Implementation>
     </Method>
     <Method Name="Restart" Id="{3b032b6e-1e78-42bd-b714-902472c46556}">
-      <Declaration><![CDATA[METHOD Restart : BOOL]]></Declaration>
+      <Declaration><![CDATA[(* Restart from zero, including while RUNNING. FALSE means preparation or
+Start failed; no deferred restart is scheduled. Call outside task callbacks.
+On success Start begins timing; Execute detects completion. *)
+METHOD Restart : BOOL]]></Declaration>
       <Implementation>
-        <ST><![CDATA[Reset();
+        <ST><![CDATA[IF NOT prepareRestart() THEN
+	RETURN;
+END_IF
 
-IF Restart := Start() THEN
-	Execute();
-END_IF]]></ST>
+Restart := Start();]]></ST>
       </Implementation>
     </Method>
     <Property Name="SelfSize" Id="{48430939-6703-4604-a8f2-f77a92c70c4f}">
@@ -155,29 +168,35 @@ PROPERTY SelfSize : ULINT]]></Declaration>
       </Get>
     </Property>
     <Method Name="SetIntervalAndRestart" Id="{f4b50be1-59c2-498b-b0b6-e742f30e0dc5}">
-      <Declaration><![CDATA[// Restart timer if already started
+      <Declaration><![CDATA[(* Prepare a restart, then set the interval and start timing immediately.
+If stopping or Reset fails, return FALSE without changing the interval.
+If Start fails after preparation, the new interval remains configured.
+No deferred restart is scheduled. Call outside task callbacks. *)
 METHOD SetIntervalAndRestart : BOOL
 VAR_INPUT
 	interval : TIME;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[Reset();
+        <ST><![CDATA[IF NOT prepareRestart() THEN
+	RETURN;
+END_IF
 
 _Timer.PT := interval;
 
-IF SetIntervalAndRestart := Start() THEN
-	Execute();
-END_IF]]></ST>
+SetIntervalAndRestart := Start();]]></ST>
       </Implementation>
     </Method>
     <Property Name="Triggered" Id="{a5955db5-1801-4da6-8fb4-f5bd42f9b8a4}">
       <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
-// True if timer just elapsed
+// True after successful timer completion, until the next Execute call.
 PROPERTY Triggered : BOOL]]></Declaration>
       <Get Name="Get" Id="{e857186c-ea2b-4d5e-92c9-ec18619c4145}">
         <Declaration><![CDATA[]]></Declaration>
         <Implementation>
-          <ST><![CDATA[Triggered := _Triggered;]]></ST>
+          <ST><![CDATA[Triggered := State.Stopped
+	AND_THEN State.StateChanged
+	AND_THEN FinalStopReason.WorkDone
+	AND_THEN _Timer.Q;]]></ST>
         </Implementation>
       </Get>
     </Property>

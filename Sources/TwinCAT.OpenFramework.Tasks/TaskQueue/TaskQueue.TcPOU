@@ -34,23 +34,31 @@ END_VAR]]></Declaration>
     </Implementation>
     <Folder Name="Overriden members" Id="{87373d04-36a2-4d28-add4-3c2f57bc7828}" />
     <Folder Name="Service members" Id="{06274e03-41d8-4565-8c9c-96cb34fe5d89}" />
-    <Property Name="CanStop" Id="{75f262af-31e5-42ae-9add-f9cc9f4f9dac}" FolderPath="Overriden members\">
-      <Declaration><![CDATA[PROPERTY PROTECTED CanStop : BOOL]]></Declaration>
-      <Get Name="Get" Id="{f3ce98cd-0600-446a-8627-f41b9446bc37}">
-        <Declaration><![CDATA[]]></Declaration>
-        <Implementation>
-          <ST><![CDATA[CanStop := _CurrentTask = 0 OR_ELSE NOT _CurrentTask.State.Running;]]></ST>
-        </Implementation>
-      </Get>
-    </Property>
-    <Method Name="Clear" Id="{b798e4c5-1ea0-4f4b-9332-cbb30319d82c}">
-      <Declaration><![CDATA[METHOD FINAL Clear]]></Declaration>
+    <Method Name="ClearWaitingTasks" Id="{b798e4c5-1ea0-4f4b-9332-cbb30319d82c}">
+      <Declaration><![CDATA[(* Remove waiting tasks without resetting or deleting their objects.
+Keep the current task only while the queue is RUNNING. *)
+METHOD FINAL ClearWaitingTasks
+VAR
+	i : DINT;
+END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[_SubTasks.Clear();]]></ST>
+        <ST><![CDATA[IF NOT State.Running OR_ELSE _CurrentTask = 0 THEN
+	_SubTasks.Clear();
+	_CurrentTask := 0;
+ELSE	
+	FOR i := _SubTasks.Length - 1 TO 1 BY -1 DO
+		_SubTasks.RemoveAt(i);
+	END_FOR
+END_IF]]></ST>
       </Implementation>
     </Method>
     <Method Name="EnqueueTask" Id="{dd1edab2-2601-428c-93c5-93955d43eb2f}" FolderPath="Service members\">
-      <Declaration><![CDATA[METHOD PROTECTED FINAL EnqueueTask
+      <Declaration><![CDATA[(* Add a prepared READY task that is not already present in this queue.
+The caller keeps the task alive while queued. The queue borrows the object
+and controls its lifecycle until removal; do not start, execute, cancel or
+reset it independently while queued. Removal does not reset or delete it.
+READY and uniqueness are caller preconditions, not checked here. *)
+METHOD PROTECTED FINAL EnqueueTask
 VAR_INPUT
 	task : ITask;
 END_VAR
@@ -95,17 +103,38 @@ END_IF]]></ST>
 END_IF]]></ST>
       </Implementation>
     </Method>
-    <Method Name="OnReset" Id="{77d5a316-a3d7-4b72-abf0-f45fddad039f}" FolderPath="Overriden members\">
-      <Declaration><![CDATA[METHOD PROTECTED OnReset 
-VAR
-	i : DINT;
-	task : ITask;
+    <Method Name="OnCancelling" Id="{535bd2ee-e5c8-4b16-a824-27dc49f7d538}" FolderPath="Overriden members\">
+      <Declaration><![CDATA[(* Advance only the active child's cleanup; do not start pending tasks.
+Set readyToStop=TRUE when no child remains RUNNING, permitting parent release. *)
+METHOD PROTECTED OnCancelling
+VAR_OUTPUT
+	readyToStop : BOOL;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[FOR i := 0 TO _SubTasks.Length - 1 DO
-	task := getTaskByIndex(i); 
-	task.Reset();
-END_FOR]]></ST>
+        <ST><![CDATA[IF _CurrentTask <> 0 AND_THEN _CurrentTask.State.Running THEN
+	_CurrentTask.Execute();
+END_IF
+
+readyToStop := _CurrentTask = 0 OR_ELSE NOT _CurrentTask.State.Running;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="OnCancelRequest" Id="{86d21a87-30df-4ecc-9666-f132ccbf24fc}" FolderPath="Overriden members\">
+      <Declaration><![CDATA[(* Forward accepted cancellation to the active child; OnCancelling advances cleanup. *)
+METHOD PROTECTED OnCancelRequest]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF _CurrentTask <> 0 AND_THEN _CurrentTask.State.Running THEN
+	_CurrentTask.Cancel();
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="OnReset" Id="{77d5a316-a3d7-4b72-abf0-f45fddad039f}" FolderPath="Overriden members\">
+      <Declaration><![CDATA[(* Reset a stopped queue to an empty state. Drop borrowed references only;
+do not reset or delete child tasks. Their owner prepares them before re-enqueueing.
+Reset in READY does not call this hook; use ClearWaitingTasks to empty that queue. *)
+METHOD PROTECTED OnReset]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_SubTasks.Clear();
+_CurrentTask := 0;]]></ST>
       </Implementation>
     </Method>
     <Method Name="OnRunning" Id="{caddc2fa-80a1-43cf-b16f-1400efcc8f23}" FolderPath="Overriden members\">
@@ -123,7 +152,10 @@ ELSE
 	IF _SubTasks.Length > 0 THEN
 		_CurrentTask := getTaskByIndex(0);
 		
-		_CurrentTask.Start();
+		IF NOT _CurrentTask.Start(refuseReason => stopReasonMessage) THEN
+			processingState := TASK_PROCESSING_STATE.ERROR;
+			RETURN;
+		END_IF
 	ELSIF _StopWhenNoPendingTasks THEN
 		processingState := TASK_PROCESSING_STATE.DONE;
 	END_IF 
@@ -132,14 +164,15 @@ END_IF
 IF _CurrentTask <> 0 THEN
 	CASE _CurrentTask.State.Value OF
 		TASK_STATE.READY:
-			removeCurrentTask();		
+			processingState := TASK_PROCESSING_STATE.ERROR;
+			stopReasonMessage := "Current task returned to READY before completion";		
 			
 		TASK_STATE.STOPPED:
-			IF _CurrentTask.OriginalStopReason.WorkDone THEN
+			IF _CurrentTask.FinalStopReason.WorkDone THEN
 				removeCurrentTask();						
 			ELSE
-				processingState := GetProcessingStateByStopReason(_CurrentTask.OriginalStopReason.Value);				
-				stopReasonMessage := _CurrentTask.OriginalStopReason.Message;
+				processingState := GetProcessingStateByStopReason(_CurrentTask.FinalStopReason.Value);				
+				stopReasonMessage := _CurrentTask.FinalStopReason.Message;
 			END_IF
 	END_CASE
 END_IF]]></ST>

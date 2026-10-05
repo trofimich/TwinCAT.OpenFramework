@@ -3,6 +3,16 @@
   <Itf Name="ITask" Id="{d3098217-84d9-41a9-8015-2bb7aecc397b}">
     <Declaration><![CDATA[(*
 
+## Short summary
+
+A reusable unit of work with optional resource acquisition amd release.
+One owner drives the inherited Execute method cyclically while the task is
+RUNNING, including after an accepted Cancel, until it reaches STOPPED.
+Avoid concurrent or recursive Execute calls on the same task.
+State, RunningSubstate and stop reasons are live views for observation;
+do not modify data through their references. Copy values and messages before
+Reset/reuse if a result must be retained; keeping a REFERENCE is not a snapshot.
+
 .. <legal notes>
 
 legal notes
@@ -19,13 +29,24 @@ legal notes
 
 INTERFACE ITask EXTENDS TOF_Core.IExecutable, TOF_Core.INamed]]></Declaration>
     <Method Name="Cancel" Id="{ef728205-374a-4fc3-bb32-decdf03e58b9}">
-      <Declaration><![CDATA[METHOD Cancel : BOOL
+      <Declaration><![CDATA[(* Accepted only in RUNNING while cancellation is not already pending and
+resource release has not begun. TRUE means the request was accepted, not that
+cleanup is complete. Continue calling Execute until STOPPED.
+Repeated requests, requests during resource release and requests outside
+RUNNING return FALSE; see refuseReason. *)
+METHOD Cancel : BOOL
 VAR_OUTPUT
 	refuseReason : TOF_Core.ERROR_MESSAGE;
 END_VAR]]></Declaration>
     </Method>
     <Property Name="FinalStopReason" Id="{9c067443-4d32-49a9-9845-eddee92ba4b3}">
       <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+(* Final result, meaningful only in STOPPED. Use this result to assess the
+whole lifecycle. STOPPED does not guarantee physical resource release.
+Release exceptions produce FAILURE without an automatic release retry.
+Best-effort errors handled and logged by the resource manager do not by
+themselves change this result. Reset restores the default reason and clears
+the message. This is a live view. *)
 PROPERTY FINAL FinalStopReason : REFERENCE TO TaskStopReason]]></Declaration>
       <Get Name="Get" Id="{10662390-fa02-468e-bb67-3e7f8e5a6238}">
         <Declaration><![CDATA[]]></Declaration>
@@ -33,19 +54,35 @@ PROPERTY FINAL FinalStopReason : REFERENCE TO TaskStopReason]]></Declaration>
     </Property>
     <Property Name="OriginalStopReason" Id="{28504d1b-5c93-456e-98f0-f8d2dcf4bea6}">
       <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+(* Reason that initiated stopping: completion, internal abort, cancellation
+or failure. Preserved with its message during resource release; release
+exceptions affect FinalStopReason and its message instead.
+The default WORK_DONE value before stopping does not indicate completed work.
+Reset restores the default reason and clears the message. This is a live view. *)
 PROPERTY FINAL OriginalStopReason : REFERENCE TO TaskStopReason]]></Declaration>
       <Get Name="Get" Id="{89fc588e-f13f-4d20-9402-908b7a5c845d}">
         <Declaration><![CDATA[]]></Declaration>
       </Get>
     </Property>
     <Method Name="Reset" Id="{f44f6234-4002-4781-87c3-cf0011acb117}">
-      <Declaration><![CDATA[METHOD Reset : BOOL
+      <Declaration><![CDATA[(* Prepares a STOPPED task for reuse; TRUE means the task is READY.
+An already READY task returns TRUE without reinitializing it.
+A RUNNING task refuses Reset; cancel it and keep calling Execute until STOPPED
+first. FALSE means reset was refused; see refuseReason.
+Successful reset from STOPPED restores default stop reasons and clears messages. *)
+METHOD Reset : BOOL
 VAR_OUTPUT
 	refuseReason : TOF_Core.ERROR_MESSAGE;
 END_VAR]]></Declaration>
     </Method>
     <Property Name="ResourceManager" Id="{0e115959-9e74-49ea-a0aa-9c9e0f7debdb}">
       <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+(* Manager used by this task to acquire and release its resource; 0 means no
+managed resource is needed. The task controls acquisition and release while
+RUNNING. External callers must not call AcquireResource or ReleaseResource
+directly during that lifecycle. The manager remains stable throughout a run;
+ResourceManager and ResourceAcquired getters have no side effects and do not
+throw exceptions. *)
 PROPERTY ResourceManager : TOF_Core.IResourceManager]]></Declaration>
       <Get Name="Get" Id="{1545f52a-8298-44a9-8fcc-24c9d4881fdb}">
         <Declaration><![CDATA[]]></Declaration>
@@ -53,19 +90,30 @@ PROPERTY ResourceManager : TOF_Core.IResourceManager]]></Declaration>
     </Property>
     <Property Name="RunningSubstate" Id="{d522f074-5e81-4b66-9912-a1c688905470}">
       <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+(* Live diagnostic view of acquisition, processing or release; meaningful
+only while State.Running is TRUE. Observe progress here and control the task
+through its methods; do not drive the resource manager from this substate. *)
 PROPERTY FINAL RunningSubstate : REFERENCE TO TaskRunningSubstate]]></Declaration>
       <Get Name="Get" Id="{f9725b23-b66a-4a9d-82c6-f306b9252035}">
         <Declaration><![CDATA[]]></Declaration>
       </Get>
     </Property>
     <Method Name="Start" Id="{bab46e46-c28a-4012-a6f3-9e40cfdbeb7a}">
-      <Declaration><![CDATA[METHOD Start : BOOL
+      <Declaration><![CDATA[(* Starts a READY task. TRUE means the lifecycle has started and the task is
+RUNNING; continue calling Execute to advance work and eventual cleanup.
+Requests outside READY or refused preparation return FALSE; see refuseReason.
+A refused start does not guarantee rollback of preparation already performed. *)
+METHOD Start : BOOL
 VAR_OUTPUT
 	refuseReason : TOF_Core.ERROR_MESSAGE;
 END_VAR]]></Declaration>
     </Method>
     <Property Name="State" Id="{c8210fde-faab-453b-946c-61525bfba211}">
       <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+(* Live view of the lifecycle: READY before start, RUNNING during work and
+cleanup, STOPPED after termination. Read FinalStopReason to assess the result.
+StateChanged is cleared at the beginning of Execute and set on a lifecycle
+transition; its lifetime follows method calls, not necessarily one PLC cycle. *)
 PROPERTY FINAL State : REFERENCE TO TaskState]]></Declaration>
       <Get Name="Get" Id="{d5910087-292c-4520-9582-a57bd68854f3}">
         <Declaration><![CDATA[]]></Declaration>

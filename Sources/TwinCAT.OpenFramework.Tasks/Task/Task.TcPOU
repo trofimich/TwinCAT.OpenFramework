@@ -3,6 +3,10 @@
   <POU Name="Task" Id="{4f3cf4ac-1772-4e42-a725-ba88b4bb1e14}" SpecialFunc="None">
     <Declaration><![CDATA[(*
 
+## Short summary
+
+ITask abstract implementation
+
 .. <legal notes>
 
 legal notes
@@ -49,9 +53,9 @@ VAR
 	_FinalStopReasonObject : TaskStopReason(_FinalStopReason, _FinalStopReasonMessage);
 	
 	{attribute 'hide'} 
-	_StateObject : TaskState(THIS^);
+	_StateObject : TaskState(_State, _StateChanged);
 	{attribute 'hide'} 
-	_RunningSubstateObject : TaskRunningSubstate(THIS^);
+	_RunningSubstateObject : TaskRunningSubstate(_RunningSubstate);
 END_VAR]]></Declaration>
     <Implementation>
       <ST><![CDATA[]]></ST>
@@ -59,15 +63,12 @@ END_VAR]]></Declaration>
     <Folder Name="Members to override" Id="{e6ebeb0e-7c81-4b67-af2e-12cd935145f5}" />
     <Folder Name="Service members" Id="{fcccf993-7a8e-4ed0-ab1b-398389fd2b3c}" />
     <Method Name="Cancel" Id="{70542690-0d14-4f0e-bd58-570de50ff500}">
-      <Declaration><![CDATA[METHOD FINAL Cancel : BOOL
+      <Declaration><![CDATA[(* TRUE means cancellation was accepted, not that cleanup is complete.
+Continue calling Execute until the task reaches STOPPED.
+FALSE means cancellation was refused; see refuseReason. *)
+METHOD FINAL Cancel : BOOL
 VAR_OUTPUT
 	refuseReason : TOF_Core.ERROR_MESSAGE;
-END_VAR
-VAR
-	tmpResourceManager : TOF_Core.IResourceManager;
-	
-	exceptionCode : __SYSTEM.ExceptionCode;	
-	exception : TOF_Core.IException;
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[IF _State <> TASK_STATE.RUNNING THEN
@@ -84,32 +85,20 @@ _CancelRequested := TRUE;
 _OriginalStopReason := TASK_STOP_REASON.EXTERNAL_CANCEL;
 _OriginalStopReasonMessage := "Cancelled by external logic";
 
+safeCallOnCancelRequest();
+
 Cancel := TRUE;	
 ]]></ST>
       </Implementation>
     </Method>
-    <Property Name="CanStop" Id="{19b7a8e6-cb7f-4dd6-9dfa-c8509dc0776e}" FolderPath="Members to override\">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
-PROPERTY PROTECTED CanStop : BOOL]]></Declaration>
-      <Get Name="Get" Id="{4f6e66ad-6cba-4d6f-9811-a70a85a5aa56}">
-        <Declaration><![CDATA[]]></Declaration>
-        <Implementation>
-          <ST><![CDATA[CanStop := TRUE;]]></ST>
-        </Implementation>
-      </Get>
-    </Property>
     <Method Name="Execute" Id="{0c44d2a0-6aaa-455c-bf4e-d065a6e8ebfd}">
       <Declaration><![CDATA[METHOD FINAL Execute ]]></Declaration>
       <Implementation>
         <ST><![CDATA[_StateChanged := FALSE;
 
-CASE _State OF
-	TASK_STATE.RUNNING:
-		handleRunning();
-	
-	TASK_STATE.STOPPED:
-		safeCallOnStopped();
-END_CASE]]></ST>
+IF _State = TASK_STATE.RUNNING THEN
+	handleRunning();
+END_IF]]></ST>
       </Implementation>
     </Method>
     <Method Name="FB_init" Id="{4a40010f-36b0-4b8e-9bdb-42fc8f2b04c7}">
@@ -127,6 +116,12 @@ END_VAR
     </Method>
     <Property Name="FinalStopReason" Id="{2700e19c-2cd2-4878-bd36-35fddbc83862}">
       <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+(* Final termination result; meaningful as a final result only in STOPPED.
+STOPPED means execution has ended, not that physical resource release succeeded.
+Resource-release exceptions produce FAILURE without an automatic release retry.
+Best-effort errors handled and
+logged by the resource manager do not by themselves change this result.
+Reset restores the default reason and clears the message. This is a live view. *)
 PROPERTY FINAL FinalStopReason : REFERENCE TO TaskStopReason]]></Declaration>
       <Get Name="Get" Id="{4683eaba-a5e9-4ae8-8977-247101cb64d5}">
         <Declaration><![CDATA[]]></Declaration>
@@ -184,13 +179,21 @@ END_CASE
     <Method Name="handleRunning" Id="{0c0b3c2d-2039-40cf-90c1-1bc48ceedfa2}" FolderPath="Service members\">
       <Declaration><![CDATA[METHOD PRIVATE handleRunning
 VAR
+	readyToStop : BOOL;
+
 	taskProcessingState : TASK_PROCESSING_STATE;
 
 	exceptionCode : __SYSTEM.ExceptionCode;	
 	exception : TOF_Core.IException;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[IF _CancelRequested AND_THEN CanStop THEN
+        <ST><![CDATA[IF _CancelRequested THEN
+	safeCallOnCancelling(readyToStop => readyToStop);
+
+	IF NOT readyToStop THEN
+		RETURN;
+	END_IF
+
 	_CancelRequested := FALSE;
 	
 	safeCallOnBeforeStop();
@@ -206,6 +209,7 @@ END_VAR]]></Declaration>
 				setStoppedState(_OriginalStopReason, _OriginalStopReasonMessage);
 				
 				safeCallOnAfterStop();
+				RETURN;
 			END_IF			
 	END_CASE
 END_IF
@@ -288,10 +292,6 @@ CASE _RunningSubstate OF
 			exception := TOF_Core.ExceptionManager.GetLastException(exceptionCode, NamespaceName, __POUNAME(), __POSITION());
 			_TemporaryErrorMessage := exception.GetMessage();
 			
-			IF _OriginalStopReason = TASK_STOP_REASON.WORK_DONE THEN
-				_OriginalStopReason := TASK_STOP_REASON.FAILURE;
-				_OriginalStopReasonMessage := _TemporaryErrorMessage;				
-			END_IF
 					
 			setStoppedState(TASK_STOP_REASON.FAILURE, _TemporaryErrorMessage);
 				
@@ -312,33 +312,83 @@ PROPERTY FINAL Name : REFERENCE TO WSTRING]]></Declaration>
       </Get>
     </Property>
     <Method Name="OnAfterStop" Id="{86e85a1b-93eb-4520-a6b2-faaa5a3db20e}" FolderPath="Members to override\">
-      <Declaration><![CDATA[METHOD PROTECTED OnAfterStop
+      <Declaration><![CDATA[(* Called after transition to STOPPED and assignment of FinalStopReason,
+following resource release when required. Use for termination notifications
+or final bookkeeping, regardless of the stop reason. Exceptions are logged
+and do not change the final result. *)
+METHOD PROTECTED OnAfterStop
 ]]></Declaration>
       <Implementation>
         <ST><![CDATA[]]></ST>
       </Implementation>
     </Method>
     <Method Name="OnBeforeStart" Id="{5fb86c1f-5c4e-4feb-b7c4-caeef1bc2031}" FolderPath="Members to override\">
-      <Declaration><![CDATA[METHOD PROTECTED OnBeforeStart]]></Declaration>
+      <Declaration><![CDATA[(* Called synchronously by Start while the task is READY, before RUNNING
+and before resource acquisition. Validate or prepare the task for this run;
+keep the callback short. An exception refuses Start and supplies refuseReason.
+No rollback of changes made by this callback is performed on refusal. *)
+METHOD PROTECTED OnBeforeStart]]></Declaration>
       <Implementation>
         <ST><![CDATA[]]></ST>
       </Implementation>
     </Method>
     <Method Name="OnBeforeStop" Id="{698786bc-ab3a-40d9-bc3c-8b44edd3a764}" FolderPath="Members to override\">
-      <Declaration><![CDATA[METHOD PROTECTED OnBeforeStop
+      <Declaration><![CDATA[(* Called when entering the stopping path, before resource release or direct
+transition to STOPPED. Use for short actions that prepare termination for
+completion, cancellation, internal abort or failure. During cancellation,
+OnCancelling has returned readyToStop=TRUE; perform waiting work there.
+Exceptions are logged; stopping continues without changing the stop reasons. *)
+METHOD PROTECTED OnBeforeStop
 ]]></Declaration>
       <Implementation>
         <ST><![CDATA[]]></ST>
       </Implementation>
     </Method>
+    <Method Name="OnCancelling" Id="{2ad060bf-91d2-42fc-8f3b-934bf7b4d05f}" FolderPath="Members to override\">
+      <Declaration><![CDATA[(* Called by Execute while accepted cancellation is pending, before resource
+release. Advance only cancellation-related work, such as child cleanup.
+Set readyToStop on every call: FALSE requires another Execute without ordinary
+OnRunning or acquisition; TRUE permits OnBeforeStop and resource release.
+TRUE does not mean the task is already STOPPED. The base returns TRUE.
+Exceptions are logged and treated as readyToStop=FALSE for this call. *)
+METHOD PROTECTED OnCancelling
+VAR_OUTPUT
+	readyToStop : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[readyToStop := TRUE;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="OnCancelRequest" Id="{ec05160b-b364-40ca-9992-6a0764b0e3eb}" FolderPath="Members to override\">
+      <Declaration><![CDATA[(* Called once, synchronously in Cancel, after cancellation is accepted
+and the cancellation flag and stop reason are set. Not called for refused
+or repeated requests. Perform only short actions that initiate cancellation;
+cleanup completion is advanced by Execute. Exceptions are logged and do not
+withdraw the accepted cancellation request. *)
+METHOD PROTECTED OnCancelRequest]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[]]></ST>
+      </Implementation>
+    </Method>
     <Method Name="OnReset" Id="{a7e8974b-7e43-4ce5-8790-6b98c2babadd}" FolderPath="Members to override\">
-      <Declaration><![CDATA[METHOD PROTECTED OnReset ]]></Declaration>
+      <Declaration><![CDATA[(* Called synchronously by Reset only in STOPPED, before transition to READY
+and clearing the task's stop reasons and cancellation flag. Reset per-run
+state for reuse. Not called when Reset is invoked on an already READY task.
+An exception refuses Reset and supplies refuseReason; changes already made
+by this callback are not rolled back. *)
+METHOD PROTECTED OnReset ]]></Declaration>
       <Implementation>
         <ST><![CDATA[]]></ST>
       </Implementation>
     </Method>
     <Method Name="OnRunning" Id="{fa525f37-9567-4dcb-9fc7-ad672f39a641}" FolderPath="Members to override\">
-      <Declaration><![CDATA[METHOD PROTECTED ABSTRACT OnRunning 
+      <Declaration><![CDATA[(* Called by Execute in the PROCESSING substate, after resource acquisition
+when required. Advance one bounded step of work. Return BUSY to continue,
+DONE to complete, ABORTED for internal abort or ERROR for failure; provide
+stopReasonMessage when useful. A non-BUSY result starts the stopping path.
+Exceptions are handled by the task's failure/cleanup logic. Not called while
+accepted cancellation is pending, during acquisition or during release. *)
+METHOD PROTECTED ABSTRACT OnRunning
 VAR_OUTPUT
 	processingState : TASK_PROCESSING_STATE;
 END_VAR
@@ -349,14 +399,13 @@ END_VAR]]></Declaration>
         <ST><![CDATA[]]></ST>
       </Implementation>
     </Method>
-    <Method Name="OnStopped" Id="{2e97ce47-80d3-4c98-8026-03f61b1ccd61}" FolderPath="Members to override\">
-      <Declaration><![CDATA[METHOD PROTECTED OnStopped ]]></Declaration>
-      <Implementation>
-        <ST><![CDATA[]]></ST>
-      </Implementation>
-    </Method>
     <Property Name="OriginalStopReason" Id="{584c09b9-cc15-4863-851e-295e1f3855a3}">
       <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+(* Reason recorded for stopping: completion, internal abort, cancellation or failure.
+Established when stopping begins and preserved during resource release, along
+with its message. Release exceptions affect FinalStopReason and its message.
+The initial WORK_DONE value does not indicate completed work.
+Reset restores the default reason and clears the message. This is a live view. *)
 PROPERTY FINAL OriginalStopReason : REFERENCE TO TaskStopReason]]></Declaration>
       <Get Name="Get" Id="{f76dfe1f-2858-4323-89c5-fdbe686b4c10}">
         <Declaration><![CDATA[]]></Declaration>
@@ -376,7 +425,12 @@ PROPERTY PROTECTED FINAL ReleaseResourceRequired : BOOL]]></Declaration>
       </Get>
     </Property>
     <Method Name="Reset" Id="{98e72552-cae8-4b2c-b8c6-8047c79b882a}">
-      <Declaration><![CDATA[METHOD FINAL Reset : BOOL
+      <Declaration><![CDATA[(* Prepares a STOPPED task for reuse; TRUE means the task is READY.
+An already READY task returns TRUE without invoking reset callbacks.
+Reset does not cancel a RUNNING task. FALSE means reset was refused;
+see refuseReason. A successful reset from STOPPED restores default stop
+reasons and clears their messages. *)
+METHOD FINAL Reset : BOOL
 VAR_OUTPUT
 	refuseReason : TOF_Core.ERROR_MESSAGE;
 END_VAR]]></Declaration>
@@ -400,6 +454,13 @@ END_IF]]></ST>
     </Method>
     <Property Name="ResourceManager" Id="{d940cf50-89bd-4d74-bb1c-dbd9609c4f14}">
       <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+(* Override to supply this task's resource manager; the base returns 0
+for tasks without a managed resource. Task drives acquisition before work
+and release during stopping. A release exception terminates the task with
+FAILURE without an automatic release retry; the manager defines recovery
+for any resource still held. Return a stable manager throughout a run;
+Keep ResourceManager and ResourceAcquired getters free of side effects;
+they must not throw exceptions. *)
 PROPERTY ResourceManager : TOF_Core.IResourceManager]]></Declaration>
       <Get Name="Get" Id="{eb1a2806-2821-4891-9a94-be06e63069cb}">
         <Declaration><![CDATA[]]></Declaration>
@@ -419,11 +480,18 @@ PROPERTY FINAL RunningSubstate : REFERENCE TO TaskRunningSubstate]]></Declaratio
       </Get>
     </Property>
     <Method Name="safeCallOnAfterStop" Id="{0c327d25-c1a4-490a-bffb-4b7b77fe9c81}" FolderPath="Service members\">
-      <Declaration><![CDATA[METHOD PRIVATE safeCallOnAfterStop]]></Declaration>
+      <Declaration><![CDATA[METHOD PRIVATE safeCallOnAfterStop
+VAR
+	exceptionCode : __SYSTEM.ExceptionCode;
+	exception : TOF_Core.IException;
+END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[__TRY
 	OnAfterStop();
-__CATCH
+__CATCH(exceptionCode)
+	exception := TOF_Core.ExceptionManager.GetLastException(exceptionCode, NamespaceName, __POUNAME(), __POSITION());
+
+	TOF_Core.LogManager.TryLogException(exception, TOF_Core.ERROR_SEVERITY.ERROR, TO_WSTRING(ClassName), TO_WSTRING(__POUNAME()));
 __ENDTRY]]></ST>
       </Implementation>
     </Method>
@@ -443,16 +511,63 @@ END_VAR]]></Declaration>
 	safeCallOnBeforeStart := TRUE;
 __CATCH(exceptionCode)
 	exception := TOF_Core.ExceptionManager.GetLastException(exceptionCode, NamespaceName, __POUNAME(), __POSITION());
+	
 	refuseReason := exception.GetMessage();
 __ENDTRY]]></ST>
       </Implementation>
     </Method>
     <Method Name="safeCallOnBeforeStop" Id="{793a8a6d-c6e3-4043-9860-ceb426a80e28}" FolderPath="Service members\">
-      <Declaration><![CDATA[METHOD PRIVATE safeCallOnBeforeStop]]></Declaration>
+      <Declaration><![CDATA[METHOD PRIVATE safeCallOnBeforeStop
+VAR
+	exceptionCode : __SYSTEM.ExceptionCode;
+	exception : TOF_Core.IException;
+END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[__TRY
 	OnBeforeStop();
-__CATCH
+__CATCH(exceptionCode)
+	exception := TOF_Core.ExceptionManager.GetLastException(exceptionCode, NamespaceName, __POUNAME(), __POSITION());
+
+	TOF_Core.LogManager.TryLogException(exception, TOF_Core.ERROR_SEVERITY.ERROR, TO_WSTRING(ClassName), TO_WSTRING(__POUNAME()));
+__ENDTRY]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="safeCallOnCancelling" Id="{3899c078-a9f5-451e-b1b5-dd53d6ba75fc}" FolderPath="Service members\">
+      <Declaration><![CDATA[METHOD PRIVATE safeCallOnCancelling
+VAR_OUTPUT
+	readyToStop : BOOL;
+END_VAR
+VAR
+	exceptionCode : __SYSTEM.ExceptionCode;
+	exception : TOF_Core.IException;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[readyToStop := FALSE;
+
+__TRY
+	OnCancelling(readyToStop => readyToStop);
+__CATCH(exceptionCode)
+	readyToStop := FALSE;
+	
+	exception := TOF_Core.ExceptionManager.GetLastException(exceptionCode, NamespaceName, __POUNAME(), __POSITION());
+
+	TOF_Core.LogManager.TryLogException(exception, TOF_Core.ERROR_SEVERITY.ERROR, TO_WSTRING(ClassName), TO_WSTRING(__POUNAME()));
+__ENDTRY]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="safeCallOnCancelRequest" Id="{905ed24a-5192-4ad8-85ce-047a09b432af}" FolderPath="Service members\">
+      <Declaration><![CDATA[METHOD PRIVATE safeCallOnCancelRequest
+VAR
+	exceptionCode : __SYSTEM.ExceptionCode;
+	exception : TOF_Core.IException;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[__TRY
+	OnCancelRequest();
+__CATCH(exceptionCode)
+	exception := TOF_Core.ExceptionManager.GetLastException(exceptionCode, NamespaceName, __POUNAME(), __POSITION());
+
+	TOF_Core.LogManager.TryLogException(exception, TOF_Core.ERROR_SEVERITY.ERROR, TO_WSTRING(ClassName), TO_WSTRING(__POUNAME()));
 __ENDTRY]]></ST>
       </Implementation>
     </Method>
@@ -472,23 +587,8 @@ END_VAR]]></Declaration>
 	safeCallOnReset := TRUE;
 __CATCH(exceptionCode)
 	exception := TOF_Core.ExceptionManager.GetLastException(exceptionCode, NamespaceName, __POUNAME(), __POSITION());
-	refuseReason := exception.GetMessage();
-__ENDTRY]]></ST>
-      </Implementation>
-    </Method>
-    <Method Name="safeCallOnStopped" Id="{c2397111-6efa-45dc-b410-fdc669c7bdf3}" FolderPath="Service members\">
-      <Declaration><![CDATA[METHOD PRIVATE safeCallOnStopped : BOOL
-VAR
-	exceptionCode : __SYSTEM.ExceptionCode;	
-	exception : TOF_Core.IException;
-END_VAR]]></Declaration>
-      <Implementation>
-        <ST><![CDATA[__TRY
-	OnStopped();
-__CATCH(exceptionCode)
-	exception := TOF_Core.ExceptionManager.GetLastException(exceptionCode, NamespaceName, __POUNAME(), __POSITION());
 	
-	TOF_Core.LogManager.TryLogException(exception, TOF_Core.ERROR_SEVERITY.ERROR, TO_WSTRING(ClassName), TO_WSTRING(__POUNAME())); 
+	refuseReason := exception.GetMessage();
 __ENDTRY]]></ST>
       </Implementation>
     </Method>
@@ -523,34 +623,44 @@ _FinalStopReasonMessage := "";	]]></ST>
     </Method>
     <Method Name="setRunningState" Id="{1d4e1480-16f7-42b7-b601-af024b62cfc3}" FolderPath="Service members\">
       <Declaration><![CDATA[METHOD PRIVATE FINAL setRunningState
+VAR
+	resourceManagerForStart : TOF_Core.IResourceManager;
+	initialRunningSubstate : TASK_RUNNING_SUBSTATE;
+END_VAR
 VAR CONSTANT
 	NEW_STATE : TASK_STATE := TASK_STATE.RUNNING;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[IF _State <> NEW_STATE THEN
-	TOF_Core.LogManager.TryLogMessage(
-		TOF_Core.WideStrings.Concat255("Task '", Name, "' changed state from '", TO_WSTRING(_State), "' to '", TO_WSTRING(NEW_STATE), "'"), 
-		TOF_Core.LOG_CATEGORY.INFORMATION, 
-		TO_WSTRING(ClassName), 
-		"Task", 
-		TOF_Core.WideStrings.Concat255("Task.", TO_WSTRING(NEW_STATE))
-	);
+        <ST><![CDATA[resourceManagerForStart := ResourceManager;
 
-	_State := NEW_STATE;
-	_StateChanged := TRUE;	
-END_IF 
-
-IF ResourceManager <> 0 AND_THEN NOT ResourceManager.ResourceAcquired THEN
-	_RunningSubstate := TASK_RUNNING_SUBSTATE.RESOURCE_ACQUIRING;
+IF resourceManagerForStart <> 0 AND_THEN NOT resourceManagerForStart.ResourceAcquired THEN
+	initialRunningSubstate := TASK_RUNNING_SUBSTATE.RESOURCE_ACQUIRING;
 ELSE
-	_RunningSubstate := TASK_RUNNING_SUBSTATE.PROCESSING;
+	initialRunningSubstate := TASK_RUNNING_SUBSTATE.PROCESSING;
 END_IF
 
+IF _State <> NEW_STATE THEN
+	TOF_Core.LogManager.TryLogMessage(
+		TOF_Core.WideStrings.Concat255("Task '", Name, "' changed state from '", TO_WSTRING(_State), "' to '", TO_WSTRING(NEW_STATE), "'"),
+		TOF_Core.LOG_CATEGORY.INFORMATION,
+		TO_WSTRING(ClassName),
+		"Task",
+		TOF_Core.WideStrings.Concat255("Task.", TO_WSTRING(NEW_STATE))
+	);
+END_IF
+
+_RunningSubstate := initialRunningSubstate;
+
 _OriginalStopReason := TASK_STOP_REASON.WORK_DONE;
-_OriginalStopReasonMessage := "";	
+_OriginalStopReasonMessage := "";
 
 _FinalStopReason := TASK_STOP_REASON.WORK_DONE;
-_FinalStopReasonMessage := "";		]]></ST>
+_FinalStopReasonMessage := "";
+
+IF _State <> NEW_STATE THEN
+	_State := NEW_STATE;
+	_StateChanged := TRUE;
+END_IF]]></ST>
       </Implementation>
     </Method>
     <Method Name="setRunningSubstate" Id="{d7f6ee1f-b4e3-4b35-9d2a-d0008766d37e}" FolderPath="Service members\">
@@ -614,19 +724,25 @@ END_IF]]></ST>
       </Implementation>
     </Method>
     <Method Name="Start" Id="{ce59c237-31f2-4c66-aa57-58d7b3210a0c}">
-      <Declaration><![CDATA[METHOD FINAL Start : BOOL
+      <Declaration><![CDATA[(* TRUE means the task lifecycle has started and the task is RUNNING,
+not that the work is complete. Continue calling Execute to advance execution.
+FALSE means starting was refused; see refuseReason.
+Changes already made by OnBeforeStart are not rolled back. *)
+METHOD FINAL Start : BOOL
 VAR_OUTPUT
 	refuseReason : TOF_Core.ERROR_MESSAGE;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[IF _State <> TASK_STATE.READY THEN
+        <ST><![CDATA[Start := FALSE;
+
+IF _State <> TASK_STATE.READY THEN
 	refuseReason := TOF_Core.WideStrings.Concat255("Expected state is '", TO_WSTRING(TASK_STATE.READY), "' but current state is '", TO_WSTRING(_State), "'");
 	RETURN;
 END_IF
 
 IF safeCallOnBeforeStart(refuseReason) THEN
 	setRunningState();
-	
+
 	Start := TRUE;
 END_IF]]></ST>
       </Implementation>
