@@ -33,7 +33,10 @@ VAR
 	_Initialized : BOOL;
 END_VAR]]></Declaration>
     <Implementation>
-      <ST><![CDATA[TestSequence();]]></ST>
+      <ST><![CDATA[TestSequence();
+
+StopWhenNoPendingTasksEnabled();
+StopWhenNoPendingTasksDisabled();]]></ST>
     </Implementation>
     <Property Name="ClassName" Id="{885dd23b-3c87-4e2e-8fac-71627e598a01}">
       <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
@@ -99,6 +102,111 @@ IF _TaskSequence.PendingTaskCount = 0 THEN
 		TEST_FINISHED();		
 	END_IF
 END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="StopWhenNoPendingTasksEnabled" Id="{fb97ff82-650c-4225-a0fd-5cbd7722b1ad}">
+      <Declaration><![CDATA[METHOD StopWhenNoPendingTasksEnabled
+VAR
+	executionIndex : INT;
+END_VAR
+VAR_INST
+	testFinished : BOOL;
+
+	taskQueue : TOF_Tasks.StandardTaskQueue;
+	counterTask : CounterTask;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN
+	RETURN;
+END_IF
+
+TEST(__POUNAME());
+
+taskQueue.StopWhenNoPendingTasks := TRUE;
+
+AssertTrue(taskQueue.Start(), 'Start must return TRUE for an empty READY queue');
+
+taskQueue.Execute();
+
+AssertTrue(taskQueue.State.Stopped, 'Empty queue must stop when StopWhenNoPendingTasks is TRUE');
+AssertTrue(taskQueue.FinalStopReason.WorkDone, 'Empty queue must stop with WorkDone when StopWhenNoPendingTasks is TRUE');
+
+AssertTrue(taskQueue.Reset(), 'Reset must return TRUE for a STOPPED queue');
+
+counterTask.TargetValue := 3;
+taskQueue.StopWhenNoPendingTasks := TRUE;
+
+taskQueue.Enqueue(counterTask);
+
+AssertTrue(taskQueue.Start(), 'Start must return TRUE for a READY queue containing a task');
+
+// CounterTask has no asynchronous operations; a bounded number of calls is sufficient.
+FOR executionIndex := 1 TO 10 DO
+	taskQueue.Execute();
+END_FOR
+
+AssertEquals_INT(3, counterTask.Counter, 'CounterTask.Counter must reach TargetValue (3)');
+AssertTrue(counterTask.FinalStopReason.WorkDone, 'CounterTask must stop with WorkDone');
+AssertEquals_DINT(0, taskQueue.PendingTaskCount, 'PendingTaskCount must be 0 after CounterTask completes');
+AssertTrue(taskQueue.State.Stopped, 'Queue must stop after the last task when StopWhenNoPendingTasks is TRUE');
+AssertTrue(taskQueue.FinalStopReason.WorkDone, 'Queue must stop with WorkDone after its last task completes');
+
+taskQueue.Cancel();
+taskQueue.Execute();
+
+testFinished := TRUE;
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="StopWhenNoPendingTasksDisabled" Id="{fe8f4f31-c749-4730-afab-e007055307a4}">
+      <Declaration><![CDATA[METHOD StopWhenNoPendingTasksDisabled
+VAR
+	executionIndex : INT;
+END_VAR
+VAR_INST
+	testFinished : BOOL;
+
+	taskQueue : TOF_Tasks.StandardTaskQueue;
+	counterTask : CounterTask;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN
+	RETURN;
+END_IF
+
+TEST(__POUNAME());
+
+taskQueue.StopWhenNoPendingTasks := FALSE;
+
+AssertTrue(taskQueue.Start(), 'Start must return TRUE for an empty READY queue');
+
+taskQueue.Execute();
+
+AssertTrue(taskQueue.State.Running, 'Empty queue must remain Running when StopWhenNoPendingTasks is FALSE');
+
+// The running empty queue must accept and execute a subsequently added task.
+counterTask.TargetValue := 3;
+
+taskQueue.Enqueue(counterTask);
+
+FOR executionIndex := 1 TO 10 DO
+	taskQueue.Execute();
+END_FOR
+
+AssertEquals_INT(3, counterTask.Counter, 'Task added to a running empty queue must reach TargetValue (3)');
+AssertTrue(counterTask.FinalStopReason.WorkDone, 'CounterTask must stop with WorkDone');
+AssertEquals_DINT(0, taskQueue.PendingTaskCount, 'PendingTaskCount must be 0 after CounterTask completes');
+AssertTrue(taskQueue.State.Running, 'Queue must remain Running after the last task when StopWhenNoPendingTasks is FALSE');
+
+AssertTrue(taskQueue.Cancel(), 'Cancel must return TRUE for a running empty queue');
+
+taskQueue.Execute();
+
+AssertTrue(taskQueue.State.Stopped, 'Execute after accepted Cancel must stop the empty queue');
+AssertTrue(taskQueue.FinalStopReason.ExternalCancel, 'Queue must stop with ExternalCancel after accepted Cancel');
+
+testFinished := TRUE;
+TEST_FINISHED();]]></ST>
       </Implementation>
     </Method>
   </POU>
