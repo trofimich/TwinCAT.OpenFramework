@@ -19,6 +19,8 @@ legal notes
 
 {attribute 'enable_dynamic_creation'}	
 {attribute 'no_explicit_call' := 'do not call this function block directly'} 
+// Adapter for native exception codes. The manager's static instance is a shared borrowed view.
+// Dynamic instances/clones belong to DynamicMemoryManager and must not be deleted manually.
 FUNCTION_BLOCK SystemException EXTENDS Object IMPLEMENTS IException
 VAR
 	{attribute 'hide'} 
@@ -26,6 +28,8 @@ VAR
 
 	{attribute 'hide'} 
 	_ExceptionCode : __SYSTEM.ExceptionCode;
+	_LocalTimestamp : LDATE_AND_TIME;
+	_UtcTimestamp : LDATE_AND_TIME;
 	{attribute 'hide'} 	
 	_CatchPointNamespaceName : STRING;
 	{attribute 'hide'} 
@@ -38,6 +42,9 @@ VAR
 
 	{attribute 'hide'} 
 	_UnspecifiedPosition : STRING(32);
+
+	// Dynamic system exceptions share the manager-owned lifetime of other exceptions.
+	_AutoDisposeRegistrar : AutoDisposeRegistrar(THIS^);
 END_VAR]]></Declaration>
     <Implementation>
       <ST><![CDATA[]]></ST>
@@ -78,26 +85,44 @@ PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
       </Get>
     </Property>
     <Method Name="Clear" Id="{dbd66dfc-fc8f-4256-a0f4-f74c9a16f7ea}">
-      <Declaration><![CDATA[METHOD Clear]]></Declaration>
+      <Declaration><![CDATA[// Clears the code: Empty becomes TRUE and GetMessage returns an empty string.
+// Resets captured timestamps; does not delete/unregister the instance. Catch-point storage is retained.
+METHOD Clear]]></Declaration>
       <Implementation>
-        <ST><![CDATA[_ExceptionCode := __SYSTEM.ExceptionCode.RTSEXCPT_NOEXCEPTION;]]></ST>
+        <ST><![CDATA[_ExceptionCode := __SYSTEM.ExceptionCode.RTSEXCPT_NOEXCEPTION;
+_LocalTimestamp := LongDateAndTimes.MIN_VALUE;
+_UtcTimestamp := LongDateAndTimes.MIN_VALUE;]]></ST>
       </Implementation>
     </Method>
     <Method Name="Clone" Id="{654edb60-f1ae-4e3d-854a-ef1384720f30}">
-      <Declaration><![CDATA[METHOD Clone : IObject
+      <Declaration><![CDATA[// Returns an auto-disposed copy of the code and catch point, borrowed until cleanup.
+// Captured timestamps are copied unchanged; cloning does not create a new occurrence time.
+// Allocation failure latches and raises fatal OUT_OF_MEMORY, without a heap exception.
+METHOD Clone : IObject
 VAR
 	exceptionClone : POINTER TO SystemException;
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[exceptionClone := __NEW(SystemException);
 
+IF exceptionClone = 0 THEN
+	DynamicMemoryManager.RaiseAllocationFailure();
+	RETURN;
+END_IF
+
 exceptionClone^._ExceptionCode := _ExceptionCode;
+exceptionClone^._CatchPointNamespaceName := _CatchPointNamespaceName;
+exceptionClone^._CatchPointPOUName := _CatchPointPOUName;
+exceptionClone^._CatchPointPosition := _CatchPointPosition;
+exceptionClone^._LocalTimestamp := _LocalTimestamp;
+exceptionClone^._UtcTimestamp := _UtcTimestamp;
 
 Clone := exceptionClone^;]]></ST>
       </Implementation>
     </Method>
     <Method Name="Configure" Id="{297ea316-2fb7-4596-b05c-db0f46e37b1b}">
-      <Declaration><![CDATA[METHOD INTERNAL Configure
+      <Declaration><![CDATA[// Captures the time GetLastException observes the native exception, not the unavailable native throw time.
+METHOD INTERNAL Configure
 VAR_IN_OUT CONSTANT
 	exceptionCode : __SYSTEM.ExceptionCode;
 	catchPointNamespaceName : STRING;
@@ -109,7 +134,9 @@ END_VAR
         <ST><![CDATA[_ExceptionCode := exceptionCode;
 _CatchPointNamespaceName := catchPointNamespaceName;
 _CatchPointPOUName := catchPointPOUName;
-_CatchPointPosition := catchPointPosition;]]></ST>
+_CatchPointPosition := catchPointPosition;
+_LocalTimestamp := System.SystemLocalDateTime;
+_UtcTimestamp := System.SystemUtcDateTime;]]></ST>
       </Implementation>
     </Method>
     <Property Name="Empty" Id="{038c5f5f-d26f-4e70-a390-6d5e8f198afd}">
@@ -196,7 +223,7 @@ PROPERTY FINAL LocalTimestamp : LDATE_AND_TIME]]></Declaration>
       <Get Name="Get" Id="{79d470da-f79a-4a33-bf4f-89aa38c370f7}">
         <Declaration><![CDATA[]]></Declaration>
         <Implementation>
-          <ST><![CDATA[LocalTimestamp := System.SystemLocalDateTime;]]></ST>
+          <ST><![CDATA[LocalTimestamp := _LocalTimestamp;]]></ST>
         </Implementation>
       </Get>
     </Property>
@@ -280,7 +307,7 @@ PROPERTY FINAL UtcTimestamp : LDATE_AND_TIME]]></Declaration>
       <Get Name="Get" Id="{9ac21bad-7080-4914-9567-5b68982f14d9}">
         <Declaration><![CDATA[]]></Declaration>
         <Implementation>
-          <ST><![CDATA[UtcTimestamp := System.SystemUtcDateTime;]]></ST>
+          <ST><![CDATA[UtcTimestamp := _UtcTimestamp;]]></ST>
         </Implementation>
       </Get>
     </Property>

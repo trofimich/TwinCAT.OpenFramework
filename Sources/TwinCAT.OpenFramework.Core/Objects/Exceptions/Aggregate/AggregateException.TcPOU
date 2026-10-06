@@ -19,6 +19,8 @@ legal notes
 
 {attribute 'enable_dynamic_creation'}	
 {attribute 'no_explicit_call' := 'do not call this function block directly'} 
+// Holds at most 255 flattened entries. Inner exception graphs must be acyclic.
+// Self-add is forbidden by contract; no recursive graph validation is performed.
 FUNCTION_BLOCK AggregateException EXTENDS Exception IMPLEMENTS IAggregateException
 VAR
 	{attribute 'hide'} 
@@ -27,13 +29,21 @@ VAR
 	_InnerExceptions : POINTER TO IException;
 	{attribute 'hide'} 
 	_InnerExceptionCount : UINT;
+END_VAR
+VAR CONSTANT
+	MAX_INNER_EXCEPTION_COUNT : UINT := 255;
 END_VAR]]></Declaration>
     <Implementation>
       <ST><![CDATA[]]></ST>
     </Implementation>
     <Folder Name="Service members" Id="{c31ba568-bfb3-4fae-ac77-198d7130e4aa}" />
     <Method Name="AddInnerException" Id="{bfce23ea-1373-4ba3-866d-7d8a69bbfdab}">
-      <Declaration><![CDATA[METHOD AddInnerException
+      <Declaration><![CDATA[// Flattens aggregates; borrows dynamic inners and clones static inners for automatic cleanup.
+// Owns only the reference array. Allocation failure uses the shared fatal memory latch.
+// Do not pass THIS or a cyclic exception graph. Null/empty aggregate inputs add nothing.
+// Exceeding 255 entries raises latched OUT_OF_MEMORY before preparing the next entry.
+// Flattening is incremental: prior successful additions are not rolled back on failure.
+METHOD AddInnerException
 VAR_INPUT
 	innerException : IException; 
 END_VAR
@@ -43,6 +53,7 @@ VAR
 	subInnerException : IException;	
 	
 	newInnerExceptionArray : POINTER TO IException;
+	preparedInnerException : IException;
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[IF innerException = 0 THEN
@@ -56,7 +67,23 @@ IF __QUERYINTERFACE(innerException, aggregateException) THEN
 		AddInnerException(subInnerException);
 	END_FOR
 ELSE
+	IF _InnerExceptionCount >= MAX_INNER_EXCEPTION_COUNT THEN
+		DynamicMemoryManager.RaiseAllocationFailure();
+		RETURN;
+	END_IF
+
+	// Prepare the inner before replacing any existing array storage.
+	IF innerException.IsDynamicInstance THEN
+		preparedInnerException := innerException;
+	ELSE
+		__QUERYINTERFACE(innerException.Clone(), preparedInnerException);
+	END_IF
+
 	newInnerExceptionArray := __NEW(POINTER TO IException, (_InnerExceptionCount + 1));
+	IF newInnerExceptionArray = 0 THEN
+		DynamicMemoryManager.RaiseAllocationFailure();
+		RETURN;
+	END_IF
 		
 	IF _InnerExceptionCount > 0 THEN
 		Tc2_System.MEMCPY(newInnerExceptionArray, _InnerExceptions, TO_UDINT(XSIZEOF(POINTER TO IException) * _InnerExceptionCount));	
@@ -64,11 +91,7 @@ ELSE
 		__DELETE(_InnerExceptions);
 	END_IF
 		
-	IF innerException.IsDynamicInstance THEN
-		newInnerExceptionArray[_InnerExceptionCount] := innerException;
-	ELSE
-		__QUERYINTERFACE(innerException.Clone(), newInnerExceptionArray[_InnerExceptionCount]);
-	END_IF
+	newInnerExceptionArray[_InnerExceptionCount] := preparedInnerException;
 	
 	_InnerExceptions := newInnerExceptionArray; 
 	_InnerExceptionCount := _InnerExceptionCount + 1;
@@ -86,7 +109,9 @@ PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
       </Get>
     </Property>
     <Method Name="Clear" Id="{e4a1b8c7-9686-4ca1-8667-c1a80c4453a6}">
-      <Declaration><![CDATA[METHOD Clear]]></Declaration>
+      <Declaration><![CDATA[// Releases the owned reference array and resets metadata; does not delete borrowed inners.
+// Repeated Clear is allowed.
+METHOD Clear]]></Declaration>
       <Implementation>
         <ST><![CDATA[IF _InnerExceptions <> 0 THEN
 	__DELETE(_InnerExceptions);
@@ -98,7 +123,9 @@ SUPER^.Clear();]]></ST>
       </Implementation>
     </Method>
     <Method Name="Clone" Id="{486d4ff9-908c-48b8-a667-acc4326b9c0c}">
-      <Declaration><![CDATA[METHOD Clone : IObject
+      <Declaration><![CDATA[// Returns a distinct auto-disposed aggregate with copied metadata and its own reference array.
+// Empty aggregates also produce a distinct empty clone; dynamic inners remain borrowed.
+METHOD Clone : IObject
 VAR
 	exceptionClone : POINTER TO AggregateException;
 		
@@ -107,12 +134,17 @@ END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[exceptionClone := __NEW(AggregateException);
 
+IF exceptionClone = 0 THEN
+	DynamicMemoryManager.RaiseAllocationFailure();
+	RETURN;
+END_IF
+
 exceptionClone^.SourceFullPOUName := _SourceFullPOUName;
 exceptionClone^.SourcePosition := _SourcePosition;
 exceptionClone^.LocalTimestamp := _LocalTimestamp;	
 exceptionClone^.UtcTimestamp := _UtcTimestamp;	
 
-FOR i := 0 TO _InnerExceptionCount - 1 DO
+FOR i := 0 TO TO_DINT(_InnerExceptionCount) - 1 DO
 	exceptionClone^.AddInnerException(GetInnerException(i));
 END_FOR
 
@@ -120,7 +152,9 @@ Clone := exceptionClone^;]]></ST>
       </Implementation>
     </Method>
     <Method Name="CopyFields" Id="{0584c9e4-cd70-4feb-b915-e7d77badfcc1}" FolderPath="Service members\">
-      <Declaration><![CDATA[METHOD PROTECTED CopyFields
+      <Declaration><![CDATA[// Destination must be empty and distinct from source. This helper does not clear existing entries.
+// Copies metadata and adds source entries using AddInnerException's ownership rules.
+METHOD PROTECTED CopyFields
 VAR_IN_OUT CONSTANT
 	sourceExxception : AggregateException;	
 END_VAR
@@ -133,7 +167,7 @@ _SourcePosition := sourceExxception.SourcePosition;
 _LocalTimestamp := sourceExxception.LocalTimestamp;	
 _UtcTimestamp := sourceExxception.UtcTimestamp;	
 
-FOR i := 0 TO sourceExxception.InnerExceptionCount - 1 DO
+FOR i := 0 TO TO_DINT(sourceExxception.InnerExceptionCount) - 1 DO
 	AddInnerException(sourceExxception.GetInnerException(i));
 END_FOR
 ]]></ST>
@@ -172,7 +206,8 @@ END_IF]]></ST>
       </Implementation>
     </Method>
     <Method Name="GetMessage" Id="{76c9ffdd-6b67-4a44-aa6c-571f736f1a93}">
-      <Declaration><![CDATA[METHOD GetMessage : ERROR_MESSAGE
+      <Declaration><![CDATA[// With default options an empty aggregate returns "0 aggregated exceptions".
+METHOD GetMessage : ERROR_MESSAGE
 VAR_INPUT
 	showSource : BOOL := FALSE;
 	timestampDisplayMode : TIMESTAMP_DISPLAY_MODE := TIMESTAMP_DISPLAY_MODE.HIDDEN;
@@ -202,7 +237,7 @@ IF showSource THEN
 		.AppendString255If(TO_WSTRING(sourcePosition), sourcePosition <> '');
 END_IF
 
-FOR i := 0 TO _InnerExceptionCount - 1 DO
+FOR i := 0 TO TO_DINT(_InnerExceptionCount) - 1 DO
 	innerException := _InnerExceptions[i];
 	
 	innerExceptionMessage := innerException.GetMessage(showSource, timestampDisplayMode);
