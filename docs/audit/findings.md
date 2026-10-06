@@ -334,3 +334,9 @@ consumer потребує уточнення; автоматичне волод�
 Name/Error references за підтвердженням власника призначені лише для читання
 без копіювання; зовнішній запис є порушенням контракту. Відсутність Core
 IStartable/ICancellable не визнано дефектом дизайну.
+
+2026-10-06: за прямим погодженням власника виправлено Reset обох string
+splitting enumerators: поточний fragment звільняється, cursor відновлюється
+присвоєнням SourceString замість MEMCPY. Allocation strategy залишено поточною.
+Статус: виправлення внесено; compilation/runtime та check-скрипти не запускалися.
+Контракт і ручні сценарії: core-interfaces-review.md, розділ Reset.
