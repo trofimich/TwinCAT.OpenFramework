@@ -2,19 +2,9 @@
 <TcPlcObject Version="1.1.0.1">
   <POU Name="ExceptionManager" Id="{a83d007f-42e6-48cd-9a14-7b9a497b4ddf}" SpecialFunc="None">
     <Declaration><![CDATA[(*
-
-.. <legal notes>
-
-legal notes
-=================
-| SPDX-FileCopyrightText: © 2026 Oleksandr Tiutyk <trofimich@gmail.com>
-| SPDX-License-Identifier: LGPL-3.0-only
-| For details check: LGPL-3.0-only_
-
-.. _LGPL-3.0-only: https://www.gnu.org/licenses/lgpl-3.0.en.html
-
-.. </legal notes>
-
+SPDX-FileCopyrightText: © 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+SPDX-License-Identifier: MIT
+License: https://opensource.org/license/mit
 *)
 
 {attribute 'no_explicit_call' := 'do not call this function block directly'} 
@@ -41,16 +31,29 @@ PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
       </Get>
     </Property>
     <Method Name="Cleanup" Id="{9439ecc4-f37f-44e7-803e-1ee8d39cff59}">
-      <Declaration><![CDATA[// Drops the borrowed framework payload before DynamicMemoryManager deletes registered objects.
-// Does not delete exceptions or reset the shared SystemException.
+      <Declaration><![CDATA[(*!
+<summary>Drops the borrowed framework payload before DynamicMemoryManager deletes registered objects.</summary>
+<description>
+Does not delete exceptions or reset the shared SystemException.
+</description>
+*)
+
 METHOD Cleanup]]></Declaration>
       <Implementation>
         <ST><![CDATA[_Exception := 0;]]></ST>
       </Implementation>
     </Method>
     <Method Name="GetLastException" Id="{e2be0c6d-d285-4e57-9453-ace2efe79ed7}">
-      <Declaration><![CDATA[// Returns the framework payload or the shared SystemException configured for this catch.
-// The result is borrowed; the shared system instance changes on the next system catch.
+      <Declaration><![CDATA[(*!
+<summary>Returns the framework payload or the shared SystemException configured for this catch.</summary>
+<description>
+The result is borrowed; the shared system instance changes on the next system catch.
+Clone a static result before callbacks that may handle another system error.
+A SystemException propagated by Throw is a dynamic framework payload retaining its original metadata.
+A native code already lost by the runtime cannot be reconstructed here.
+</description>
+*)
+
 METHOD GetLastException : IException
 VAR_INPUT 
 	exceptionCode : __SYSTEM.ExceptionCode;
@@ -79,26 +82,51 @@ PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
       </Get>
     </Property>
     <Method Name="ReThrowLastException" Id="{7ea9eaf2-899d-4c20-8cad-4853167d967f}">
-      <Declaration><![CDATA[// Pass the code from the current __CATCH, never a remembered code from another catch.
-// If callbacks can replace the framework payload, also pass the saved live exception.
-// The saved reference is borrowed; this method does not clone or take ownership.
+      <Declaration><![CDATA[(*!
+<summary>Propagates the current exception as a framework payload, wrapping native errors in SystemException.</summary>
+<description>
+Pass the current catch code and its location, or the exception already obtained for that catch.
+A supplied exception takes precedence over the code and preserves its original catch point and timestamps.
+Before callbacks that can handle another error, clone a borrowed static SystemException and retain that clone.
+Static payloads are cloned on propagation; dynamic payloads retain identity until automatic cleanup.
+The next raw catch code identifies framework transport, not the original native error.
+A latched allocation failure is raised before any allocation and is never wrapped here.
+</description>
+*)
+
 METHOD ReThrowLastException
 VAR_INPUT
 	exceptionCode : __SYSTEM.ExceptionCode;
 	exception : IException := 0;
+	catchPointNamespaceName : STRING := '';
+	catchPointPOUName : STRING := '';
+	catchPointPosition : STRING := '';
+END_VAR
+VAR
+	currentException : IException;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[IF (exceptionCode = __SYSTEM.ExceptionCode.RTSEXCPT_USER_EXCEPTION_BASE OR_ELSE exceptionCode = 3902013441) AND_THEN exception <> 0 THEN
-	_Exception := exception;
+        <ST><![CDATA[DynamicMemoryManager.RaiseIfAllocationFailed();
+
+currentException := exception;
+IF currentException = 0 THEN
+	currentException := GetLastException(exceptionCode, catchPointNamespaceName, catchPointPOUName, catchPointPosition);
 END_IF
 
-Tc2_System.F_RaiseException(exceptionCode);]]></ST>
+Throw(currentException);]]></ST>
       </Implementation>
     </Method>
     <Method Name="Throw" Id="{75adab3e-0cb1-497b-afc4-6a0aa273ac06}">
-      <Declaration><![CDATA[// Null is a no-op. Dynamic exceptions are borrowed; static exceptions are cloned.
-// The clone must implement IException and have a lifetime covering all handlers until cleanup.
-// Framework implementations register dynamic clones with DynamicMemoryManager.
+      <Declaration><![CDATA[(*!
+<summary>Null is a no-op. Dynamic exceptions are borrowed; static exceptions are cloned.</summary>
+<description>
+The clone must implement IException and have a lifetime covering all handlers until cleanup.
+Framework implementations register dynamic clones with DynamicMemoryManager.
+SystemException uses the same transport and retains its captured native code and timestamps.
+A latched allocation failure is raised before cloning.
+</description>
+*)
+
 METHOD Throw
 VAR_INPUT CONSTANT
 	exception : IException;
@@ -107,6 +135,8 @@ END_VAR]]></Declaration>
         <ST><![CDATA[IF exception = 0 THEN
 	RETURN;
 END_IF
+
+DynamicMemoryManager.RaiseIfAllocationFailed();
 
 //LogManager.TryLogException(exception, "Exception", "Exception.Throw", WideStrings.Concat255(STRING_TO_WSTRING(exception.ClassName), ".Throw"));
 

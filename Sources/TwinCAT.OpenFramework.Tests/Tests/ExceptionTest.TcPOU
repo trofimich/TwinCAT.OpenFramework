@@ -2,19 +2,9 @@
 <TcPlcObject Version="1.1.0.1" ProductVersion="3.1.4026.21">
   <POU Name="ExceptionTest" Id="{26e3c0f6-79be-0fd8-2416-047495069edc}" SpecialFunc="None">
     <Declaration><![CDATA[(*
-
-.. <legal notes>
-
-legal notes
-=================
-| SPDX-FileCopyrightText: © 2026 Oleksandr Tiutyk <trofimich@gmail.com>
-| SPDX-License-Identifier: LGPL-3.0-only
-| For details check: LGPL-3.0-only_
-
-.. _LGPL-3.0-only: https://www.gnu.org/licenses/lgpl-3.0.en.html
-
-.. </legal notes>
-
+SPDX-FileCopyrightText: © 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+SPDX-License-Identifier: MIT
+License: https://opensource.org/license/mit
 *)
 
 FUNCTION_BLOCK ExceptionTest EXTENDS TcUnit.FB_TestSuite
@@ -27,12 +17,84 @@ END_VAR]]></Declaration>
 StandardExceptions();
 AggregateException();
 RethrowSavedFrameworkException();
-RethrowNativeAfterFramework();
+RethrowSystemExceptionAfterFramework();
 TimestampFormatting();
 SystemExceptionClone();
 AggregateCloneLifetime();
 ArgumentTypeCloneIdentity();]]></ST>
     </Implementation>
+    <Method Name="AggregateCloneLifetime" Id="{b99d5e1b-9b7e-4c6c-ae5b-f36a74aebdd2}">
+      <Declaration><![CDATA[METHOD AggregateCloneLifetime
+VAR
+	source : TOF_Core.StandardException;
+	aggregate : TOF_Core.AggregateException;
+	dynamicInner : TOF_Core.IException;
+	clonedObject : TOF_Core.IObject;
+	clonedAggregate : TOF_Core.IAggregateException;
+	firstInner : TOF_Core.IException;
+	storedDynamicInner : TOF_Core.IException;
+	clonedFirstInner : TOF_Core.IException;
+	clonedSecondInner : TOF_Core.IException;
+	caughtCode : __SYSTEM.ExceptionCode;
+	caught : BOOL;
+	queried : BOOL;
+END_VAR
+VAR_INST
+	testFinished : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN 
+	RETURN; 
+END_IF
+
+TEST(__POUNAME());
+
+__TRY
+	source.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), "Original inner");
+__CATCH(caughtCode)
+	caught := TRUE;
+	dynamicInner := TOF_Core.ExceptionManager.GetLastException(caughtCode, NamespaceName, __POUNAME(), __POSITION());
+__ENDTRY
+
+AssertEquals_BOOL(TRUE, caught, 'Expected a dynamic exception from static Throw');
+
+IF caught THEN
+	aggregate.AddInnerException(source);
+	aggregate.AddInnerException(dynamicInner);
+	source.Clear();
+	firstInner := aggregate.GetInnerException(0);
+	AssertEquals_BOOL(TRUE, firstInner <> 0, 'Static inner must be cloned');
+	
+	IF firstInner <> 0 THEN
+		AssertEquals_WSTRING("Original inner", firstInner.GetMessage(), 'Clearing static source must not clear the stored clone');
+	END_IF
+	
+	storedDynamicInner := aggregate.GetInnerException(1);
+	AssertEquals_BOOL(TRUE, storedDynamicInner = dynamicInner, 'Dynamic inner must retain identity');
+
+	clonedObject := aggregate.Clone();
+	queried := __QUERYINTERFACE(clonedObject, clonedAggregate);
+	AssertEquals_BOOL(TRUE, queried, 'Aggregate clone must implement IAggregateException');
+
+	aggregate.Clear();
+	aggregate.Clear();
+
+	AssertEquals_UINT(0, aggregate.InnerExceptionCount, 'Repeated Clear must leave an empty aggregate');
+	IF queried THEN
+		AssertEquals_UINT(2, clonedAggregate.InnerExceptionCount, 'Clearing source must preserve the clone array');
+
+		clonedFirstInner := clonedAggregate.GetInnerException(0);
+		clonedSecondInner := clonedAggregate.GetInnerException(1);
+
+		AssertEquals_BOOL(TRUE, clonedFirstInner = firstInner AND_THEN clonedSecondInner = dynamicInner, 'Aggregate clone must borrow the same dynamic inners');
+	END_IF
+END_IF
+
+// All dynamic exception instances are released by the manager at the cycle boundary.
+testFinished := TRUE;
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
     <Method Name="AggregateException" Id="{a0a36685-039a-455b-9e90-8d283dc9d749}">
       <Declaration><![CDATA[METHOD AggregateException
 VAR
@@ -104,14 +166,36 @@ __CATCH(exceptionCode)
 	
 	errorMessage := caughtException.GetMessage();
 	
-	AssertEquals_INT(
-		1, 
-		Tc2_Standard.WFIND(errorMessage, "3"), 
-		'Wrong aggregate exception message caught');	
+	AssertEquals_INT(1,	Tc2_Standard.WFIND(errorMessage, "3"), 'Wrong aggregate exception message caught');	
 __ENDTRY
 AssertEquals_BOOL(TRUE, caught, 'Expected exception was not raised');
 
 testFinished := TRUE; 
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="ArgumentTypeCloneIdentity" Id="{35cd05cb-95a0-46b6-a37e-a04b522270db}">
+      <Declaration><![CDATA[METHOD ArgumentTypeCloneIdentity
+VAR
+	source : TOF_Core.ArgumentTypeNotSupportedException;
+	clonedObject : TOF_Core.IObject;
+	typedClone : TOF_Core.IArgumentTypeNotSupportedException;
+END_VAR
+VAR_INST
+	testFinished : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN 
+	RETURN; 
+END_IF
+
+TEST(__POUNAME());
+
+clonedObject := source.Clone();
+AssertEquals_BOOL(TRUE, __QUERYINTERFACE(clonedObject, typedClone), 'Clone must preserve IArgumentTypeNotSupportedException');
+
+// The dynamic clone is owned by DynamicMemoryManager.
+testFinished := TRUE;
 TEST_FINISHED();]]></ST>
       </Implementation>
     </Method>
@@ -135,17 +219,175 @@ PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
         </Implementation>
       </Get>
     </Property>
+    <Method Name="RethrowSavedFrameworkException" Id="{1392d859-48c4-418d-bce1-a5d8e9d1aa50}">
+      <Declaration><![CDATA[METHOD RethrowSavedFrameworkException
+VAR
+	original : TOF_Core.StandardException;
+	nested : TOF_Core.StandardException;
+	saved : TOF_Core.IException;
+	received : TOF_Core.IException;
+	caughtCode : __SYSTEM.ExceptionCode;
+	outerCode : __SYSTEM.ExceptionCode;
+	caught : BOOL;
+END_VAR
+VAR_INST
+	testFinished : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN 
+	RETURN; 
+END_IF
+
+TEST(__POUNAME());
+
+__TRY
+	__TRY
+		original.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), "Original");
+	__CATCH(caughtCode)
+		saved := TOF_Core.ExceptionManager.GetLastException(caughtCode, NamespaceName, __POUNAME(), __POSITION());
+
+		__TRY
+			nested.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), "Nested");
+		__CATCH
+		__ENDTRY
+
+		TOF_Core.ExceptionManager.ReThrowLastException(caughtCode, saved);
+	__ENDTRY
+__CATCH(outerCode)
+	caught := TRUE;
+	received := TOF_Core.ExceptionManager.GetLastException(outerCode, NamespaceName, __POUNAME(), __POSITION());
+__ENDTRY
+
+AssertEquals_BOOL(TRUE, caught, 'Expected rethrown framework exception');
+AssertEquals_BOOL(TRUE, saved <> 0 AND_THEN received = saved, 'Nested catch must not replace the saved payload');
+
+testFinished := TRUE;
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="RethrowSystemExceptionAfterFramework" Id="{ed6d4170-4d0a-448f-95f1-92495e20ca2e}">
+      <Declaration><![CDATA[(*!
+<summary>Checks SystemException propagation after a previous framework error, including nested handlers.</summary>
+<description>
+Supplies a known native code to the adapter without using F_RaiseException to generate the initial error.
+This tests wrapper propagation; it does not verify delivery of the initial native code by TwinCAT.
+</description>
+*)
+METHOD RethrowSystemExceptionAfterFramework
+VAR
+	previous : TOF_Core.StandardException;
+	outerCode : __SYSTEM.ExceptionCode;
+	original : TOF_Core.IException;
+	received : TOF_Core.IException;
+	repeated : TOF_Core.IException;
+	otherSystem : TOF_Core.IException;
+	expectedMessage : TOF_Core.ERROR_MESSAGE;
+	savedLocalTime : LDATE_AND_TIME;
+	savedUtcTime : LDATE_AND_TIME;
+	caught : BOOL;
+END_VAR
+VAR_INST
+	testFinished : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN 
+	RETURN; 
+END_IF
+
+TEST(__POUNAME());
+
+__TRY
+	previous.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), "Previous");
+__CATCH
+__ENDTRY
+
+// Model an already received native code; the runtime's initial raise bug is a separate limitation.
+original := TOF_Core.ExceptionManager.GetLastException(__SYSTEM.ExceptionCode.RTSEXCPT_ARRAYBOUNDS, NamespaceName, 'OriginalCatch', 'OriginalPosition');
+expectedMessage := original.GetMessage();
+savedLocalTime := original.LocalTimestamp;
+savedUtcTime := original.UtcTimestamp;
+
+caught := FALSE;
+__TRY
+	TOF_Core.ExceptionManager.ReThrowLastException(__SYSTEM.ExceptionCode.RTSEXCPT_ARRAYBOUNDS, original);
+__CATCH(outerCode)
+	caught := TRUE;
+	received := TOF_Core.ExceptionManager.GetLastException(outerCode, NamespaceName, 'OuterCatch', 'OuterPosition');
+__ENDTRY
+
+AssertEquals_BOOL(TRUE, caught, 'Expected propagated system wrapper');
+AssertEquals_BOOL(TRUE, received <> 0, 'System wrapper must be available in the next catch');
+
+IF received <> 0 THEN
+	AssertEquals_BOOL(TRUE, received.IsDynamicInstance, 'Static system wrapper must be cloned for propagation');
+	AssertEquals_BOOL(TRUE, received <> original, 'Propagated wrapper must be independent of shared storage');
+	AssertEquals_WSTRING(expectedMessage, received.GetMessage(), 'Wrapper must retain native error and original catch point');
+	AssertEquals_BOOL(TRUE, received.LocalTimestamp = savedLocalTime AND_THEN received.UtcTimestamp = savedUtcTime, 'Wrapper must retain original timestamps');
+
+	otherSystem := TOF_Core.ExceptionManager.GetLastException(__SYSTEM.ExceptionCode.RTSEXCPT_ACCESS_VIOLATION, NamespaceName, 'OtherCatch', 'OtherPosition');
+	AssertEquals_WSTRING(expectedMessage, received.GetMessage(), 'Another system catch must not overwrite the propagated wrapper');
+
+	// Replace the manager payload before propagating the saved dynamic wrapper again.
+	__TRY
+		previous.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), "Nested");
+	__CATCH
+	__ENDTRY
+	
+	caught := FALSE;
+	
+	__TRY
+		TOF_Core.ExceptionManager.ReThrowLastException(__SYSTEM.ExceptionCode.RTSEXCPT_ARRAYBOUNDS, received);
+	__CATCH(outerCode)
+		caught := TRUE;
+		repeated := TOF_Core.ExceptionManager.GetLastException(outerCode, NamespaceName, 'NextCatch', 'NextPosition');
+	__ENDTRY
+	
+	AssertEquals_BOOL(TRUE, caught, 'Expected saved system wrapper to be propagated again');
+	AssertEquals_BOOL(TRUE, repeated = received, 'Repeated propagation must retain the saved dynamic wrapper identity');
+END_IF
+
+// Callers without a saved payload supply the catch code and location directly.
+caught := FALSE;
+repeated := 0;
+
+__TRY
+	TOF_Core.ExceptionManager.ReThrowLastException(exceptionCode := __SYSTEM.ExceptionCode.RTSEXCPT_ARRAYBOUNDS, catchPointNamespaceName := NamespaceName, catchPointPOUName := 'OriginalCatch', catchPointPosition := 'OriginalPosition');
+__CATCH(outerCode)
+	caught := TRUE;
+	repeated := TOF_Core.ExceptionManager.GetLastException(outerCode, NamespaceName, 'OuterCatch', 'OuterPosition');
+__ENDTRY
+
+AssertEquals_BOOL(TRUE, caught, 'Expected native code to be wrapped without a supplied payload');
+AssertEquals_BOOL(TRUE, repeated <> 0, 'Expected a wrapper for the supplied native code');
+
+IF repeated <> 0 THEN
+	AssertEquals_WSTRING(expectedMessage, repeated.GetMessage(), 'Code-only propagation must preserve native error and catch point');
+END_IF
+
+// Dynamic wrappers belong to DynamicMemoryManager until cycle cleanup.
+testFinished := TRUE;
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
     <Method Name="SimpleException" Id="{68b793dc-aa3d-48fc-b926-e787c555c9b4}">
-      <Declaration><![CDATA[METHOD SimpleException
+      <Declaration><![CDATA[//!<param name="exceptionCode">filled by __CATCH statement</param>
+
+//!<param name="exception">exception object returned by ExceptionManager</param>
+
+//!<param name="notImplementedException">to filter specific exception type</param>
+
+//!<param name="exceptionMessage">exception message</param>
+
+METHOD SimpleException
 VAR
 	caught : BOOL;
-	exceptionCode : __SYSTEM.ExceptionCode; // filled by __CATCH statement 
+	exceptionCode : __SYSTEM.ExceptionCode; 
 	
-	exception : TOF_Core.IException; // exception object returned by ExceptionManager
+	exception : TOF_Core.IException; 
 	
-	notImplementedException : TOF_Core.INotImplementedException; // to filter specific exception type
+	notImplementedException : TOF_Core.INotImplementedException; 
 	
-	exceptionMessage : WSTRING(255); // exception message	
+	exceptionMessage : WSTRING(255); 
 END_VAR
 VAR_INST
 	testFinished : BOOL;
@@ -158,6 +400,7 @@ END_IF
 TEST(__POUNAME());
 
 caught := FALSE;
+
 __TRY	
 	throwNotImplementedException(); // your logic
 __CATCH(exceptionCode)
@@ -172,6 +415,7 @@ __CATCH(exceptionCode)
 		AssertEquals_BOOL(TRUE, FALSE, 'Wrong exception class'); // handle all other exceptions
 	END_IF
 __ENDTRY
+
 AssertEquals_BOOL(TRUE, caught, 'Expected exception was not raised');
 
 testFinished := TRUE; 
@@ -208,6 +452,7 @@ END_IF
 TEST(__POUNAME());
 
 caught := FALSE;
+
 __TRY
 	standardException1.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), exception1Message, 0, 0);
 __CATCH(exceptionCode)
@@ -222,6 +467,7 @@ __CATCH(exceptionCode)
 		recievedErrorMessage, 
 		'Wrong exception1 message caught');	
 __ENDTRY
+
 AssertEquals_BOOL(TRUE, caught, 'Expected exception was not raised');
 
 caught := FALSE;
@@ -239,6 +485,7 @@ __CATCH(exceptionCode)
 		recievedErrorMessage, 
 		'Wrong exception2 message caught');	
 __ENDTRY
+
 AssertEquals_BOOL(TRUE, caught, 'Expected exception was not raised');
 
 caught := FALSE;
@@ -256,126 +503,10 @@ __CATCH(exceptionCode)
 		recievedErrorMessage, 
 		'Wrong exception3 message caught');	
 __ENDTRY
+
 AssertEquals_BOOL(TRUE, caught, 'Expected exception was not raised');
 
 testFinished := TRUE; 
-TEST_FINISHED();]]></ST>
-      </Implementation>
-    </Method>
-    <Method Name="throwNotImplementedException" Id="{812cab99-b998-4b88-8bd1-6a55f32844fc}">
-      <Declaration><![CDATA[METHOD PRIVATE throwNotImplementedException
-VAR
-	notImplementedException : TOF_Core.NotImplementedException;
-END_VAR]]></Declaration>
-      <Implementation>
-        <ST><![CDATA[notImplementedException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION()); ]]></ST>
-      </Implementation>
-    </Method>
-    <Method Name="RethrowSavedFrameworkException" Id="{1392d859-48c4-418d-bce1-a5d8e9d1aa50}">
-      <Declaration><![CDATA[METHOD RethrowSavedFrameworkException
-VAR
-	original : TOF_Core.StandardException;
-	nested : TOF_Core.StandardException;
-	saved : TOF_Core.IException;
-	received : TOF_Core.IException;
-	caughtCode : __SYSTEM.ExceptionCode;
-	outerCode : __SYSTEM.ExceptionCode;
-	caught : BOOL;
-END_VAR
-VAR_INST
-	testFinished : BOOL;
-END_VAR]]></Declaration>
-      <Implementation>
-        <ST><![CDATA[IF testFinished THEN RETURN; END_IF
-TEST(__POUNAME());
-
-__TRY
-	__TRY
-		original.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), "Original");
-	__CATCH(caughtCode)
-		saved := TOF_Core.ExceptionManager.GetLastException(caughtCode, NamespaceName, __POUNAME(), __POSITION());
-		__TRY
-			nested.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), "Nested");
-		__CATCH
-		__ENDTRY
-		TOF_Core.ExceptionManager.ReThrowLastException(caughtCode, saved);
-	__ENDTRY
-__CATCH(outerCode)
-	caught := TRUE;
-	received := TOF_Core.ExceptionManager.GetLastException(outerCode, NamespaceName, __POUNAME(), __POSITION());
-__ENDTRY
-
-AssertEquals_BOOL(TRUE, caught, 'Expected rethrown framework exception');
-AssertEquals_BOOL(TRUE, saved <> 0 AND_THEN received = saved, 'Nested catch must not replace the saved payload');
-testFinished := TRUE;
-TEST_FINISHED();]]></ST>
-      </Implementation>
-    </Method>
-    <Method Name="RethrowNativeAfterFramework" Id="{ed6d4170-4d0a-448f-95f1-92495e20ca2e}">
-      <Declaration><![CDATA[METHOD RethrowNativeAfterFramework
-VAR
-	previous : TOF_Core.StandardException;
-	caughtCode : __SYSTEM.ExceptionCode;
-	outerCode : __SYSTEM.ExceptionCode;
-	caught : BOOL;
-END_VAR
-VAR_INST
-	testFinished : BOOL;
-END_VAR]]></Declaration>
-      <Implementation>
-        <ST><![CDATA[IF testFinished THEN RETURN; END_IF
-TEST(__POUNAME());
-
-// Leave a framework payload in the manager before raising a different native code.
-__TRY
-	previous.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), "Previous");
-__CATCH
-__ENDTRY
-
-__TRY
-	__TRY
-		// Synthetic native exception only; no allocation failure or fatal flag is injected.
-		Tc2_System.F_RaiseException(__SYSTEM.ExceptionCode.RTSEXCPT_OUT_OF_MEMORY);
-	__CATCH(caughtCode)
-		TOF_Core.ExceptionManager.ReThrowLastException(caughtCode);
-	__ENDTRY
-__CATCH(outerCode)
-	caught := TRUE;
-__ENDTRY
-
-AssertEquals_BOOL(TRUE, caught, 'Expected rethrown native exception');
-AssertEquals_BOOL(TRUE, outerCode = __SYSTEM.ExceptionCode.RTSEXCPT_OUT_OF_MEMORY, 'Rethrow must preserve the current native code');
-testFinished := TRUE;
-TEST_FINISHED();]]></ST>
-      </Implementation>
-    </Method>
-    <Method Name="TimestampFormatting" Id="{c65b5cb7-89c0-49a5-bd2f-0f0ddba4cfdd}">
-      <Declaration><![CDATA[METHOD TimestampFormatting
-VAR
-	message : TOF_Core.ERROR_MESSAGE;
-END_VAR
-VAR_INST
-	probe : ExceptionTimestampProbe;
-	testFinished : BOOL;
-END_VAR
-VAR CONSTANT
-	localTime : LDATE_AND_TIME := LDT#2026-10-06-15:04:05;
-	utcTime : LDATE_AND_TIME := LDT#2026-10-06-12:04:05;
-END_VAR]]></Declaration>
-      <Implementation>
-        <ST><![CDATA[IF testFinished THEN RETURN; END_IF
-TEST(__POUNAME());
-
-message := probe.FormatTimestamp(TOF_Core.TIMESTAMP_DISPLAY_MODE.HIDDEN, localTime, utcTime);
-AssertEquals_WSTRING("", message, 'Hidden timestamp must produce no text');
-message := probe.FormatTimestamp(TOF_Core.TIMESTAMP_DISPLAY_MODE.LOCAL, localTime, utcTime);
-AssertEquals_BOOL(TRUE, Tc2_Standard.WFIND(message, "15:04:05") > 0, 'Local mode must use local time');
-AssertEquals_BOOL(TRUE, Tc2_Standard.WFIND(message, "UTC") = 0, 'Local mode must not have a UTC suffix');
-message := probe.FormatTimestamp(TOF_Core.TIMESTAMP_DISPLAY_MODE.UTC, localTime, utcTime);
-AssertEquals_BOOL(TRUE, Tc2_Standard.WFIND(message, "12:04:05") > 0, 'UTC mode must use UTC time');
-AssertEquals_WSTRING("UTC", Tc2_Standard.WRIGHT(message, 3), 'UTC suffix must survive timestamp truncation');
-
-testFinished := TRUE;
 TEST_FINISHED();]]></ST>
       </Implementation>
     </Method>
@@ -394,16 +525,22 @@ VAR_INST
 	testFinished : BOOL;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[IF testFinished THEN RETURN; END_IF
+        <ST><![CDATA[IF testFinished THEN 
+	RETURN; 
+END_IF
+
 TEST(__POUNAME());
 
 original := TOF_Core.ExceptionManager.GetLastException(__SYSTEM.ExceptionCode.RTSEXCPT_OUT_OF_MEMORY, 'CloneTest', 'OriginalCatch', 'P1');
 message := original.GetMessage();
 savedLocalTime := original.LocalTimestamp;
 savedUtcTime := original.UtcTimestamp;
+
 clonedObject := original.Clone();
+
 queried := __QUERYINTERFACE(clonedObject, clonedException);
 AssertEquals_BOOL(TRUE, queried, 'System clone must implement IException');
+
 IF queried THEN
 	AssertEquals_BOOL(TRUE, clonedException.IsDynamicInstance, 'System clone must be dynamic');
 	// Reconfigure the shared system instance; the clone must retain the original catch point.
@@ -411,83 +548,52 @@ IF queried THEN
 	AssertEquals_WSTRING(message, clonedException.GetMessage(), 'System clone must preserve code and catch point');
 	AssertEquals_BOOL(TRUE, clonedException.LocalTimestamp = savedLocalTime AND_THEN clonedException.UtcTimestamp = savedUtcTime, 'System clone must preserve occurrence timestamps');
 END_IF
+
 // The clone belongs to DynamicMemoryManager. Do not release it manually.
 testFinished := TRUE;
 TEST_FINISHED();]]></ST>
       </Implementation>
     </Method>
-    <Method Name="AggregateCloneLifetime" Id="{b99d5e1b-9b7e-4c6c-ae5b-f36a74aebdd2}">
-      <Declaration><![CDATA[METHOD AggregateCloneLifetime
+    <Method Name="throwNotImplementedException" Id="{812cab99-b998-4b88-8bd1-6a55f32844fc}">
+      <Declaration><![CDATA[METHOD PRIVATE throwNotImplementedException
 VAR
-	source : TOF_Core.StandardException;
-	aggregate : TOF_Core.AggregateException;
-	dynamicInner : TOF_Core.IException;
-	clonedObject : TOF_Core.IObject;
-	clonedAggregate : TOF_Core.IAggregateException;
-	firstInner : TOF_Core.IException;
-	caughtCode : __SYSTEM.ExceptionCode;
-	caught : BOOL;
-	queried : BOOL;
-END_VAR
-VAR_INST
-	testFinished : BOOL;
+	notImplementedException : TOF_Core.NotImplementedException;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[IF testFinished THEN RETURN; END_IF
-TEST(__POUNAME());
-
-__TRY
-	source.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), "Original inner");
-__CATCH(caughtCode)
-	caught := TRUE;
-	dynamicInner := TOF_Core.ExceptionManager.GetLastException(caughtCode, NamespaceName, __POUNAME(), __POSITION());
-__ENDTRY
-AssertEquals_BOOL(TRUE, caught, 'Expected a dynamic exception from static Throw');
-IF caught THEN
-	aggregate.AddInnerException(source);
-	aggregate.AddInnerException(dynamicInner);
-	source.Clear();
-	firstInner := aggregate.GetInnerException(0);
-	AssertEquals_BOOL(TRUE, firstInner <> 0, 'Static inner must be cloned');
-	IF firstInner <> 0 THEN
-		AssertEquals_WSTRING("Original inner", firstInner.GetMessage(), 'Clearing static source must not clear the stored clone');
-	END_IF
-	AssertEquals_BOOL(TRUE, aggregate.GetInnerException(1) = dynamicInner, 'Dynamic inner must retain identity');
-	clonedObject := aggregate.Clone();
-	queried := __QUERYINTERFACE(clonedObject, clonedAggregate);
-	AssertEquals_BOOL(TRUE, queried, 'Aggregate clone must implement IAggregateException');
-	aggregate.Clear();
-	aggregate.Clear();
-	AssertEquals_UINT(0, aggregate.InnerExceptionCount, 'Repeated Clear must leave an empty aggregate');
-	IF queried THEN
-		AssertEquals_UINT(2, clonedAggregate.InnerExceptionCount, 'Clearing source must preserve the clone array');
-		AssertEquals_BOOL(TRUE, clonedAggregate.GetInnerException(0) = firstInner AND_THEN clonedAggregate.GetInnerException(1) = dynamicInner, 'Aggregate clone must borrow the same dynamic inners');
-	END_IF
-END_IF
-
-// All dynamic exception instances are released by the manager at the cycle boundary.
-testFinished := TRUE;
-TEST_FINISHED();]]></ST>
+        <ST><![CDATA[notImplementedException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION()); ]]></ST>
       </Implementation>
     </Method>
-    <Method Name="ArgumentTypeCloneIdentity" Id="{35cd05cb-95a0-46b6-a37e-a04b522270db}">
-      <Declaration><![CDATA[METHOD ArgumentTypeCloneIdentity
+    <Method Name="TimestampFormatting" Id="{c65b5cb7-89c0-49a5-bd2f-0f0ddba4cfdd}">
+      <Declaration><![CDATA[METHOD TimestampFormatting
 VAR
-	source : TOF_Core.ArgumentTypeNotSupportedException;
-	clonedObject : TOF_Core.IObject;
-	typedClone : TOF_Core.IArgumentTypeNotSupportedException;
+	message : TOF_Core.ERROR_MESSAGE;
 END_VAR
 VAR_INST
+	probe : ExceptionTimestampProbe;
 	testFinished : BOOL;
+END_VAR
+VAR CONSTANT
+	localTime : LDATE_AND_TIME := LDT#2026-10-06-15:04:05;
+	utcTime : LDATE_AND_TIME := LDT#2026-10-06-12:04:05;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[IF testFinished THEN RETURN; END_IF
+        <ST><![CDATA[IF testFinished THEN 
+	RETURN; 
+END_IF
+
 TEST(__POUNAME());
 
-clonedObject := source.Clone();
-AssertEquals_BOOL(TRUE, __QUERYINTERFACE(clonedObject, typedClone), 'Clone must preserve IArgumentTypeNotSupportedException');
+message := probe.FormatTimestamp(TOF_Core.TIMESTAMP_DISPLAY_MODE.HIDDEN, localTime, utcTime);
+AssertEquals_WSTRING("", message, 'Hidden timestamp must produce no text');
 
-// The dynamic clone is owned by DynamicMemoryManager.
+message := probe.FormatTimestamp(TOF_Core.TIMESTAMP_DISPLAY_MODE.LOCAL, localTime, utcTime);
+AssertEquals_BOOL(TRUE, Tc2_Standard.WFIND(message, "15:04:05") > 0, 'Local mode must use local time');
+AssertEquals_BOOL(TRUE, Tc2_Standard.WFIND(message, "UTC") = 0, 'Local mode must not have a UTC suffix');
+
+message := probe.FormatTimestamp(TOF_Core.TIMESTAMP_DISPLAY_MODE.UTC, localTime, utcTime);
+AssertEquals_BOOL(TRUE, Tc2_Standard.WFIND(message, "12:04:05") > 0, 'UTC mode must use UTC time');
+AssertEquals_WSTRING("UTC", Tc2_Standard.WRIGHT(message, 3), 'UTC suffix must survive timestamp truncation');
+
 testFinished := TRUE;
 TEST_FINISHED();]]></ST>
       </Implementation>
