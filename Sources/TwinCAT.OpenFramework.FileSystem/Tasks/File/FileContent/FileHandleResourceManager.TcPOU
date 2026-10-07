@@ -7,6 +7,16 @@ SPDX-License-Identifier: MIT
 License: https://opensource.org/license/mit
 *)
 
+(*!
+<summary>Manages file opening and best-effort closing for file-content tasks.</summary>
+<description>
+StartAcquire and StartRelease request one operation; Execute advances it until completion.
+Configure before acquisition and keep configuration unchanged until release completes.
+Do not overlap requests. FinishPendingAcquire drains a pending open during cancellation.
+Close errors are logged and finish the cleanup attempt without throwing.
+</description>
+*)
+
 {attribute 'no_explicit_call' := 'Direct call is not allowed'} 
 FUNCTION_BLOCK INTERNAL FileHandleResourceManager EXTENDS TOF_Core.Object IMPLEMENTS TOF_Core.IResourceManager
 VAR
@@ -17,6 +27,8 @@ VAR
 	_FileClose : Tc2_System.FB_FileClose;
 	
 	_FileHandleAcquired : BOOL;
+	_Acquiring : BOOL;
+	_Releasing : BOOL;
 	
 	_FileHandleResource : FileHandleResource(_FileOpen);
 END_VAR]]></Declaration>
@@ -26,31 +38,23 @@ END_VAR]]></Declaration>
     <Folder Name="Inputs" Id="{2e824959-2c7c-490d-b090-ada3c4d7a2d9}" />
     <Folder Name="Internal methods" Id="{6577756f-627e-4f88-8d2b-366f1cad24e3}" />
     <Folder Name="Outputs" Id="{1801966b-7c3d-4b3c-94f0-65a057cde663}" />
-    <Method Name="AcquireResource" Id="{812a139a-f185-479e-864d-b310d1edded3}">
-      <Declaration><![CDATA[METHOD AcquireResource
-VAR_INPUT
-	client : TOF_Core.IObject;
-END_VAR
+    <Method Name="executeAcquire" Id="{812a139a-f185-479e-864d-b310d1edded3}">
+      <Declaration><![CDATA[(*!
+<summary>Advances opening of the configured file and reports success through ResourceAcquired.</summary>
+*)
+METHOD PRIVATE executeAcquire
 VAR
-	memberNotSpecifiedException : TOF_Core.DataMemberNotSpecifiedException;
 	openFileException : TOF_Core.StandardException;
 	
 	messageBuilder : TOF_Core.WideStringBuilder;
 	message : TOF_Core.ERROR_MESSAGE;	
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[IF NOT _FileOpen.bExecute THEN
-	TOF_Core.LogManager.TryLogMessage(TOF_Core.WideStrings.Concat255("Attempt to open file '", TO_WSTRING(_FileOpen.sPathName), "'"), TOF_Core.LOG_CATEGORY.INFORMATION, TO_WSTRING(ClassName), TO_WSTRING(__POUNAME()));	
-END_IF
-
-IF TOF_Core.Strings.IsNullOrWhiteSpace(_FileOpen.sPathName) THEN
-	memberNotSpecifiedException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), 'FilePath');
-END_IF
-
-_FileClose(bExecute := FALSE);
-_FileOpen(bExecute := TRUE);
+        <ST><![CDATA[_FileOpen(bExecute := TRUE);
 	
 IF _FileOpen.bError THEN
+	_Acquiring := FALSE;
+
 	messageBuilder
 		.AppendString("Error while open file '")
 		.Append(_FileOpen.sPathName)
@@ -63,6 +67,7 @@ IF _FileOpen.bError THEN
 END_IF
 
 IF NOT _FileOpen.bBusy AND_THEN _FileOpen.hFile > 0 THEN
+	_Acquiring := FALSE;
 	_FileHandleAcquired := TRUE;
 	
 	messageBuilder
@@ -147,9 +152,9 @@ PROPERTY FilePath : Tc2_System.T_MaxString]]></Declaration>
     </Property>
     <Method Name="FinishPendingAcquire" Id="{c81dece5-ef14-407d-ad17-b6960c0c25b9}" FolderPath="Internal methods\">
       <Declaration><![CDATA[(*!
-<summary>Called during cancellation before resource release. Advance only an open</summary>
+<summary>Finishes a pending open during cancellation without starting a new open.</summary>
 <description>
-already in progress; TRUE means its response has been processed (or none was pending).
+TRUE means its response has been processed (or none was pending), and acquisition is no longer scheduled.
 Preserve a successfully returned handle so the normal release path can close it.
 </description>
 *)
@@ -164,11 +169,25 @@ METHOD INTERNAL FinishPendingAcquire : BOOL]]></Declaration>
 	END_IF
 END_IF
 
-FinishPendingAcquire := NOT _FileOpen.bBusy;]]></ST>
+FinishPendingAcquire := NOT _FileOpen.bBusy;
+
+IF FinishPendingAcquire THEN
+	_Acquiring := FALSE;
+END_IF]]></ST>
       </Implementation>
     </Method>
     <Method Name="GetResource" Id="{da34d722-f49b-4fa9-bce2-28d0fd1bb9f9}">
-      <Declaration><![CDATA[METHOD GetResource : TOF_Core.IObject]]></Declaration>
+      <Declaration><![CDATA[(*!
+<summary>Returns a borrowed resource object owned by this manager.</summary>
+<description>
+The caller must not delete the returned object. It may be obtained before acquisition
+and retained while the manager remains alive, including across release and reacquisition.
+The object remains valid after release, but its presence does not mean the resource is acquired.
+Use the underlying resource only after successful acquisition and before release begins.
+Do not reuse a handle saved from an earlier acquisition after release.
+</description>
+*)
+METHOD GetResource : TOF_Core.IObject]]></Declaration>
       <Implementation>
         <ST><![CDATA[GetResource := _FileHandleResource;]]></ST>
       </Implementation>
@@ -220,21 +239,18 @@ PROPERTY PathType : Tc2_System.E_OpenPath]]></Declaration>
         </Implementation>
       </Set>
     </Property>
-    <Method Name="ReleaseResource" Id="{a4a50be3-0dfc-44f6-bb5a-f1a98beada52}">
-      <Declaration><![CDATA[METHOD ReleaseResource
-VAR_INPUT
-	client : TOF_Core.IObject;
-END_VAR
+    <Method Name="executeRelease" Id="{a4a50be3-0dfc-44f6-bb5a-f1a98beada52}">
+      <Declaration><![CDATA[(*!
+<summary>Advances best-effort file closing; close errors are logged and the cleanup attempt is completed.</summary>
+*)
+METHOD PRIVATE executeRelease
 VAR	
 	messageBuilder : TOF_Core.WideStringBuilder;
 	message : TOF_Core.ERROR_MESSAGE;	
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[IF NOT _FileClose.bExecute THEN
-	TOF_Core.LogManager.TryLogMessage(TOF_Core.WideStrings.Concat255("Attempt to close file '", TO_WSTRING(_FileOpen.sPathName), "'"), TOF_Core.LOG_CATEGORY.INFORMATION, TO_WSTRING(ClassName), TO_WSTRING(__POUNAME()));	
-END_IF
-
-IF NOT _FileHandleAcquired THEN
+        <ST><![CDATA[IF NOT _FileHandleAcquired THEN
+	_Releasing := FALSE;
 	_FileOpen(bExecute := FALSE);
 	
 	RETURN;
@@ -243,6 +259,7 @@ END_IF
 _FileClose(hFile := _FileOpen.hFile, bExecute := TRUE);
 
 IF NOT _FileClose.bBusy THEN
+	_Releasing := FALSE;
 	_FileHandleAcquired := FALSE;
 	
 	_FileOpen(bExecute := FALSE);
@@ -254,7 +271,7 @@ IF NOT _FileClose.bBusy THEN
 			.AppendString("'")
 			.AssignToString(message);
 	
-		TOF_Core.LogManager.TryLogMessage(message, TOF_Core.LOG_CATEGORY.ERROR, TO_WSTRING(ClassName), "FileHandleResourceManager.AcquireResource", "FileHandleResourceManager.AcquireResource.Done");
+		TOF_Core.LogManager.TryLogMessage(message, TOF_Core.LOG_CATEGORY.ERROR, TO_WSTRING(ClassName), "FileHandleResourceManager.executeRelease", "FileHandleResourceManager.executeRelease.Done");
 	ELSE
 		messageBuilder
 			.AppendString("File '")
@@ -304,5 +321,65 @@ _FileClose.tTimeout := Timeout;]]></ST>
         </Implementation>
       </Set>
     </Property>
+    <Method Name="Execute" Id="{a6fd7154-99a5-481c-85e2-93b3106fac63}">
+      <Declaration><![CDATA[(*!
+<summary>Advances the requested acquire or release operation; does nothing when idle.</summary>
+*)
+METHOD Execute]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF _Acquiring THEN
+	executeAcquire();
+ELSIF _Releasing THEN
+	executeRelease();
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="StartAcquire" Id="{16d0f4b4-ae54-48bd-8d26-f722c5bc38f3}">
+      <Declaration><![CDATA[(*!
+<summary>Requests opening of the configured file on subsequent Execute calls.</summary>
+<description>
+Call once with no pending operation. An already acquired handle is retained.
+An empty FilePath raises an exception before the request is scheduled.
+</description>
+*)
+METHOD StartAcquire
+VAR
+	memberNotSpecifiedException : TOF_Core.DataMemberNotSpecifiedException;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF _FileHandleAcquired THEN
+	RETURN;
+END_IF
+
+IF TOF_Core.Strings.IsNullOrWhiteSpace(_FileOpen.sPathName) THEN
+	memberNotSpecifiedException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), 'FilePath');
+END_IF
+
+TOF_Core.LogManager.TryLogMessage(TOF_Core.WideStrings.Concat255("Attempt to open file '", TO_WSTRING(_FileOpen.sPathName), "'"), TOF_Core.LOG_CATEGORY.INFORMATION, TO_WSTRING(ClassName), TO_WSTRING(__POUNAME()));
+
+_FileClose(bExecute := FALSE);
+_FileOpen(bExecute := FALSE);
+_Acquiring := TRUE;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="StartRelease" Id="{8c1a0c78-599e-44dc-a8be-967c680bd37f}">
+      <Declaration><![CDATA[(*!
+<summary>Requests best-effort closing on subsequent Execute calls.</summary>
+<description>
+Acquisition must have completed or been drained by FinishPendingAcquire.
+Call once; releasing an absent handle is allowed.
+</description>
+*)
+METHOD StartRelease]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[TOF_Core.LogManager.TryLogMessage(TOF_Core.WideStrings.Concat255("Attempt to close file '", TO_WSTRING(_FileOpen.sPathName), "'"), TOF_Core.LOG_CATEGORY.INFORMATION, TO_WSTRING(ClassName), TO_WSTRING(__POUNAME()));
+
+IF _FileHandleAcquired THEN
+	_Releasing := TRUE;
+ELSE
+	_FileOpen(bExecute := FALSE);
+END_IF]]></ST>
+      </Implementation>
+    </Method>
   </POU>
 </TcPlcObject>

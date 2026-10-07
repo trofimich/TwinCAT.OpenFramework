@@ -8,7 +8,11 @@ License: https://opensource.org/license/mit
 *)
 
 (*!
-<summary>ITask abstract implementation</summary>
+<summary>Implements a reusable task with acquisition, processing and release phases.</summary>
+<description>
+Each resource phase issues its start request once, then advances the manager through Execute.
+Cancellation and stop callbacks control when processing ends and resource release begins.
+</description>
 *)
 
 {attribute 'no_explicit_call' := 'do not call this function block directly'} 
@@ -25,6 +29,7 @@ VAR
 	_StateChanged : BOOL;	
 	{attribute 'hide'} 
 	_RunningSubstate : TASK_RUNNING_SUBSTATE;
+	_ResourceOperationStarted : BOOL;
 
 	{attribute 'hide'} 
 	_OriginalStopReason : TASK_STOP_REASON;
@@ -182,7 +187,11 @@ END_CASE
       </Implementation>
     </Method>
     <Method Name="handleRunning" Id="{0c0b3c2d-2039-40cf-90c1-1bc48ceedfa2}" FolderPath="Service members\">
-      <Declaration><![CDATA[METHOD PRIVATE handleRunning
+      <Declaration><![CDATA[(*!
+<summary>Advances cancellation or the current resource and processing phase.</summary>
+<description>Each resource phase calls its start method once, then Execute until completion.</description>
+*)
+METHOD PRIVATE handleRunning
 VAR
 	readyToStop : BOOL;
 
@@ -222,7 +231,12 @@ END_IF
 CASE _RunningSubstate OF
 	TASK_RUNNING_SUBSTATE.RESOURCE_ACQUIRING:
 		__TRY
-			resourceManager.AcquireResource(THIS^);
+			IF NOT _ResourceOperationStarted THEN
+				_ResourceOperationStarted := TRUE;
+				resourceManager.StartAcquire();
+			END_IF
+
+			resourceManager.Execute();
 			
 			IF resourceManager.ResourceAcquired THEN
 				setRunningSubstate(TASK_RUNNING_SUBSTATE.PROCESSING);
@@ -286,7 +300,12 @@ CASE _RunningSubstate OF
 	
 	TASK_RUNNING_SUBSTATE.RESOURCE_RELEASING:
 		__TRY
-			resourceManager.ReleaseResource(THIS^);
+			IF NOT _ResourceOperationStarted THEN
+				_ResourceOperationStarted := TRUE;
+				resourceManager.StartRelease();
+			END_IF
+
+			resourceManager.Execute();
 			
 			IF NOT resourceManager.ResourceAcquired THEN
 				setStoppedState(_OriginalStopReason, _OriginalStopReasonMessage);
@@ -508,7 +527,8 @@ END_IF]]></ST>
 <summary>Override to supply this task's resource manager; the base returns 0</summary>
 <description>
 for tasks without a managed resource. Task drives acquisition before work
-and release during stopping. A release exception terminates the task with
+and release during stopping, calling StartAcquire or StartRelease once per phase
+and Execute to advance it. A release exception terminates the task with
 FAILURE without an automatic release retry; the manager defines recovery
 for any resource still held. Return a stable manager throughout a run;
 Keep ResourceManager and ResourceAcquired getters free of side effects;
@@ -650,7 +670,10 @@ __ENDTRY]]></ST>
       </Implementation>
     </Method>
     <Method Name="setIdleState" Id="{d671c618-6e83-4250-9051-fb8450c86902}" FolderPath="Service members\">
-      <Declaration><![CDATA[METHOD PRIVATE FINAL setIdleState
+      <Declaration><![CDATA[(*!
+<summary>Prepares the ready state and clears the previous resource operation marker.</summary>
+*)
+METHOD PRIVATE FINAL setIdleState
 VAR CONSTANT
 	NEW_STATE : TASK_STATE := TASK_STATE.READY;
 END_VAR]]></Declaration>
@@ -670,6 +693,7 @@ END_IF
 
 _CancelRequested := FALSE;
 _RunningSubstate := TASK_RUNNING_SUBSTATE.PROCESSING;
+_ResourceOperationStarted := FALSE;
 
 _OriginalStopReason := TASK_STOP_REASON.WORK_DONE;
 _OriginalStopReasonMessage := "";	
@@ -679,7 +703,10 @@ _FinalStopReasonMessage := "";	]]></ST>
       </Implementation>
     </Method>
     <Method Name="setRunningState" Id="{1d4e1480-16f7-42b7-b601-af024b62cfc3}" FolderPath="Service members\">
-      <Declaration><![CDATA[METHOD PRIVATE FINAL setRunningState
+      <Declaration><![CDATA[(*!
+<summary>Initializes a new run and prepares its first resource phase.</summary>
+*)
+METHOD PRIVATE FINAL setRunningState
 VAR
 	resourceManagerForStart : TOF_Core.IResourceManager;
 	initialRunningSubstate : TASK_RUNNING_SUBSTATE;
@@ -707,6 +734,7 @@ IF _State <> NEW_STATE THEN
 END_IF
 
 _RunningSubstate := initialRunningSubstate;
+_ResourceOperationStarted := FALSE;
 
 _OriginalStopReason := TASK_STOP_REASON.WORK_DONE;
 _OriginalStopReasonMessage := "";
@@ -721,13 +749,17 @@ END_IF]]></ST>
       </Implementation>
     </Method>
     <Method Name="setRunningSubstate" Id="{d7f6ee1f-b4e3-4b35-9d2a-d0008766d37e}" FolderPath="Service members\">
-      <Declaration><![CDATA[METHOD PRIVATE setRunningSubstate
+      <Declaration><![CDATA[(*!
+<summary>Enters a running phase and prepares its one-time resource start request.</summary>
+*)
+METHOD PRIVATE setRunningSubstate
 VAR_INPUT
 	runningSubState : TASK_RUNNING_SUBSTATE;
 END_VAR
 ]]></Declaration>
       <Implementation>
-        <ST><![CDATA[_RunningSubstate := runningSubState;]]></ST>
+        <ST><![CDATA[_RunningSubstate := runningSubState;
+_ResourceOperationStarted := FALSE;]]></ST>
       </Implementation>
     </Method>
     <Method Name="setStoppedState" Id="{8d421360-d406-412c-baae-5d7b7f498ca6}" FolderPath="Service members\">
