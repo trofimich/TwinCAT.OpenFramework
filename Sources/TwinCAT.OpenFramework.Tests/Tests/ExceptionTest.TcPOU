@@ -7,6 +7,10 @@ SPDX-License-Identifier: MIT
 License: https://opensource.org/license/mit
 *)
 
+(*!
+<summary>Exercises exception diagnostics, propagation and clone lifetime contracts.</summary>
+<description>Tests use task-scoped exception cleanup. Borrowed inner views do not own the exceptions they inspect.</description>
+*)
 FUNCTION_BLOCK ExceptionTest EXTENDS TcUnit.FB_TestSuite
 VAR
 	{attribute 'hide'} 
@@ -24,17 +28,21 @@ AggregateCloneLifetime();
 ArgumentTypeCloneIdentity();]]></ST>
     </Implementation>
     <Method Name="AggregateCloneLifetime" Id="{b99d5e1b-9b7e-4c6c-ae5b-f36a74aebdd2}">
-      <Declaration><![CDATA[METHOD AggregateCloneLifetime
+      <Declaration><![CDATA[(*!
+<summary>Checks that an aggregate clone owns its array while sharing dynamic causes.</summary>
+<description>Reads entries through IReadOnlyException and compares identities through the same interface type. Clearing the source aggregate must leave the clone entries available until task cleanup.</description>
+*)
+METHOD AggregateCloneLifetime
 VAR
 	source : TOF_Core.StandardException;
 	aggregate : TOF_Core.AggregateException;
-	dynamicInner : TOF_Core.IException;
+	dynamicInner : TOF_Core.IReadOnlyException;
 	clonedObject : TOF_Core.IObject;
 	clonedAggregate : TOF_Core.IAggregateException;
-	firstInner : TOF_Core.IException;
-	storedDynamicInner : TOF_Core.IException;
-	clonedFirstInner : TOF_Core.IException;
-	clonedSecondInner : TOF_Core.IException;
+	firstInner : TOF_Core.IReadOnlyException;
+	storedDynamicInner : TOF_Core.IReadOnlyException;
+	clonedFirstInner : TOF_Core.IReadOnlyException;
+	clonedSecondInner : TOF_Core.IReadOnlyException;
 	caughtCode : __SYSTEM.ExceptionCode;
 	caught : BOOL;
 	queried : BOOL;
@@ -220,7 +228,11 @@ PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
       </Get>
     </Property>
     <Method Name="RethrowSavedFrameworkException" Id="{1392d859-48c4-418d-bce1-a5d8e9d1aa50}">
-      <Declaration><![CDATA[METHOD RethrowSavedFrameworkException
+      <Declaration><![CDATA[(*!
+<summary>Checks propagation of a saved framework exception after a nested handler.</summary>
+<description>Propagates the saved exception through ExceptionManager.Throw; nested handlers do not select a replacement payload. Static system wrappers must be cloned before callbacks that can overwrite them.</description>
+*)
+METHOD RethrowSavedFrameworkException
 VAR
 	original : TOF_Core.StandardException;
 	nested : TOF_Core.StandardException;
@@ -251,7 +263,7 @@ __TRY
 		__CATCH
 		__ENDTRY
 
-		TOF_Core.ExceptionManager.ReThrowLastException(caughtCode, saved);
+		TOF_Core.ExceptionManager.Throw(saved);
 	__ENDTRY
 __CATCH(outerCode)
 	caught := TRUE;
@@ -268,7 +280,7 @@ TEST_FINISHED();]]></ST>
     <Method Name="RethrowSystemExceptionAfterFramework" Id="{ed6d4170-4d0a-448f-95f1-92495e20ca2e}">
       <Declaration><![CDATA[(*!
 <summary>Checks SystemException propagation after a previous framework error, including nested handlers.</summary>
-<description>
+<description>Propagates the saved exception through ExceptionManager.Throw; nested handlers do not select a replacement payload. Static system wrappers must be cloned before callbacks that can overwrite them. 
 Supplies a known native code to the adapter without using F_RaiseException to generate the initial error.
 This tests wrapper propagation; it does not verify delivery of the initial native code by TwinCAT.
 </description>
@@ -309,7 +321,7 @@ savedUtcTime := original.UtcTimestamp;
 
 caught := FALSE;
 __TRY
-	TOF_Core.ExceptionManager.ReThrowLastException(__SYSTEM.ExceptionCode.RTSEXCPT_ARRAYBOUNDS, original);
+	TOF_Core.ExceptionManager.Throw(original);
 __CATCH(outerCode)
 	caught := TRUE;
 	received := TOF_Core.ExceptionManager.GetLastException(outerCode, NamespaceName, 'OuterCatch', 'OuterPosition');
@@ -336,7 +348,7 @@ IF received <> 0 THEN
 	caught := FALSE;
 	
 	__TRY
-		TOF_Core.ExceptionManager.ReThrowLastException(__SYSTEM.ExceptionCode.RTSEXCPT_ARRAYBOUNDS, received);
+		TOF_Core.ExceptionManager.Throw(received);
 	__CATCH(outerCode)
 		caught := TRUE;
 		repeated := TOF_Core.ExceptionManager.GetLastException(outerCode, NamespaceName, 'NextCatch', 'NextPosition');

@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <TcPlcObject Version="1.1.0.1">
   <POU Name="Strings" Id="{7aa7463a-7b84-4807-b00e-cbaa6fc59270}" SpecialFunc="None">
     <Declaration><![CDATA[(*
@@ -8,6 +8,10 @@ License: https://opensource.org/license/mit
 *)
 
 {attribute 'no_explicit_call' := 'Direct call is not allowed'} 
+(*!
+<summary>Provides STRING constants and helpers for text manipulation and value formatting.</summary>
+<description>Buffer ownership and size requirements are defined by each operation. ANY formatting reads the caller's value through its type descriptor.</description>
+*)
 PROGRAM Strings
 VAR_INPUT CONSTANT
 	CharSize : BYTE := 1;
@@ -47,7 +51,11 @@ END_VAR]]></Declaration>
       </Implementation>
     </Method>
     <Method Name="AppendToTarget" Id="{7d3432ad-7058-4ce7-80d2-01c9d35ec6fb}" FolderPath="Append\">
-      <Declaration><![CDATA[METHOD AppendToTarget
+      <Declaration><![CDATA[(*!
+<summary>Prepares diagnostic text locally before passing it to read-only logging or exception parameters.</summary>
+<description>Computed diagnostic strings are held in local buffers for the duration of the receiving call.</description>
+*)
+METHOD AppendToTarget
 VAR_INPUT
 	targetString : ANY_STRING;
 END_VAR
@@ -55,12 +63,16 @@ VAR_IN_OUT CONSTANT
 	sourceString : STRING;
 END_VAR
 VAR
+	formattedExceptionMessage : WSTRING(255);
+
 	stringTypeNotSupportedException : NotSupportedException;
 	targetStringMemoryOverflowExcepton : TargetVariableMemoryOverflowException;	
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[IF targetString.TypeClass <> __SYSTEM.TYPE_CLASS.TYPE_STRING THEN
-	stringTypeNotSupportedException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), Tc2_Utilities.WCONCAT("Not supported type ", TO_WSTRING(targetString.TypeClass)));
+	formattedExceptionMessage := Tc2_Utilities.WCONCAT("Not supported type ", TO_WSTRING(targetString.TypeClass));
+
+	stringTypeNotSupportedException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), formattedExceptionMessage);
 END_IF
 
 IF NOT InternalAppendToTarget(targetString, ADR(sourceString), 0, 0, 0, 0, 0, 0, 0, 0, 0) THEN
@@ -69,7 +81,11 @@ END_IF]]></ST>
       </Implementation>
     </Method>
     <Method Name="AppendToTarget255" Id="{b845707e-9f67-4676-b647-f64266f03b85}" FolderPath="Append\">
-      <Declaration><![CDATA[METHOD AppendToTarget255
+      <Declaration><![CDATA[(*!
+<summary>Prepares diagnostic text locally before passing it to read-only logging or exception parameters.</summary>
+<description>Computed diagnostic strings are held in local buffers for the duration of the receiving call.</description>
+*)
+METHOD AppendToTarget255
 VAR_INPUT
 	targetString : ANY_STRING;
 	sourceString1 : STRING(255);
@@ -84,12 +100,16 @@ VAR_INPUT
 	sourceString10 : STRING(255) := '';
 END_VAR
 VAR
+	formattedExceptionMessage : WSTRING(255);
+
 	stringTypeNotSupportedException : NotSupportedException;
 	targetStringMemoryOverflowExcepton : TargetVariableMemoryOverflowException;	
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[IF targetString.TypeClass <> __SYSTEM.TYPE_CLASS.TYPE_STRING THEN
-	stringTypeNotSupportedException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), Tc2_Utilities.WCONCAT("Not supported type ", TO_WSTRING(targetString.TypeClass)));
+	formattedExceptionMessage := Tc2_Utilities.WCONCAT("Not supported type ", TO_WSTRING(targetString.TypeClass));
+
+	stringTypeNotSupportedException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), formattedExceptionMessage);
 END_IF
 
 IF NOT InternalAppendToTarget(targetString, ADR(sourceString1), ADR(sourceString2), ADR(sourceString3), ADR(sourceString4), ADR(sourceString5), ADR(sourceString6), ADR(sourceString7), ADR(sourceString8), ADR(sourceString9), ADR(sourceString10)) THEN
@@ -279,7 +299,12 @@ END_VAR
       </Implementation>
     </Method>
     <Method Name="InternalAnyToString255" Id="{dbd6569e-fd5b-4765-a843-fc6bef815e68}" FolderPath="Service members\">
-      <Declaration><![CDATA[METHOD INTERNAL InternalAnyToString255 : STRING(255)
+      <Declaration><![CDATA[(*!
+<summary>Formats a supported ANY value into a STRING of at most 255 characters.</summary>
+<description>Borrows the value storage for this call. The descriptor must identify a live value of the stated type. The result does not retain a reference to the source. Unhandled type classes return a diagnostic marker containing the type class and descriptor size in bytes, without reading value storage, allocating heap memory or raising a formatting exception. This also applies to an unhandled type with a null data address.</description>
+<param name="value">Type descriptor and address of the value to format.</param>
+*)
+METHOD INTERNAL InternalAnyToString255 : STRING(255)
 VAR_IN_OUT CONSTANT
 	value : __SYSTEM.AnyType;
 END_VAR
@@ -288,7 +313,7 @@ VAR
 
 	anyByte : POINTER TO BYTE;
 	anyWord : POINTER TO WORD;
-	anyDWord : POINTER TO LWORD;
+	anyDWord : POINTER TO DWORD;
 	anyLWord : POINTER TO LWORD;
 	
 	anySInt : POINTER TO SINT;
@@ -312,6 +337,8 @@ VAR
 	anyDate : POINTER TO DATE;
 	anyDateAndTime : POINTER TO DATE_AND_TIME;
 	anyTimeOfDay : POINTER TO TOD;
+
+	anyPVoid : POINTER TO PVOID;
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[CASE value.TypeClass OF
@@ -397,28 +424,11 @@ END_VAR]]></Declaration>
 		InternalAnyToString255 := TO_STRING(anyTimeOfDay^);
 	
 	__SYSTEM.TYPE_CLASS.TYPE_POINTER, __SYSTEM.TYPE_CLASS.TYPE_REFERENCE:
-		InternalAnyToString255 := Tc2_Utilities.PVOID_TO_HEXSTR(anyDate, 8, FALSE);		
+		anyPVoid := value.pValue;
+		InternalAnyToString255 := Tc2_Utilities.PVOID_TO_HEXSTR(anyPVoid^, TO_INT(SIZEOF(PVOID) * 2), FALSE);		
 	
-	(*__SYSTEM.TYPE_CLASS.TYPE_SUBRANGE:
-	__SYSTEM.TYPE_CLASS.TYPE_ENUM:
-	__SYSTEM.TYPE_CLASS.TYPE_ARRAY:
-	__SYSTEM.TYPE_CLASS.TYPE_PARAMS:
-	__SYSTEM.TYPE_CLASS.TYPE_USERDEF:
-	__SYSTEM.TYPE_CLASS.TYPE_NONE:
-	__SYSTEM.TYPE_CLASS.TYPE_ANY:
-	__SYSTEM.TYPE_CLASS.TYPE_ANYBIT:
-	__SYSTEM.TYPE_CLASS.TYPE_ANYDATE:
-	__SYSTEM.TYPE_CLASS.TYPE_ANYINT:
-	__SYSTEM.TYPE_CLASS.TYPE_ANYNUM:
-	__SYSTEM.TYPE_CLASS.TYPE_ANYREAL:
-	__SYSTEM.TYPE_CLASS.TYPE_LAZY:
-	__SYSTEM.TYPE_CLASS.TYPE_BITCONST:*)
 	ELSE
-		IF value.pValue <> 0 THEN
-			InternalAnyToString255 := TO_STRING(value.pValue^); 
-		ELSE
-			InternalAnyToString255 := 'NULL';
-		END_IF
+		InternalAnyToString255 := Concat255('<value unavailable; type class: ', TO_STRING(value.TypeClass), '; size: ', TO_STRING(value.diSize), ' bytes>');
 END_CASE	]]></ST>
       </Implementation>
     </Method>
@@ -870,7 +880,11 @@ IsUnsignedInteger := digitFound;]]></ST>
       </Implementation>
     </Method>
     <Method Name="JoinToTarget" Id="{f9356af7-1c6b-416a-a5c8-0029f23752d3}" FolderPath="Join\">
-      <Declaration><![CDATA[METHOD JoinToTarget
+      <Declaration><![CDATA[(*!
+<summary>Prepares diagnostic text locally before passing it to read-only logging or exception parameters.</summary>
+<description>Computed diagnostic strings are held in local buffers for the duration of the receiving call.</description>
+*)
+METHOD JoinToTarget
 VAR_INPUT
 	targetString : ANY_STRING;
 END_VAR
@@ -881,13 +895,17 @@ VAR_INPUT
 	count : UDINT := 0;
 END_VAR
 VAR
+	formattedExceptionMessage : WSTRING(255);
+
 	stringTypeNotSupportedException : NotSupportedException;
 	sourceEnumeratorNullException : ArgumentNotSpecifiedException;
 	targetStringMemoryOverflowExcepton : TargetVariableMemoryOverflowException;	
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[IF targetString.TypeClass <> __SYSTEM.TYPE_CLASS.TYPE_STRING THEN
-	stringTypeNotSupportedException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), Tc2_Utilities.WCONCAT("Not supported type ", TO_WSTRING(targetString.TypeClass)));
+	formattedExceptionMessage := Tc2_Utilities.WCONCAT("Not supported type ", TO_WSTRING(targetString.TypeClass));
+
+	stringTypeNotSupportedException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), formattedExceptionMessage);
 END_IF
 
 IF sourceEnumerator = 0 THEN
@@ -910,7 +928,11 @@ PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
       </Get>
     </Property>
     <Method Name="ReplaceInSource" Id="{f06898de-32ea-4f51-b053-1b282cb73a8a}" FolderPath="Replace\">
-      <Declaration><![CDATA[METHOD ReplaceInSource
+      <Declaration><![CDATA[(*!
+<summary>Prepares diagnostic text locally before passing it to read-only logging or exception parameters.</summary>
+<description>Computed diagnostic strings are held in local buffers for the duration of the receiving call.</description>
+*)
+METHOD ReplaceInSource
 VAR_INPUT
 	sourceString : ANY_STRING;
 END_VAR
@@ -930,10 +952,15 @@ VAR
 	sourceStringMemoryOverflowExcepton : TargetVariableMemoryOverflowException;
 	
 	replaceResult : BOOL; 
+END_VAR
+VAR
+	formattedExceptionMessage : WSTRING(255);
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[IF sourceString.TypeClass <> __SYSTEM.TYPE_CLASS.TYPE_STRING THEN
-	stringTypeNotSupportedException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), Tc2_Utilities.WCONCAT("Not supported type ", TO_WSTRING(sourceString.TypeClass)));
+	formattedExceptionMessage := Tc2_Utilities.WCONCAT("Not supported type ", TO_WSTRING(sourceString.TypeClass));
+
+	stringTypeNotSupportedException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), formattedExceptionMessage);
 END_IF
 
 IF NOT InternalReplaceInSource(sourceString, ADR(oldSubstring), ADR(newSubstring), maxReplacements, skipReplacements, replacementCount => replacementCount) THEN
@@ -942,7 +969,11 @@ END_IF]]></ST>
       </Implementation>
     </Method>
     <Method Name="ReplaceInSource255" Id="{f41fa253-7b57-4bb9-a052-ea59a6eb6bff}" FolderPath="Replace\">
-      <Declaration><![CDATA[METHOD ReplaceInSource255
+      <Declaration><![CDATA[(*!
+<summary>Prepares diagnostic text locally before passing it to read-only logging or exception parameters.</summary>
+<description>Computed diagnostic strings are held in local buffers for the duration of the receiving call.</description>
+*)
+METHOD ReplaceInSource255
 VAR_INPUT
 	sourceString : ANY_STRING;
 	oldSubstring : STRING(255);
@@ -958,10 +989,15 @@ VAR
 	sourceStringMemoryOverflowExcepton : TargetVariableMemoryOverflowException;
 	
 	replaceResult : BOOL; 
+END_VAR
+VAR
+	formattedExceptionMessage : WSTRING(255);
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[IF sourceString.TypeClass <> __SYSTEM.TYPE_CLASS.TYPE_STRING THEN
-	stringTypeNotSupportedException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), Tc2_Utilities.WCONCAT("Not supported type ", TO_WSTRING(sourceString.TypeClass)));
+	formattedExceptionMessage := Tc2_Utilities.WCONCAT("Not supported type ", TO_WSTRING(sourceString.TypeClass));
+
+	stringTypeNotSupportedException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), formattedExceptionMessage);
 END_IF
 
 IF NOT InternalReplaceInSource(sourceString, ADR(oldSubstring), ADR(newSubstring), maxReplacements, skipReplacements, replacementCount => replacementCount) THEN

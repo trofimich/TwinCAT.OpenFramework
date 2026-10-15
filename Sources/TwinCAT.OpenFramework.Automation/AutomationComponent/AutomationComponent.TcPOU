@@ -1,10 +1,23 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <TcPlcObject Version="1.1.0.1">
   <POU Name="AutomationComponent" Id="{b4897826-50fc-4a14-bfab-9ca314d8ba3a}" SpecialFunc="None">
     <Declaration><![CDATA[(*
 SPDX-FileCopyrightText: © 2026 Oleksandr Tiutyk <trofimich@gmail.com>
 SPDX-License-Identifier: MIT
 License: https://opensource.org/license/mit
+*)
+
+(*!
+<summary>Provides common automation state, diagnostics and local event reception.</summary>
+<description>
+Both event delivery directions call OnEventReceived locally. Descendants with a parent or children
+extend the appropriate direction with forwarding; terminal nodes only receive the event.
+Event delivery is synchronous and borrowed, without retaining the event or transferring ownership.
+Delivery and forwarding are independent of Enabled and operational state. OnEventReceived decides
+whether the component should react in its current state; inactivity alone does not stop propagation.
+The event must be non-null and live. Handler exceptions abort delivery and propagate to the caller;
+effects of handlers already invoked are not rolled back.
+</description>
 *)
 
 FUNCTION_BLOCK ABSTRACT AutomationComponent EXTENDS TOF_Core.Object IMPLEMENTS IAutomationComponent
@@ -33,6 +46,48 @@ END_VAR]]></Declaration>
     </Implementation>
     <Folder Name="Methods to override" Id="{9e76983f-3aef-47df-97e1-2bd089a83751}" />
     <Folder Name="Service methods" Id="{1ca304da-6558-4606-898c-97a283347ac4}" />
+    <Method Name="BroadcastEvent" Id="{d67c04d1-58bd-4df7-9b20-74ea96e2adc1}">
+      <Declaration><![CDATA[(*!
+<summary>Receives a broadcast event locally without forwarding it.</summary>
+<description>
+Calls OnEventReceived once. This is the terminal behavior for a leaf; branches override it to forward
+to children unless propagation is stopped. Handled does not suppress delivery.
+The event is borrowed for this synchronous call and is not retained or owned by the component.
+</description>
+*)
+
+METHOD BroadcastEvent
+VAR_INPUT
+	event : TOF_Core.IEvent;
+END_VAR
+VAR
+	stopPropagation : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[OnEventReceived(event := event, stopPropagation => stopPropagation);]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="BubbleEvent" Id="{829ca0e6-191f-4c0e-a95b-b8275c1a0d3c}">
+      <Declaration><![CDATA[(*!
+<summary>Receives a bubbling event locally without forwarding it.</summary>
+<description>
+Calls OnEventReceived once. This is the terminal behavior for a root; components with a parent
+override it to forward upward unless propagation is stopped. Handled does not suppress delivery.
+The event is borrowed for this synchronous call and is not retained or owned by the component.
+</description>
+*)
+
+METHOD BubbleEvent
+VAR_INPUT
+	event : TOF_Core.IEvent;
+END_VAR
+VAR
+	stopPropagation : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[OnEventReceived(event := event, stopPropagation => stopPropagation);]]></ST>
+      </Implementation>
+    </Method>
     <Method Name="Disable" Id="{0d1971e1-5f59-4975-85f2-7a8ffd650e1f}">
       <Declaration><![CDATA[METHOD ABSTRACT Disable]]></Declaration>
       <Implementation>
@@ -134,16 +189,25 @@ END_IF]]></ST>
       </Implementation>
     </Method>
     <Method Name="HandleRequest" Id="{13aff68a-a752-4191-bc9a-adaacd1893cd}">
-      <Declaration><![CDATA[METHOD HandleRequest
+      <Declaration><![CDATA[(*!
+<summary>Prepares diagnostic text locally before passing it to read-only logging or exception parameters.</summary>
+<description>Computed diagnostic strings are held in local buffers for the duration of the receiving call.</description>
+*)
+METHOD HandleRequest
 VAR_INPUT
 	request	: TOF_Core.INamed;
+END_VAR
+VAR
+	formattedLogMessage : WSTRING(255);
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[IF request = 0 THEN
 	RETURN;
 END_IF
 
-TOF_Core.LogManager.TryLogMessage(TOF_Core.WideStrings.Concat255("Request ", request.Name, " was not handled"), TOF_Core.LOG_CATEGORY.INFORMATION, TO_WSTRING(ClassName), TO_WSTRING(__POUNAME()));]]></ST>
+formattedLogMessage := TOF_Core.WideStrings.Concat255("Request ", request.Name, " was not handled");
+
+TOF_Core.LogManager.TryLogMessage(formattedLogMessage, TOF_Core.LOG_CATEGORY.INFORMATION, TO_WSTRING(ClassName), TO_WSTRING(__POUNAME()));]]></ST>
       </Implementation>
     </Method>
     <Property Name="HasError" Id="{b058a64f-59a4-414d-b578-01945ffe1e29}">
@@ -189,7 +253,20 @@ PROPERTY FINAL Name : REFERENCE TO WSTRING]]></Declaration>
       </Get>
     </Property>
     <Method Name="OnEventReceived" Id="{f94f2cee-1148-4676-b329-3c117e050581}" FolderPath="Methods to override\">
-      <Declaration><![CDATA[METHOD OnEventReceived
+      <Declaration><![CDATA[(*!
+<summary>Handles a delivered event locally and can stop further propagation along the current route.</summary>
+<description>
+May be called regardless of Enabled or operational state, including while disabled or stopped.
+The handler checks state when its reaction requires it. Ignoring an event does not stop propagation;
+leave stopPropagation FALSE unless further delivery along the route must be stopped.
+The event must be non-null and live and is borrowed only for the call; do not retain it for later use.
+Handled and stopPropagation are independent. Setting stopPropagation stops bubbling to the parent
+or broadcasting into this node's descendants; it does not cancel sibling branches in the caller.
+An exception aborts delivery and propagates to the dispatch caller, without rolling back prior effects.
+</description>
+*)
+
+METHOD OnEventReceived
 VAR_INPUT
 	event : TOF_Core.IEvent;
 END_VAR

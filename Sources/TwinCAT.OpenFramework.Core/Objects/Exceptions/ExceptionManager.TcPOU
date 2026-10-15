@@ -7,14 +7,19 @@ SPDX-License-Identifier: MIT
 License: https://opensource.org/license/mit
 *)
 
+(*!
+<summary>Transports exceptions with a separate payload and native wrapper for each cyclic PLC task.</summary>
+<description>Exception objects must not cross task boundaries. Throw/GetLastException/ReThrowLastException require cyclic context; do not throw from FB_init. Cleanup affects only the current task. Clone its static native wrapper before callbacks that can handle another native error. Per-task array bounds use System.TASK_COUNT.</description>
+*)
+
 {attribute 'no_explicit_call' := 'do not call this function block directly'} 
 PROGRAM ExceptionManager
 VAR
 	{attribute 'hide'} 
 	_ClassName : STRING := __POUNAME();
 
-	_Exception : IException;
-	_SystemException : SystemException;
+	_Exceptions : ARRAY [1..System.TASK_COUNT] OF IException;
+	_SystemExceptions : ARRAY [1..System.TASK_COUNT] OF SystemException;
 END_VAR
 ]]></Declaration>
     <Implementation>
@@ -34,20 +39,43 @@ PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
       <Declaration><![CDATA[(*!
 <summary>Drops the borrowed framework payload before DynamicMemoryManager deletes registered objects.</summary>
 <description>
-Does not delete exceptions or reset the shared SystemException.
+Only affects the current cyclic task. Does not delete exceptions or reset its SystemException.
 </description>
 *)
 
-METHOD Cleanup]]></Declaration>
+METHOD Cleanup
+VAR
+	taskIndex : DINT;
+END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[_Exception := 0;]]></ST>
+        <ST><![CDATA[taskIndex := DynamicMemoryManager.GetCurrentTaskIndex();
+
+IF taskIndex = 0 THEN
+	RETURN;
+END_IF
+
+CleanupTask(taskIndex);]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="CleanupTask" Id="{73c688ca-dc50-410f-8a35-38c9d610e5e0}">
+      <Declaration><![CDATA[(*!
+<summary>Drops one task's borrowed payload before its registered objects are deleted.</summary>
+<description>Internal operation for the owning task or application teardown with cyclic execution stopped. taskIndex must be within the generated task table; concurrent access from another task is forbidden.</description>
+*)
+
+METHOD INTERNAL CleanupTask
+VAR_INPUT
+	taskIndex : DINT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_Exceptions[taskIndex] := 0;]]></ST>
       </Implementation>
     </Method>
     <Method Name="GetLastException" Id="{e2be0c6d-d285-4e57-9453-ace2efe79ed7}">
       <Declaration><![CDATA[(*!
 <summary>Returns the framework payload or the shared SystemException configured for this catch.</summary>
 <description>
-The result is borrowed; the shared system instance changes on the next system catch.
+The result is borrowed from the current cyclic task; its system instance changes on the next system catch in that task. Do not pass the result to another task.
 Clone a static result before callbacks that may handle another system error.
 A SystemException propagated by Throw is a dynamic framework payload retaining its original metadata.
 A native code already lost by the runtime cannot be reconstructed here.
@@ -60,14 +88,24 @@ VAR_INPUT
 	catchPointNamespaceName : STRING;
 	catchPointPOUName : STRING;
 	catchPointPosition : STRING;
+END_VAR
+VAR
+	taskIndex : DINT;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[// 3902013441 is a workaround for bug in 3.1.4026.19
-IF (exceptionCode = __SYSTEM.ExceptionCode.RTSEXCPT_USER_EXCEPTION_BASE OR_ELSE exceptionCode = 3902013441) AND_THEN _Exception <> 0 THEN
-	GetLastException := _Exception;
+        <ST><![CDATA[taskIndex := DynamicMemoryManager.GetCurrentTaskIndex();
+
+IF taskIndex = 0 THEN
+	RETURN;
+END_IF
+
+// 3902013441 is a workaround for bug in 3.1.4026.19
+IF (exceptionCode = __SYSTEM.ExceptionCode.RTSEXCPT_USER_EXCEPTION_BASE OR_ELSE exceptionCode = 3902013441) AND_THEN _Exceptions[taskIndex] <> 0 THEN
+	GetLastException := _Exceptions[taskIndex];
 ELSE
-	_SystemException.Configure(exceptionCode, catchPointNamespaceName, catchPointPOUName, catchPointPosition);
-	GetLastException := _SystemException;
+	_SystemExceptions[taskIndex].Configure(exceptionCode, catchPointNamespaceName, catchPointPOUName, catchPointPosition);
+	
+	GetLastException := _SystemExceptions[taskIndex];
 END_IF]]></ST>
       </Implementation>
     </Method>
@@ -85,8 +123,8 @@ PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
       <Declaration><![CDATA[(*!
 <summary>Propagates the current exception as a framework payload, wrapping native errors in SystemException.</summary>
 <description>
-Pass the current catch code and its location, or the exception already obtained for that catch.
-A supplied exception takes precedence over the code and preserves its original catch point and timestamps.
+Pass the current catch code and its location. For an already obtained exception, call Throw directly.
+The payload belongs to the current cyclic task and must not be shared with another task.
 Before callbacks that can handle another error, clone a borrowed static SystemException and retain that clone.
 Static payloads are cloned on propagation; dynamic payloads retain identity until automatic cleanup.
 The next raw catch code identifies framework transport, not the original native error.
@@ -97,7 +135,6 @@ A latched allocation failure is raised before any allocation and is never wrappe
 METHOD ReThrowLastException
 VAR_INPUT
 	exceptionCode : __SYSTEM.ExceptionCode;
-	exception : IException := 0;
 	catchPointNamespaceName : STRING := '';
 	catchPointPOUName : STRING := '';
 	catchPointPosition : STRING := '';
@@ -108,10 +145,7 @@ END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[DynamicMemoryManager.RaiseIfAllocationFailed();
 
-currentException := exception;
-IF currentException = 0 THEN
-	currentException := GetLastException(exceptionCode, catchPointNamespaceName, catchPointPOUName, catchPointPosition);
-END_IF
+currentException := GetLastException(exceptionCode, catchPointNamespaceName, catchPointPOUName, catchPointPosition);
 
 Throw(currentException);]]></ST>
       </Implementation>
@@ -120,6 +154,7 @@ Throw(currentException);]]></ST>
       <Declaration><![CDATA[(*!
 <summary>Null is a no-op. Dynamic exceptions are borrowed; static exceptions are cloned.</summary>
 <description>
+Call in a cyclic PLC task using a payload belonging to that task. Do not throw during FB_init.
 The clone must implement IException and have a lifetime covering all handlers until cleanup.
 Framework implementations register dynamic clones with DynamicMemoryManager.
 SystemException uses the same transport and retains its captured native code and timestamps.
@@ -130,6 +165,9 @@ A latched allocation failure is raised before cloning.
 METHOD Throw
 VAR_INPUT CONSTANT
 	exception : IException;
+END_VAR
+VAR
+	taskIndex : DINT;
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[IF exception = 0 THEN
@@ -138,12 +176,16 @@ END_IF
 
 DynamicMemoryManager.RaiseIfAllocationFailed();
 
-//LogManager.TryLogException(exception, "Exception", "Exception.Throw", WideStrings.Concat255(STRING_TO_WSTRING(exception.ClassName), ".Throw"));
+taskIndex := DynamicMemoryManager.GetCurrentTaskIndex();
+
+IF taskIndex = 0 THEN
+	RETURN;
+END_IF
 
 IF exception.IsDynamicInstance THEN
-	_Exception := exception;
+	_Exceptions[taskIndex] := exception;
 ELSE
-	__QUERYINTERFACE(exception.Clone(), _Exception);
+	__QUERYINTERFACE(exception.Clone(), _Exceptions[taskIndex]);
 END_IF
 
 Tc2_System.F_RaiseException(__SYSTEM.ExceptionCode.RTSEXCPT_USER_EXCEPTION_BASE);]]></ST>

@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <TcPlcObject Version="1.1.0.1">
   <POU Name="DataMemberValueNotSupportedException" Id="{7c8607ac-ff97-4c81-9b19-1ae785ca9865}" SpecialFunc="None">
     <Declaration><![CDATA[(*
@@ -9,6 +9,10 @@ License: https://opensource.org/license/mit
 
 {attribute 'enable_dynamic_creation'}	
 {attribute 'no_explicit_call' := 'do not call this function block directly'} 
+(*!
+<summary>Reports a field or property value unsupported by the operation.</summary>
+<description>The caller detects the member error; Throw records diagnostics rather than inspecting the object. Dynamic instances and clones belong to the current task memory manager until cleanup. Value text is limited to 255 characters. Longer STRING and WSTRING inputs use a 254-character prefix followed by an ellipsis.</description>
+*)
 FUNCTION_BLOCK DataMemberValueNotSupportedException EXTENDS GeneralException IMPLEMENTS IDataMemberValueNotSupportedException
 VAR
 	{attribute 'hide'} 
@@ -28,7 +32,11 @@ PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
       </Get>
     </Property>
     <Method Name="Clone" Id="{06589630-ee4e-4f3f-b35f-5e9c2d57c7f9}">
-      <Declaration><![CDATA[METHOD Clone : IObject
+      <Declaration><![CDATA[(*!
+<summary>Creates a distinct auto-disposed copy of this concrete exception type.</summary>
+<description>Copies message, code, source and timestamps through CopyGeneralFields; any prepared inner cause remains borrowed. The current task memory manager owns the clone until cleanup. Allocation failure is terminal. Descendants with additional payload must override Clone to preserve their type and fields.</description>
+*)
+METHOD Clone : IObject
 VAR
 	exceptionClone : POINTER TO DataMemberValueNotSupportedException;
 END_VAR]]></Declaration>
@@ -37,7 +45,6 @@ END_VAR]]></Declaration>
 
 IF exceptionClone = 0 THEN
 	DynamicMemoryManager.RaiseAllocationFailure();
-	RETURN;
 END_IF
 
 exceptionClone^.CopyGeneralFields(THIS^);
@@ -66,7 +73,13 @@ PROPERTY SelfSize : ULINT]]></Declaration>
       </Get>
     </Property>
     <Method Name="Throw" Id="{0586d628-4a4c-4adc-8bb8-68f1e0460289}">
-      <Declaration><![CDATA[METHOD Throw
+      <Declaration><![CDATA[(*!
+<summary>Formats the rejected member and propagates the exception.</summary>
+<description>Call in the owning cyclic task, not during FB_init. Builds a member diagnostic and captures source and timestamps with zero error code and no inner cause. Input storage is not retained. Allocation failure uses the shared terminal memory mechanism. Uses the shared ANY formatter; STRING and WSTRING values longer than 255 characters retain their first 254 characters followed by an ellipsis. Exactly 255 characters remain unchanged.</description>
+<param name="dataMemberName">Name of the field or property rejected by the caller.</param>
+<param name="dataMemberValue">Live value to describe; string inputs must be null-terminated.</param>
+*)
+METHOD Throw
 VAR_INPUT
 	sourceNamespaceName : STRING;
 	sourceClassName : STRING;
@@ -82,6 +95,13 @@ VAR
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[valueAsString := WideStrings.InternalAnyToString255(dataMemberValue);
+
+IF (dataMemberValue.TypeClass = __SYSTEM.TYPE_CLASS.TYPE_STRING
+	AND_THEN Strings.InternalGetLength(dataMemberValue.pValue) > 255)
+	OR_ELSE (dataMemberValue.TypeClass = __SYSTEM.TYPE_CLASS.TYPE_WSTRING
+	AND_THEN WideStrings.InternalGetLength(dataMemberValue.pValue) > 255) THEN
+	valueAsString := Tc2_Standard.WCONCAT(Tc2_Standard.WLEFT(valueAsString, 254), "…");
+END_IF
 
 stringBuilder
 	.AppendString("Field or property '")

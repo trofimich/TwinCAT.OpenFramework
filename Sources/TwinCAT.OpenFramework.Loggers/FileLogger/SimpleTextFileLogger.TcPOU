@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <TcPlcObject Version="1.1.0.1">
   <POU Name="SimpleTextFileLogger" Id="{83e72a06-d888-49e4-a1fa-5926cd0560d7}" SpecialFunc="None">
     <Declaration><![CDATA[(*
@@ -8,6 +8,10 @@ License: https://opensource.org/license/mit
 *)
 
 {attribute 'no_explicit_call' := 'do not call this function block directly'} 
+(*!
+<summary>Formats diagnostics for text-file logging and advances file operations through cyclic execution.</summary>
+<description>Exception logging accepts IReadOnlyException and reads borrowed diagnostics without transferring ownership. Implementations must not retain exception references beyond their task cleanup.</description>
+*)
 FUNCTION_BLOCK SimpleTextFileLogger EXTENDS TOF_Core.Object IMPLEMENTS TOF_Core.ILogger
 VAR
 	_ClassName : STRING := __POUNAME();
@@ -118,10 +122,17 @@ PROPERTY ErrorMessage : REFERENCE TO TOF_Core.ERROR_MESSAGE]]></Declaration>
       </Get>
     </Property>
     <Method Name="Execute" Id="{17cdfc70-e5ab-42fe-ab86-0d76e3d26166}">
-      <Declaration><![CDATA[METHOD Execute
+      <Declaration><![CDATA[(*!
+<summary>Prepares diagnostic text locally before passing it to read-only logging or exception parameters.</summary>
+<description>Computed diagnostic strings are held in local buffers for the duration of the receiving call.</description>
+*)
+METHOD Execute
 VAR	
 	exceptionCode : __SYSTEM.ExceptionCode;
 	exception : TOF_Core.IException;
+END_VAR
+VAR
+	formattedExceptionMessage : TOF_Core.ERROR_MESSAGE;
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[__TRY
@@ -146,7 +157,9 @@ END_VAR]]></Declaration>
 			_FileContentManager.Execute();
 			
 			IF _FileContentManager.State.Stopped AND_THEN _FileContentManager.FinalStopReason.Failure THEN					
-				_CreateDirectoryException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), _FileContentManager.FinalStopReason.Message);
+				formattedExceptionMessage := _FileContentManager.FinalStopReason.Message;
+
+				_CreateDirectoryException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), formattedExceptionMessage);
 			END_IF	
 			
 			tryLogNewMessages();
@@ -293,9 +306,15 @@ TryLogError := TryLogMessage(SEL(error.Severity = TOF_Core.ERROR_SEVERITY.CRITIC
       </Implementation>
     </Method>
     <Method Name="TryLogException" Id="{e7bb0a19-d38b-4050-ac16-1d13038e54cb}">
-      <Declaration><![CDATA[METHOD TryLogException : BOOL
+      <Declaration><![CDATA[(*!
+<summary>Attempts to log diagnostic information from a read-only exception view.</summary>
+<description>Borrows the exception for the call without clearing it or taking ownership. The exception and its inner causes must remain live while their diagnostics are read. Logging does not extend their lifetime.</description>
+<param name="exception">Exception view to read; null is ignored.</param>
+<param name="severity">Severity used to select the log category.</param>
+*)
+METHOD TryLogException : BOOL
 VAR_INPUT
-	exception : TOF_Core.IException;
+	exception : TOF_Core.IReadOnlyException;
 	severity : TOF_Core.ERROR_SEVERITY;
 	messageNumber : REFERENCE TO ULINT := 0;
 END_VAR
@@ -339,8 +358,14 @@ _MessageBuffer.AppendGeneric(TOF_Core.GenericValueFactory.FromWStringValue(textT
       </Implementation>
     </Method>
     <Method Name="tryLogNewMessages" Id="{b3206f74-587e-4877-b310-0e0e64ffdebf}" FolderPath="Service memebers\">
-      <Declaration><![CDATA[METHOD PRIVATE tryLogNewMessages
+      <Declaration><![CDATA[(*!
+<summary>Prepares diagnostic text locally before passing it to read-only logging or exception parameters.</summary>
+<description>Computed diagnostic strings are held in local buffers for the duration of the receiving call.</description>
+*)
+METHOD PRIVATE tryLogNewMessages
 VAR
+	formattedExceptionMessage : WSTRING(255);
+
 	message : TOF_Core.GENERIC_VALUE;
 END_VAR]]></Declaration>
       <Implementation>
@@ -349,11 +374,15 @@ END_VAR]]></Declaration>
 END_IF
 
 IF NOT _WriteBytesTask.State.Ready AND_THEN NOT _WriteBytesTask.State.Stopped THEN
-	_LogNewMessageException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), TOF_Core.WideStrings.Concat255("WriteBytesTask has invalid state '", TO_WSTRING(_WriteBytesTask.State.Value), "'"));
+	formattedExceptionMessage := TOF_Core.WideStrings.Concat255("WriteBytesTask has invalid state '", TO_WSTRING(_WriteBytesTask.State.Value), "'");
+
+	_LogNewMessageException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), formattedExceptionMessage);
 END_IF
  
 IF _WriteBytesTask.State.Stopped AND_THEN NOT _WriteBytesTask.FinalStopReason.WorkDone THEN
-	_LogNewMessageException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), TOF_Core.WideStrings.Concat255("WriteBytesTask has invalid stop reason '", TO_WSTRING(_WriteBytesTask.FinalStopReason.Value), "'"));	
+	formattedExceptionMessage := TOF_Core.WideStrings.Concat255("WriteBytesTask has invalid stop reason '", TO_WSTRING(_WriteBytesTask.FinalStopReason.Value), "'");
+
+	_LogNewMessageException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), formattedExceptionMessage);	
 END_IF
 
 IF _RecordsPerFile >= _MaxRecordsPerFile AND_THEN _FileContentManager.State.Running THEN

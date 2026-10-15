@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <TcPlcObject Version="1.1.0.1">
   <POU Name="AggregateException" Id="{8695c106-e7fb-42e2-9023-16f2aac84192}" SpecialFunc="None">
     <Declaration><![CDATA[(*
@@ -10,7 +10,9 @@ License: https://opensource.org/license/mit
 (*!
 <summary>Holds at most 255 flattened entries. Inner exception graphs must be acyclic.</summary>
 <description>
-Self-add is forbidden by contract; no recursive graph validation is performed.
+Input graphs must already be acyclic, including graphs from custom implementations. AddInnerException rejects paths back to this instance before adding any entries, using a StandardException without an inner cause.
+Stored entries and GetInnerException use read-only views; ownership remains with the task memory manager. Root lookup returns a borrowed read-only view of the first entry's root, or this instance when empty.
+ToError copies the aggregate message and the first entry's deepest cause into one ERROR, using the aggregate timestamps and caller-supplied severity.
 </description>
 *)
 
@@ -23,7 +25,7 @@ VAR
 	{attribute 'hide'} 
 	_ClassName : STRING := __POUNAME();
 	
-	_InnerExceptions : POINTER TO IException;
+	_InnerExceptions : POINTER TO IReadOnlyException;
 	{attribute 'hide'} 
 	_InnerExceptionCount : UINT;
 END_VAR
@@ -38,40 +40,47 @@ END_VAR]]></Declaration>
       <Declaration><![CDATA[(*!
 <summary>Flattens aggregates; borrows dynamic inners and clones static inners for automatic cleanup.</summary>
 <description>
-Owns only the reference array. Allocation failure uses the shared fatal memory latch.
-Do not pass THIS or a cyclic exception graph. Null/empty aggregate inputs add nothing.
+Owns only the reference array. Accepts read-only causes; static inputs are cloned and dynamic inputs are borrowed without exposing Clear. Allocation failure uses the shared fatal memory latch.
+The supplied graph must already be acyclic, including graphs from custom implementations. The entire input graph is searched before adding entries. A path back to this instance raises StandardException without changing this instance. Validation follows IGeneralException and IAggregateException edges; inputs must remain live and stable during traversal. Shared causes in separate branches are allowed. Null/empty aggregate inputs add nothing.
 Exceeding 255 entries raises latched OUT_OF_MEMORY before preparing the next entry.
-Flattening is incremental: prior successful additions are not rolled back on failure.
+After graph validation, flattening is incremental: prior successful additions are not rolled back on allocation or cloning failure.
 </description>
 *)
 
 METHOD AddInnerException
 VAR_INPUT
-	innerException : IException; 
+	innerException : IReadOnlyException; 
 END_VAR
 VAR
 	aggregateException : IAggregateException;
 	i : DINT;
-	subInnerException : IException;	
 	
-	newInnerExceptionArray : POINTER TO IException;
-	preparedInnerException : IException;
+	newInnerExceptionArray : POINTER TO IReadOnlyException;
+	preparedInnerException : IReadOnlyException;
+
+	invalidInnerException : StandardException;
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[IF innerException = 0 THEN
 	RETURN;
 END_IF
 
+IF NOT Exceptions.CanAttachInnerException(THIS^, innerException) THEN
+	invalidInnerException.Throw(
+		sourceNamespaceName := CurrentNamespace.Name,
+		sourceClassName := 'AggregateException',
+		sourcePOUName := 'AddInnerException',
+		sourcePosition := '',
+		message := "Cannot attach an exception graph containing its prospective owner.");
+END_IF
+
 IF __QUERYINTERFACE(innerException, aggregateException) THEN
 	FOR i := 0 TO TO_DINT(aggregateException.InnerExceptionCount) - 1 DO
-		subInnerException := aggregateException.GetInnerException(i);
-		
-		AddInnerException(subInnerException);
+		AddInnerException(aggregateException.GetInnerException(i));
 	END_FOR
 ELSE
 	IF _InnerExceptionCount >= MAX_INNER_EXCEPTION_COUNT THEN
 		DynamicMemoryManager.RaiseAllocationFailure();
-		RETURN;
 	END_IF
 
 	// Prepare the inner before replacing any existing array storage.
@@ -81,14 +90,13 @@ ELSE
 		__QUERYINTERFACE(innerException.Clone(), preparedInnerException);
 	END_IF
 
-	newInnerExceptionArray := __NEW(POINTER TO IException, (_InnerExceptionCount + 1));
+	newInnerExceptionArray := __NEW(POINTER TO IReadOnlyException, (_InnerExceptionCount + 1));
 	IF newInnerExceptionArray = 0 THEN
 		DynamicMemoryManager.RaiseAllocationFailure();
-		RETURN;
 	END_IF
 		
 	IF _InnerExceptionCount > 0 THEN
-		Tc2_System.MEMCPY(newInnerExceptionArray, _InnerExceptions, TO_UDINT(XSIZEOF(POINTER TO IException) * _InnerExceptionCount));	
+		Tc2_System.MEMCPY(newInnerExceptionArray, _InnerExceptions, TO_UDINT(XSIZEOF(POINTER TO IReadOnlyException) * _InnerExceptionCount));	
 	
 		__DELETE(_InnerExceptions);
 	END_IF
@@ -114,7 +122,7 @@ PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
       <Declaration><![CDATA[(*!
 <summary>Releases the owned reference array and resets metadata; does not delete borrowed inners.</summary>
 <description>
-Repeated Clear is allowed.
+Resets the entry count, source and timestamps. Repeated Clear is allowed. Does not delete the exception instance or unregister it from task cleanup. Other aggregates and clones borrowing the same causes remain valid until their task cleanup. An attached dynamic cause must not be cleared through an alias.
 </description>
 *)
 
@@ -133,41 +141,31 @@ SUPER^.Clear();]]></ST>
       <Declaration><![CDATA[(*!
 <summary>Returns a distinct auto-disposed aggregate with copied metadata and its own reference array.</summary>
 <description>
-Empty aggregates also produce a distinct empty clone; dynamic inners remain borrowed.
+Empty aggregates also produce a distinct empty clone. Copies source metadata and timestamps; entries retain their order and their prepared dynamic causes remain shared. The task memory manager owns the clone until cleanup; callers must not delete or adopt it. Clearing the source aggregate does not clear the clone or its causes. Allocation failure uses the shared terminal memory mechanism. Descendants with additional payload must override Clone to preserve that payload and their concrete type.
 </description>
 *)
 
 METHOD Clone : IObject
 VAR
 	exceptionClone : POINTER TO AggregateException;
-		
-	i : DINT;
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[exceptionClone := __NEW(AggregateException);
 
 IF exceptionClone = 0 THEN
 	DynamicMemoryManager.RaiseAllocationFailure();
-	RETURN;
 END_IF
 
-exceptionClone^.SourceFullPOUName := _SourceFullPOUName;
-exceptionClone^.SourcePosition := _SourcePosition;
-exceptionClone^.LocalTimestamp := _LocalTimestamp;	
-exceptionClone^.UtcTimestamp := _UtcTimestamp;	
-
-FOR i := 0 TO TO_DINT(_InnerExceptionCount) - 1 DO
-	exceptionClone^.AddInnerException(GetInnerException(i));
-END_FOR
+exceptionClone^.CopyFields(THIS^);
 
 Clone := exceptionClone^;]]></ST>
       </Implementation>
     </Method>
     <Method Name="CopyFields" Id="{0584c9e4-cd70-4feb-b915-e7d77badfcc1}" FolderPath="Service members\">
       <Declaration><![CDATA[(*!
-<summary>Destination must be empty and distinct from source. This helper does not clear existing entries.</summary>
+<summary>Copies aggregate metadata and entries into a distinct empty destination.</summary>
 <description>
-Copies metadata and adds source entries using AddInnerException's ownership rules.
+Destination must be empty and distinct from source. This helper does not clear existing entries. Source and its causes must remain live during copying. Copies metadata and adds source entries using AddInnerException's ownership rules; does not transfer ownership or extend cause lifetime. Copying is incremental, without rollback on allocation or cloning failure.
 </description>
 *)
 
@@ -214,7 +212,12 @@ END_VAR
       </Implementation>
     </Method>
     <Method Name="GetInnerException" Id="{208441ce-95c7-4cde-b727-858df1415649}">
-      <Declaration><![CDATA[METHOD GetInnerException : IException
+      <Declaration><![CDATA[(*!
+<summary>Returns a borrowed read-only view of an entry at a zero-based index.</summary>
+<description>Returns null for an index outside the stored range. Does not clone or transfer ownership, and does not extend the entry lifetime beyond its task cleanup. The view is not an immutable snapshot; modifying an attached dynamic cause through another alias is forbidden.</description>
+<param name="index">Zero-based entry index.</param>
+*)
+METHOD GetInnerException : IReadOnlyException
 VAR_INPUT
 	index : DINT;
 END_VAR]]></Declaration>
@@ -227,6 +230,7 @@ END_IF]]></ST>
     <Method Name="GetMessage" Id="{76c9ffdd-6b67-4a44-aa6c-571f736f1a93}">
       <Declaration><![CDATA[(*!
 <summary>With default options an empty aggregate returns "0 aggregated exceptions".</summary>
+<description>Formats entries in their stored order. If the result exceeds ERROR_MESSAGE capacity, preserves the prefix and ends with an ellipsis; later entries may be omitted. Copying the final message does not raise a size-overflow exception. Builder allocation failures remain terminal.</description>
 *)
 
 METHOD GetMessage : ERROR_MESSAGE
@@ -238,7 +242,7 @@ VAR
 	stringBuilder : WideStringBuilder;
 	
 	i : DINT;
-	innerException : IException;
+	innerException : IReadOnlyException;
 	innerExceptionMessage : ERROR_MESSAGE;
 END_VAR]]></Declaration>
       <Implementation>
@@ -272,11 +276,16 @@ FOR i := 0 TO TO_DINT(_InnerExceptionCount) - 1 DO
 		.Append(innerExceptionMessage);
 END_FOR		
 
-stringBuilder.AssignToString(GetMessage);]]></ST>
+GetMessage := Exceptions.CopyMessage(stringBuilder);]]></ST>
       </Implementation>
     </Method>
     <Method Name="GetRootException" Id="{3947d49e-1dd5-493f-96aa-4bb6602d0186}">
-      <Declaration><![CDATA[METHOD FINAL GetRootException : IException]]></Declaration>
+      <Declaration><![CDATA[(*!
+<summary>Returns a borrowed read-only view of the root exception.</summary>
+<description>No clone is created and ownership is not transferred. The view does not extend the exception's lifetime and does not expose Clear.</description>
+*)
+
+METHOD FINAL GetRootException : IReadOnlyException]]></Declaration>
       <Implementation>
         <ST><![CDATA[IF _InnerExceptionCount > 0 THEN
 	GetRootException := GetInnerException(0);
@@ -335,7 +344,13 @@ ExceptionManager.Throw(THIS^);]]></ST>
       </Implementation>
     </Method>
     <Method Name="ToError" Id="{d4ff76fe-085d-4302-a17b-b20e40bfa8ce}">
-      <Declaration><![CDATA[METHOD ToError
+      <Declaration><![CDATA[(*!
+<summary>Copies aggregate diagnostics and the first branch's root cause into one ERROR.</summary>
+<description>The overall message describes all entries within the GetMessage length limit. Root message and source come from GetRootException, following the first entry to its deepest cause. Uses this aggregate's timestamps and the supplied severity. Copies diagnostic values without transferring exception ownership. An empty aggregate produces an explicit empty-aggregate description and no root message. An invalid target reference is ignored. Computed diagnostic strings are held in local buffers for the duration of the receiving call.</description>
+<param name="targetError">Destination whose diagnostic fields are replaced.</param>
+<param name="severity">Severity assigned to the resulting ERROR.</param>
+*)
+METHOD ToError
 VAR_IN_OUT CONSTANT
 	targetError : ERROR;
 END_VAR
@@ -343,7 +358,12 @@ VAR_INPUT
 	severity : ERROR_SEVERITY;	
 END_VAR
 VAR
-	rootException : IException;
+	topSourceText : STRING(255);
+	rootSourceText : STRING(255);
+	topMessageText : ERROR_MESSAGE;
+	rootMessageText : ERROR_MESSAGE;
+
+	rootException : IReadOnlyException;
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[IF NOT __ISVALIDREF(targetError) THEN
@@ -351,10 +371,13 @@ END_VAR]]></Declaration>
 END_IF
 
 IF _InnerExceptionCount <= 0 THEN
+	topSourceText := GetSourceDescription();
+	rootSourceText := Exceptions.UNSPECIFIED_SOURCE;
+
 	targetError.Fill(
 		severity,
-		GetSourceDescription(),
-		Exceptions.UNSPECIFIED_SOURCE,
+		topSourceText,
+		rootSourceText,
 		"Empty aggregate exception (zero inner exceptions)",
 		"",
 		LocalTimestamp,
@@ -364,14 +387,19 @@ IF _InnerExceptionCount <= 0 THEN
 	RETURN;
 END_IF
 
-rootException := GetInnerException(0);
+rootException := GetRootException();
+
+topSourceText := Strings.Concat255(TO_STRING(_InnerExceptionCount), ' exceptions occured');
+rootSourceText := rootException.GetSourceDescription();
+topMessageText := GetMessage();
+rootMessageText := rootException.GetMessage();
 
 targetError.Fill(
 	severity,
-	Strings.Concat255(TO_STRING(_InnerExceptionCount), ' exceptions occured'),
-	rootException.GetSourceDescription(),
-	GetMessage(),
-	rootException.GetMessage(),
+	topSourceText,
+	rootSourceText,
+	topMessageText,
+	rootMessageText,
 	LocalTimestamp,
 	UtcTimestamp
 );]]></ST>
