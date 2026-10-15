@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <TcPlcObject Version="1.1.0.1">
   <POU Name="VariableHasValueCondition" Id="{30d35608-a928-454b-b4e1-546e7091b14c}" SpecialFunc="None">
     <Declaration><![CDATA[(*
@@ -9,6 +9,10 @@ License: https://opensource.org/license/mit
 
 {attribute 'no_explicit_call' := 'do not call this function block directly'} 
 {attribute 'enable_dynamic_creation'}
+(*!
+<summary>Evaluates a workflow variable against a configured value.</summary>
+<description>Diagnostic string inputs are borrowed only during the call; retained diagnostic text is copied into owned storage.</description>
+*)
 FUNCTION_BLOCK VariableHasValueCondition EXTENDS Condition IMPLEMENTS IVariableHasValueCondition
 VAR
 	{attribute 'OPC.UA.DA' := '0'}
@@ -99,11 +103,17 @@ PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
       </Get>
     </Property>
     <Method Name="OnEvalute" Id="{8440fe50-06b4-43d8-bb22-4354c386b514}" FolderPath="Overriden members\">
-      <Declaration><![CDATA[METHOD PROTECTED OnEvalute : BOOL
+      <Declaration><![CDATA[(*!
+<summary>Prepares diagnostic text locally before passing it to read-only logging or exception parameters.</summary>
+<description>Computed diagnostic strings are held in local buffers for the duration of the receiving call.</description>
+*)
+METHOD PROTECTED OnEvalute : BOOL
 VAR_INPUT
 	activity : IActivity;
 END_VAR
 VAR
+	formattedExceptionMessage : WSTRING(255);
+
 	conditionNotConfiguredException : TOF_Core.StandardException;
 	variableNotFoundException : TOF_Core.StandardException;
 
@@ -112,11 +122,15 @@ VAR
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[IF NOT Configured THEN
-	conditionNotConfiguredException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), TOF_Core.WideStrings.Concat255("Condition '", Name, "' is not configured"));
+	formattedExceptionMessage := TOF_Core.WideStrings.Concat255("Condition '", Name, "' is not configured");
+
+	conditionNotConfiguredException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), formattedExceptionMessage);
 END_IF
 
 IF NOT _Workflow.TryGetVariable(_MonitoredVariableName, variable => variable) THEN
-	variableNotFoundException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), TOF_Core.WideStrings.Concat255("Condition '", Name, "' requirs variable '", TO_WSTRING(_MonitoredVariableName), "' which is not found"));
+	formattedExceptionMessage := TOF_Core.WideStrings.Concat255("Condition '", Name, "' requirs variable '", TO_WSTRING(_MonitoredVariableName), "' which is not found");
+
+	variableNotFoundException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), formattedExceptionMessage);
 END_IF
 
 variableValue := variable.AsAnyType();

@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <TcPlcObject Version="1.1.0.1">
   <POU Name="Strings" Id="{7aa7463a-7b84-4807-b00e-cbaa6fc59270}" SpecialFunc="None">
     <Declaration><![CDATA[(*
@@ -8,6 +8,10 @@ License: https://opensource.org/license/mit
 *)
 
 {attribute 'no_explicit_call' := 'Direct call is not allowed'} 
+(*!
+<summary>Provides STRING constants and helpers for text manipulation and value formatting.</summary>
+<description>Buffer ownership and size requirements are defined by each operation. ANY formatting reads the caller's value through its type descriptor.</description>
+*)
 PROGRAM Strings
 VAR_INPUT CONSTANT
 	CharSize : BYTE := 1;
@@ -47,7 +51,13 @@ END_VAR]]></Declaration>
       </Implementation>
     </Method>
     <Method Name="AppendToTarget" Id="{7d3432ad-7058-4ce7-80d2-01c9d35ec6fb}" FolderPath="Append\">
-      <Declaration><![CDATA[METHOD AppendToTarget
+      <Declaration><![CDATA[(*!
+<summary>Appends one STRING to a caller-owned STRING buffer.</summary>
+<description>Requires live, null-terminated strings and a writable target whose declared size describes its capacity. After validating the target type, an empty source completes without modifying the target. A non-STRING target raises NotSupportedException; failure of the append helper raises TargetVariableMemoryOverflowException. Source storage is borrowed only for this call.</description>
+*)
+//!<param name="targetString">Writable STRING buffer to append to.</param>
+//!<param name="sourceString">Text to append; empty leaves the target unchanged.</param>
+METHOD AppendToTarget
 VAR_INPUT
 	targetString : ANY_STRING;
 END_VAR
@@ -55,12 +65,20 @@ VAR_IN_OUT CONSTANT
 	sourceString : STRING;
 END_VAR
 VAR
+	formattedExceptionMessage : WSTRING(255);
+
 	stringTypeNotSupportedException : NotSupportedException;
 	targetStringMemoryOverflowExcepton : TargetVariableMemoryOverflowException;	
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[IF targetString.TypeClass <> __SYSTEM.TYPE_CLASS.TYPE_STRING THEN
-	stringTypeNotSupportedException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), Tc2_Utilities.WCONCAT("Not supported type ", TO_WSTRING(targetString.TypeClass)));
+	formattedExceptionMessage := Tc2_Utilities.WCONCAT("Not supported type ", TO_WSTRING(targetString.TypeClass));
+
+	stringTypeNotSupportedException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), formattedExceptionMessage);
+END_IF
+
+IF sourceString = '' THEN
+	RETURN;
 END_IF
 
 IF NOT InternalAppendToTarget(targetString, ADR(sourceString), 0, 0, 0, 0, 0, 0, 0, 0, 0) THEN
@@ -69,7 +87,11 @@ END_IF]]></ST>
       </Implementation>
     </Method>
     <Method Name="AppendToTarget255" Id="{b845707e-9f67-4676-b647-f64266f03b85}" FolderPath="Append\">
-      <Declaration><![CDATA[METHOD AppendToTarget255
+      <Declaration><![CDATA[(*!
+<summary>Appends up to ten STRING fragments in argument order, skipping empty fragments.</summary>
+<description>Requires live, null-terminated source strings and a writable STRING target with valid capacity metadata. Empty fragments do not stop processing; if all are empty, the target is unchanged and the operation succeeds. Raises NotSupportedException for a non-STRING target or TargetVariableMemoryOverflowException when appending fails. Processing stops on the first append failure; earlier modifications are not rolled back. Source storage is borrowed only for this call.</description>
+*)
+METHOD AppendToTarget255
 VAR_INPUT
 	targetString : ANY_STRING;
 	sourceString1 : STRING(255);
@@ -84,12 +106,16 @@ VAR_INPUT
 	sourceString10 : STRING(255) := '';
 END_VAR
 VAR
+	formattedExceptionMessage : WSTRING(255);
+
 	stringTypeNotSupportedException : NotSupportedException;
 	targetStringMemoryOverflowExcepton : TargetVariableMemoryOverflowException;	
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[IF targetString.TypeClass <> __SYSTEM.TYPE_CLASS.TYPE_STRING THEN
-	stringTypeNotSupportedException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), Tc2_Utilities.WCONCAT("Not supported type ", TO_WSTRING(targetString.TypeClass)));
+	formattedExceptionMessage := Tc2_Utilities.WCONCAT("Not supported type ", TO_WSTRING(targetString.TypeClass));
+
+	stringTypeNotSupportedException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), formattedExceptionMessage);
 END_IF
 
 IF NOT InternalAppendToTarget(targetString, ADR(sourceString1), ADR(sourceString2), ADR(sourceString3), ADR(sourceString4), ADR(sourceString5), ADR(sourceString6), ADR(sourceString7), ADR(sourceString8), ADR(sourceString9), ADR(sourceString10)) THEN
@@ -108,7 +134,16 @@ PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
       </Get>
     </Property>
     <Method Name="Concat255" Id="{833ffcb1-3f77-4b1a-908f-282a178d2bc7}">
-      <Declaration><![CDATA[METHOD Concat255 : STRING(255)
+      <Declaration><![CDATA[(*!
+<summary>Concatenates up to sixteen text fragments without nested calls.</summary>
+<description>
+Fragments are appended in argument order. Empty and omitted optional fragments
+are skipped; they do not prevent later fragments from being appended.
+The result is limited to 255 characters; excess text is truncated by the
+standard concatenation function. No dynamic memory is allocated.
+</description>
+*)
+METHOD Concat255 : STRING(255)
 VAR_INPUT
 	string1 : STRING(255);
 	string2 : STRING(255);
@@ -130,93 +165,71 @@ END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[Concat255 := Tc2_Standard.CONCAT(string1, string2);
 
-IF Tc2_Standard.LEN(string3) = 0 THEN
-	RETURN;
-ELSE
+IF Tc2_Standard.LEN(string3) > 0 THEN
 	Concat255 := Tc2_Standard.CONCAT(Concat255, string3);
 END_IF
 
-IF Tc2_Standard.LEN(string4) = 0 THEN
-	RETURN;
-ELSE
+IF Tc2_Standard.LEN(string4) > 0 THEN
 	Concat255 := Tc2_Standard.CONCAT(Concat255, string4);
 END_IF
 
-IF Tc2_Standard.LEN(string5) = 0 THEN
-	RETURN;
-ELSE
+IF Tc2_Standard.LEN(string5) > 0 THEN
 	Concat255 := Tc2_Standard.CONCAT(Concat255, string5);
 END_IF
 
-IF Tc2_Standard.LEN(string6) = 0 THEN
-	RETURN;
-ELSE
+IF Tc2_Standard.LEN(string6) > 0 THEN
 	Concat255 := Tc2_Standard.CONCAT(Concat255, string6);
 END_IF
 
-IF Tc2_Standard.LEN(string7) = 0 THEN
-	RETURN;
-ELSE
+IF Tc2_Standard.LEN(string7) > 0 THEN
 	Concat255 := Tc2_Standard.CONCAT(Concat255, string7);
 END_IF
 
-IF Tc2_Standard.LEN(string8) = 0 THEN
-	RETURN;
-ELSE
+IF Tc2_Standard.LEN(string8) > 0 THEN
 	Concat255 := Tc2_Standard.CONCAT(Concat255, string8);
 END_IF
 
-IF Tc2_Standard.LEN(string9) = 0 THEN
-	RETURN;
-ELSE
+IF Tc2_Standard.LEN(string9) > 0 THEN
 	Concat255 := Tc2_Standard.CONCAT(Concat255, string9);
 END_IF
 
-IF Tc2_Standard.LEN(string10) = 0 THEN
-	RETURN;
-ELSE
+IF Tc2_Standard.LEN(string10) > 0 THEN
 	Concat255 := Tc2_Standard.CONCAT(Concat255, string10);
 END_IF
 
-IF Tc2_Standard.LEN(string11) = 0 THEN
-	RETURN;
-ELSE
+IF Tc2_Standard.LEN(string11) > 0 THEN
 	Concat255 := Tc2_Standard.CONCAT(Concat255, string11);
 END_IF
 
-IF Tc2_Standard.LEN(string12) = 0 THEN
-	RETURN;
-ELSE
+IF Tc2_Standard.LEN(string12) > 0 THEN
 	Concat255 := Tc2_Standard.CONCAT(Concat255, string12);
 END_IF
 
-IF Tc2_Standard.LEN(string13) = 0 THEN
-	RETURN;
-ELSE
+IF Tc2_Standard.LEN(string13) > 0 THEN
 	Concat255 := Tc2_Standard.CONCAT(Concat255, string13);
 END_IF
 
-IF Tc2_Standard.LEN(string14) = 0 THEN
-	RETURN;
-ELSE
+IF Tc2_Standard.LEN(string14) > 0 THEN
 	Concat255 := Tc2_Standard.CONCAT(Concat255, string14);
 END_IF
 
-IF Tc2_Standard.LEN(string15) = 0 THEN
-	RETURN;
-ELSE
+IF Tc2_Standard.LEN(string15) > 0 THEN
 	Concat255 := Tc2_Standard.CONCAT(Concat255, string15);
 END_IF
 
-IF Tc2_Standard.LEN(string16) = 0 THEN
-	RETURN;
-ELSE
+IF Tc2_Standard.LEN(string16) > 0 THEN
 	Concat255 := Tc2_Standard.CONCAT(Concat255, string16);
 END_IF]]></ST>
       </Implementation>
     </Method>
     <Method Name="CreateSplitter" Id="{74505d39-c9b2-47f5-a8a1-80fe0e3aaae8}" FolderPath="Split\">
-      <Declaration><![CDATA[METHOD CreateSplitter : StringSplittingEnumerator
+      <Declaration><![CDATA[(*!
+<summary>Creates an enumerator over fragments of a borrowed source string.</summary>
+<description>The source must remain alive and unchanged during iteration. The splitter owns its current fragment; borrowed fragment references expire on MoveNext, Reset or destruction. This method does not allocate the splitter with __NEW. The initialized result has no fragment allocation until MoveNext; assigning it must not overwrite an instance with an unreleased fragment. The caller is responsible for the result lifetime and cleanup, including Reset when abandoning iteration. Do not copy an active splitter by value; use references. Only an instance explicitly allocated with __NEW may be deleted with __DELETE.</description>
+*)
+//!<param name="maxCount">Maximum number of returned fragments; zero means unlimited. Empty fragments removed after optional trimming do not count toward the limit. Remaining text is not returned after the limit is reached and is not merged into the last fragment.</param>
+//!<param name="separator">Copied separator containing 1 to 80 characters. An empty or longer value raises ArgumentOutOfRangeException before initialization.</param>
+METHOD CreateSplitter : StringSplittingEnumerator
 VAR_IN_OUT CONSTANT
 	sourceString : STRING;
 	separator : STRING;
@@ -228,6 +241,7 @@ VAR_INPUT
 END_VAR
 VAR
 	sourceStringIsNullException : ArgumentNotSpecifiedException;
+	separatorOutOfRangeException : ArgumentOutOfRangeException;
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[IF NOT __ISVALIDREF(sourceString) THEN
@@ -238,11 +252,22 @@ IF NOT __ISVALIDREF(separator) THEN
 	sourceStringIsNullException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), 'separator');
 END_IF
 
+IF separator = '' OR_ELSE InternalGetLength(ADR(separator)) > 80 THEN
+	separatorOutOfRangeException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), 'separator', separator);
+END_IF
+
 CreateSplitter.Initialize(ADR(sourceString), separator, maxCount, trimEntries, removeEmptyEntries);]]></ST>
       </Implementation>
     </Method>
     <Method Name="Find" Id="{0c61da8f-b806-465e-b4f1-5bdbe54f1092}">
-      <Declaration><![CDATA[METHOD Find : BOOL
+      <Declaration><![CDATA[(*!
+<summary>Finds the first exact, case-sensitive occurrence of a substring.</summary>
+<description>Returns TRUE with a one-based position when found. An empty search substring matches at position 1, including in an empty source. Returns FALSE with position 0 when absent. Inputs must be live, null-terminated strings; they are borrowed only for this call and are not modified.</description>
+*)
+//!<param name="stringToSearchIn">Text to search.</param>
+//!<param name="stringToFind">Substring to locate; empty matches at the beginning.</param>
+//!<param name="position">One-based position in code units, or zero when absent.</param>
+METHOD Find : BOOL
 VAR_IN_OUT CONSTANT
 	stringToSearchIn : STRING;
 	stringToFind : STRING;
@@ -251,11 +276,19 @@ VAR_OUTPUT
 	position : UDINT;
 END_VAR
 VAR
-	searchInStringLength : UDINT;
 	stringToFindLength : UDINT;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[Find := InternalFind(ADR(stringToSearchIn), InternalGetLength(ADR(stringToSearchIn)), ADR(stringToFind), InternalGetLength(ADR(stringToFindLength)), position => position);]]></ST>
+        <ST><![CDATA[position := 0;
+stringToFindLength := InternalGetLength(ADR(stringToFind));
+
+IF stringToFindLength = 0 THEN
+	position := 1;
+	Find := TRUE;
+	RETURN;
+END_IF
+
+Find := InternalFind(ADR(stringToSearchIn), InternalGetLength(ADR(stringToSearchIn)), ADR(stringToFind), stringToFindLength, position => position);]]></ST>
       </Implementation>
     </Method>
     <Method Name="GetActualSize" Id="{e8e8416f-8e42-44ac-ac9b-ab76e4a16eec}">
@@ -279,7 +312,12 @@ END_VAR
       </Implementation>
     </Method>
     <Method Name="InternalAnyToString255" Id="{dbd6569e-fd5b-4765-a843-fc6bef815e68}" FolderPath="Service members\">
-      <Declaration><![CDATA[METHOD INTERNAL InternalAnyToString255 : STRING(255)
+      <Declaration><![CDATA[(*!
+<summary>Formats a supported ANY value into a STRING of at most 255 characters.</summary>
+<description>Borrows the value storage for this call. The descriptor must identify a live value of the stated type. The result does not retain a reference to the source. Unhandled type classes return a diagnostic marker containing the type class and descriptor size in bytes, without reading value storage, allocating heap memory or raising a formatting exception. This also applies to an unhandled type with a null data address.</description>
+<param name="value">Type descriptor and address of the value to format.</param>
+*)
+METHOD INTERNAL InternalAnyToString255 : STRING(255)
 VAR_IN_OUT CONSTANT
 	value : __SYSTEM.AnyType;
 END_VAR
@@ -288,7 +326,7 @@ VAR
 
 	anyByte : POINTER TO BYTE;
 	anyWord : POINTER TO WORD;
-	anyDWord : POINTER TO LWORD;
+	anyDWord : POINTER TO DWORD;
 	anyLWord : POINTER TO LWORD;
 	
 	anySInt : POINTER TO SINT;
@@ -312,6 +350,8 @@ VAR
 	anyDate : POINTER TO DATE;
 	anyDateAndTime : POINTER TO DATE_AND_TIME;
 	anyTimeOfDay : POINTER TO TOD;
+
+	anyPVoid : POINTER TO PVOID;
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[CASE value.TypeClass OF
@@ -397,33 +437,20 @@ END_VAR]]></Declaration>
 		InternalAnyToString255 := TO_STRING(anyTimeOfDay^);
 	
 	__SYSTEM.TYPE_CLASS.TYPE_POINTER, __SYSTEM.TYPE_CLASS.TYPE_REFERENCE:
-		InternalAnyToString255 := Tc2_Utilities.PVOID_TO_HEXSTR(anyDate, 8, FALSE);		
+		anyPVoid := value.pValue;
+		InternalAnyToString255 := Tc2_Utilities.PVOID_TO_HEXSTR(anyPVoid^, TO_INT(SIZEOF(PVOID) * 2), FALSE);		
 	
-	(*__SYSTEM.TYPE_CLASS.TYPE_SUBRANGE:
-	__SYSTEM.TYPE_CLASS.TYPE_ENUM:
-	__SYSTEM.TYPE_CLASS.TYPE_ARRAY:
-	__SYSTEM.TYPE_CLASS.TYPE_PARAMS:
-	__SYSTEM.TYPE_CLASS.TYPE_USERDEF:
-	__SYSTEM.TYPE_CLASS.TYPE_NONE:
-	__SYSTEM.TYPE_CLASS.TYPE_ANY:
-	__SYSTEM.TYPE_CLASS.TYPE_ANYBIT:
-	__SYSTEM.TYPE_CLASS.TYPE_ANYDATE:
-	__SYSTEM.TYPE_CLASS.TYPE_ANYINT:
-	__SYSTEM.TYPE_CLASS.TYPE_ANYNUM:
-	__SYSTEM.TYPE_CLASS.TYPE_ANYREAL:
-	__SYSTEM.TYPE_CLASS.TYPE_LAZY:
-	__SYSTEM.TYPE_CLASS.TYPE_BITCONST:*)
 	ELSE
-		IF value.pValue <> 0 THEN
-			InternalAnyToString255 := TO_STRING(value.pValue^); 
-		ELSE
-			InternalAnyToString255 := 'NULL';
-		END_IF
+		InternalAnyToString255 := Concat255('<value unavailable; type class: ', TO_STRING(value.TypeClass), '; size: ', TO_STRING(value.diSize), ' bytes>');
 END_CASE	]]></ST>
       </Implementation>
     </Method>
     <Method Name="InternalAppendToTarget" Id="{96f09b6b-a3b9-4899-b746-36fdcd4d9236}" FolderPath="Service members\">
-      <Declaration><![CDATA[METHOD INTERNAL InternalAppendToTarget : BOOL
+      <Declaration><![CDATA[(*!
+<summary>Appends up to ten STRING fragments in argument order, skipping empty fragments.</summary>
+<description>Requires live, null-terminated source strings and a writable STRING target with valid capacity metadata. Empty fragments do not stop processing; if all are empty, the target is unchanged and the operation succeeds. Returns FALSE for a non-STRING target or when appending fails. Processing stops on the first append failure; earlier modifications are not rolled back. Source storage is borrowed only for this call. Null source pointers denote omitted fragments and are skipped.</description>
+*)
+METHOD INTERNAL InternalAppendToTarget : BOOL
 VAR_INPUT
 	targetString : __SYSTEM.AnyType;
 	sourceString1 : POINTER TO STRING;
@@ -438,73 +465,81 @@ VAR_INPUT
 	sourceString10 : POINTER TO STRING;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[IF targetString.TypeClass <> __SYSTEM.TYPE_CLASS.TYPE_STRING THEN
+        <ST><![CDATA[InternalAppendToTarget := FALSE;
+
+IF targetString.TypeClass <> __SYSTEM.TYPE_CLASS.TYPE_STRING THEN
 	RETURN;
 END_IF
 
-IF sourceString1 = 0 OR_ELSE Tc2_Utilities.LEN2(sourceString1) = 0 THEN
-	RETURN;
-ELSE
-	InternalAppendToTarget := Tc2_Utilities.CONCAT2(targetString.pValue, sourceString1, targetString.pValue, TO_UDINT(targetString.diSize));
+IF sourceString1 <> 0 AND_THEN Tc2_Utilities.LEN2(sourceString1) > 0 THEN
+	IF NOT Tc2_Utilities.CONCAT2(targetString.pValue, sourceString1, targetString.pValue, TO_UDINT(targetString.diSize)) THEN
+		RETURN;
+	END_IF
 END_IF
 
-IF NOT InternalAppendToTarget OR_ELSE sourceString2 = 0 OR_ELSE Tc2_Utilities.LEN2(sourceString2) = 0 THEN
-	RETURN;
-ELSE
-	InternalAppendToTarget := Tc2_Utilities.CONCAT2(targetString.pValue, sourceString2, targetString.pValue, TO_UDINT(targetString.diSize));
+IF sourceString2 <> 0 AND_THEN Tc2_Utilities.LEN2(sourceString2) > 0 THEN
+	IF NOT Tc2_Utilities.CONCAT2(targetString.pValue, sourceString2, targetString.pValue, TO_UDINT(targetString.diSize)) THEN
+		RETURN;
+	END_IF
 END_IF
 
-IF NOT InternalAppendToTarget OR_ELSE sourceString3 = 0 OR_ELSE Tc2_Utilities.LEN2(sourceString3) = 0 THEN
-	RETURN;
-ELSE
-	InternalAppendToTarget := Tc2_Utilities.CONCAT2(targetString.pValue, sourceString3, targetString.pValue, TO_UDINT(targetString.diSize));
+IF sourceString3 <> 0 AND_THEN Tc2_Utilities.LEN2(sourceString3) > 0 THEN
+	IF NOT Tc2_Utilities.CONCAT2(targetString.pValue, sourceString3, targetString.pValue, TO_UDINT(targetString.diSize)) THEN
+		RETURN;
+	END_IF
 END_IF
 
-IF NOT InternalAppendToTarget OR_ELSE sourceString4 = 0 OR_ELSE Tc2_Utilities.LEN2(sourceString4) = 0 THEN
-	RETURN;
-ELSE
-	InternalAppendToTarget := Tc2_Utilities.CONCAT2(targetString.pValue, sourceString4, targetString.pValue, TO_UDINT(targetString.diSize));
+IF sourceString4 <> 0 AND_THEN Tc2_Utilities.LEN2(sourceString4) > 0 THEN
+	IF NOT Tc2_Utilities.CONCAT2(targetString.pValue, sourceString4, targetString.pValue, TO_UDINT(targetString.diSize)) THEN
+		RETURN;
+	END_IF
 END_IF
 
-IF NOT InternalAppendToTarget OR_ELSE sourceString5 = 0 OR_ELSE Tc2_Utilities.LEN2(sourceString5) = 0 THEN
-	RETURN;
-ELSE
-	InternalAppendToTarget := Tc2_Utilities.CONCAT2(targetString.pValue, sourceString5, targetString.pValue, TO_UDINT(targetString.diSize));
+IF sourceString5 <> 0 AND_THEN Tc2_Utilities.LEN2(sourceString5) > 0 THEN
+	IF NOT Tc2_Utilities.CONCAT2(targetString.pValue, sourceString5, targetString.pValue, TO_UDINT(targetString.diSize)) THEN
+		RETURN;
+	END_IF
 END_IF
 
-IF NOT InternalAppendToTarget OR_ELSE sourceString6 = 0 OR_ELSE Tc2_Utilities.LEN2(sourceString6) = 0 THEN
-	RETURN;
-ELSE
-	InternalAppendToTarget := Tc2_Utilities.CONCAT2(targetString.pValue, sourceString6, targetString.pValue, TO_UDINT(targetString.diSize));
+IF sourceString6 <> 0 AND_THEN Tc2_Utilities.LEN2(sourceString6) > 0 THEN
+	IF NOT Tc2_Utilities.CONCAT2(targetString.pValue, sourceString6, targetString.pValue, TO_UDINT(targetString.diSize)) THEN
+		RETURN;
+	END_IF
 END_IF
 
-IF NOT InternalAppendToTarget OR_ELSE sourceString7 = 0 OR_ELSE Tc2_Utilities.LEN2(sourceString7) = 0 THEN
-	RETURN;
-ELSE
-	InternalAppendToTarget := Tc2_Utilities.CONCAT2(targetString.pValue, sourceString7, targetString.pValue, TO_UDINT(targetString.diSize));
+IF sourceString7 <> 0 AND_THEN Tc2_Utilities.LEN2(sourceString7) > 0 THEN
+	IF NOT Tc2_Utilities.CONCAT2(targetString.pValue, sourceString7, targetString.pValue, TO_UDINT(targetString.diSize)) THEN
+		RETURN;
+	END_IF
 END_IF
 
-IF NOT InternalAppendToTarget OR_ELSE sourceString8 = 0 OR_ELSE Tc2_Utilities.LEN2(sourceString8) = 0 THEN
-	RETURN;
-ELSE
-	InternalAppendToTarget := Tc2_Utilities.CONCAT2(targetString.pValue, sourceString8, targetString.pValue, TO_UDINT(targetString.diSize));
+IF sourceString8 <> 0 AND_THEN Tc2_Utilities.LEN2(sourceString8) > 0 THEN
+	IF NOT Tc2_Utilities.CONCAT2(targetString.pValue, sourceString8, targetString.pValue, TO_UDINT(targetString.diSize)) THEN
+		RETURN;
+	END_IF
 END_IF
 
-IF NOT InternalAppendToTarget OR_ELSE sourceString9 = 0 OR_ELSE Tc2_Utilities.LEN2(sourceString9) = 0 THEN
-	RETURN;
-ELSE
-	InternalAppendToTarget := Tc2_Utilities.CONCAT2(targetString.pValue, sourceString9, targetString.pValue, TO_UDINT(targetString.diSize));
+IF sourceString9 <> 0 AND_THEN Tc2_Utilities.LEN2(sourceString9) > 0 THEN
+	IF NOT Tc2_Utilities.CONCAT2(targetString.pValue, sourceString9, targetString.pValue, TO_UDINT(targetString.diSize)) THEN
+		RETURN;
+	END_IF
 END_IF
 
-IF NOT InternalAppendToTarget OR_ELSE sourceString10 = 0 OR_ELSE Tc2_Utilities.LEN2(sourceString10) = 0 THEN
-	RETURN;
-ELSE
-	InternalAppendToTarget := Tc2_Utilities.CONCAT2(targetString.pValue, sourceString10, targetString.pValue, TO_UDINT(targetString.diSize));
-END_IF]]></ST>
+IF sourceString10 <> 0 AND_THEN Tc2_Utilities.LEN2(sourceString10) > 0 THEN
+	IF NOT Tc2_Utilities.CONCAT2(targetString.pValue, sourceString10, targetString.pValue, TO_UDINT(targetString.diSize)) THEN
+		RETURN;
+	END_IF
+END_IF
+
+InternalAppendToTarget := TRUE;]]></ST>
       </Implementation>
     </Method>
     <Method Name="InternalFind" Id="{5b6aff61-016c-4db4-94ed-cfbbb336515e}" FolderPath="Service members\">
-      <Declaration><![CDATA[METHOD INTERNAL InternalFind : BOOL
+      <Declaration><![CDATA[(*!
+<summary>Finds the first exact occurrence of a nonempty substring in buffers with supplied lengths.</summary>
+<description>Lengths and the one-based result position are measured in code units, excluding terminators. Caller-provided lengths must describe accessible buffers. Returns FALSE and position 0 for an empty search substring or no match. Unlike public Find, this helper does not match an empty substring, allowing replacement and splitting loops to make progress.</description>
+*)
+METHOD INTERNAL InternalFind : BOOL
 VAR_INPUT
 	stringToSearchIn : POINTER TO STRING;
 	stringToSearchInLength : UDINT;
@@ -516,10 +551,12 @@ VAR_OUTPUT
 END_VAR
 VAR	
 	i : UDINT;
-	memCoparisionResult : DINT;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[IF stringToSearchInLength < stringToFindLength THEN
+        <ST><![CDATA[InternalFind := FALSE;
+position := 0;
+
+IF stringToFindLength = 0 OR_ELSE stringToSearchInLength < stringToFindLength THEN
 	RETURN;
 END_IF
 
@@ -543,7 +580,11 @@ END_VAR
       </Implementation>
     </Method>
     <Method Name="InternalJoinToTarget" Id="{641619b9-d14d-4e22-94f4-454b0a713080}" FolderPath="Service members\">
-      <Declaration><![CDATA[METHOD INTERNAL InternalJoinToTarget : BOOL
+      <Declaration><![CDATA[(*!
+<summary>Builds joined text from the selected enumerated values in the supplied buffer.</summary>
+<description>Clears the target before joining and consumes the enumerator from its current position. Values formatted through the 255-character conversion use a matching 255-character local buffer. Returns FALSE on an incompatible target or append failure; partial text is not rolled back. Referenced data must remain valid during each append.</description>
+*)
+METHOD INTERNAL InternalJoinToTarget : BOOL
 VAR_INPUT
 	targetString : __SYSTEM.AnyType;
 	separator : POINTER TO STRING;
@@ -553,7 +594,7 @@ VAR_INPUT
 END_VAR
 VAR
 	currentValue : REFERENCE TO GENERIC_VALUE;
-	string255 : STRING;
+	string255 : STRING(255);
 	stringReference : REFERENCE TO STRING;
 	currentCount : UDINT;
 	currentIndex : UDINT;
@@ -607,7 +648,14 @@ END_WHILE]]></ST>
       </Implementation>
     </Method>
     <Method Name="InternalReplaceInSource" Id="{0ac24766-5e3a-42f7-a2a0-58aa460f844f}" FolderPath="Service members\">
-      <Declaration><![CDATA[METHOD INTERNAL InternalReplaceInSource : BOOL
+      <Declaration><![CDATA[(*!
+<summary>Replaces matching substrings in the supplied text buffer.</summary>
+<description>Replaces exact, case-sensitive, non-overlapping occurrences in place. An empty oldSubstring succeeds without changes and sets replacementCount to zero. An empty newSubstring deletes matched text. Zero maxReplacements means no replacement limit; skipReplacements skips the first matching occurrences. Returns FALSE if a memory operation fails or the result does not fit. Replacement is not atomic. If the next replacement would exceed buffer capacity, it is not performed; completed replacements remain, replacementCount reports their count, and the valid source remains null-terminated. These guarantees concern capacity failure with valid input buffers, not invalid memory access. The caller supplies live buffers of the correct encoding; sourceString must be writable and its size must include space for the terminator.</description>
+*)
+//!<param name="oldSubstring">Text to replace; empty performs no replacements.</param>
+//!<param name="newSubstring">Replacement text; empty deletes each selected match.</param>
+//!<param name="replacementCount">Number of completed replacements.</param>
+METHOD INTERNAL InternalReplaceInSource : BOOL
 VAR_INPUT
 	sourceString : __SYSTEM.AnyType;
 	oldSubstring : POINTER TO STRING;
@@ -636,13 +684,21 @@ VAR
 	memFunctionResult : UDINT;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[sourceStringMemorySize := TO_UDINT(sourceString.diSize);
+        <ST><![CDATA[InternalReplaceInSource := FALSE;
+replacementCount := 0;
+oldSubstringLength := InternalGetLength(oldSubstring);
+
+IF oldSubstringLength = 0 THEN
+	InternalReplaceInSource := TRUE;
+	RETURN;
+END_IF
+
+sourceStringMemorySize := TO_UDINT(sourceString.diSize);
 sourceStringLength := InternalGetLength(sourceString.pValue);
 
 handledString := sourceString.pValue;
 handledStringLength := sourceStringLength;
 
-oldSubstringLength := InternalGetLength(oldSubstring);
 newSubstringLength := InternalGetLength(newSubstring);
 checkMemorySize := oldSubstringLength < newSubstringLength;
 
@@ -701,12 +757,18 @@ InternalReplaceInSource := TRUE;]]></ST>
       </Implementation>
     </Method>
     <Method Name="IsFloat" Id="{5cca10b4-3ba5-4176-ae1b-a21dca6dbf97}">
-      <Declaration><![CDATA[METHOD IsFloat : BOOL
+      <Declaration><![CDATA[(*!
+<summary>Checks the complete input text for floating-point syntax.</summary>
+<description>Accepts decimal digits with an optional leading sign, at most one decimal point before an optional e/E exponent, and an optional sign immediately after the exponent marker. Requires a mantissa digit and, when an exponent is present, an exponent digit. Empty strings, whitespace and other characters are rejected. This is a lexical check, not a numeric range or representability check. The caller supplies a live null-terminated string, borrowed read-only for the call; processing is not limited to 255 characters and its cost grows with input length.</description>
+*)
+//!<param name="stringToCheck">Complete text to validate.</param>
+METHOD IsFloat : BOOL
 VAR_IN_OUT CONSTANT
     stringToCheck : STRING;
 END_VAR
 VAR
-    i : INT;
+    i : UDINT;
+    stringLength : UDINT;
 
     digitFound : BOOL;
     dotFound : BOOL;
@@ -715,7 +777,14 @@ VAR
 END_VAR
 ]]></Declaration>
       <Implementation>
-        <ST><![CDATA[FOR i := 0 TO Tc2_Standard.LEN(stringToCheck) - 1 DO
+        <ST><![CDATA[IsFloat := FALSE;
+stringLength := Tc2_Utilities.LEN2(ADR(stringToCheck));
+
+IF stringLength = 0 THEN
+	RETURN;
+END_IF
+
+FOR i := 0 TO stringLength - 1 DO
     // sign can be first character 
     IF i = 0 AND_THEN (stringToCheck[i] = 43 OR_ELSE stringToCheck[i] = 45) THEN
         CONTINUE;
@@ -775,18 +844,31 @@ END_IF]]></ST>
       </Implementation>
     </Method>
     <Method Name="IsInteger" Id="{64017c0a-0904-4813-83bf-5a23b0d4cfee}">
-      <Declaration><![CDATA[METHOD IsInteger : BOOL
+      <Declaration><![CDATA[(*!
+<summary>Checks the complete input text for signed integer syntax.</summary>
+<description>Accepts decimal digits with an optional leading plus or minus sign; at least one digit is required. Empty strings, whitespace and other characters are rejected. This is a lexical check, not a numeric range or representability check. The caller supplies a live null-terminated string, borrowed read-only for the call; processing is not limited to 255 characters and its cost grows with input length.</description>
+*)
+//!<param name="stringToCheck">Complete text to validate.</param>
+METHOD IsInteger : BOOL
 VAR_IN_OUT CONSTANT
     stringToCheck : STRING;
 END_VAR
 VAR
-    i : INT;
+    i : UDINT;
+    stringLength : UDINT;
 
     digitFound : BOOL;
 END_VAR
 ]]></Declaration>
       <Implementation>
-        <ST><![CDATA[FOR i := 0 TO Tc2_Standard.LEN(stringToCheck) - 1 DO
+        <ST><![CDATA[IsInteger := FALSE;
+stringLength := Tc2_Utilities.LEN2(ADR(stringToCheck));
+
+IF stringLength = 0 THEN
+	RETURN;
+END_IF
+
+FOR i := 0 TO stringLength - 1 DO
     // sign can be first character 
     IF i = 0 AND_THEN (stringToCheck[i] = 43 OR_ELSE stringToCheck[i] = 45) THEN
         CONTINUE;
@@ -838,18 +920,31 @@ END_WHILE]]></ST>
       </Implementation>
     </Method>
     <Method Name="IsUnsignedInteger" Id="{dfaddadb-137b-494a-9d2f-8a9a940574ca}">
-      <Declaration><![CDATA[METHOD IsUnsignedInteger : BOOL
+      <Declaration><![CDATA[(*!
+<summary>Checks the complete input text for unsigned integer syntax.</summary>
+<description>Accepts decimal digits with an optional leading plus sign; at least one digit is required. Empty strings, whitespace and other characters are rejected. This is a lexical check, not a numeric range or representability check. The caller supplies a live null-terminated string, borrowed read-only for the call; processing is not limited to 255 characters and its cost grows with input length.</description>
+*)
+//!<param name="stringToCheck">Complete text to validate.</param>
+METHOD IsUnsignedInteger : BOOL
 VAR_IN_OUT CONSTANT
     stringToCheck : STRING;
 END_VAR
 VAR
-    i : INT;
+    i : UDINT;
+    stringLength : UDINT;
 
     digitFound : BOOL;
 END_VAR
 ]]></Declaration>
       <Implementation>
-        <ST><![CDATA[FOR i := 0 TO Tc2_Standard.LEN(stringToCheck) - 1 DO
+        <ST><![CDATA[IsUnsignedInteger := FALSE;
+stringLength := Tc2_Utilities.LEN2(ADR(stringToCheck));
+
+IF stringLength = 0 THEN
+	RETURN;
+END_IF
+
+FOR i := 0 TO stringLength - 1 DO
     // + can be first character 
     IF i = 0 AND_THEN stringToCheck[i] = 43 THEN
         CONTINUE;
@@ -870,7 +965,11 @@ IsUnsignedInteger := digitFound;]]></ST>
       </Implementation>
     </Method>
     <Method Name="JoinToTarget" Id="{f9356af7-1c6b-416a-a5c8-0029f23752d3}" FolderPath="Join\">
-      <Declaration><![CDATA[METHOD JoinToTarget
+      <Declaration><![CDATA[(*!
+<summary>Prepares diagnostic text locally before passing it to read-only logging or exception parameters.</summary>
+<description>Computed diagnostic strings are held in local buffers for the duration of the receiving call.</description>
+*)
+METHOD JoinToTarget
 VAR_INPUT
 	targetString : ANY_STRING;
 END_VAR
@@ -881,13 +980,17 @@ VAR_INPUT
 	count : UDINT := 0;
 END_VAR
 VAR
+	formattedExceptionMessage : WSTRING(255);
+
 	stringTypeNotSupportedException : NotSupportedException;
 	sourceEnumeratorNullException : ArgumentNotSpecifiedException;
 	targetStringMemoryOverflowExcepton : TargetVariableMemoryOverflowException;	
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[IF targetString.TypeClass <> __SYSTEM.TYPE_CLASS.TYPE_STRING THEN
-	stringTypeNotSupportedException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), Tc2_Utilities.WCONCAT("Not supported type ", TO_WSTRING(targetString.TypeClass)));
+	formattedExceptionMessage := Tc2_Utilities.WCONCAT("Not supported type ", TO_WSTRING(targetString.TypeClass));
+
+	stringTypeNotSupportedException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), formattedExceptionMessage);
 END_IF
 
 IF sourceEnumerator = 0 THEN
@@ -910,7 +1013,14 @@ PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
       </Get>
     </Property>
     <Method Name="ReplaceInSource" Id="{f06898de-32ea-4f51-b053-1b282cb73a8a}" FolderPath="Replace\">
-      <Declaration><![CDATA[METHOD ReplaceInSource
+      <Declaration><![CDATA[(*!
+<summary>Replaces matching substrings in the supplied text buffer.</summary>
+<description>Replaces exact, case-sensitive, non-overlapping occurrences in place. An empty oldSubstring succeeds without changes and sets replacementCount to zero. An empty newSubstring deletes matched text. Zero maxReplacements means no replacement limit; skipReplacements skips the first matching occurrences. Raises NotSupportedException for an incompatible source type and TargetVariableMemoryOverflowException if replacement cannot complete. Replacement is not atomic. If the next replacement would exceed buffer capacity, it is not performed; completed replacements remain, replacementCount reports their count, and the valid source remains null-terminated. These guarantees concern capacity failure with valid input buffers, not invalid memory access. The caller supplies live buffers of the correct encoding; sourceString must be writable and its size must include space for the terminator.</description>
+*)
+//!<param name="oldSubstring">Text to replace; empty performs no replacements.</param>
+//!<param name="newSubstring">Replacement text; empty deletes each selected match.</param>
+//!<param name="replacementCount">Number of completed replacements.</param>
+METHOD ReplaceInSource
 VAR_INPUT
 	sourceString : ANY_STRING;
 END_VAR
@@ -930,10 +1040,15 @@ VAR
 	sourceStringMemoryOverflowExcepton : TargetVariableMemoryOverflowException;
 	
 	replaceResult : BOOL; 
+END_VAR
+VAR
+	formattedExceptionMessage : WSTRING(255);
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[IF sourceString.TypeClass <> __SYSTEM.TYPE_CLASS.TYPE_STRING THEN
-	stringTypeNotSupportedException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), Tc2_Utilities.WCONCAT("Not supported type ", TO_WSTRING(sourceString.TypeClass)));
+	formattedExceptionMessage := Tc2_Utilities.WCONCAT("Not supported type ", TO_WSTRING(sourceString.TypeClass));
+
+	stringTypeNotSupportedException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), formattedExceptionMessage);
 END_IF
 
 IF NOT InternalReplaceInSource(sourceString, ADR(oldSubstring), ADR(newSubstring), maxReplacements, skipReplacements, replacementCount => replacementCount) THEN
@@ -942,7 +1057,14 @@ END_IF]]></ST>
       </Implementation>
     </Method>
     <Method Name="ReplaceInSource255" Id="{f41fa253-7b57-4bb9-a052-ea59a6eb6bff}" FolderPath="Replace\">
-      <Declaration><![CDATA[METHOD ReplaceInSource255
+      <Declaration><![CDATA[(*!
+<summary>Replaces matching substrings in the supplied text buffer.</summary>
+<description>Replaces exact, case-sensitive, non-overlapping occurrences in place. An empty oldSubstring succeeds without changes and sets replacementCount to zero. An empty newSubstring deletes matched text. Zero maxReplacements means no replacement limit; skipReplacements skips the first matching occurrences. Raises NotSupportedException for an incompatible source type and TargetVariableMemoryOverflowException if replacement cannot complete. Replacement is not atomic. If the next replacement would exceed buffer capacity, it is not performed; completed replacements remain, replacementCount reports their count, and the valid source remains null-terminated. These guarantees concern capacity failure with valid input buffers, not invalid memory access. The caller supplies live buffers of the correct encoding; sourceString must be writable and its size must include space for the terminator.</description>
+*)
+//!<param name="oldSubstring">Text to replace; empty performs no replacements.</param>
+//!<param name="newSubstring">Replacement text; empty deletes each selected match.</param>
+//!<param name="replacementCount">Number of completed replacements.</param>
+METHOD ReplaceInSource255
 VAR_INPUT
 	sourceString : ANY_STRING;
 	oldSubstring : STRING(255);
@@ -958,10 +1080,15 @@ VAR
 	sourceStringMemoryOverflowExcepton : TargetVariableMemoryOverflowException;
 	
 	replaceResult : BOOL; 
+END_VAR
+VAR
+	formattedExceptionMessage : WSTRING(255);
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[IF sourceString.TypeClass <> __SYSTEM.TYPE_CLASS.TYPE_STRING THEN
-	stringTypeNotSupportedException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), Tc2_Utilities.WCONCAT("Not supported type ", TO_WSTRING(sourceString.TypeClass)));
+	formattedExceptionMessage := Tc2_Utilities.WCONCAT("Not supported type ", TO_WSTRING(sourceString.TypeClass));
+
+	stringTypeNotSupportedException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), formattedExceptionMessage);
 END_IF
 
 IF NOT InternalReplaceInSource(sourceString, ADR(oldSubstring), ADR(newSubstring), maxReplacements, skipReplacements, replacementCount => replacementCount) THEN
@@ -1023,7 +1150,11 @@ TrimChars(stringToTrim, trimMode, trimCharArray);]]></ST>
       </Implementation>
     </Method>
     <Method Name="TrimChars" Id="{f8f9620e-29b0-4754-aeb8-6e676ec3c2d0}" FolderPath="Trim\">
-      <Declaration><![CDATA[METHOD TrimChars
+      <Declaration><![CDATA[(*!
+<summary>Removes selected character values from the requested ends of a string in place.</summary>
+<description>The caller supplies a live writable null-terminated string. Left trimming moves the retained suffix, including its terminator, within the same buffer; no new storage is allocated. The trim-character array may have negative bounds. Right trimming stops after the first code unit without decrementing an unsigned index below zero.</description>
+*)
+METHOD TrimChars
 VAR_IN_OUT
 	stringToTrim : STRING;
 END_VAR
@@ -1039,7 +1170,7 @@ VAR
 	trimCharData : POINTER TO BYTE;
 	
 	originalCharIndex : UDINT;
-	trimCharIndex : UDINT;
+	trimCharIndex : DINT;
 	trimCharCount : UDINT;
 END_VAR]]></Declaration>
       <Implementation>
@@ -1054,7 +1185,7 @@ IF trimMode = TRIM_MODE.LEFT_AND_RIGHT OR_ELSE trimMode = TRIM_MODE.LEFT THEN
 	trimCharCount := 0;
 	
 	FOR originalCharIndex := 0 TO stringLength - 1 BY 1 DO
-		FOR trimCharIndex := TO_UDINT(LOWER_BOUND(trimChars, 1)) TO TO_UDINT(UPPER_BOUND(trimChars, 1)) DO
+		FOR trimCharIndex := LOWER_BOUND(trimChars, 1) TO UPPER_BOUND(trimChars, 1) DO
 			trimCharData := ADR(trimChars[trimCharIndex]);
 			
 			IF stringData[originalCharIndex] = trimCharData^ THEN
@@ -1071,7 +1202,7 @@ IF trimMode = TRIM_MODE.LEFT_AND_RIGHT OR_ELSE trimMode = TRIM_MODE.LEFT THEN
 	IF trimCharCount > 0 THEN
 		stringLength := stringLength - trimCharCount;
 		
-		Tc2_System.MEMCPY(stringData, stringData + (trimCharCount * CharSize), (stringLength * CharSize) + CharSize);		
+		Tc2_System.MEMMOVE(stringData, stringData + (trimCharCount * CharSize), (stringLength * CharSize) + CharSize);		
 	END_IF
 END_IF
 
@@ -1082,19 +1213,17 @@ END_IF
 IF trimMode = TRIM_MODE.LEFT_AND_RIGHT OR_ELSE trimMode = TRIM_MODE.RIGHT THEN
 	trimCharCount := 0;
 	
-	{warning disable C0266}
-	FOR originalCharIndex := stringLength - 1 TO 0 BY -1 DO
-	{warning restore C0266}
-		FOR trimCharIndex := TO_UDINT(LOWER_BOUND(trimChars, 1)) TO TO_UDINT(UPPER_BOUND(trimChars, 1)) DO
+	FOR originalCharIndex := stringLength TO 1 BY -1 DO
+		FOR trimCharIndex := LOWER_BOUND(trimChars, 1) TO UPPER_BOUND(trimChars, 1) DO
 			trimCharData := ADR(trimChars[trimCharIndex]);
 			
-			IF stringData[originalCharIndex] = trimCharData^ THEN
+			IF stringData[originalCharIndex - 1] = trimCharData^ THEN
 				trimCharCount := trimCharCount + 1;
 				EXIT;
 			END_IF
 		END_FOR
 		
-		IF trimCharCount <> stringLength - originalCharIndex THEN
+		IF trimCharCount <> stringLength - originalCharIndex + 1 THEN
 			EXIT;
 		END_IF
 	END_FOR
@@ -1108,7 +1237,11 @@ END_IF]]></ST>
       </Implementation>
     </Method>
     <Method Name="TryAppendToTarget" Id="{bf1d041e-2745-49ca-b076-368f2e842cc8}" FolderPath="Append\">
-      <Declaration><![CDATA[METHOD TryAppendToTarget : BOOL
+      <Declaration><![CDATA[(*!
+<summary>Appends one STRING to a caller-owned buffer and reports success.</summary>
+<description>Requires live, null-terminated source strings and a writable STRING target with valid capacity metadata. Empty fragments do not stop processing; if all are empty, the target is unchanged and the operation succeeds. Returns FALSE for a non-STRING target or when appending fails. Processing stops on the first append failure; earlier modifications are not rolled back. Source storage is borrowed only for this call.</description>
+*)
+METHOD TryAppendToTarget : BOOL
 VAR_INPUT
 	targetString : ANY_STRING;
 END_VAR
@@ -1120,7 +1253,11 @@ END_VAR]]></Declaration>
       </Implementation>
     </Method>
     <Method Name="TryAppendToTarget255" Id="{9c82266a-bb32-451c-9763-5118bd999fda}" FolderPath="Append\">
-      <Declaration><![CDATA[METHOD TryAppendToTarget255 : BOOL
+      <Declaration><![CDATA[(*!
+<summary>Appends up to ten STRING fragments in argument order, skipping empty fragments.</summary>
+<description>Requires live, null-terminated source strings and a writable STRING target with valid capacity metadata. Empty fragments do not stop processing; if all are empty, the target is unchanged and the operation succeeds. Returns FALSE for a non-STRING target or when appending fails. Processing stops on the first append failure; earlier modifications are not rolled back. Source storage is borrowed only for this call.</description>
+*)
+METHOD TryAppendToTarget255 : BOOL
 VAR_INPUT
 	targetString : ANY_STRING;
 	sourceString1 : STRING(255);
@@ -1139,7 +1276,13 @@ END_VAR]]></Declaration>
       </Implementation>
     </Method>
     <Method Name="TryCreateSplitter" Id="{34df4a0d-a862-4e0c-8436-c7e6b40e8278}" FolderPath="Split\">
-      <Declaration><![CDATA[METHOD TryCreateSplitter : BOOL
+      <Declaration><![CDATA[(*!
+<summary>Initializes a splitter when the source has the supported string type.</summary>
+<description>The source must remain alive and unchanged during iteration. The splitter owns its current fragment; borrowed fragment references expire on MoveNext, Reset or destruction. This method does not allocate the splitter with __NEW. The initialized result has no fragment allocation until MoveNext; assigning it must not overwrite an instance with an unreleased fragment. The caller is responsible for the result lifetime and cleanup, including Reset when abandoning iteration. Do not copy an active splitter by value; use references. Only an instance explicitly allocated with __NEW may be deleted with __DELETE.</description>
+*)
+//!<param name="maxCount">Maximum number of returned fragments; zero means unlimited. Empty fragments removed after optional trimming do not count toward the limit. Remaining text is not returned after the limit is reached and is not merged into the last fragment.</param>
+//!<param name="separator">Copied separator containing 1 to 80 characters. An invalid reference, empty or longer value returns FALSE before initialization.</param>
+METHOD TryCreateSplitter : BOOL
 VAR_INPUT
 	sourceString : ANY_STRING;
 END_VAR
@@ -1159,6 +1302,14 @@ VAR
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[IF sourceString.TypeClass <> __SYSTEM.TYPE_CLASS.TYPE_STRING THEN
+	RETURN;
+END_IF
+
+IF NOT __ISVALIDREF(separator) THEN
+	RETURN;
+END_IF
+
+IF separator = '' OR_ELSE InternalGetLength(ADR(separator)) > 80 THEN
 	RETURN;
 END_IF
 
@@ -1186,7 +1337,14 @@ __ENDTRY]]></ST>
       </Implementation>
     </Method>
     <Method Name="TryReplaceInSource" Id="{6cd9fde4-681b-4169-adb0-283364fff827}" FolderPath="Replace\">
-      <Declaration><![CDATA[METHOD TryReplaceInSource : BOOL
+      <Declaration><![CDATA[(*!
+<summary>Replaces matching substrings in the supplied text buffer.</summary>
+<description>Replaces exact, case-sensitive, non-overlapping occurrences in place. An empty oldSubstring succeeds without changes and sets replacementCount to zero. An empty newSubstring deletes matched text. Zero maxReplacements means no replacement limit; skipReplacements skips the first matching occurrences. Returns FALSE for an incompatible source type or if replacement cannot complete. Replacement is not atomic. If the next replacement would exceed buffer capacity, it is not performed; completed replacements remain, replacementCount reports their count, and the valid source remains null-terminated. These guarantees concern capacity failure with valid input buffers, not invalid memory access. The caller supplies live buffers of the correct encoding; sourceString must be writable and its size must include space for the terminator.</description>
+*)
+//!<param name="oldSubstring">Text to replace; empty performs no replacements.</param>
+//!<param name="newSubstring">Replacement text; empty deletes each selected match.</param>
+//!<param name="replacementCount">Number of completed replacements.</param>
+METHOD TryReplaceInSource : BOOL
 VAR_INPUT
 	sourceString : ANY_STRING;
 END_VAR
@@ -1211,7 +1369,14 @@ TryReplaceInSource := InternalReplaceInSource(sourceString, ADR(oldSubstring), A
       </Implementation>
     </Method>
     <Method Name="TryReplaceInSource255" Id="{9f1f7515-63df-42e0-8ebb-d9a7a98ddbf5}" FolderPath="Replace\">
-      <Declaration><![CDATA[METHOD TryReplaceInSource255 : BOOL
+      <Declaration><![CDATA[(*!
+<summary>Replaces matching substrings in the supplied text buffer.</summary>
+<description>Replaces exact, case-sensitive, non-overlapping occurrences in place. An empty oldSubstring succeeds without changes and sets replacementCount to zero. An empty newSubstring deletes matched text. Zero maxReplacements means no replacement limit; skipReplacements skips the first matching occurrences. Returns FALSE for an incompatible source type or if replacement cannot complete. Replacement is not atomic. If the next replacement would exceed buffer capacity, it is not performed; completed replacements remain, replacementCount reports their count, and the valid source remains null-terminated. These guarantees concern capacity failure with valid input buffers, not invalid memory access. The caller supplies live buffers of the correct encoding; sourceString must be writable and its size must include space for the terminator.</description>
+*)
+//!<param name="oldSubstring">Text to replace; empty performs no replacements.</param>
+//!<param name="newSubstring">Replacement text; empty deletes each selected match.</param>
+//!<param name="replacementCount">Number of completed replacements.</param>
+METHOD TryReplaceInSource255 : BOOL
 VAR_INPUT
 	sourceString : ANY_STRING;
 	oldSubstring : STRING(255);

@@ -7,14 +7,19 @@ SPDX-License-Identifier: MIT
 License: https://opensource.org/license/mit
 *)
 
+(*!
+<summary>Enumerates allocated text fragments from a borrowed source string.</summary>
+<description>Initialization requires a separator containing 1 to 80 characters, stored in a fixed buffer. The source must remain alive and unchanged during iteration. The enumerator owns the current fragment; borrowed fragment references expire on MoveNext, Reset or destruction. Allocation failure uses the terminal memory mechanism. With a nonempty separator, empty fragments are preserved when RemoveEmptyEntries is FALSE, including the final fragment after a trailing separator and one fragment for an empty source. RemoveEmptyEntries filters empty fragments after optional trimming. MaxCount still limits the number of returned fragments. Do not copy an instance by assignment or pass it by value while it owns an allocated buffer; use references instead. Assignment does not clone the buffer or transfer ownership. Do not overwrite an instance that still owns a buffer. The creator is responsible for the splitter lifetime and cleanup. Release the current fragment with Reset when abandoning iteration. Delete the splitter itself only if it was allocated with __NEW; FB_exit releases its current fragment. Statically or locally declared instances must not be passed to __DELETE. The borrowed source is never owned or freed by the splitter.</description>
+*)
 {attribute 'no_explicit_call' := 'do not call this function block directly'} 
 FUNCTION_BLOCK WideStringSplittingEnumerator EXTENDS Object IMPLEMENTS IEnumerator
 VAR_OUTPUT
 	SourceString : POINTER TO WSTRING;
 	SourceStringLength : UDINT;
 	SourceStringSize : UDINT;
-	Separator : WSTRING;
+	Separator : WSTRING(80);
 	SeparatorLength : UDINT;
+	//!<summary>Maximum number of returned fragments; zero means unlimited. Empty fragments removed after optional trimming do not count toward the limit. Remaining text is not returned after the limit is reached and is not merged into the last fragment.</summary>
 	MaxCount : UDINT := 0;
 	TrimEntries : BOOL := FALSE;
 	RemoveEmptyEntries : BOOL := FALSE;	
@@ -97,10 +102,16 @@ END_IF]]></ST>
       </Implementation>
     </Method>
     <Method Name="Initialize" Id="{efd8c83e-84af-4552-92cf-49864ca5b37a}">
-      <Declaration><![CDATA[METHOD INTERNAL Initialize
+      <Declaration><![CDATA[(*!
+<summary>Sets the borrowed source and splitting options, then resets iteration.</summary>
+<description>SourceStringLength counts UTF-16 code units; SourceStringSize counts bytes including the terminator. The separator is copied into internal storage. The source remains caller-owned.</description>
+*)
+//!<param name="maxCount">Maximum number of returned fragments; zero means unlimited. Empty fragments removed after optional trimming do not count toward the limit. Remaining text is not returned after the limit is reached and is not merged into the last fragment.</param>
+//!<param name="separator">Separator containing 1 to 80 characters; the caller must validate its length before initialization.</param>
+METHOD INTERNAL Initialize
 VAR_INPUT
 	sourceString : POINTER TO WSTRING;
-	separator : WSTRING;
+	separator : WSTRING(80);
 	maxCount : UDINT;
 	trimEntries : BOOL;
 	removeEmptyEntries : BOOL;
@@ -108,9 +119,9 @@ END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[THIS^.SourceString := sourceString;
 THIS^.SourceStringLength := WideStrings.InternalGetLength(sourceString);
-THIS^.SourceStringSize := THIS^.SourceStringLength + WideStrings.CharSize; 
+THIS^.SourceStringSize := (THIS^.SourceStringLength + 1) * WideStrings.CharSize; 
 THIS^.Separator := separator;
-THIS^.SeparatorLength := WideStrings.InternalGetLength(ADR(separator));
+THIS^.SeparatorLength := WideStrings.InternalGetLength(ADR(THIS^.Separator));
 THIS^.MaxCount := maxCount;
 THIS^.TrimEntries := trimEntries;
 THIS^.RemoveEmptyEntries := removeEmptyEntries;
@@ -121,7 +132,11 @@ Reset();]]></ST>
       </Implementation>
     </Method>
     <Method Name="MoveNext" Id="{6f4c66bb-70e6-443d-b741-5ac7aedc0a0c}">
-      <Declaration><![CDATA[METHOD MoveNext : BOOL
+      <Declaration><![CDATA[(*!
+<summary>Releases the previous fragment and advances to the next selected fragment.</summary>
+<description>Returns TRUE when a new current fragment is available, FALSE at the end or when the configured limit is reached. A non-null cursor with zero remaining length represents a pending empty final fragment; a null cursor marks completed iteration. Empty fragments are returned unless RemoveEmptyEntries is TRUE, subject to MaxCount. Each fragment owns a null-terminated allocation; allocation failure invokes DynamicMemoryManager.RaiseAllocationFailure before the buffer is accessed.</description>
+*)
+METHOD MoveNext : BOOL
 VAR
 	separatorPosition : UDINT;
 END_VAR]]></Declaration>
@@ -134,7 +149,7 @@ IF _CurrentEntry <> 0 THEN
 	__DELETE(_CurrentEntry);
 END_IF
 
-IF _CurrentString = 0 OR_ELSE _CurrentStringLength = 0 OR_ELSE Separator = "" OR_ELSE (MaxCount > 0 AND_THEN _EntryCount >= MaxCount) THEN
+IF _CurrentString = 0 OR_ELSE Separator = "" OR_ELSE (MaxCount > 0 AND_THEN _EntryCount >= MaxCount) THEN
 	RETURN;
 END_IF
 
@@ -142,16 +157,24 @@ IF WideStrings.InternalFind(_CurrentString, _CurrentStringLength, ADR(Separator)
 	_CurrentEntrySize := separatorPosition * WideStrings.CharSize;
 	_CurrentEntry := __NEW(BYTE, _CurrentEntrySize);
 
+	IF _CurrentEntry = 0 THEN
+		DynamicMemoryManager.RaiseAllocationFailure();
+	END_IF
+
 	Tc2_System.MEMCPY(_CurrentEntry, _CurrentString, (separatorPosition - 1) * WideStrings.CharSize);
 	Tc2_System.MEMSET(_CurrentEntry + ((separatorPosition - 1) * WideStrings.CharSize), 0, WideStrings.CharSize);
 
 	_CurrentString := _CurrentString + ((separatorPosition - 1) * WideStrings.CharSize) + (SeparatorLength * WideStrings.CharSize);
 	_CurrentStringLength := _CurrentStringLength - separatorPosition + 1 - SeparatorLength;
 ELSE	
-	_CurrentEntrySize := _CurrentStringLength + WideStrings.CharSize;	
+	_CurrentEntrySize := (_CurrentStringLength + 1) * WideStrings.CharSize;	
 	_CurrentEntry := __NEW(BYTE, _CurrentEntrySize);
+
+	IF _CurrentEntry = 0 THEN
+		DynamicMemoryManager.RaiseAllocationFailure();
+	END_IF
 	
-	Tc2_System.MEMCPY(_CurrentEntry, _CurrentString, _CurrentStringLength + WideStrings.CharSize);
+	Tc2_System.MEMCPY(_CurrentEntry, _CurrentString, _CurrentEntrySize);
 	
 	_CurrentString := 0;
 	_CurrentStringLength := 0;

@@ -9,13 +9,17 @@ License: https://opensource.org/license/mit
 
 {attribute 'enable_dynamic_creation'}	
 {attribute 'no_explicit_call' := 'do not call this function block directly'} 
+(*!
+<summary>Provides a message, error code and optional inner exception for concrete exception types.</summary>
+<description>Root lookup provides a borrowed read-only diagnostic view without transferring ownership or extending lifetime. When supplying an inner exception, the caller must also supply a nonempty message or a nonzero error code for the wrapper. This rule is not checked at runtime. A dynamic exception supplied as an inner cause must not be cleared or otherwise modified through any alias until its task cleanup. Reading and propagation through ExceptionManager remain allowed; static inputs are cloned. The supplied graph must already be acyclic, including graphs from custom implementations. Before changing this instance, framework Throw rejects any path back to this instance with a StandardException that has no inner cause. Validation follows IGeneralException and IAggregateException edges; inputs must remain live and stable during traversal. Shared causes in separate branches are allowed.</description>
+*)
 FUNCTION_BLOCK ABSTRACT GeneralException EXTENDS Exception IMPLEMENTS IGeneralException
 VAR
 	{attribute 'hide'} 
 	_ErrorCode : UDINT;
 	
 	{attribute 'hide'} 
-	_InnerException : IException;
+	_InnerException : IReadOnlyException;
 
 	{attribute 'hide'} 
 	_SourceMessage : ERROR_MESSAGE;
@@ -38,7 +42,7 @@ SUPER^.Clear();]]></ST>
       <Declaration><![CDATA[(*!
 <summary>Copies metadata and borrows the source's already prepared inner exception.</summary>
 <description>
-The copy does not take ownership or extend the inner exception's lifetime.
+The copy does not take ownership or extend the inner exception's lifetime. All aliases of the prepared dynamic inner cause must leave it unchanged until task cleanup.
 </description>
 *)
 
@@ -57,7 +61,12 @@ _InnerException := sourceException.InnerException;]]></ST>
       </Implementation>
     </Method>
     <Property Name="Empty" Id="{2c487122-2631-4c9e-81c7-74c59235aeea}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Indicates that both the exception's own message and error code are empty.</summary>
+<description>Does not inspect the inner exception. Callers supplying an inner exception must also provide a nonempty wrapper message or a nonzero error code.</description>
+*)
+
+{attribute 'monitoring' := 'call'}
 PROPERTY Empty : BOOL]]></Declaration>
       <Get Name="Get" Id="{55a012e2-d7b7-48ff-8ce7-8cc112477a4e}">
         <Declaration><![CDATA[]]></Declaration>
@@ -77,7 +86,12 @@ PROPERTY FINAL ErrorCode : UDINT]]></Declaration>
       </Get>
     </Property>
     <Method Name="GetMessage" Id="{3db2de1b-8880-4652-a131-08e8d78488a3}">
-      <Declaration><![CDATA[METHOD GetMessage : ERROR_MESSAGE
+      <Declaration><![CDATA[(*!
+<summary>Formats this exception and its inner cause as a bounded diagnostic message.</summary>
+<description>Includes source and captured timestamps according to the options. If the result exceeds ERROR_MESSAGE capacity, preserves the prefix and ends it with an ellipsis. Formatting does not raise merely because the final text is too long; builder allocation failures remain terminal.</description>
+*)
+
+METHOD GetMessage : ERROR_MESSAGE
 VAR_INPUT
 	showSource : BOOL := FALSE;
 	timestampDisplayMode : TIMESTAMP_DISPLAY_MODE := TIMESTAMP_DISPLAY_MODE.HIDDEN;
@@ -116,11 +130,16 @@ IF innerExceptionMessage <> "" THEN
 		.AppendString(innerExceptionMessage);	
 END_IF
 
-stringBuilder.AssignToString(GetMessage);]]></ST>
+GetMessage := Exceptions.CopyMessage(stringBuilder);]]></ST>
       </Implementation>
     </Method>
     <Method Name="GetRootException" Id="{fa05036d-6eea-4f81-a421-ce9f1b10c66e}">
-      <Declaration><![CDATA[METHOD FINAL GetRootException : IException]]></Declaration>
+      <Declaration><![CDATA[(*!
+<summary>Returns a borrowed read-only view of the root exception.</summary>
+<description>No clone is created and ownership is not transferred. The view does not extend the exception's lifetime and does not expose Clear.</description>
+*)
+
+METHOD FINAL GetRootException : IReadOnlyException]]></Declaration>
       <Implementation>
         <ST><![CDATA[IF _InnerException = 0 THEN
 	GetRootException := THIS^;
@@ -130,8 +149,13 @@ END_IF]]></ST>
       </Implementation>
     </Method>
     <Property Name="InnerException" Id="{8936f82b-1d48-4d62-9fe4-79e75a11ff7b}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
-PROPERTY FINAL InnerException : IException]]></Declaration>
+      <Declaration><![CDATA[(*!
+<summary>Returns the inner cause as a borrowed reference for reading only.</summary>
+<description>Returns zero when no inner cause is attached. Callers must not clear or otherwise modify the returned exception through this reference. No clone is created, ownership is not transferred and lifetime is not extended; registered exceptions remain valid only until their task cleanup. The IReadOnlyException view does not expose Clear. It is not an immutable snapshot; callers must also respect the read-only contract of borrowed source strings.</description>
+*)
+
+{attribute 'monitoring' := 'call'}
+PROPERTY FINAL InnerException : IReadOnlyException]]></Declaration>
       <Get Name="Get" Id="{1ab4855a-cf36-46cf-ac1d-a023e4487413}">
         <Declaration><![CDATA[
 ]]></Declaration>
@@ -141,8 +165,13 @@ PROPERTY FINAL InnerException : IException]]></Declaration>
       </Get>
     </Property>
     <Method Name="InternalThrow" Id="{106035ff-80e4-499c-8c2e-6479af0d1e6a}" FolderPath="Service members\">
-      <Declaration><![CDATA[METHOD PROTECTED InternalThrow
-VAR_IN_OUT
+      <Declaration><![CDATA[(*!
+<summary>Captures exception metadata, prepares the inner cause and propagates this exception.</summary>
+<description>Call in the owning cyclic task. If innerException is supplied, message must be nonempty or errorCode nonzero; the caller is responsible and no runtime validation is performed. Static inner exceptions are cloned, dynamic ones are borrowed until task cleanup. Captures timestamps before propagation through ExceptionManager. A dynamic exception supplied as an inner cause must not be cleared or otherwise modified through any alias until its task cleanup. Reading and propagation through ExceptionManager remain allowed; static inputs are cloned. The supplied graph must already be acyclic, including graphs from custom implementations. Before changing this instance, framework Throw rejects any path back to this instance with a StandardException that has no inner cause. Validation follows IGeneralException and IAggregateException edges; inputs must remain live and stable during traversal. Shared causes in separate branches are allowed. Long diagnostic strings are borrowed read-only for this call; their references are not retained. Pass variables or literals, and store computed expressions in local variables before calling.</description>
+*)
+
+METHOD PROTECTED InternalThrow
+VAR_IN_OUT CONSTANT
 	sourceNamespaceName : STRING;
 	sourceClassName : STRING;
 	sourcePOUName : STRING;
@@ -152,9 +181,21 @@ END_VAR
 VAR_INPUT
 	errorCode : UDINT;
 	innerException : IException;	
+END_VAR
+VAR
+	invalidInnerException : StandardException;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[_SourceFullPOUName := GetFullPOUName(sourceNamespaceName, sourceClassName, sourcePOUName);
+        <ST><![CDATA[IF NOT Exceptions.CanAttachInnerException(THIS^, innerException) THEN
+	invalidInnerException.Throw(
+		sourceNamespaceName := CurrentNamespace.Name,
+		sourceClassName := ClassName,
+		sourcePOUName := __POUNAME(),
+		sourcePosition := __POSITION(),
+		message := "Cannot attach an exception graph containing its prospective owner.");
+END_IF
+
+_SourceFullPOUName := GetFullPOUName(sourceNamespaceName, sourceClassName, sourcePOUName);
 _SourcePosition := sourcePosition;
 _SourceMessage := message;
 _ErrorCode := errorCode;
@@ -175,7 +216,11 @@ ExceptionManager.Throw(THIS^);]]></ST>
       </Implementation>
     </Method>
     <Property Name="SourceMessage" Id="{f95394ae-f3fa-41a0-9ff1-1b06e2acc75a}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Borrows the exception's own message for reading without copying.</summary>
+<description>Callers must not modify the returned string. The compiler does not enforce this read-only contract. The reference does not transfer ownership or extend the exception's lifetime and is not an independent snapshot; its contents may change when the exception is cleared or reused.</description>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY FINAL SourceMessage : REFERENCE TO ERROR_MESSAGE]]></Declaration>
       <Get Name="Get" Id="{e2b70d3d-22b6-49c5-91b1-02c758c1bd0e}">
         <Declaration><![CDATA[]]></Declaration>
@@ -185,7 +230,12 @@ PROPERTY FINAL SourceMessage : REFERENCE TO ERROR_MESSAGE]]></Declaration>
       </Get>
     </Property>
     <Method Name="ToError" Id="{732ff150-933e-4d7b-ab35-7e05b750ad36}">
-      <Declaration><![CDATA[METHOD ToError
+      <Declaration><![CDATA[(*!
+<summary>Copies diagnostic fields of this exception and its root into the target error.</summary>
+<description>An invalid target reference is ignored. The root is borrowed for reading during the call. Computed diagnostic strings are held in local buffers for the duration of the receiving call.</description>
+*)
+
+METHOD ToError
 VAR_IN_OUT CONSTANT
 	targetError : ERROR;
 END_VAR
@@ -193,7 +243,13 @@ VAR_INPUT
 	severity : ERROR_SEVERITY;	
 END_VAR
 VAR
-	rootException : IException;
+	topSourceText : STRING(255);
+	rootSourceText : STRING(255);
+	
+	topMessageText : ERROR_MESSAGE;
+	rootMessageText : ERROR_MESSAGE;
+	
+	rootException : IReadOnlyException;
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[IF NOT __ISVALIDREF(targetError) THEN
@@ -202,12 +258,17 @@ END_IF
 
 rootException := GetRootException();
 
+topSourceText := GetSourceDescription();
+rootSourceText := rootException.GetSourceDescription();
+topMessageText := GetMessage();
+rootMessageText := rootException.GetMessage();
+
 targetError.Fill(
 	severity,
-	GetSourceDescription(),
-	rootException.GetSourceDescription(),
-	GetMessage(),
-	rootException.GetMessage(),
+	topSourceText,
+	rootSourceText,
+	topMessageText,
+	rootMessageText,
 	LocalTimestamp,
 	UtcTimestamp
 );]]></ST>

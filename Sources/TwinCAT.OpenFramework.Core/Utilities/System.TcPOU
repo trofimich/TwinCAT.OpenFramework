@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <TcPlcObject Version="1.1.0.1">
   <POU Name="System" Id="{93357f84-3794-4f45-97d8-6aeeff54147a}" SpecialFunc="None">
     <Declaration><![CDATA[(*
@@ -7,32 +7,26 @@ SPDX-License-Identifier: MIT
 License: https://opensource.org/license/mit
 *)
 
+(*!
+<summary>Provides PLC execution context information and cached system time.</summary>
+<description>Task queries do not require Execute. A statically allocated TaskSystemState per cyclic PLC task owns its ADS blocks and cached time. Execute and clock properties select the calling task. Outside cyclic context clock getters return default values, SystemTime returns a null reference, and Execute and the interval setter do nothing. Borrowed time references must not cross task boundaries.</description>
+*)
+
 {attribute 'no_explicit_call' := 'do not call this function block directly'} 
 PROGRAM System
-VAR_OUTPUT	
-	SystemTimeZoneId : Tc2_Utilities.E_TimeZoneID;	
-	SystemTimeZoneInformation : Tc2_Utilities.ST_TimeZoneInformation;		
-			
-	SystemLocalDateTime : LDATE_AND_TIME;			
-	SystemUtcDateTime : LDATE_AND_TIME;
-		
-	SystemFileTime : Tc2_Utilities.T_FILETIME;		
-	SystemFileTime64 : Tc2_Utilities.T_FILETIME64;
-	
-	SystemDataValid : BOOL;
+VAR CONSTANT
+	(*!
+	<summary>Number of entries in the generated PLC task information table.</summary>
+	<description>Shared compile-time bound for per-task state arrays. Valid cyclic task indices range from 1 to TASK_COUNT; non-cyclic contexts are not entries.</description>
+	*)
+	TASK_COUNT : DINT := TO_DINT(XSIZEOF(TwinCAT_SystemInfoVarList._TaskInfo) / XSIZEOF(Global.PlcTaskSystemInfo));
 END_VAR
 VAR
-	{attribute 'hide'} 
+	{attribute 'hide'}
 	_ClassName : STRING := __POUNAME();
-	
-	{attribute 'hide'} 
-	_GetLocalAmsNetId : FB_GetLocalAmsNetId;
-	{attribute 'hide'} 
-	_LocalSystemTime : Tc2_Utilities.FB_LocalSystemTime; 
-	{attribute 'hide'} 
-	_GetTimeZone : Tc2_Utilities.FB_GetTimeZoneInformation;
-	{attribute 'hide'} 
-	_LocalTimeToUtcTime : FB_TzSpecificLocalTimeToSystemTime;	
+
+	{attribute 'hide'}
+	_TaskStates : ARRAY [1..TASK_COUNT] OF TaskSystemState;
 END_VAR]]></Declaration>
     <Implementation>
       <ST><![CDATA[]]></ST>
@@ -49,7 +43,12 @@ PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
       </Get>
     </Property>
     <Method Name="ConvertTimestructToLongDateTime" Id="{c368065d-a4b5-46d7-baee-bf08cd6397d3}" FolderPath="Service methods\">
-      <Declaration><![CDATA[METHOD ConvertTimestructToLongDateTime : LDATE_AND_TIME
+      <Declaration><![CDATA[(*!
+<summary>Converts calendar fields to a long date and time, preserving milliseconds.</summary>
+<description>The input must contain a valid date in the LDATE_AND_TIME range and milliseconds from 0 to 999. No timezone conversion is performed.</description>
+*)
+
+METHOD ConvertTimestructToLongDateTime : LDATE_AND_TIME
 VAR_IN_OUT CONSTANT
 	timestruct : Tc2_Utilities.TIMESTRUCT;
 END_VAR
@@ -71,50 +70,29 @@ END_VAR]]></Declaration>
 	':',
 	TO_STRING(timestruct.wSecond),
 	'.',
-	TO_STRING(timestruct.wMilliseconds));
+	RIGHT(CONCAT('00', TO_STRING(timestruct.wMilliseconds)), 3));
 	
 ConvertTimestructToLongDateTime := TO_LDT(longDateTimeLiteral);]]></ST>
       </Implementation>
     </Method>
     <Method Name="Execute" Id="{0c6bf583-9275-4792-a0da-31f846086145}">
-      <Declaration><![CDATA[METHOD Execute : BOOL]]></Declaration>
+      <Declaration><![CDATA[(*!
+<summary>Advances system information requests and updates the cached clock.</summary>
+<description>Call cyclically from each task using system time. Advances only the calling task's ADS blocks and time snapshot. Does nothing outside cyclic context. Read initial readiness through SystemDataValid; no result is returned.</description>
+*)
+
+METHOD Execute
+VAR
+	taskIndex : DINT;
+END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[_GetLocalAmsNetId(bExecute := TRUE);
+        <ST><![CDATA[taskIndex := GetCurrentTaskIndex();
 
-IF SystemTimeZoneId = Tc2_Utilities.E_TimeZoneID.eTimeZoneID_Unknown OR_ELSE SystemTimeZoneId = Tc2_Utilities.E_TimeZoneID.eTimeZoneID_Invalid THEN
-	_GetTimeZone(bExecute := TRUE, tTimeout := T#1S);
-	
-	IF NOT _GetTimeZone.bBusy THEN
-		IF _GetTimeZone.bError THEN
-			_GetTimeZone(bExecute := FALSE);
-			_GetTimeZone(bExecute := TRUE);
-		ELSE
-			SystemTimeZoneId := _GetTimeZone.tzID;
-			SystemTimeZoneInformation := _GetTimeZone.tzInfo;
-		END_IF		
-	END_IF
-END_IF
- 
-_LocalSystemTime(bEnable := TRUE);
-
-IF NOT _GetTimeZone.bBusy AND_THEN NOT _GetTimeZone.bError THEN
-	SystemLocalDateTime := ConvertTimestructToLongDateTime(_LocalSystemTime.systemTime);
-
-	_LocalTimeToUtcTime(in := _LocalSystemTime.systemTime, tzInfo := _GetTimeZone.tzInfo);	
-
-	SystemUtcDateTime := ConvertTimestructToLongDateTime(_LocalTimeToUtcTime.out);
-
-	SystemFileTime := Tc2_Utilities.SYSTEMTIME_TO_FILETIME(_LocalSystemTime.systemTime);
-	SystemFileTime64 := Tc2_Utilities.SYSTEMTIME_TO_FILETIME64(_LocalSystemTime.systemTime);
+IF taskIndex < 1 OR_ELSE taskIndex > TASK_COUNT THEN
+	RETURN;
 END_IF
 
-IF NOT SystemDataValid 
-	AND_THEN NOT _GetLocalAmsNetId.bBusy AND_THEN NOT _GetLocalAmsNetId.bError
-	AND_THEN NOT _GetTimeZone.bBusy AND_THEN NOT _GetTimeZone.bError 
-	AND_THEN _LocalSystemTime.bValid 
-THEN
-	SystemDataValid := TRUE; 	
-END_IF]]></ST>
+_TaskStates[taskIndex].Execute();]]></ST>
       </Implementation>
     </Method>
     <Method Name="GetCurrentAppInfo" Id="{972d2eff-4041-4c5b-bf4c-f1b03604e359}">
@@ -123,19 +101,35 @@ END_IF]]></ST>
         <ST><![CDATA[GetCurrentAppInfo REF= TwinCAT_SystemInfoVarList._AppInfo;]]></ST>
       </Implementation>
     </Method>
+    <Method Name="GetCurrentTaskIndex" Id="{cc1072bd-3ddd-49d0-95e8-e9bd0e09202c}">
+      <Declaration><![CDATA[(*!
+<summary>Identifies the calling execution context without accessing cached system data.</summary>
+<description>Returns a positive cyclic PLC task index, zero for a non-cyclic real-time context, or -1 for Windows context. Does not allocate, log or raise exceptions and does not require Execute.</description>
+*)
+
+METHOD PUBLIC GetCurrentTaskIndex : DINT]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[GetCurrentTaskIndex := Tc2_System.GETCURTASKINDEXEX();]]></ST>
+      </Implementation>
+    </Method>
     <Method Name="GetCurrentTaskInfo" Id="{04f9a0b7-6093-424d-9fb3-0a09972c00e1}">
-      <Declaration><![CDATA[METHOD GetCurrentTaskInfo : Global.PlcTaskSystemInfo
+      <Declaration><![CDATA[(*!
+<summary>Returns a copy of the current cyclic PLC task information.</summary>
+<description>Does not require Execute. Outside a cyclic task, logs a diagnostic and returns default task information.</description>
+*)
+
+METHOD GetCurrentTaskInfo : Global.PlcTaskSystemInfo
 VAR
-  taskIndex: DINT;
+	taskIndex : DINT;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[taskIndex := Tc2_System.GETCURTASKINDEXEX();
+        <ST><![CDATA[taskIndex := GetCurrentTaskIndex();
 
 IF taskIndex > 0 THEN
-  GetCurrentTaskInfo := TwinCAT_SystemInfoVarList._TaskInfo[taskIndex];
+	GetCurrentTaskInfo := TwinCAT_SystemInfoVarList._TaskInfo[taskIndex];
 ELSE
 	IF taskIndex < 0 THEN
-		LogManager.TryLogMessage("Method called not from the windows context", LOG_CATEGORY.ERROR, TO_WSTRING(ClassName), TO_WSTRING(__POUNAME())); 
+		LogManager.TryLogMessage("Method called from the Windows context", LOG_CATEGORY.ERROR, TO_WSTRING(ClassName), TO_WSTRING(__POUNAME())); 
 	ELSE
 		LogManager.TryLogMessage("Method called not from a cyclic PLC task (such as FB_init)", LOG_CATEGORY.ERROR, TO_WSTRING(ClassName), TO_WSTRING(__POUNAME())); 
 	END_IF
@@ -143,30 +137,64 @@ END_IF]]></ST>
       </Implementation>
     </Method>
     <Method Name="GetTaskCycleTime" Id="{50bc18db-6507-4bea-bcbf-a26468abea5b}">
-      <Declaration><![CDATA[METHOD GetTaskCycleTime : LTIME
+      <Declaration><![CDATA[(*!
+<summary>Returns the configured cycle duration of the calling cyclic PLC task.</summary>
+<description>Clears error on each call. Outside a cyclic task, returns zero and fills error without allocating an exception. Does not require Execute. Outside cyclic context error timestamps are default values because there is no task time snapshot.</description>
+*)
+
+METHOD GetTaskCycleTime : LTIME
 VAR_OUTPUT
 	error : Error;
 END_VAR
 VAR
 	taskInfo : Global.PlcTaskSystemInfo;
+	taskIndex : DINT;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[taskInfo := GetCurrentTaskInfo();
+        <ST><![CDATA[error.Clear();
+taskIndex := GetCurrentTaskIndex();
 
-IF error.Empty THEN
-	GetTaskCycleTime := TO_LTIME(taskInfo.CycleTime * 100);
-END_IF]]></ST>
+IF taskIndex <= 0 THEN
+	error.Fill(
+		severity := ERROR_SEVERITY.ERROR,
+		topSource := 'System.GetTaskCycleTime',
+		rootSource := 'System.GetTaskCycleTime',
+		topMessage := "Method requires a cyclic PLC task",
+		rootMessage := "Method requires a cyclic PLC task",
+		localTimestamp := SystemLocalDateTime,
+		utcTimestamp := SystemUtcDateTime);
+	GetTaskCycleTime := LTIME#0NS;
+	RETURN;
+END_IF
+
+taskInfo := TwinCAT_SystemInfoVarList._TaskInfo[taskIndex];
+GetTaskCycleTime := TO_LTIME(TO_ULINT(taskInfo.CycleTime) * ULINT#100);]]></ST>
       </Implementation>
     </Method>
     <Property Name="LocalAmsNetId" Id="{f3ddb93d-d4f5-42d0-8950-99b61751e8a6}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Returns the local AMS address obtained by the calling task.</summary>
+<description>Returns an empty address outside cyclic context or before acquisition. Address acquisition does not gate SystemDataValid.</description>
+*)
+
 PROPERTY FINAL LocalAmsNetId : Tc2_System.T_AmsNetID]]></Declaration>
       <Get Name="Get" Id="{1d8d104b-6d8f-4619-bd22-ec259d3bad6c}">
-        <Declaration><![CDATA[]]></Declaration>
+        <Declaration><![CDATA[VAR
+	taskIndex : DINT;
+	defaultValue : Tc2_System.T_AmsNetID;
+END_VAR]]></Declaration>
         <Implementation>
-          <ST><![CDATA[LocalAmsNetId := _GetLocalAmsNetId.AddrString;]]></ST>
+          <ST><![CDATA[LocalAmsNetId := defaultValue;
+taskIndex := GetCurrentTaskIndex();
+
+IF taskIndex < 1 OR_ELSE taskIndex > TASK_COUNT THEN
+	RETURN;
+END_IF
+
+LocalAmsNetId := _TaskStates[taskIndex].LocalAmsNetId;]]></ST>
         </Implementation>
       </Get>
+
     </Property>
     <Property Name="NamespaceName" Id="{33d380fa-ca9e-4f26-80e3-0dd39a24bf5e}">
       <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
@@ -179,30 +207,241 @@ PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
       </Get>
     </Property>
     <Property Name="SystemTime" Id="{fc3dc1a5-f07a-44ea-8872-067f64602e6c}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
-PROPERTY SystemTime : REFERENCE TO TIMESTRUCT]]></Declaration>
+      <Declaration><![CDATA[(*!
+<summary>Borrows the calling task's local calendar time for reading.</summary>
+<description>Returns a null reference outside cyclic context. In cyclic context the reference remains valid for the task state lifetime, but its contents change on Execute. Read only after SystemDataValid; do not modify or share this reference with another task.</description>
+*)
+
+PROPERTY FINAL SystemTime : REFERENCE TO TIMESTRUCT]]></Declaration>
       <Get Name="Get" Id="{bca92c39-3456-4f53-b765-98dd8b8ca1e9}">
-        <Declaration><![CDATA[]]></Declaration>
+        <Declaration><![CDATA[VAR
+	taskIndex : DINT;
+END_VAR]]></Declaration>
         <Implementation>
-          <ST><![CDATA[SystemTime REF= _LocalSystemTime.systemTime;]]></ST>
+          <ST><![CDATA[SystemTime REF= 0;
+taskIndex := GetCurrentTaskIndex();
+
+IF taskIndex < 1 OR_ELSE taskIndex > TASK_COUNT THEN
+	RETURN;
+END_IF
+
+SystemTime REF= _TaskStates[taskIndex].SystemTime;]]></ST>
         </Implementation>
       </Get>
+
     </Property>
     <Property Name="SystemTimeSynchronisationInterval" Id="{e833856d-fead-4a01-a433-f36f3355afd1}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
-PROPERTY SystemTimeSynchronisationInterval : DWORD]]></Declaration>
+      <Declaration><![CDATA[(*!
+<summary>Controls the calling task's clock synchronization interval in seconds.</summary>
+<description>Configure from the owning cyclic task using 1 to 86400 seconds. Each task has an independent interval. Outside cyclic context the getter returns zero and the setter does nothing.</description>
+*)
+
+PROPERTY FINAL SystemTimeSynchronisationInterval : DWORD]]></Declaration>
       <Get Name="Get" Id="{ff6af129-621a-439f-9b9e-cfb3b139ccc1}">
-        <Declaration><![CDATA[]]></Declaration>
+        <Declaration><![CDATA[VAR
+	taskIndex : DINT;
+	defaultValue : DWORD;
+END_VAR]]></Declaration>
         <Implementation>
-          <ST><![CDATA[SystemTimeSynchronisationInterval := _LocalSystemTime.dwCycle;]]></ST>
+          <ST><![CDATA[SystemTimeSynchronisationInterval := defaultValue;
+taskIndex := GetCurrentTaskIndex();
+
+IF taskIndex < 1 OR_ELSE taskIndex > TASK_COUNT THEN
+	RETURN;
+END_IF
+
+SystemTimeSynchronisationInterval := _TaskStates[taskIndex].SystemTimeSynchronisationInterval;]]></ST>
         </Implementation>
       </Get>
       <Set Name="Set" Id="{88654d47-db1f-4874-a223-1856440fbe45}">
-        <Declaration><![CDATA[]]></Declaration>
+        <Declaration><![CDATA[VAR
+	taskIndex : DINT;
+END_VAR]]></Declaration>
         <Implementation>
-          <ST><![CDATA[_LocalSystemTime.dwCycle := SystemTimeSynchronisationInterval;]]></ST>
+          <ST><![CDATA[taskIndex := GetCurrentTaskIndex();
+
+IF taskIndex < 1 OR_ELSE taskIndex > TASK_COUNT THEN
+	RETURN;
+END_IF
+
+_TaskStates[taskIndex].SystemTimeSynchronisationInterval := SystemTimeSynchronisationInterval;]]></ST>
         </Implementation>
       </Set>
+    </Property>
+    <Property Name="SystemTimeZoneId" Id="{ab9dcc61-6d10-40c3-ac0d-cf0e93175250}">
+      <Declaration><![CDATA[(*!
+<summary>Returns the calling task's cached timezone identifier.</summary>
+<description>Reads only the calling task's state without updating it. Returns the type's default value outside cyclic context. Call Execute in this task and wait for SystemDataValid before consuming time values.</description>
+*)
+
+PROPERTY FINAL SystemTimeZoneId : Tc2_Utilities.E_TimeZoneID]]></Declaration>
+      <Get Name="Get" Id="{16fd5c6a-37cb-4bf6-9aad-279fd5082ce8}">
+        <Declaration><![CDATA[VAR
+	taskIndex : DINT;
+	defaultValue : Tc2_Utilities.E_TimeZoneID;
+END_VAR]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[SystemTimeZoneId := defaultValue;
+taskIndex := GetCurrentTaskIndex();
+
+IF taskIndex < 1 OR_ELSE taskIndex > TASK_COUNT THEN
+	RETURN;
+END_IF
+
+SystemTimeZoneId := _TaskStates[taskIndex].SystemTimeZoneId;]]></ST>
+        </Implementation>
+      </Get>
+
+    </Property>
+    <Property Name="SystemTimeZoneInformation" Id="{b3056978-f770-4d50-b3df-5728e69da9eb}">
+      <Declaration><![CDATA[(*!
+<summary>Returns a copy of the calling task's cached timezone rules.</summary>
+<description>Reads only the calling task's state without updating it. Returns the type's default value outside cyclic context. Call Execute in this task and wait for SystemDataValid before consuming time values.</description>
+*)
+
+PROPERTY FINAL SystemTimeZoneInformation : Tc2_Utilities.ST_TimeZoneInformation]]></Declaration>
+      <Get Name="Get" Id="{a946e3b2-b47c-4610-801d-30acfa22861c}">
+        <Declaration><![CDATA[VAR
+	taskIndex : DINT;
+	defaultValue : Tc2_Utilities.ST_TimeZoneInformation;
+END_VAR]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[SystemTimeZoneInformation := defaultValue;
+taskIndex := GetCurrentTaskIndex();
+
+IF taskIndex < 1 OR_ELSE taskIndex > TASK_COUNT THEN
+	RETURN;
+END_IF
+
+SystemTimeZoneInformation := _TaskStates[taskIndex].SystemTimeZoneInformation;]]></ST>
+        </Implementation>
+      </Get>
+
+    </Property>
+    <Property Name="SystemLocalDateTime" Id="{d772a061-814f-43db-b63f-4c35be061290}">
+      <Declaration><![CDATA[(*!
+<summary>Returns the local date and time captured by this task's last Execute.</summary>
+<description>Reads only the calling task's state without updating it. Returns the type's default value outside cyclic context. Call Execute in this task and wait for SystemDataValid before consuming time values.</description>
+*)
+
+PROPERTY FINAL SystemLocalDateTime : LDATE_AND_TIME]]></Declaration>
+      <Get Name="Get" Id="{4b089666-be80-48ce-a55b-c8a11b5d1f38}">
+        <Declaration><![CDATA[VAR
+	taskIndex : DINT;
+	defaultValue : LDATE_AND_TIME;
+END_VAR]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[SystemLocalDateTime := defaultValue;
+taskIndex := GetCurrentTaskIndex();
+
+IF taskIndex < 1 OR_ELSE taskIndex > TASK_COUNT THEN
+	RETURN;
+END_IF
+
+SystemLocalDateTime := _TaskStates[taskIndex].SystemLocalDateTime;]]></ST>
+        </Implementation>
+      </Get>
+
+    </Property>
+    <Property Name="SystemUtcDateTime" Id="{85aa966e-d1cf-4fc5-b00a-2bf21c99d4c1}">
+      <Declaration><![CDATA[(*!
+<summary>Returns the UTC date and time captured by this task's last Execute.</summary>
+<description>Reads only the calling task's state without updating it. Returns the type's default value outside cyclic context. Call Execute in this task and wait for SystemDataValid before consuming time values.</description>
+*)
+
+PROPERTY FINAL SystemUtcDateTime : LDATE_AND_TIME]]></Declaration>
+      <Get Name="Get" Id="{b7db94d4-977e-4c63-a4db-2dfd7a348d17}">
+        <Declaration><![CDATA[VAR
+	taskIndex : DINT;
+	defaultValue : LDATE_AND_TIME;
+END_VAR]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[SystemUtcDateTime := defaultValue;
+taskIndex := GetCurrentTaskIndex();
+
+IF taskIndex < 1 OR_ELSE taskIndex > TASK_COUNT THEN
+	RETURN;
+END_IF
+
+SystemUtcDateTime := _TaskStates[taskIndex].SystemUtcDateTime;]]></ST>
+        </Implementation>
+      </Get>
+
+    </Property>
+    <Property Name="SystemFileTime" Id="{111195c9-20a9-426b-8d3b-6634564a7ce3}">
+      <Declaration><![CDATA[(*!
+<summary>Returns this task's cached local calendar time encoded as FILETIME.</summary>
+<description>Reads only the calling task's state without updating it. Returns the type's default value outside cyclic context. Call Execute in this task and wait for SystemDataValid before consuming time values.</description>
+*)
+
+PROPERTY FINAL SystemFileTime : Tc2_Utilities.T_FILETIME]]></Declaration>
+      <Get Name="Get" Id="{c8d3958a-6e2a-4a9e-9c2d-01d5f73efc76}">
+        <Declaration><![CDATA[VAR
+	taskIndex : DINT;
+	defaultValue : Tc2_Utilities.T_FILETIME;
+END_VAR]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[SystemFileTime := defaultValue;
+taskIndex := GetCurrentTaskIndex();
+
+IF taskIndex < 1 OR_ELSE taskIndex > TASK_COUNT THEN
+	RETURN;
+END_IF
+
+SystemFileTime := _TaskStates[taskIndex].SystemFileTime;]]></ST>
+        </Implementation>
+      </Get>
+
+    </Property>
+    <Property Name="SystemFileTime64" Id="{82e61e7b-21eb-4a28-912e-f56fc8269f2e}">
+      <Declaration><![CDATA[(*!
+<summary>Returns this task's cached local calendar time encoded as 64-bit FILETIME.</summary>
+<description>Reads only the calling task's state without updating it. Returns the type's default value outside cyclic context. Call Execute in this task and wait for SystemDataValid before consuming time values.</description>
+*)
+
+PROPERTY FINAL SystemFileTime64 : Tc2_Utilities.T_FILETIME64]]></Declaration>
+      <Get Name="Get" Id="{1c7343e6-d74d-4e9e-bb43-a1f8ae551704}">
+        <Declaration><![CDATA[VAR
+	taskIndex : DINT;
+	defaultValue : Tc2_Utilities.T_FILETIME64;
+END_VAR]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[SystemFileTime64 := defaultValue;
+taskIndex := GetCurrentTaskIndex();
+
+IF taskIndex < 1 OR_ELSE taskIndex > TASK_COUNT THEN
+	RETURN;
+END_IF
+
+SystemFileTime64 := _TaskStates[taskIndex].SystemFileTime64;]]></ST>
+        </Implementation>
+      </Get>
+
+    </Property>
+    <Property Name="SystemDataValid" Id="{0cb1ae30-8082-4885-a4df-b45f2a9ae686}">
+      <Declaration><![CDATA[(*!
+<summary>Indicates that the calling task has obtained system time and timezone successfully.</summary>
+<description>Latches initial time and timezone readiness for this task until application reinitialization. AMS Net ID does not gate readiness. Returns FALSE outside cyclic context.</description>
+*)
+
+PROPERTY FINAL SystemDataValid : BOOL]]></Declaration>
+      <Get Name="Get" Id="{b72f9f7c-20a1-4fe4-8dfb-5a17d0fca9a7}">
+        <Declaration><![CDATA[VAR
+	taskIndex : DINT;
+	defaultValue : BOOL;
+END_VAR]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[SystemDataValid := defaultValue;
+taskIndex := GetCurrentTaskIndex();
+
+IF taskIndex < 1 OR_ELSE taskIndex > TASK_COUNT THEN
+	RETURN;
+END_IF
+
+SystemDataValid := _TaskStates[taskIndex].SystemDataValid;]]></ST>
+        </Implementation>
+      </Get>
+
     </Property>
   </POU>
 </TcPlcObject>

@@ -8,6 +8,10 @@ License: https://opensource.org/license/mit
 *)
 
 {attribute 'no_explicit_call' := 'do not call this function block directly'} 
+(*!
+<summary>Writes diagnostics through TwinCAT EventLogger and expands aggregate exceptions into entries.</summary>
+<description>Exception logging accepts IReadOnlyException and reads borrowed diagnostics without transferring ownership. Implementations must not retain exception references beyond their task cleanup. Numbered messages preserve the number and truncate oversized text to ERROR_MESSAGE capacity with a final ellipsis.</description>
+*)
 FUNCTION_BLOCK EventLogger EXTENDS TOF_Core.Object IMPLEMENTS TOF_Core.ILogger
 VAR
 	{attribute 'hide'} 
@@ -75,7 +79,11 @@ _CriticlErrorEventType := criticlErrorEventType;]]></ST>
       </Implementation>
     </Method>
     <Method Name="InternalTryLogMessage" Id="{b17f1f74-b328-47c1-a9cb-5cbdf2cd529f}" FolderPath="Internal members\">
-      <Declaration><![CDATA[METHOD PROTECTED InternalTryLogMessage : BOOL
+      <Declaration><![CDATA[(*!
+<summary>Sends a diagnostic with its source and optional message number.</summary>
+<description>When a number is supplied, preserves the number prefix and as much message text as fits ERROR_MESSAGE. Truncated text ends with U+2026. Formatting uses local storage and does not raise a size-overflow exception. Returns FALSE for an unsupported category or failed send.</description>
+*)
+METHOD PROTECTED InternalTryLogMessage : BOOL
 VAR_INPUT
 	category : TOF_Core.LOG_CATEGORY;	
 END_VAR
@@ -90,6 +98,7 @@ VAR
 	sourceInfo : Tc3_EventLogger.FB_TcSourceInfo;
 	arguments : Tc3_EventLogger.FB_TcArguments;
 	messageWithNumber : TOF_Core.ERROR_MESSAGE;
+	messageCharacters : POINTER TO WORD;
 	methodResult : HRESULT;
 END_VAR]]></Declaration>
       <Implementation>
@@ -97,7 +106,11 @@ END_VAR]]></Declaration>
 
 IF __ISVALIDREF(messageNumber) THEN
 	messageWithNumber := TOF_Core.WideStrings.Concat255(TO_WSTRING(TOF_Core.Exceptions.MESSAGE_NUMBER_PREFIX), TO_WSTRING(messageNumber), TO_WSTRING(TOF_Core.Exceptions.MESSAGE_NUMBER_SUFFIX));
-	TOF_Core.WideStrings.AppendToTarget(messageWithNumber, message);
+	
+	IF NOT TOF_Core.WideStrings.TryAppendToTarget(messageWithNumber, message) THEN
+		messageCharacters := ADR(messageWithNumber);
+		messageCharacters[SIZEOF(messageWithNumber) / TOF_Core.WideStrings.CharSize - 2] := TOF_Core.WideStrings.ELLIPSIS;
+	END_IF
 
 	arguments.AddWString(messageWithNumber);
 ELSE
@@ -181,9 +194,15 @@ TryLogError := InternalTryLogMessage(SEL(error.Severity = TOF_Core.ERROR_SEVERIT
       </Implementation>
     </Method>
     <Method Name="TryLogException" Id="{1990277d-d5d3-4267-af7a-8be26122cbfe}">
-      <Declaration><![CDATA[METHOD TryLogException : BOOL
+      <Declaration><![CDATA[(*!
+<summary>Attempts to log diagnostic information from a read-only exception view.</summary>
+<description>Borrows the exception for the call without clearing it or taking ownership. The exception and its inner causes must remain live while their diagnostics are read. Logging does not extend their lifetime.</description>
+<param name="exception">Exception view to read; null is ignored.</param>
+<param name="severity">Severity used to select the log category.</param>
+*)
+METHOD TryLogException : BOOL
 VAR_INPUT
-	exception : TOF_Core.IException;
+	exception : TOF_Core.IReadOnlyException;
 	severity : TOF_Core.ERROR_SEVERITY;
 	messageNumber : REFERENCE TO ULINT := 0;
 END_VAR
@@ -201,6 +220,8 @@ IF NOT __QUERYINTERFACE(exception, aggregateException) OR_ELSE aggregateExceptio
 	message := exception.GetMessage(FALSE, TOF_Core.TIMESTAMP_DISPLAY_MODE.LOCAL);
 	TryLogException := InternalTryLogMessage(SEL(severity = TOF_Core.ERROR_SEVERITY.CRITICAL, TOF_Core.LOG_CATEGORY.ERROR, TOF_Core.LOG_CATEGORY.CRITICAL_ERROR), message, exception.GetSourceDescription(), messageNumber);
 ELSE
+	TryLogException := TRUE;
+	
 	FOR i := 0 TO aggregateException.InnerExceptionCount - 1 DO
 		TryLogException := TryLogException AND THIS^.TryLogException(aggregateException.GetInnerException(i), severity, messageNumber);		
 	END_FOR

@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <TcPlcObject Version="1.1.0.1">
   <POU Name="ArgumentValueNotSupportedException" Id="{d8d21990-1e39-4f5f-aef8-b984d73d7d73}" SpecialFunc="None">
     <Declaration><![CDATA[(*
@@ -9,6 +9,10 @@ License: https://opensource.org/license/mit
 
 {attribute 'enable_dynamic_creation'}	
 {attribute 'no_explicit_call' := 'do not call this function block directly'} 
+(*!
+<summary>Reports an argument value that the requested operation does not support.</summary>
+<description>The caller determines that the argument is invalid; Throw formats the diagnostic rather than validating the argument. Argument values are represented in at most 255 characters. STRING and WSTRING values longer than 255 characters retain their first 254 characters followed by an ellipsis. Dynamic exceptions belong to the current task memory manager until cleanup.</description>
+*)
 FUNCTION_BLOCK ArgumentValueNotSupportedException EXTENDS GeneralException IMPLEMENTS IArgumentValueNotSupportedException
 VAR
 	{attribute 'hide'} 
@@ -37,7 +41,6 @@ END_VAR]]></Declaration>
 
 IF exceptionClone = 0 THEN
 	DynamicMemoryManager.RaiseAllocationFailure();
-	RETURN;
 END_IF
 
 exceptionClone^.CopyGeneralFields(THIS^);
@@ -66,7 +69,13 @@ PROPERTY SelfSize : ULINT]]></Declaration>
       </Get>
     </Property>
     <Method Name="Throw" Id="{1c82cdaa-6e6a-4d9a-bfc8-2c6b6a993818}">
-      <Declaration><![CDATA[METHOD Throw
+      <Declaration><![CDATA[(*!
+<summary>Formats the rejected argument and propagates the exception with source metadata.</summary>
+<description>Call in the owning cyclic task, not during FB_init. Reads the supplied value only during this call and retains its formatted text. Long STRING and WSTRING values use a 254-character prefix followed by an ellipsis; exactly 255 characters are kept unchanged. Other types use the shared ANY formatter. Sets error code to zero and has no inner cause. Builder or exception allocation failure uses the terminal memory mechanism.</description>
+<param name="argumentName">Name of the argument rejected by the caller.</param>
+<param name="argumentValue">Live value to describe; string inputs must be null-terminated.</param>
+*)
+METHOD Throw
 VAR_INPUT
 	sourceNamespaceName : STRING;
 	sourceClassName : STRING;
@@ -82,6 +91,13 @@ VAR
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[valueAsString := WideStrings.InternalAnyToString255(argumentValue);
+
+IF (argumentValue.TypeClass = __SYSTEM.TYPE_CLASS.TYPE_STRING
+	AND_THEN Strings.InternalGetLength(argumentValue.pValue) > 255)
+	OR_ELSE (argumentValue.TypeClass = __SYSTEM.TYPE_CLASS.TYPE_WSTRING
+	AND_THEN WideStrings.InternalGetLength(argumentValue.pValue) > 255) THEN
+	valueAsString := Tc2_Standard.WCONCAT(Tc2_Standard.WLEFT(valueAsString, 254), "…");
+END_IF
 
 stringBuilder
 	.AppendString("Argument '")

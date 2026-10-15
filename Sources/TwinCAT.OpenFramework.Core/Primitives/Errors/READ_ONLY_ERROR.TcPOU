@@ -7,6 +7,10 @@ SPDX-License-Identifier: MIT
 License: https://opensource.org/license/mit
 *)
 
+(*!
+<summary>Stores an error snapshot for reading and diagnostic formatting.</summary>
+<description>Consumers must treat the exposed fields as read-only. The snapshot stores its own messages, sources and timestamps independently of exception lifetime. ToString returns bounded diagnostic text with an ellipsis when the combined text exceeds its capacity.</description>
+*)
 {attribute 'no_explicit_call' := 'do not call this function block directly'} 
 FUNCTION_BLOCK ABSTRACT READ_ONLY_ERROR
 VAR_OUTPUT
@@ -35,7 +39,12 @@ PROPERTY FINAL Empty : BOOL]]></Declaration>
       </Get>
     </Property>
     <Method Name="GetSource" Id="{d36b0d5c-6310-4e02-9fa2-271bbf6c3775}">
-      <Declaration><![CDATA[METHOD GetSource : STRING(255);
+      <Declaration><![CDATA[(*!
+<summary>Formats the top source and optionally a distinct root source.</summary>
+<description>Returns TopSource unchanged when the root is not requested, empty or identical to the top source. Otherwise joins both sources with INNER_MESSAGE_PREFIX. If the combined text exceeds 255 characters, returns its first 252 characters followed by three ASCII dots. Exact-fit text is preserved. Does not modify the snapshot or allocate dynamic memory.</description>
+*)
+//!<param name="appendRootSource">Include a nonempty root source when it differs from the top source.</param>
+METHOD GetSource : STRING(255);
 VAR_INPUT
 	appendRootSource : BOOL;
 END_VAR]]></Declaration>
@@ -44,6 +53,13 @@ END_VAR]]></Declaration>
 	GetSource := TopSource;
 ELSE
 	GetSource := Strings.Concat255(TopSource, TO_STRING(Exceptions.INNER_MESSAGE_PREFIX), RootSource);
+
+	IF Tc2_Standard.LEN(TopSource)
+		+ Tc2_Standard.LEN(TO_STRING(Exceptions.INNER_MESSAGE_PREFIX))
+		+ Tc2_Standard.LEN(RootSource) > SIZEOF(GetSource) - 1 
+	THEN
+		GetSource := Strings.Concat255(Tc2_Standard.LEFT(GetSource, SIZEOF(GetSource) - 4), '...');
+	END_IF
 END_IF ]]></ST>
       </Implementation>
     </Method>
@@ -58,47 +74,80 @@ PROPERTY FINAL HasError : BOOL]]></Declaration>
       </Get>
     </Property>
     <Method Name="ToString" Id="{8ae5d492-d51d-44d5-8715-918abb2a1096}">
-      <Declaration><![CDATA[METHOD ToString : ERROR_MESSAGE
+      <Declaration><![CDATA[(*!
+<summary>Formats the stored error with optional source and timestamp information.</summary>
+<description>Preserves the order: top message, distinct root message, source, timestamp. If the combined text exceeds ERROR_MESSAGE capacity, returns its leading characters with a final ellipsis and stops formatting. Exact-fit text is preserved. Does not allocate dynamic memory, modify the snapshot or raise a size-overflow exception. The intermediate source buffer holds 255 characters, matching the GetSource result capacity. Source formatting retains the existing GetSource limit.</description>
+*)
+METHOD ToString : ERROR_MESSAGE
 VAR_INPUT
 	sourceDisplayMode : ERROR_SOURCE_DISPLAY_MODE := ERROR_SOURCE_DISPLAY_MODE.HIDDEN;
 	timestampDisplayMode : TIMESTAMP_DISPLAY_MODE := TIMESTAMP_DISPLAY_MODE.HIDDEN;
 END_VAR
 VAR
-	tempString : WSTRING;
+	tempString : WSTRING(255);
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[// always show top message
-WideStrings.AppendToTarget(ToString, TopMessage);
+IF NOT WideStrings.TryAppendToTarget(ToString, TopMessage) THEN
+	JMP TRUNCATED;
+END_IF
 
 // append root message if it exists ond differs from top message
 IF RootMessage <> "" AND_THEN TopMessage <> RootMessage THEN
-	WideStrings.AppendToTarget(ToString, Exceptions.INNER_MESSAGE_PREFIX);
-	WideStrings.AppendToTarget(ToString, RootMessage);
+	IF NOT WideStrings.TryAppendToTarget(ToString, Exceptions.INNER_MESSAGE_PREFIX) THEN
+		JMP TRUNCATED;
+	END_IF
+	
+	IF NOT WideStrings.TryAppendToTarget(ToString, RootMessage) THEN
+		JMP TRUNCATED;
+	END_IF
 END_IF 
 
 // append message source
 IF sourceDisplayMode <> ERROR_SOURCE_DISPLAY_MODE.HIDDEN THEN
-	WideStrings.AppendToTarget(ToString, Exceptions.SOURCE_PREFIX);
+	IF NOT WideStrings.TryAppendToTarget(ToString, Exceptions.SOURCE_PREFIX) THEN
+		JMP TRUNCATED;
+	END_IF
+	
 	tempString := TO_WSTRING(GetSource(sourceDisplayMode = ERROR_SOURCE_DISPLAY_MODE.TOP_AND_ROOT));
-	WideStrings.AppendToTarget(ToString, tempString);
+	
+	IF NOT WideStrings.TryAppendToTarget(ToString, tempString) THEN
+		JMP TRUNCATED;
+	END_IF
 END_IF
 
 // append
 IF timestampDisplayMode <> TIMESTAMP_DISPLAY_MODE.HIDDEN THEN
-	WideStrings.AppendToTarget(ToString, Exceptions.TIME_PREFIX);	
+	IF NOT WideStrings.TryAppendToTarget(ToString, Exceptions.TIME_PREFIX) THEN
+		JMP TRUNCATED;
+	END_IF
 
 	CASE timestampDisplayMode OF
 		TIMESTAMP_DISPLAY_MODE.LOCAL:
 			tempString := TO_WSTRING(LocalTimestamp);
-			WideStrings.AppendToTarget(ToString, tempString);	
+			
+			IF NOT WideStrings.TryAppendToTarget(ToString, tempString) THEN
+				JMP TRUNCATED;
+			END_IF
 		
 		TIMESTAMP_DISPLAY_MODE.UTC:
 			tempString := TO_WSTRING(UtcTimestamp);
-			WideStrings.AppendToTarget(ToString, tempString);	
-			WideStrings.AppendToTarget(ToString, "UTC");	
+			
+			IF NOT WideStrings.TryAppendToTarget(ToString, tempString) THEN
+				JMP TRUNCATED;
+			END_IF
+			
+			IF NOT WideStrings.TryAppendToTarget(ToString, "UTC") THEN
+				JMP TRUNCATED;
+			END_IF
 	END_CASE
 END_IF
 
+RETURN;
+
+TRUNCATED:
+
+ToString[SIZEOF(ToString) / SIZEOF(WORD) - 2] := WideStrings.ELLIPSIS;
 ]]></ST>
       </Implementation>
     </Method>

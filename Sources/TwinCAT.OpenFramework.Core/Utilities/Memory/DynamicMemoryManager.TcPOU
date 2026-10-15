@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <TcPlcObject Version="1.1.0.1">
   <POU Name="DynamicMemoryManager" Id="{dfd03ea7-11b7-42ce-b52e-f5a7df7a7ad3}" SpecialFunc="None">
     <Declaration><![CDATA[(*
@@ -13,6 +13,11 @@ License: https://opensource.org/license/mit
 Registered objects are released by cycle cleanup. RaiseAllocationFailure is also available
 to dependent libraries and does not register or transfer ownership of any object.
 The fatal allocation flag persists until application reinitialization.
+Registration ignores null and non-dynamic objects before accessing cyclic cleanup state.
+Each cyclic PLC task owns a separate registry; references must not cross task boundaries.
+Registry bounds use System.TASK_COUNT.
+Call CleanupMemory after all exception consumers in each task, with or without AutomationRunner.
+Fatal state is shared and synchronized; all other registry access belongs to the current task.
 </description>
 *)
 
@@ -20,28 +25,23 @@ The fatal allocation flag persists until application reinitialization.
 
 {attribute 'no_explicit_call' := 'Direct call is not allowed'} 
 PROGRAM DynamicMemoryManager
+VAR CONSTANT
+	ALLOCATE_POINTER_COUNT : BYTE := 10;
+END_VAR
 VAR
 	{attribute 'hide'} 
 	_ClassName : STRING := __POUNAME();
 	
-	{attribute 'hide'} 
-	_AutoDisposedObjects : POINTER TO IObject;	
-	{attribute 'hide'} 
-	_AutoDisposedPointerCount : DWORD;
-	{attribute 'hide'} 
-	_AutoDisposedObjectCount : DWORD;
-
-	{attribute 'hide'} 
-	_LastSystemTaskCycleCount : UDINT;
+	{attribute 'hide'}
+	_TaskMemory : ARRAY [1..System.TASK_COUNT] OF TASK_MEMORY_STATE;
 
 	{attribute 'hide'}
-	_AllocationFailed : BOOL; 
+	_AllocationFailed : BOOL;
+	{attribute 'hide'}
+	_AllocationFailureLock : Tc2_System.FB_IecCriticalSection;
 
-	{attribute 'hide'} 
-	_MemoryCleanupHelper : MemoryCleanupHelper;	
-END_VAR
-VAR CONSTANT
-	ALLOCATE_POINTER_COUNT : BYTE := 10;
+	{attribute 'hide'}
+	_MemoryCleanupHelper : MemoryCleanupHelper;
 END_VAR]]></Declaration>
     <Implementation>
       <ST><![CDATA[]]></ST>
@@ -57,14 +57,26 @@ PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
         </Implementation>
       </Get>
     </Property>
-    <Method Name="CleanupMemory" Id="{a080fe6a-f539-4ac0-9048-10f8d3587c3b}" FolderPath="Service memebers\">
+    <Method Name="CleanupAllTasks" Id="{277e6ac8-bfb1-417b-b46f-b03cd85c424a}">
       <Declaration><![CDATA[(*!
-<summary>Deletes registered objects; all borrowed references to them become invalid.</summary>
-<description>
-Object FB_exit implementations and disposal logger/filter calls must not raise exceptions.
-During cleanup these callbacks must not register auto-disposed objects or reenter cleanup.
-Releasing their own resources remains allowed. This precondition is not checked at runtime.
-</description>
+<summary>Releases all task registries during application teardown.</summary>
+<description>Internal shutdown operation only: all cyclic tasks must be stopped. Clears borrowed manager payloads before deleting objects and releasing buffers. Never call concurrently with task execution.</description>
+*)
+
+METHOD INTERNAL CleanupAllTasks
+VAR
+	taskIndex : DINT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[FOR taskIndex := 1 TO System.TASK_COUNT DO
+	cleanupTaskMemory(taskIndex, TRUE);
+END_FOR]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="CleanupMemory" Id="{a080fe6a-f539-4ac0-9048-10f8d3587c3b}">
+      <Declaration><![CDATA[(*!
+<summary>Deletes only the current task's registered objects and clears its exception payload.</summary>
+<description>Call in a cyclic PLC task after all consumers. Borrowed references become invalid. FB_exit must not throw, register auto-disposed objects or reenter cleanup. releaseBuffer also releases this task's registry buffer; diagnostic counts remain unchanged.</description>
 *)
 
 METHOD CleanupMemory
@@ -72,41 +84,120 @@ VAR_INPUT
 	releaseBuffer : BOOL := FALSE;
 END_VAR
 VAR
-	i : ULINT;
-	objectToDispose : POINTER TO Object;
+	taskIndex : DINT;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[IF _AutoDisposedObjectCount > 0 THEN
-	FOR i := 0 TO _AutoDisposedObjectCount - 1 DO
-		Memory.TryReleaseDynamicObject(_AutoDisposedObjects[i]);
-	END_FOR
-			
-	_AutoDisposedObjectCount := 0;
+        <ST><![CDATA[taskIndex := GetCurrentTaskIndex();
+
+IF taskIndex = 0 THEN
+	RETURN;
 END_IF
 
-IF _AutoDisposedPointerCount > 0 AND_THEN releaseBuffer THEN
-	__DELETE(_AutoDisposedObjects);
-	
-	_AutoDisposedPointerCount := 0;
+cleanupTaskMemory(taskIndex, releaseBuffer);]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="cleanupTaskMemory" Id="{10b48b5a-672d-4f3d-b7bd-26f0a00691d1}" FolderPath="Service memebers\">
+      <Declaration><![CDATA[(*!
+<summary>Clears one task's payload and deletes its registered objects.</summary>
+<description>Called only by the owning task or during application teardown with cyclic execution stopped. taskIndex must be within the generated task table. Cleanup callbacks must not throw, register objects or reenter cleanup.</description>
+*)
+
+METHOD PRIVATE cleanupTaskMemory
+VAR_INPUT
+	taskIndex : DINT;
+	releaseBuffer : BOOL;
+END_VAR
+VAR
+	i : LINT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[ExceptionManager.CleanupTask(taskIndex);
+
+IF _TaskMemory[taskIndex].ObjectCount > 0 THEN
+	FOR i := 0 TO TO_LINT(_TaskMemory[taskIndex].ObjectCount) - 1 DO
+		Memory.TryReleaseDynamicObject(_TaskMemory[taskIndex].Objects[i]);
+	END_FOR
+
+	_TaskMemory[taskIndex].ObjectCount := 0;
+END_IF
+
+IF releaseBuffer AND_THEN _TaskMemory[taskIndex].Objects <> 0 THEN
+	__DELETE(_TaskMemory[taskIndex].Objects);
+	_TaskMemory[taskIndex].BufferCapacity := 0;
 END_IF]]></ST>
       </Implementation>
     </Method>
     <Method Name="cooperativeCleanupMemory" Id="{5754b7a5-6f2f-49c9-a633-b4906595d6ba}" FolderPath="Service memebers\">
-      <Declaration><![CDATA[METHOD PRIVATE cooperativeCleanupMemory
+      <Declaration><![CDATA[(*!
+<summary>Releases the current task's remaining objects when its system cycle changes.</summary>
+<description>Counts a missed cleanup only when objects from the previous cycle remain. The counter saturates at the UDINT maximum. No logging or diagnostic exception is emitted.</description>
+*)
+
+METHOD PRIVATE cooperativeCleanupMemory
+VAR_INPUT
+	taskIndex : DINT;
+END_VAR
 VAR
 	systemTaskInfo : Global.PlcTaskSystemInfo;
-END_VAR
-]]></Declaration>
+END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[systemTaskInfo := Tc2_System.F_GetTaskInfo();
 
-IF systemTaskInfo.CycleCount <> _LastSystemTaskCycleCount THEN
-	_LastSystemTaskCycleCount := systemTaskInfo.CycleCount;
-	
-	CleanupMemory(FALSE);
+IF systemTaskInfo.CycleCount <> _TaskMemory[taskIndex].LastSystemTaskCycleCount THEN
+	IF _TaskMemory[taskIndex].ObjectCount > 0 THEN
+		IF _TaskMemory[taskIndex].MissedCleanupCount < UnsignedInt32.MAX_VALUE THEN
+			_TaskMemory[taskIndex].MissedCleanupCount := _TaskMemory[taskIndex].MissedCleanupCount + 1;
+		END_IF
+
+		cleanupTaskMemory(taskIndex, FALSE);
+	END_IF
+
+	_TaskMemory[taskIndex].LastSystemTaskCycleCount := systemTaskInfo.CycleCount;
 END_IF]]></ST>
       </Implementation>
     </Method>
+    <Method Name="GetCurrentTaskIndex" Id="{a66a0c41-f14c-4d35-9c2f-df04c6e576a1}">
+      <Declaration><![CDATA[(*!
+<summary>Returns the current cyclic PLC task index for manager state access.</summary>
+<description>Uses System.GetCurrentTaskIndex and applies the managers' cyclic-context requirement. Only indices covered by the generated system task table are accepted. Unsupported non-cyclic calls raise a native access violation without allocating an exception. Returns zero if the runtime returns from that raise.</description>
+*)
+
+METHOD INTERNAL GetCurrentTaskIndex : DINT
+VAR
+	taskIndex : DINT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[taskIndex := System.GetCurrentTaskIndex();
+
+IF taskIndex < 1 OR_ELSE taskIndex > System.TASK_COUNT THEN
+	Tc2_System.F_RaiseException(__SYSTEM.ExceptionCode.RTSEXCPT_ACCESS_VIOLATION);
+	RETURN;
+END_IF
+
+GetCurrentTaskIndex := taskIndex;]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="MissedCleanupCount" Id="{ea1704a2-f2f7-4189-803a-66fa66d283bf}">
+      <Declaration><![CDATA[(*!
+<summary>Returns the number of fallback cleanups for the current cyclic PLC task.</summary>
+<description>Increments when registration finds objects left from a previous cycle. Saturates at the UDINT maximum and resets only with application reinitialization. Read this property from the owning task; no arbitrary cross-task read is provided.</description>
+*)
+
+PROPERTY MissedCleanupCount : UDINT]]></Declaration>
+      <Get Name="Get" Id="{95222b0c-42a7-46df-8435-7b129d9d73d2}">
+        <Declaration><![CDATA[VAR
+	taskIndex : DINT;
+END_VAR]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[taskIndex := GetCurrentTaskIndex();
+IF taskIndex = 0 THEN
+	RETURN;
+END_IF
+
+MissedCleanupCount := _TaskMemory[taskIndex].MissedCleanupCount;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
     <Property Name="NamespaceName" Id="{958706a2-1f53-424d-8ad1-0af68e5c53ec}">
       <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
 PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
@@ -117,15 +208,50 @@ PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
         </Implementation>
       </Get>
     </Property>
-    <Method Name="RegisterAutoDisposedObject" Id="{74218506-44e1-4d86-8e89-41e66c133362}" FolderPath="Service memebers\">
+    <Method Name="RaiseAllocationFailure" Id="{2a951f88-56f8-4a83-aa48-d6c96c0b6514}">
       <Declaration><![CDATA[(*!
-<summary>Successful registration gives this manager exclusive ownership of the dynamic object.</summary>
-<description>
-Callers may borrow it until cleanup, but must not delete it or transfer its ownership.
-Must not be called while this manager is executing cleanup, including from disposal callbacks.
-Registry allocation failure latches a fatal error and raises RTSEXCPT_OUT_OF_MEMORY.
-The application boundary must call RaiseIfAllocationFailed outside recoverable exception handlers.
-</description>
+<summary>Latches a fatal allocation failure for the entire application and raises it.</summary>
+<description>The latch is synchronized across tasks and cleared only by application reinitialization. No allocation, logging or cleanup is performed. The lock is released before raising. Inability to acquire the fatal-state lock also raises a native fatal error without accessing unprotected state. This method does not return normally; callers do not need a RETURN after the call.</description>
+*)
+
+METHOD RaiseAllocationFailure]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF _AllocationFailureLock.Enter() THEN
+	_AllocationFailed := TRUE;
+	
+	_AllocationFailureLock.Leave();
+END_IF
+
+Tc2_System.F_RaiseException(__SYSTEM.ExceptionCode.RTSEXCPT_OUT_OF_MEMORY);]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="RaiseIfAllocationFailed" Id="{50bd9e86-6026-42f5-9840-3805894f952e}">
+      <Declaration><![CDATA[(*!
+<summary>Raises the application's synchronized fatal allocation state without constructing an exception object.</summary>
+<description>Call at every task boundary outside recoverable handlers. A lock acquisition failure is treated as fatal rather than allowing unprotected access. The lock is released before the native raise.</description>
+*)
+
+METHOD RaiseIfAllocationFailed
+VAR
+	allocationFailed : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF _AllocationFailureLock.Enter() THEN
+	allocationFailed := _AllocationFailed;
+	_AllocationFailureLock.Leave();
+ELSE
+	allocationFailed := TRUE;
+END_IF
+
+IF allocationFailed THEN
+	Tc2_System.F_RaiseException(__SYSTEM.ExceptionCode.RTSEXCPT_OUT_OF_MEMORY);
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="RegisterAutoDisposedObject" Id="{74218506-44e1-4d86-8e89-41e66c133362}">
+      <Declaration><![CDATA[(*!
+<summary>Registers a dynamic object under the exclusive ownership of the current cyclic PLC task's registry.</summary>
+<description>Null and non-dynamic objects are ignored before accessing task state. The caller must not delete the object or share it with another task. Dynamic registration outside a cyclic task, registration during cleanup and reentrant cleanup are unsupported. Allocation failure is terminal for the application.</description>
 *)
 
 METHOD INTERNAL RegisterAutoDisposedObject
@@ -133,83 +259,58 @@ VAR_INPUT
 	autoDisposedObject : IObject;
 END_VAR
 VAR
+	taskIndex : DINT;
 	newAutoDisposedObjects : POINTER TO IObject;
 	newAutoDisposedPointerCount : DWORD;
-	i : LINT;	
+	i : LINT;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[RaiseIfAllocationFailed();
-
-cooperativeCleanupMemory();
-
-// skip registration id object did not created in the dynamic memory area
-IF autoDisposedObject = 0 OR_ELSE NOT Memory.IsDynamicData(autoDisposedObject.SelfAddress) THEN
+        <ST><![CDATA[IF autoDisposedObject = 0 OR_ELSE NOT Memory.IsDynamicData(autoDisposedObject.SelfAddress) THEN
 	RETURN;
 END_IF
 
+taskIndex := GetCurrentTaskIndex();
+IF taskIndex = 0 THEN
+	RETURN;
+END_IF
+
+RaiseIfAllocationFailed();
+
+cooperativeCleanupMemory(taskIndex);
+
 // prevents multiple registrations of the same object
-IF _AutoDisposedObjectCount > 0 THEN
-	FOR i := 0 TO TO_LINT(_AutoDisposedObjectCount) - 1 DO
-		IF _AutoDisposedObjects[i] = autoDisposedObject THEN
+IF _TaskMemory[taskIndex].ObjectCount > 0 THEN
+	FOR i := 0 TO TO_LINT(_TaskMemory[taskIndex].ObjectCount) - 1 DO
+		IF _TaskMemory[taskIndex].Objects[i] = autoDisposedObject THEN
 			RETURN;
 		END_IF
 	END_FOR	
 END_IF
 
-IF _AutoDisposedObjectCount + 1 > _AutoDisposedPointerCount THEN
-	newAutoDisposedPointerCount := _AutoDisposedPointerCount + ALLOCATE_POINTER_COUNT;
+IF _TaskMemory[taskIndex].ObjectCount + 1 > _TaskMemory[taskIndex].BufferCapacity THEN
+	newAutoDisposedPointerCount := _TaskMemory[taskIndex].BufferCapacity + ALLOCATE_POINTER_COUNT;
 	
 	newAutoDisposedObjects := __NEW(POINTER TO IObject, newAutoDisposedPointerCount);
+	
 	IF newAutoDisposedObjects = 0 THEN
 		RaiseAllocationFailure();
-		RETURN;
 	END_IF
 	
-	IF _AutoDisposedObjectCount > 0 THEN
-		Tc2_System.MEMCPY(newAutoDisposedObjects, _AutoDisposedObjects, TO_UDINT(XSIZEOF(POINTER TO IObject) * _AutoDisposedObjectCount));
+	IF _TaskMemory[taskIndex].ObjectCount > 0 THEN
+		Tc2_System.MEMCPY(newAutoDisposedObjects, _TaskMemory[taskIndex].Objects, TO_UDINT(XSIZEOF(POINTER TO IObject) * _TaskMemory[taskIndex].ObjectCount));
 		
-		__DELETE(_AutoDisposedObjects);
 	END_IF
-	
-	_AutoDisposedObjects := newAutoDisposedObjects;
-	_AutoDisposedPointerCount := newAutoDisposedPointerCount;
+
+	IF _TaskMemory[taskIndex].Objects <> 0 THEN
+		__DELETE(_TaskMemory[taskIndex].Objects);
+	END_IF
+
+	_TaskMemory[taskIndex].Objects := newAutoDisposedObjects;
+	_TaskMemory[taskIndex].BufferCapacity := newAutoDisposedPointerCount;
 END_IF
 
-_AutoDisposedObjects[_AutoDisposedObjectCount] := autoDisposedObject;
-_AutoDisposedObjectCount := _AutoDisposedObjectCount + 1;	]]></ST>
-      </Implementation>
-    </Method>
-    <Method Name="RaiseIfAllocationFailed" Id="{50bd9e86-6026-42f5-9840-3805894f952e}" FolderPath="Service memebers\">
-      <Declaration><![CDATA[(*!
-<summary>Raises a latched fatal allocation failure without constructing a framework exception.</summary>
-<description>
-Call at the application boundary outside handlers that could swallow this fatal error.
-Does not reset the flag, allocate a framework exception, or invoke logging/cleanup.
-</description>
-*)
-
-METHOD RaiseIfAllocationFailed]]></Declaration>
-      <Implementation>
-        <ST><![CDATA[IF _AllocationFailed THEN
-	Tc2_System.F_RaiseException(__SYSTEM.ExceptionCode.RTSEXCPT_OUT_OF_MEMORY);
-END_IF]]></ST>
-      </Implementation>
-    </Method>
-    <Method Name="RaiseAllocationFailure" Id="{2a951f88-56f8-4a83-aa48-d6c96c0b6514}" FolderPath="Service memebers\">
-      <Declaration><![CDATA[(*!
-<summary>Latches a fatal allocation failure until application reinitialization and raises it.</summary>
-<description>
-Call after a failed allocation, including from dependent libraries.
-No heap exception, logging or cleanup. The application boundary must recheck the latch
-with RaiseIfAllocationFailed outside handlers that could swallow the fatal error.
-This is a terminal failure, not a recoverable operation result.
-</description>
-*)
-
-METHOD RaiseAllocationFailure]]></Declaration>
-      <Implementation>
-        <ST><![CDATA[_AllocationFailed := TRUE;
-RaiseIfAllocationFailed();]]></ST>
+_TaskMemory[taskIndex].Objects[_TaskMemory[taskIndex].ObjectCount] := autoDisposedObject;
+_TaskMemory[taskIndex].ObjectCount := _TaskMemory[taskIndex].ObjectCount + 1;	]]></ST>
       </Implementation>
     </Method>
   </POU>

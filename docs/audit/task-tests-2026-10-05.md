@@ -83,28 +83,10 @@ Watchdogs 5–20 секунд завершують тест з failure; післ
 Cancel і метод продовжує Execute cleanup, поки suite викликається runner.
 Watchdog не є фізичним abort ADS і не гарантує cleanup, якщо runner зупинено.
 
-## Виконані перевірки
+## Статус перевірок
 
-`docs/audit/check-task-tests.ps1` виконано: 45 XML source files Tests parsed;
-407 object IDs унікальні; Compile includes існують, немає дублів та пропущених
-реєстрацій; 53 нові методи викликаються suites, мають TEST_FINISHED; suites
-інстанційовані в controller; Timers placeholder присутній. `git diff --check`
-не виявив проблем. Це структурна перевірка, а не ST type checking або виконання
-assertions. Нові XML відформатовано зі збереженням CDATA та IDs.
-
-## Впорядкування після зауважень власника
-
-Нові ST declarations/implementations приведено до оформлення наявних тестів:
-табуляція для вкладених блоків, порожні рядки між логічними групами,
-окремий рядок для кожної операції та розгорнуті IF/FOR. Короткі локальні
-назви замінено на task, timer, taskQueue, fileContentManager, resourceManager,
-firstTask/secondTask, executionIndex тощо. Невикористані шаблонні instances
-та змінні видалено; ConfiguredResourceManager/ProcessingResult у fixtures
-пояснюють їх призначення. Також відформатовано два змінені існуючі методи.
-53 різні сценарії збережено; кількість тестів не зменшено за рахунок покриття.
-Object IDs та production-код збережено. До структурної перевірки додано
-контроль однолітерних декларацій, кількох statements на одному рядку та
-нерозгорнутих IF/FOR. ST compilation/runtime після оформлення не виконано.
+Історичні структурні перевірки не підтверджують поточну ST compilation/runtime.
+Скрипт check-task-tests.ps1 видалений як старий артефакт; чинні тести в Sources збережені.
 
 ## Обмеження й наступні покращення
 
