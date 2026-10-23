@@ -9,7 +9,7 @@ License: https://opensource.org/license/mit
 
 (*!
 <summary>Creates and sends a TwinCAT event message.</summary>
-<description>Diagnostic string inputs are borrowed only during the call; retained diagnostic text is copied into owned storage.</description>
+<description>Creates the underlying EventLogger instance on the first send and retains it for subsequent sends. FB_exit requests its release without creating framework exceptions or logging release errors. Diagnostic string inputs are borrowed only during the call; retained diagnostic text is copied into owned storage.</description>
 *)
 FUNCTION_BLOCK ABSTRACT EventLoggerMessage EXTENDS TOF_Core.Object
 VAR
@@ -38,7 +38,11 @@ END_VAR
       </Get>
     </Property>
     <Method Name="FB_exit" Id="{fa58c06e-47d0-416d-864c-c44235c7aff8}">
-      <Declaration><![CDATA[//!<param name="bInCopyCode">if TRUE, the exit method is called for exiting an instance that is copied afterwards (online change).</param>
+      <Declaration><![CDATA[(*!
+<summary>Releases the EventLogger instance if it was created.</summary>
+<description>Calls FB_TcMessage.Release once. Its HRESULT is ignored during destruction; failure is not converted into a framework exception and successful release is not guaranteed.</description>
+<param name="bInCopyCode">Indicates destruction of the old instance during online change.</param>
+*)
 
 METHOD FB_exit : BOOL
 VAR_INPUT
@@ -127,7 +131,12 @@ END_IF]]></ST>
       </Implementation>
     </Method>
     <Method Name="InternalTrySend" Id="{f4c68b09-4d21-4204-9c94-e88baef1faea}" FolderPath="Internal methods\">
-      <Declaration><![CDATA[METHOD PROTECTED InternalTrySend : BOOL
+      <Declaration><![CDATA[(*!
+<summary>Attempts to create and send an EventLogger message with JSON data.</summary>
+<description>Returns TRUE when Send returns S_OK. HRESULT failures and caught exceptions return FALSE without further logging. A successfully created instance is retained even if a later step fails; FALSE does not roll back earlier EventLogger operations. Any existing terminal allocation failure remains latched.</description>
+<param name="jsonData">JSON text borrowed for this call.</param>
+*)
+METHOD PROTECTED InternalTrySend : BOOL
 VAR_IN_OUT CONSTANT
 	jsonData : STRING(1000);
 END_VAR
@@ -135,29 +144,33 @@ VAR
 	result : HRESULT;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[IF NOT _Created THEN
-	result := _Message.CreateEx(EventEntry, _MessageSourceInfo);
- 
+        <ST><![CDATA[__TRY
+	IF NOT _Created THEN
+		result := _Message.CreateEx(EventEntry, _MessageSourceInfo);
+	 
+		IF result <> Tc3_Module.S_OK THEN
+			RETURN;
+		ELSE
+			_Created := TRUE;
+		END_IF
+	END_IF
+
+	result := _Message.SetJsonAttribute(jsonData);
+
 	IF result <> Tc3_Module.S_OK THEN
 		RETURN;
-	ELSE
-		_Created := TRUE;
 	END_IF
-END_IF
 
-result := _Message.SetJsonAttribute(jsonData);
+	result := _Message.Send(0); 
 
-IF result <> Tc3_Module.S_OK THEN
-	RETURN;
-END_IF
+	IF result <> Tc3_Module.S_OK THEN
+		RETURN;
+	END_IF
 
-result := _Message.Send(0); 
-
-IF result <> Tc3_Module.S_OK THEN
-	RETURN;
-END_IF
-
-InternalTrySend := TRUE;]]></ST>
+	InternalTrySend := TRUE;
+__CATCH
+	InternalTrySend := FALSE;
+__ENDTRY]]></ST>
       </Implementation>
     </Method>
     <Property Name="SelfSize" Id="{91cf2cb2-f8a5-4793-b434-4f172abcdbb8}">

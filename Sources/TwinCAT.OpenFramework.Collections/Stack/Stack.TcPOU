@@ -1,0 +1,546 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="Stack" Id="{2d4c59dd-1a4d-496a-8e2f-08f6e3a46c3c}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+SPDX-FileCopyrightText: © 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+SPDX-License-Identifier: MIT
+License: https://opensource.org/license/mit
+*)
+
+(*!
+<summary>Stores generic values for last-in, first-out processing.</summary>
+<description>
+CreateEnumerator allocates an independent cursor owned by its caller.
+The collection must remain alive while that cursor is used.
+Successful insertion transfers disposal responsibility for owned payload; borrowed payload must remain alive while stored. The caller-side descriptor copy is not reset and must not be released again after transfer. Independent owning aliases and overlapping owned allocations are unsupported. Peek and GetByIndex borrow entries. RemoveLast releases the top without shifting remaining entries. Indices and enumeration run from top to bottom. Static capacity defaults to ten; zero selects dynamic storage. Validators are borrowed for the collection lifetime. ContainsGeneric defaults to releasing its query. Growth checks allocation arithmetic and invokes the terminal mechanism on null NEW before replacing the old buffer. No locking or mutation-version checks are implemented.
+Generic lookup with requested query release also attempts cleanup on lookup failure before propagating the captured exception; terminal OOM takes precedence.
+</description>
+*)
+
+{attribute 'no_explicit_call' := 'do not call this function block directly'} 
+FUNCTION_BLOCK FINAL Stack 
+VAR_GENERIC CONSTANT
+	//!<summary>Inline descriptor capacity; zero selects dynamic backing storage.</summary>
+	{attribute 'hide'} 
+    _StaticCapacity : TOF_Core.DINT_LENGTH := 10;
+END_VAR
+EXTENDS TOF_Core.Object IMPLEMENTS IStack
+VAR_INPUT
+	//! <summary>Number of slots added when dynamic storage is full; must be positive when growth is required.</summary>
+	DefaultDynamicAllocationElementCount : BYTE := 10;	
+END_VAR
+VAR	
+	{attribute 'hide'} 
+	_ClassName : STRING := __POUNAME();
+	
+	{attribute 'hide'} 
+	_ValueValidator : TOF_Core.IGenericValueValidator;
+
+	{attribute 'hide'} 
+	_Array : POINTER TO TOF_Core.GENERIC_VALUE;
+	{attribute 'hide'} 
+	_StaticArray : ARRAY [0.._StaticCapacity - 1] OF TOF_Core.GENERIC_VALUE;
+	
+	{attribute 'hide'} 
+	_DynamicCapacity : TOF_Core.DINT_LENGTH;
+	{attribute 'hide'} 
+	_Length : TOF_Core.DINT_LENGTH;
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[]]></ST>
+    </Implementation>
+    <Folder Name="Service methods" Id="{698652b2-f734-4e5a-89ac-b567da7a99d8}" />
+    <Method Name="AllocateMemory" Id="{a39e4b73-cfcc-49b2-a7c5-22d15eb1fcf9}" FolderPath="Service methods\">
+      <Declaration><![CDATA[(*!
+<summary>Expands the dynamic descriptor buffer.</summary>
+<description>
+Static instances return without allocation. A positive increment must fit DINT capacity and the UDINT allocation-byte limit; invalid ranges raise ArgumentOutOfRangeException before storage changes. A null allocation invokes the terminal allocation-failure mechanism before copying or deleting the old buffer. Existing descriptors are moved without cloning payload; incoming ownership is not accepted by this helper.
+</description>
+*)
+METHOD PROTECTED FINAL AllocateMemory 
+VAR_INPUT
+	elementCount : TOF_Core.DINT_LENGTH;
+END_VAR
+VAR CONSTANT
+	//!<summary>Bytes per descriptor slot used to bound and size the dynamic backing allocation.</summary>
+	ENTRY_ALLOCATION_SIZE : ULINT := XSIZEOF(TOF_Core.GENERIC_VALUE);
+END_VAR
+VAR
+	newMemory : POINTER TO TOF_Core.GENERIC_VALUE;
+	newCapacity : ULINT;
+
+	rangeException : TOF_Core.ArgumentOutOfRangeException;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF NOT Dynamic THEN
+	RETURN;
+END_IF
+
+IF elementCount <= TOF_Core.SignedInt32.ZERO THEN
+	rangeException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), 'elementCount', elementCount);
+END_IF
+
+newCapacity := TO_ULINT(_DynamicCapacity) + TO_ULINT(elementCount);
+IF newCapacity > TO_ULINT(TOF_Core.SignedInt32.MAX_VALUE)
+	OR_ELSE newCapacity > TO_ULINT(TOF_Core.UnsignedInt32.MAX_VALUE) / ENTRY_ALLOCATION_SIZE
+THEN
+	rangeException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), 'capacity', newCapacity);
+END_IF
+
+newMemory := __NEW(BYTE, TO_UDINT(ENTRY_ALLOCATION_SIZE * newCapacity));
+IF newMemory = 0 THEN
+	TOF_Core.DynamicMemoryManager.RaiseAllocationFailure();
+END_IF
+
+IF _Length > TOF_Core.SignedInt32.ZERO THEN
+	Tc2_System.MEMCPY(newMemory, _Array, TO_UDINT(ENTRY_ALLOCATION_SIZE * TO_ULINT(_Length)));
+END_IF
+
+IF _Array <> 0 THEN
+	__DELETE(_Array);
+END_IF
+
+_DynamicCapacity := TO_DINT(newCapacity);
+_Array := newMemory;]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="Capacity" Id="{c056b874-0fa7-408a-9cfe-f1bb12deab6b}">
+      <Declaration><![CDATA[(*!
+<summary>Reports the currently allocated number of slots.</summary>
+<description>
+Units are stack entries. Static capacity is fixed; dynamic capacity can change on growth or clearing. This is not a guarantee that the next allocation succeeds.
+</description>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY FINAL Capacity : TOF_Core.DINT_LENGTH]]></Declaration>
+      <Get Name="Get" Id="{85382a0b-c4a3-4022-9dc3-bcce5360d52b}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[Capacity := SEL(_StaticCapacity = TOF_Core.SignedInt32.ZERO, _StaticCapacity, _DynamicCapacity);]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="ClassName" Id="{2af9e032-8e5e-41fc-9ed0-d2535806f56a}">
+      <Declaration><![CDATA[(*!
+<summary>Provides the concrete type name for diagnostics.</summary>
+<description>
+Borrowed read-only reference to instance metadata; no ownership transfer.
+</description>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{a22d8c7f-5526-4586-9c31-58b2b310c772}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ClassName REF= _ClassName;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="Clear" Id="{1887cd2a-f25f-43c8-90aa-af4ab10f928a}">
+      <Declaration><![CDATA[(*!
+<summary>Removes all entries and releases dynamic backing storage.</summary>
+<description>
+Owned payload is released best effort through GENERIC_VALUE.Release; borrowed storage is not freed. Static capacity and the borrowed validator are retained. Dynamic capacity becomes zero. Returns this collection and invalidates positions and views. Cleanup callbacks must not reenter mutation.
+</description>
+*)
+METHOD Clear : IStack
+VAR
+	i : DINT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[Clear := THIS^;
+
+FOR i := 0 TO _Length - 1 DO
+	_Array[i].Release();
+END_FOR
+
+_Length := 0;
+_DynamicCapacity := 0;
+
+IF _Array <> 0 AND_THEN Dynamic THEN
+	__DELETE(_Array);	
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="Contains" Id="{c45cf347-6435-483e-93f5-9c6c4d341e62}">
+      <Declaration><![CDATA[(*!
+<summary>Searches for a value using default generic equality.</summary>
+<description>
+Borrows the ANY argument during a linear search without cloning or releasing it. isObject = TRUE means a live Object FB instance, not a pointer or interface variable. Equality exceptions propagate; callbacks that mutate the collection can invalidate traversal.
+</description>
+*)
+METHOD Contains : BOOL
+VAR_INPUT
+	value : ANY;
+	isObject : BOOL := FALSE;
+END_VAR
+VAR
+	genericValue : TOF_Core.GENERIC_VALUE;
+	i : TOF_Core.DINT_INDEX;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[genericValue := TOF_Core.GenericValueFactory.FromAnyType(value, isObject, TOF_Core.GENERIC_MEMORY_MANAGEMENT_BEHAVIOR.STORE_ORIGINAL_REFERENCE_AND_NOT_OWNS_MEMORY);
+
+FOR i := 0 TO _Length - 1 DO
+	IF _Array[i].Equals(genericValue) THEN
+		Contains := TRUE;
+		RETURN;
+	END_IF
+END_FOR]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="ContainsGeneric" Id="{55ce4a3e-4eda-41cd-80d0-4c164a340a25}">
+      <Declaration><![CDATA[(*!
+<summary>Searches for an equal generic value and optionally releases the query.</summary>
+<description>
+Uses GENERIC_VALUE.Equals in a linear search. releaseValue defaults to TRUE: after a completed search, Release is called on the local query copy, including on a miss. Caller-side aliases are not reset. The query must not own storage retained by the collection. Requested release is attempted after both successful lookup and lookup failure. Before cleanup, the original framework exception is retained and a borrowed static system exception is cloned to preserve its code, catch point and timestamps across cleanup callbacks. The captured exception is then propagated through ExceptionManager.Throw in the current cyclic task; native errors use the framework SystemException representation. If capturing the system exception fails with terminal OOM, query cleanup is still attempted and terminal OOM takes precedence. Terminal allocation state is never cleared. Release is best effort and does not prove successful deallocation. Cleanup callbacks must not reenter collection mutation.
+</description>
+*)
+METHOD ContainsGeneric : BOOL
+VAR_INPUT
+	value : TOF_Core.GENERIC_VALUE;
+	releaseValue : BOOL := TRUE;
+END_VAR
+VAR
+	exceptionCode : __SYSTEM.ExceptionCode;
+	caughtException : TOF_Core.IException;
+
+	i : DINT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[__TRY
+	FOR i := 0 TO _Length - 1 DO
+		IF _Array[i].Equals(value) THEN
+			ContainsGeneric := TRUE;
+			EXIT;
+		END_IF
+	END_FOR
+__CATCH(exceptionCode)
+	caughtException := TOF_Core.ExceptionManager.GetLastException(exceptionCode, NamespaceName, __POUNAME(), __POSITION());
+__ENDTRY
+
+IF releaseValue THEN
+	IF caughtException <> 0 AND_THEN NOT caughtException.IsDynamicInstance THEN
+		__TRY
+			__QUERYINTERFACE(caughtException.Clone(), caughtException);
+		__CATCH(exceptionCode)
+			value.Release();
+
+			TOF_Core.ExceptionManager.ReThrowLastException(exceptionCode := exceptionCode, catchPointNamespaceName := NamespaceName, catchPointPOUName := __POUNAME(), catchPointPosition := __POSITION());
+		__ENDTRY
+	END_IF
+
+	value.Release();
+END_IF
+
+IF caughtException <> 0 THEN
+	TOF_Core.ExceptionManager.Throw(caughtException);
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="CreateEnumerator" Id="{66e81cc2-5c7e-4eb1-a84a-141a601ac24d}">
+      <Declaration><![CDATA[(*!
+<summary>Creates an independent enumerator owned by the caller.</summary>
+<description>
+The caller must explicitly release the enumerator and keep this collection alive while using it.
+Allocation failure invokes DynamicMemoryManager.RaiseAllocationFailure without a heap exception;
+it is terminal and is not returned as a recoverable null result.
+</description>
+*)
+METHOD CreateEnumerator : TOF_Core.IEnumerator
+VAR
+	enumerator : POINTER TO StackEnumerator;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[enumerator := __NEW(StackEnumerator(stack := THIS^));
+
+IF enumerator = 0 THEN
+	TOF_Core.DynamicMemoryManager.RaiseAllocationFailure();
+END_IF
+
+CreateEnumerator := enumerator^;]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="Dynamic" Id="{e53ef9d4-acf7-487a-bdb7-057a208d96d5}">
+      <Declaration><![CDATA[(*!
+<summary>Reports whether storage can grow dynamically.</summary>
+<description>
+Static capacity zero selects dynamic storage. Dynamic collections can still fail to allocate.
+</description>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY FINAL Dynamic : BOOL]]></Declaration>
+      <Get Name="Get" Id="{17cdc800-7dce-4562-af66-34341981186d}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[Dynamic := _StaticCapacity = TOF_Core.SignedInt32.ZERO;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="Empty" Id="{67066d5e-47c9-4480-b597-8101fd62fc6c}">
+      <Declaration><![CDATA[(*!
+<summary>Reports whether the collection has no entries.</summary>
+<description>
+Reflects Length; not a check of payload lifetime or memory health.
+</description>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY FINAL Empty : BOOL]]></Declaration>
+      <Get Name="Get" Id="{97cf1f77-0e58-4039-a9f5-53f4633f7680}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[Empty := _Length <= TOF_Core.SignedInt32.ZERO;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="FB_exit" Id="{a26cec15-22b4-44e4-92c4-ab94cdf0ee9c}">
+      <Declaration><![CDATA[(*!
+<summary>Releases owned payload and backing storage during destruction.</summary>
+<description>
+Calls Clear; lifecycle methods and payload cleanup callbacks must not raise exceptions or reenter mutation. Payload release is best effort, not proof of successful destruction. No separate copy-code ownership handoff is implemented.
+</description>
+*)
+//!<param name="bInCopyCode">if TRUE, the exit method is called for exiting an instance that is copied afterwards (online change).</param>
+
+METHOD FB_exit : BOOL
+VAR_INPUT
+	bInCopyCode : BOOL; 
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[Clear();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="FB_init" Id="{51109f0f-6910-436f-b2fc-87fbcd255ed6}">
+      <Declaration><![CDATA[(*!
+<summary>Binds the optional validator and inline storage during initialization.</summary>
+<description>
+The validator is borrowed and must remain alive while used; it is not invoked here. Static storage is bound without allocation. Lifecycle methods must not raise exceptions. No explicit online-change relocation repair is implemented.
+</description>
+*)
+//!<param name="bInitRetains">if TRUE, the retain variables are initialized (warm start / cold start)</param>
+
+//!<param name="bInCopyCode">if TRUE, the instance afterwards gets moved into the copy code (online change)</param>
+
+METHOD FB_init : BOOL
+VAR_INPUT
+	
+	bInitRetains	: BOOL;
+	
+	bInCopyCode	: BOOL;
+	valueValidator : TOF_Core.IGenericValueValidator;
+END_VAR
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_ValueValidator := valueValidator;
+
+IF NOT Dynamic THEN
+	_Array := ADR(_StaticArray); 
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="Full" Id="{5d930b40-efac-4806-abd6-924c9cbfda51}">
+      <Declaration><![CDATA[(*!
+<summary>Reports whether fixed-capacity storage has no free slot.</summary>
+<description>
+Dynamic collections report FALSE even when Length equals Capacity. This does not guarantee available heap memory.
+</description>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY FINAL Full : BOOL]]></Declaration>
+      <Get Name="Get" Id="{b9181b87-2005-4c94-b6cd-a557dcbb3a40}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[Full := _StaticCapacity <> TOF_Core.SignedInt32.ZERO AND_THEN _Length >= _StaticCapacity;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="GetByIndex" Id="{a1f05df5-5698-4813-b749-97769e7336e1}">
+      <Declaration><![CDATA[(*!
+<summary>Borrows the descriptor at a zero-based stack position.</summary>
+<description>
+Position zero is the top; increasing indices move toward the bottom. An out-of-range index raises an exception. Returned descriptors and payload are borrowed, not clones. Do not modify descriptor metadata or release payload through this view, even when IsMemoryOwner is TRUE. Keep the source and borrowed storage alive; mutation or destruction can invalidate the view.
+</description>
+*)
+METHOD GetByIndex : REFERENCE TO TOF_Core.GENERIC_VALUE
+VAR_INPUT
+	index : TOF_Core.DINT_INDEX;
+END_VAR
+VAR
+	argumentOutOfRangeException : TOF_Core.ArgumentOutOfRangeException;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF index < TOF_Core.SignedInt32.ZERO OR_ELSE index >= _Length THEN
+	argumentOutOfRangeException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), 'index', index);
+END_IF
+
+GetByIndex REF= _Array[_Length - 1 - index];]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="Length" Id="{3fb1399a-d2b3-4e36-a8b0-cb3b48e73ade}">
+      <Declaration><![CDATA[(*!
+<summary>Reports the number of stored entries.</summary>
+<description>
+Units are stack entries. Existing positions range from zero through Length minus one.
+</description>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY FINAL Length : TOF_Core.DINT_LENGTH]]></Declaration>
+      <Get Name="Get" Id="{a88fa5fb-2c13-4472-8933-24d1641798ee}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[Length := _Length;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="NamespaceName" Id="{6cd5d3f0-0091-407b-a847-4973771a5275}">
+      <Declaration><![CDATA[(*!
+<summary>Provides the library namespace for diagnostics.</summary>
+<description>
+Borrowed read-only reference to compiler-initialized metadata; no ownership transfer.
+</description>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{beb9b273-9b26-4f90-9633-80641195d099}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[NamespaceName REF= CurrentNamespace.Name;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="Peek" Id="{7fef83ed-2137-4b56-90af-1068e1040b8c}">
+      <Declaration><![CDATA[(*!
+<summary>Borrows the LIFO top without removing it.</summary>
+<description>
+An empty stack raises CollectionEmptyException. Returned descriptors and payload are borrowed, not clones. Do not modify descriptor metadata or release payload through this view, even when IsMemoryOwner is TRUE. Keep the source and borrowed storage alive; mutation or destruction can invalidate the view.
+</description>
+*)
+METHOD Peek : REFERENCE TO TOF_Core.GENERIC_VALUE
+VAR
+	stackEmptyException : TOF_Core.CollectionEmptyException;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF _Length <= TOF_Core.SignedInt32.ZERO THEN
+	stackEmptyException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), GetName());
+END_IF
+
+Peek REF= _Array[_Length - 1];]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="PushCopy" Id="{c7e3c25d-428c-49b1-9d49-8b1725d1a1cb}">
+      <Declaration><![CDATA[(*!
+<summary>Copies a value and appends it to the stack top.</summary>
+<description>
+Borrows the original during the call. isObject = TRUE requires a live Object FB instance implementing ICloneable; other data is copied as bytes without recursively cloning references. A prepared copy is released if insertion fails before acceptance; exceptions propagate. Engine-managed exception objects are unsupported.
+</description>
+*)
+METHOD PushCopy : IStack
+VAR_INPUT
+	value : ANY;
+	isObject : BOOL := FALSE;
+END_VAR
+VAR
+	exceptionCode : __SYSTEM.ExceptionCode;
+	genericValue : TOF_Core.GENERIC_VALUE;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[genericValue := TOF_Core.GenericValueFactory.FromAnyType(value, isObject, TOF_Core.GENERIC_MEMORY_MANAGEMENT_BEHAVIOR.CLONE_ORIGINAL_VALUE_AND_OWNS_MEMORY);
+
+__TRY
+	PushCopy := PushGeneric(genericValue);
+__CATCH(exceptionCode)
+	genericValue.Release();
+	
+	TOF_Core.ExceptionManager.ReThrowLastException(exceptionCode := exceptionCode, catchPointNamespaceName := NamespaceName, catchPointPOUName := __POUNAME(), catchPointPosition := __POSITION());
+__ENDTRY]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="PushGeneric" Id="{402f3d98-7321-439d-8d7c-999c96094d48}">
+      <Declaration><![CDATA[(*!
+<summary>Pushes a descriptor onto the stack top.</summary>
+<description>
+Successful insertion transfers disposal responsibility for owned payload; borrowed payload must remain alive while stored. The caller-side descriptor copy is not reset and must not be released again after transfer. Independent owning aliases and overlapping owned allocations are unsupported. Full static storage raises an exception. A configured validator is invoked once before any capacity growth or ownership acceptance. Validation failure leaves the buffer, Length and incoming ownership unchanged; its exception propagates. Validator callbacks must not mutate this collection.
+</description>
+*)
+METHOD PushGeneric : IStack
+VAR_INPUT
+	value : TOF_Core.GENERIC_VALUE;
+END_VAR
+VAR
+	staticCollectionFullException : TOF_Core.StaticCollectionFullException;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF _ValueValidator <> 0 THEN
+	_ValueValidator.Validate(GetName(), value);
+END_IF
+
+IF _Length >= Capacity THEN
+	IF Dynamic THEN
+		AllocateMemory(DefaultDynamicAllocationElementCount);
+	ELSE
+		staticCollectionFullException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), GetName(), TO_UDINT(Capacity));
+	END_IF
+END_IF
+
+PushGeneric := THIS^;
+
+_Array[_Length] := value;
+_Length := _Length + 1;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="RemoveLast" Id="{50d918e0-4b2c-4ec1-b4d5-98d139b87699}">
+      <Declaration><![CDATA[(*!
+<summary>Removes and releases the LIFO top.</summary>
+<description>
+An empty stack raises CollectionEmptyException. Owned top storage is released best effort, not returned to the caller. Remaining descriptors are not moved; removal takes constant time apart from payload cleanup. Returns this stack; positions and views may change. Cleanup callbacks must not reenter mutation.
+</description>
+*)
+METHOD RemoveLast : IStack
+VAR
+	stackEmptyException : TOF_Core.CollectionEmptyException;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF _Length <= TOF_Core.SignedInt32.ZERO THEN
+	stackEmptyException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), GetName());
+END_IF
+
+_Length := _Length - 1;
+_Array[_Length].Release();
+
+RemoveLast := THIS^;]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="SelfSize" Id="{74439844-9cb0-4b9e-a4d2-453424aea2cc}">
+      <Declaration><![CDATA[(*!
+<summary>Reports the size of this function-block instance.</summary>
+<description>
+Measured in bytes; includes inline storage but excludes separately allocated buffers, payload and enumerators.
+</description>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY SelfSize : ULINT]]></Declaration>
+      <Get Name="Get" Id="{7b7e048d-cbf3-465e-ab6a-8a564a7acc16}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[SelfSize := XSIZEOF(THIS^);]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="ValueValidator" Id="{30294eca-0ed5-4a6b-9ae0-03a9d88d1c1e}">
+      <Declaration><![CDATA[(*!
+<summary>Exposes the configured value validator.</summary>
+<description>
+Borrowed optional reference fixed at initialization. Zero means no validator. The collection does not own or release it.
+</description>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY FINAL ValueValidator : TOF_Core.IGenericValueValidator]]></Declaration>
+      <Get Name="Get" Id="{60e75fe6-6e09-4937-ad55-f14163cd16d0}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ValueValidator := _ValueValidator;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+  </POU>
+</TcPlcObject>

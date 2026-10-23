@@ -1,4 +1,4 @@
-<?xml version="1.0" encoding="utf-8"?>
+﻿<?xml version="1.0" encoding="utf-8"?>
 <TcPlcObject Version="1.1.0.1">
   <POU Name="LogManager" Id="{5168e535-223e-4560-9821-bca21a9b8561}" SpecialFunc="None">
     <Declaration><![CDATA[(*
@@ -9,18 +9,26 @@ License: https://opensource.org/license/mit
 
 (*!
 <summary>Routes diagnostics through the configured logger with topic filtering and message numbering.</summary>
-<description>Exception logging accepts IReadOnlyException and reads borrowed diagnostics without transferring ownership. Implementations must not retain exception references beyond their task cleanup.</description>
+<description>TryLog calls select an explicit logger first, then the calling cyclic task override, then the shared Logger (built-in AdsLogger when unset). Logger references are borrowed and must remain valid during use; routing does not transfer ownership or provide synchronization. Counter updates and number snapshots are serialized by short critical sections. Filters, backends, configuration changes and external counter reads or writes are not protected by this lock. Configure shared Logger, Filter and MessageNumberFormat before parallel logging starts. Runtime changes require application-level synchronization with all affected TryLog and Execute calls; the manager does not provide it. Keep replaced logger and filter instances alive until their in-flight calls finish. A filter shared by tasks must support concurrent ShouldLog calls and synchronize its own mutable state and rule updates. The assigned number describes numbering order, not backend delivery order. Total counters count requests reaching filtering after the initial null or empty-input guard. PassedFilter counters count requests that pass filtering and are incremented before calling the logger, regardless of its result. Message numbers use these post-filter counters and can have gaps in successfully written output. Exception logging accepts IReadOnlyException and reads borrowed diagnostics without transferring ownership. Implementations must not retain exception references beyond their task cleanup. A logger or filter invoked by LogManager must not call back into that manager, directly or indirectly, while handling the invocation. TryLog methods return FALSE on caught exceptions without logging them again. Counters retain increments already performed, and backend side effects are not rolled back. A fatal allocation latch is not cleared; task boundaries must call RaiseIfAllocationFailed outside recoverable handlers. Independent diagnostics may use a separate channel that does not return to the same logging chain. This restriction does not prohibit internal method calls used to expand aggregate exceptions.</description>
 *)
 PROGRAM LogManager
 VAR_INPUT
+	(*!
+	<summary>Selects whether logging calls receive a global or per-category sequence number.</summary>
+	<description>Configure before parallel logging starts. Runtime changes must be synchronized by the application with logging calls; the counter lock does not protect this setting.</description>
+	*)
 	MessageNumberFormat : LOG_MESSAGE_NUMBER_FORMAT := LOG_MESSAGE_NUMBER_FORMAT.SEQUENTIAL_BY_CATEGORY;
 END_VAR
 VAR_OUTPUT
+	//!<summary>Requests reaching filtering after the initial input guard.</summary>
 	TotalMessageCounter : ULINT;
-	FilteredMessageCounter : ULINT;
+	//!<summary>Requests passing filtering, counted before the logger call regardless of its result.</summary>
+	PassedFilterMessageCounter : ULINT;
 	
+	//!<summary>Requests reaching filtering, grouped by category.</summary>
 	TotalMessageByCategoryCounters : ARRAY [LOG_CATEGORY.DEBUG .. LOG_CATEGORY.CRITICAL_ERROR] OF ULINT;   
-	FilteredMessageByCategoryCounters : ARRAY [LOG_CATEGORY.DEBUG .. LOG_CATEGORY.CRITICAL_ERROR] OF ULINT;   
+	//!<summary>Requests passing filtering by category, independent of logger success.</summary>
+	PassedFilterMessageByCategoryCounters : ARRAY [LOG_CATEGORY.DEBUG .. LOG_CATEGORY.CRITICAL_ERROR] OF ULINT;   
 END_VAR
 VAR
 	{attribute 'hide'} 
@@ -29,15 +37,23 @@ VAR
 	{attribute 'hide'} 
 	_DefaultLogger : AdsLogger;
 	{attribute 'hide'} 
-	_Logger : ILogger;	
+	_Logger : ILogger;
+	{attribute 'hide'}
+	_TaskLoggers : ARRAY [1..System.TASK_COUNT] OF ILogger;
 	{attribute 'hide'} 
+	_CounterLock : Tc2_System.FB_IecCriticalSection;
+	{attribute 'hide'}
 	_Filter : ILogFilter;  
 END_VAR]]></Declaration>
     <Implementation>
       <ST><![CDATA[]]></ST>
     </Implementation>
     <Property Name="ClassName" Id="{605c7ee8-fe66-40d6-9aa1-b8b2828392e5}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Provides the diagnostic type name without copying its storage.</summary>
+<description>Borrowed read-only reference. Do not modify the referenced name; keep the owning instance alive while using the reference.</description>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
       <Get Name="Get" Id="{f1ca54d4-2382-4af1-96ca-fc4dbaf9eb4e}">
         <Declaration><![CDATA[]]></Declaration>
@@ -47,7 +63,11 @@ PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
       </Get>
     </Property>
     <Method Name="Execute" Id="{13c3c36e-9fa4-45b8-9a63-156fe14d049b}">
-      <Declaration><![CDATA[METHOD Execute
+      <Declaration><![CDATA[(*!
+<summary>Advances the shared fallback logger without propagating exceptions.</summary>
+<description>Uses the shared Logger property, regardless of task overrides or explicit destinations in TryLog calls. The caller must arrange Execute separately for other loggers that require cyclic processing. This method does not serialize concurrent backend calls. If a backend violates the no-throw contract, attempts independent ADS diagnostics. Failures of that diagnostic path are also contained. Does not clear terminal allocation state.</description>
+*)
+METHOD Execute
 VAR
 	exceptionCode : __SYSTEM.ExceptionCode;
 	exception : IException;
@@ -56,14 +76,22 @@ END_VAR]]></Declaration>
         <ST><![CDATA[__TRY
 	Logger.Execute();
 __CATCH(exceptionCode)
-	exception := ExceptionManager.GetLastException(exceptionCode, NamespaceName, __POUNAME(), __POSITION());
+	__TRY
+		exception := ExceptionManager.GetLastException(exceptionCode, NamespaceName, __POUNAME(), __POSITION());
 	
-	_DefaultLogger.TryLogException(exception, ERROR_SEVERITY.ERROR);
+		_DefaultLogger.TryLogException(exception, ERROR_SEVERITY.ERROR);
+	__CATCH
+		// A secondary diagnostic failure must not escape to the caller.
+	__ENDTRY
 __ENDTRY]]></ST>
       </Implementation>
     </Method>
     <Property Name="Filter" Id="{b6f1f4aa-92b0-409e-ad33-af6c50416e83}">
-      <Declaration><![CDATA[PROPERTY Filter : ILogFilter]]></Declaration>
+      <Declaration><![CDATA[(*!
+<summary>Gets or sets the shared filter applied before forwarding diagnostics.</summary>
+<description>Zero disables filtering. The reference is borrowed and must remain valid during use. ShouldLog runs outside the counter lock and may be called concurrently by different tasks; the filter implementation is responsible for safe shared state and rule updates. Assign before parallel logging starts. Runtime replacement must be synchronized by the application with all affected calls; the old filter must remain alive until its in-flight calls finish. Rule updates inside the filter remain the responsibility of its implementation.</description>
+*)
+PROPERTY FINAL Filter : ILogFilter]]></Declaration>
       <Get Name="Get" Id="{31e6a597-f4cb-45a7-bcf1-c6f162ef07f2}">
         <Declaration><![CDATA[]]></Declaration>
         <Implementation>
@@ -78,7 +106,11 @@ __ENDTRY]]></ST>
       </Set>
     </Property>
     <Property Name="Logger" Id="{8f399577-3e03-44ae-a287-168cdae9d0ec}">
-      <Declaration><![CDATA[PROPERTY Logger : ILogger]]></Declaration>
+      <Declaration><![CDATA[(*!
+<summary>Gets or sets the shared fallback logger.</summary>
+<description>Zero selects the built-in AdsLogger. The getter returns this shared fallback, not a task override. References are borrowed; this property does not transfer ownership or synchronize configuration changes. Assign before parallel logging starts. Runtime replacement requires application-level synchronization with TryLog and Execute calls; keep the old logger alive until all calls using it finish and complete any pending backend work before destruction.</description>
+*)
+PROPERTY Logger : ILogger]]></Declaration>
       <Get Name="Get" Id="{c9c1cefb-1091-483c-b6a3-ca70a961903f}">
         <Declaration><![CDATA[]]></Declaration>
         <Implementation>
@@ -97,7 +129,11 @@ END_IF]]></ST>
       </Set>
     </Property>
     <Property Name="NamespaceName" Id="{84be6e8d-e2b5-4bd6-ae4f-31889ab0432e}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Provides the library namespace used in diagnostics.</summary>
+<description>Borrowed read-only reference to the compiler-initialized library namespace; no ownership transfer.</description>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
       <Get Name="Get" Id="{4891555c-102c-47e3-8f69-9a215e109b78}">
         <Declaration><![CDATA[]]></Declaration>
@@ -106,8 +142,69 @@ PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
         </Implementation>
       </Get>
     </Property>
+    <Method Name="resolveLogger" Id="{c6a68697-2de1-41f3-8bf5-d212c74cb83d}">
+      <Declaration><![CDATA[(*!
+<summary>Selects the destination for a logging call.</summary>
+<description>Explicit destination takes precedence over the current cyclic task override and shared fallback. Outside a cyclic task, no task override is consulted. Does not allocate or take ownership.</description>
+<param name="logger">Explicit destination, or zero for configured routing.</param>
+*)
+METHOD PRIVATE resolveLogger : ILogger
+VAR_INPUT
+	logger : ILogger;
+END_VAR
+VAR
+	taskIndex : DINT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF logger <> 0 THEN
+	resolveLogger := logger;
+	RETURN;
+END_IF
+
+taskIndex := System.GetCurrentTaskIndex();
+
+IF taskIndex >= 1 AND_THEN taskIndex <= System.TASK_COUNT THEN
+	IF _TaskLoggers[taskIndex] <> 0 THEN
+		resolveLogger := _TaskLoggers[taskIndex];
+		RETURN;
+	END_IF
+END_IF
+
+resolveLogger := LogManager.Logger;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="SetTaskLogger" Id="{cea7a759-8938-4dc3-91eb-626a866c861f}">
+      <Declaration><![CDATA[(*!
+<summary>Assigns the default logging destination for the calling cyclic task.</summary>
+<description>Returns TRUE after updating the current task override. Returns FALSE without changing configuration outside a valid cyclic task; does not allocate or raise exceptions. Zero removes the override and restores shared fallback routing. The logger is borrowed and must remain valid while configured and during calls using it. Does not delete the previous logger or arrange cyclic Execute calls. Sharing a logger across tasks requires separately synchronized access.</description>
+<param name="logger">Borrowed logger for this task, or zero to use the shared fallback.</param>
+*)
+METHOD SetTaskLogger : BOOL
+VAR_INPUT
+	logger : ILogger;
+END_VAR
+VAR
+	taskIndex : DINT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[taskIndex := System.GetCurrentTaskIndex();
+
+IF taskIndex < 1 OR_ELSE taskIndex > System.TASK_COUNT THEN
+	SetTaskLogger := FALSE;
+	RETURN;
+END_IF
+
+_TaskLoggers[taskIndex] := logger;
+SetTaskLogger := TRUE;]]></ST>
+      </Implementation>
+    </Method>
     <Method Name="TryLogError" Id="{f8c266fa-1403-48ca-81af-80709466198a}">
-      <Declaration><![CDATA[METHOD TryLogError : BOOL
+      <Declaration><![CDATA[(*!
+<summary>Attempts to forward an error through topic filtering to the configured logger.</summary>
+<description>Borrows the error for this call. An invalid reference or rejected filter returns FALSE. Returns FALSE if a nested call raises an exception. Does not log the caught exception or roll back counters and backend side effects. Counter-lock acquisition failure returns FALSE. Counter increments already made are retained. Logger receives a call-local number snapshot. The fatal allocation latch remains set; RaiseIfAllocationFailed must be called at the task boundary outside recoverable handlers.</description>
+<param name="logger">Optional borrowed destination. Zero selects the calling task logger or shared fallback. Manager filtering and numbering still apply.</param>
+*)
+METHOD TryLogError : BOOL
 VAR_INPUT
 	error : REFERENCE TO ERROR;
 	topic1 : WSTRING := "";	
@@ -115,52 +212,85 @@ VAR_INPUT
 	topic3 : WSTRING := "";	
 	topic4 : WSTRING := "";	
 	topic5 : WSTRING := "";	
+	logger : ILogger := 0;
 END_VAR
 VAR
+	selectedLogger : ILogger;
+	sequentialNumber : ULINT;
+	categoryNumber : ULINT;
+	counterLockHeld : BOOL;
+
 	category : LOG_CATEGORY;
 	topics : ARRAY [0..4] OF WSTRING; 
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[IF NOT __ISVALIDREF(error) THEN
-	RETURN;
-END_IF
+        <ST><![CDATA[__TRY
+	IF NOT __ISVALIDREF(error) THEN
+		RETURN;
+	END_IF
 
-category := SEL(error.Severity = ERROR_SEVERITY.CRITICAL, LOG_CATEGORY.ERROR, LOG_CATEGORY.CRITICAL_ERROR); 
+	category := SEL(error.Severity = ERROR_SEVERITY.CRITICAL, LOG_CATEGORY.ERROR, LOG_CATEGORY.CRITICAL_ERROR); 
 
-TotalMessageCounter := TotalMessageCounter + 1;
-TotalMessageByCategoryCounters[category] := TotalMessageByCategoryCounters[category] + 1;
+	IF NOT _CounterLock.Enter() THEN
+		RETURN;
+	END_IF
 
-topics[0] := topic1;
-topics[1] := topic2;
-topics[2] := topic3;
-topics[3] := topic4;
-topics[4] := topic5;
+	counterLockHeld := TRUE;
+	TotalMessageCounter := TotalMessageCounter + 1;
+	TotalMessageByCategoryCounters[category] := TotalMessageByCategoryCounters[category] + 1;
+	_CounterLock.Leave();
+	counterLockHeld := FALSE;
 
-IF Filter <> 0 AND_THEN NOT Filter.ShouldLog(category, topics) THEN
-	RETURN;
-END_IF
+	topics[0] := topic1;
+	topics[1] := topic2;
+	topics[2] := topic3;
+	topics[3] := topic4;
+	topics[4] := topic5;
 
-FilteredMessageCounter := FilteredMessageCounter + 1;
-FilteredMessageByCategoryCounters[category] := FilteredMessageByCategoryCounters[category] + 1;
+	IF _Filter <> 0 AND_THEN NOT _Filter.ShouldLog(category, topics) THEN
+		RETURN;
+	END_IF
 
-CASE MessageNumberFormat OF
-	LOG_MESSAGE_NUMBER_FORMAT.NONE:
-		TryLogError := Logger.TryLogError(error);
+	IF NOT _CounterLock.Enter() THEN
+		RETURN;
+	END_IF
+
+	counterLockHeld := TRUE;	
+	PassedFilterMessageCounter := PassedFilterMessageCounter + 1;
+	PassedFilterMessageByCategoryCounters[category] := PassedFilterMessageByCategoryCounters[category] + 1;
+	sequentialNumber := PassedFilterMessageCounter;
+	categoryNumber := PassedFilterMessageByCategoryCounters[category];
+	_CounterLock.Leave();
+	counterLockHeld := FALSE;
+
+	selectedLogger := resolveLogger(logger);
+
+	CASE MessageNumberFormat OF
+		LOG_MESSAGE_NUMBER_FORMAT.NONE:
+			TryLogError := selectedLogger.TryLogError(error);
+			
+		LOG_MESSAGE_NUMBER_FORMAT.SEQUENTIAL:
+			TryLogError := selectedLogger.TryLogError(error, sequentialNumber);
 		
-	LOG_MESSAGE_NUMBER_FORMAT.SEQUENTIAL:
-		TryLogError := Logger.TryLogError(error, FilteredMessageCounter);
-	
-	LOG_MESSAGE_NUMBER_FORMAT.SEQUENTIAL_BY_CATEGORY:
-		TryLogError := Logger.TryLogError(error, FilteredMessageByCategoryCounters[category]);
-END_CASE]]></ST>
+		LOG_MESSAGE_NUMBER_FORMAT.SEQUENTIAL_BY_CATEGORY:
+			TryLogError := selectedLogger.TryLogError(error, categoryNumber);
+	END_CASE
+__CATCH
+	IF counterLockHeld THEN
+		_CounterLock.Leave();
+	END_IF
+
+	TryLogError := FALSE;
+__ENDTRY]]></ST>
       </Implementation>
     </Method>
     <Method Name="TryLogException" Id="{bd7d75b2-118d-460f-87a2-4f124e9232ba}">
       <Declaration><![CDATA[(*!
 <summary>Attempts to log diagnostic information from a read-only exception view.</summary>
-<description>Borrows the exception for the call without clearing it or taking ownership. The exception and its inner causes must remain live while their diagnostics are read. Logging does not extend their lifetime.</description>
+<description>Borrows the exception for the call without clearing it or taking ownership. The exception and its inner causes must remain live while their diagnostics are read. Logging does not extend their lifetime. Returns FALSE if a nested call raises an exception. Does not log the caught exception or roll back counters and backend side effects. Counter-lock acquisition failure returns FALSE. Counter increments already made are retained. Logger receives a call-local number snapshot. The fatal allocation latch remains set; RaiseIfAllocationFailed must be called at the task boundary outside recoverable handlers.</description>
 <param name="exception">Exception view to read; null is ignored.</param>
 <param name="severity">Severity used to select the log category.</param>
+<param name="logger">Optional borrowed destination. Zero selects the calling task logger or shared fallback. Manager filtering and numbering still apply.</param>
 *)
 METHOD TryLogException : BOOL
 VAR_INPUT
@@ -170,50 +300,83 @@ VAR_INPUT
 	topic2 : WSTRING := "";	
 	topic3 : WSTRING := "";	
 	topic4 : WSTRING := "";	
+	logger : ILogger := 0;
 END_VAR
 VAR
+	selectedLogger : ILogger;
+	sequentialNumber : ULINT;
+	categoryNumber : ULINT;
+	counterLockHeld : BOOL;
+
 	category : LOG_CATEGORY;
 	topics : ARRAY [0..4] OF WSTRING; 
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[IF exception = 0 THEN
-	RETURN;
-END_IF
+        <ST><![CDATA[__TRY
+	IF exception = 0 THEN
+		RETURN;
+	END_IF
 
-category := SEL(severity = ERROR_SEVERITY.CRITICAL, LOG_CATEGORY.ERROR, LOG_CATEGORY.CRITICAL_ERROR); 
+	category := SEL(severity = ERROR_SEVERITY.CRITICAL, LOG_CATEGORY.ERROR, LOG_CATEGORY.CRITICAL_ERROR); 
 
-TotalMessageCounter := TotalMessageCounter + 1;
-TotalMessageByCategoryCounters[category] := TotalMessageByCategoryCounters[category] + 1;
+	IF NOT _CounterLock.Enter() THEN
+		RETURN;
+	END_IF
 
-topics[0] := TO_WSTRING(exception.ClassName);
-topics[1] := topic1;
-topics[2] := topic2;
-topics[3] := topic3;
-topics[4] := topic4;
+	counterLockHeld := TRUE;
+	TotalMessageCounter := TotalMessageCounter + 1;
+	TotalMessageByCategoryCounters[category] := TotalMessageByCategoryCounters[category] + 1;
+	_CounterLock.Leave();
+	counterLockHeld := FALSE;
 
-IF Filter <> 0 AND_THEN NOT Filter.ShouldLog(category, topics) THEN
-	RETURN;
-END_IF
+	topics[0] := TO_WSTRING(exception.ClassName);
+	topics[1] := topic1;
+	topics[2] := topic2;
+	topics[3] := topic3;
+	topics[4] := topic4;
 
-FilteredMessageCounter := FilteredMessageCounter + 1;
-FilteredMessageByCategoryCounters[category] := FilteredMessageByCategoryCounters[category] + 1;
+	IF _Filter <> 0 AND_THEN NOT _Filter.ShouldLog(category, topics) THEN
+		RETURN;
+	END_IF
 
-CASE MessageNumberFormat OF
-	LOG_MESSAGE_NUMBER_FORMAT.NONE:
-		TryLogException := Logger.TryLogException(exception, severity);
+	IF NOT _CounterLock.Enter() THEN
+		RETURN;
+	END_IF
+
+	counterLockHeld := TRUE;
+	PassedFilterMessageCounter := PassedFilterMessageCounter + 1;
+	PassedFilterMessageByCategoryCounters[category] := PassedFilterMessageByCategoryCounters[category] + 1;
+	sequentialNumber := PassedFilterMessageCounter;
+	categoryNumber := PassedFilterMessageByCategoryCounters[category];
+	_CounterLock.Leave();
+	counterLockHeld := FALSE;
+
+	selectedLogger := resolveLogger(logger);
+
+	CASE MessageNumberFormat OF
+		LOG_MESSAGE_NUMBER_FORMAT.NONE:
+			TryLogException := selectedLogger.TryLogException(exception, severity);
+			
+		LOG_MESSAGE_NUMBER_FORMAT.SEQUENTIAL:
+			TryLogException := selectedLogger.TryLogException(exception, severity, sequentialNumber);
 		
-	LOG_MESSAGE_NUMBER_FORMAT.SEQUENTIAL:
-		TryLogException := Logger.TryLogException(exception, severity, FilteredMessageCounter);
-	
-	LOG_MESSAGE_NUMBER_FORMAT.SEQUENTIAL_BY_CATEGORY:
-		TryLogException := Logger.TryLogException(exception, severity, FilteredMessageByCategoryCounters[category]);
-END_CASE]]></ST>
+		LOG_MESSAGE_NUMBER_FORMAT.SEQUENTIAL_BY_CATEGORY:
+			TryLogException := selectedLogger.TryLogException(exception, severity, categoryNumber);
+	END_CASE
+__CATCH
+	IF counterLockHeld THEN
+		_CounterLock.Leave();
+	END_IF
+
+	TryLogException := FALSE;
+__ENDTRY]]></ST>
       </Implementation>
     </Method>
     <Method Name="TryLogMessage" Id="{1b41c149-f4d6-4a68-875a-675fa3954ac9}">
       <Declaration><![CDATA[(*!
 <summary>Processes the supplied diagnostic message without copying the input buffer.</summary>
-<description>Long diagnostic strings are borrowed read-only for this call; their references are not retained. Pass variables or literals, and store computed expressions in local variables before calling.</description>
+<description>Long diagnostic strings are borrowed read-only for this call; their references are not retained. Pass variables or literals, and store computed expressions in local variables before calling. Returns FALSE if a nested call raises an exception. Does not log the caught exception or roll back counters and backend side effects. Counter-lock acquisition failure returns FALSE. Counter increments already made are retained. Logger receives a call-local number snapshot. The fatal allocation latch remains set; RaiseIfAllocationFailed must be called at the task boundary outside recoverable handlers.</description>
+<param name="logger">Optional borrowed destination. Zero selects the calling task logger or shared fallback. Manager filtering and numbering still apply.</param>
 *)
 METHOD TryLogMessage : BOOL
 VAR_IN_OUT CONSTANT
@@ -226,41 +389,73 @@ VAR_INPUT
 	topic3 : WSTRING := "";	
 	topic4 : WSTRING := "";	
 	topic5 : WSTRING := "";	
+	logger : ILogger := 0;
 END_VAR
 VAR
+	selectedLogger : ILogger;
+	sequentialNumber : ULINT;
+	categoryNumber : ULINT;
+	counterLockHeld : BOOL;
+
 	topics : ARRAY [0..4] OF WSTRING; 
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[IF message = WideStrings.Empty THEN
-	RETURN;
-END_IF
+        <ST><![CDATA[__TRY
+	IF message = WideStrings.Empty THEN
+		RETURN;
+	END_IF
 
-TotalMessageCounter := TotalMessageCounter + 1;
-TotalMessageByCategoryCounters[category] := TotalMessageByCategoryCounters[category] + 1;
+	IF NOT _CounterLock.Enter() THEN
+		RETURN;
+	END_IF
 
-topics[0] := topic1;
-topics[1] := topic2;
-topics[2] := topic3;
-topics[3] := topic4;
-topics[4] := topic5;
+	counterLockHeld := TRUE;
+	TotalMessageCounter := TotalMessageCounter + 1;
+	TotalMessageByCategoryCounters[category] := TotalMessageByCategoryCounters[category] + 1;
+	_CounterLock.Leave();
+	counterLockHeld := FALSE;
 
-IF Filter <> 0 AND_THEN NOT Filter.ShouldLog(category, topics) THEN
-	RETURN;
-END_IF
+	topics[0] := topic1;
+	topics[1] := topic2;
+	topics[2] := topic3;
+	topics[3] := topic4;
+	topics[4] := topic5;
 
-FilteredMessageCounter := FilteredMessageCounter + 1;
-FilteredMessageByCategoryCounters[category] := FilteredMessageByCategoryCounters[category] + 1;
+	IF _Filter <> 0 AND_THEN NOT _Filter.ShouldLog(category, topics) THEN
+		RETURN;
+	END_IF
 
-CASE MessageNumberFormat OF
-	LOG_MESSAGE_NUMBER_FORMAT.NONE:
-		TryLogMessage := Logger.TryLogMessage(category, message);
+	IF NOT _CounterLock.Enter() THEN
+		RETURN;
+	END_IF
+
+	counterLockHeld := TRUE;
+	PassedFilterMessageCounter := PassedFilterMessageCounter + 1;
+	PassedFilterMessageByCategoryCounters[category] := PassedFilterMessageByCategoryCounters[category] + 1;
+	sequentialNumber := PassedFilterMessageCounter;
+	categoryNumber := PassedFilterMessageByCategoryCounters[category];
+	_CounterLock.Leave();
+	counterLockHeld := FALSE;
+
+	selectedLogger := resolveLogger(logger);
+
+	CASE MessageNumberFormat OF
+		LOG_MESSAGE_NUMBER_FORMAT.NONE:
+			TryLogMessage := selectedLogger.TryLogMessage(category, message);
+			
+		LOG_MESSAGE_NUMBER_FORMAT.SEQUENTIAL:
+			TryLogMessage := selectedLogger.TryLogMessage(category, message, sequentialNumber);
 		
-	LOG_MESSAGE_NUMBER_FORMAT.SEQUENTIAL:
-		TryLogMessage := Logger.TryLogMessage(category, message, FilteredMessageCounter);
-	
-	LOG_MESSAGE_NUMBER_FORMAT.SEQUENTIAL_BY_CATEGORY:
-		TryLogMessage := Logger.TryLogMessage(category, message, FilteredMessageByCategoryCounters[category]);
-END_CASE]]></ST>
+		LOG_MESSAGE_NUMBER_FORMAT.SEQUENTIAL_BY_CATEGORY:
+			TryLogMessage := selectedLogger.TryLogMessage(category, message, categoryNumber);
+	END_CASE
+__CATCH
+	IF counterLockHeld THEN
+		_CounterLock.Leave();
+	END_IF
+
+	TryLogMessage := FALSE;
+__ENDTRY]]></ST>
       </Implementation>
     </Method>
   </POU>

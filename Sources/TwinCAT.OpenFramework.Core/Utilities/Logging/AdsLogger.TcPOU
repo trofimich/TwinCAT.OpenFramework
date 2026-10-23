@@ -10,7 +10,7 @@ License: https://opensource.org/license/mit
 {attribute 'no_explicit_call' := 'do not call this function block directly'} 
 (*!
 <summary>Writes messages and exception diagnostics to the ADS log.</summary>
-<description>Exception logging accepts IReadOnlyException and reads borrowed diagnostics without transferring ownership. Implementations must not retain exception references beyond their task cleanup.</description>
+<description>Use this backend for short diagnostics in the standard ADS log; it is the built-in LogManager fallback and requires no cyclic work. Direct concurrent use has no established guarantee in this contract: formatting uses call-local storage, but that alone does not establish concurrency guarantees for ADSLOGSTR and all nested calls. This is not a confirmed concurrency defect. For a single-task backend access path from multiple sending tasks, use the QueuedLogger wrapper from the Loggers library and do not call the backend concurrently outside that wrapper. This backend is intended for short diagnostics. Each TryLogMessage call emits one ADS record; text exceeding the conversion or ADS output capacity is truncated at the end, without splitting it into multiple records. The optional number prefix consumes part of that capacity. Message text is passed as the ADS string argument with a fixed format, so format tokens in the message remain literal text. Exception logging accepts IReadOnlyException and reads borrowed diagnostics without transferring ownership. Implementations must not retain exception references beyond their task cleanup. TryLog methods must satisfy the no-throw contract even when called directly, without LogManager. Does not propagate exceptions, including failures while reading or formatting diagnostics and calling the backend; returns FALSE instead. Already emitted entries are not rolled back, so FALSE may follow partial output. Caught exceptions are not logged again. The fatal allocation latch is preserved for RaiseIfAllocationFailed at the task boundary outside recoverable handlers.</description>
 *)
 FUNCTION_BLOCK AdsLogger EXTENDS Object IMPLEMENTS ILogger
 VAR
@@ -21,7 +21,11 @@ END_VAR]]></Declaration>
       <ST><![CDATA[]]></ST>
     </Implementation>
     <Property Name="ClassName" Id="{c900fbb9-86d0-4a3f-9595-f30e1df1d1f1}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Provides the diagnostic type name without copying its storage.</summary>
+<description>Borrowed read-only reference. Do not modify the referenced name; keep the owning instance alive while using the reference.</description>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
       <Get Name="Get" Id="{910140d1-6146-4f27-82a4-105ab45c7077}">
         <Declaration><![CDATA[]]></Declaration>
@@ -31,14 +35,22 @@ PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
       </Get>
     </Property>
     <Method Name="Execute" Id="{7f679376-d6c2-4628-9f18-706629e6a200}">
-      <Declaration><![CDATA[METHOD Execute
+      <Declaration><![CDATA[(*!
+<summary>Completes without work because this logger has no cyclic processing.</summary>
+<description>Does not raise exceptions.</description>
+*)
+METHOD Execute
 ]]></Declaration>
       <Implementation>
         <ST><![CDATA[// nothing to do for ADS logger]]></ST>
       </Implementation>
     </Method>
     <Property Name="NamespaceName" Id="{c38469fc-4ff8-41a9-b499-75e413a00bb3}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Provides the library namespace used in diagnostics.</summary>
+<description>Borrowed read-only reference to the compiler-initialized library namespace; no ownership transfer.</description>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
       <Get Name="Get" Id="{bcccda69-31bf-4d44-868c-2415428102e1}">
         <Declaration><![CDATA[]]></Declaration>
@@ -48,7 +60,11 @@ PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
       </Get>
     </Property>
     <Property Name="SelfSize" Id="{c266c68f-d111-413c-997b-ce427475c7b9}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Reports the byte size of this concrete instance.</summary>
+<description>Uses XSIZEOF on the instance. Does not include separately allocated payloads or prove that an arbitrary address is valid.</description>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY SelfSize : ULINT]]></Declaration>
       <Get Name="Get" Id="{368ffd0e-de98-47d3-99fe-4d83a0af5f22}">
         <Declaration><![CDATA[]]></Declaration>
@@ -58,7 +74,11 @@ PROPERTY SelfSize : ULINT]]></Declaration>
       </Get>
     </Property>
     <Method Name="TryLogError" Id="{20bf6186-2dc6-4029-8680-18c8f237e377}">
-      <Declaration><![CDATA[METHOD TryLogError : BOOL
+      <Declaration><![CDATA[(*!
+<summary>Attempts to log a borrowed error without propagating exceptions.</summary>
+<description>Borrows inputs only for the call. TRUE reports backend acceptance, not guaranteed durable storage. Does not propagate exceptions, including failures while reading or formatting diagnostics and calling the backend; returns FALSE instead. Already emitted entries are not rolled back, so FALSE may follow partial output. Caught exceptions are not logged again. The fatal allocation latch is preserved for RaiseIfAllocationFailed at the task boundary outside recoverable handlers. Descendants cannot replace this non-throwing ADS logging path; implement ILogger separately for another backend.</description>
+*)
+METHOD FINAL TryLogError : BOOL
 VAR_INPUT
 	error : REFERENCE TO ERROR;
 	messageNumber : REFERENCE TO ULINT := 0;
@@ -67,24 +87,28 @@ VAR
 	message : ERROR_MESSAGE;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[IF NOT __ISVALIDREF(error) THEN
-	RETURN;
-END_IF
+        <ST><![CDATA[__TRY
+	IF NOT __ISVALIDREF(error) THEN
+		RETURN;
+	END_IF
 
-message := error.ToString(ERROR_SOURCE_DISPLAY_MODE.TOP_AND_ROOT, TIMESTAMP_DISPLAY_MODE.LOCAL);
+	message := error.ToString(ERROR_SOURCE_DISPLAY_MODE.TOP_AND_ROOT, TIMESTAMP_DISPLAY_MODE.LOCAL);
 
-TryLogError := TryLogMessage(SEL(error.Severity = ERROR_SEVERITY.CRITICAL, LOG_CATEGORY.ERROR, LOG_CATEGORY.CRITICAL_ERROR), message, messageNumber);]]></ST>
+	TryLogError := TryLogMessage(SEL(error.Severity = ERROR_SEVERITY.CRITICAL, LOG_CATEGORY.ERROR, LOG_CATEGORY.CRITICAL_ERROR), message, messageNumber);
+__CATCH
+	TryLogError := FALSE;
+__ENDTRY]]></ST>
       </Implementation>
     </Method>
     <Method Name="TryLogException" Id="{52444f42-e6c7-4828-baa7-3f12fe45268b}">
       <Declaration><![CDATA[(*!
 <summary>Attempts to log diagnostic information from a read-only exception view.</summary>
-<description>Borrows the exception for the call without clearing it or taking ownership. The exception and its inner causes must remain live while their diagnostics are read. Logging does not extend their lifetime.</description>
+<description>Borrows the exception for the call without clearing it or taking ownership. The exception and its inner causes must remain live while their diagnostics are read. Logging does not extend their lifetime. Does not propagate exceptions, including failures while reading or formatting diagnostics and calling the backend; returns FALSE instead. Already emitted entries are not rolled back, so FALSE may follow partial output. Caught exceptions are not logged again. The fatal allocation latch is preserved for RaiseIfAllocationFailed at the task boundary outside recoverable handlers. Descendants cannot replace this non-throwing ADS logging path; implement ILogger separately for another backend.</description>
 <param name="exception">Exception view to read; null is ignored.</param>
 <param name="severity">Severity used to select the log category.</param>
 <param name="messageNumber">Optional number forwarded to the ordinary or single-cause message, or to the header of a multi-cause aggregate.</param>
 *)
-METHOD TryLogException : BOOL
+METHOD FINAL TryLogException : BOOL
 VAR_INPUT
 	exception : IReadOnlyException;
 	severity : ERROR_SEVERITY;
@@ -97,40 +121,51 @@ VAR
 	i : DINT;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[IF exception = 0 THEN
-	RETURN;
-END_IF
+        <ST><![CDATA[__TRY
+	IF exception = 0 THEN
+		RETURN;
+	END_IF
 
-IF NOT __QUERYINTERFACE(exception, aggregateException) OR_ELSE aggregateException.InnerExceptionCount = 0 THEN
-	message := exception.GetMessage(TRUE, TIMESTAMP_DISPLAY_MODE.LOCAL);
-	
-	TryLogException := TryLogMessage(SEL(severity = ERROR_SEVERITY.CRITICAL, LOG_CATEGORY.ERROR, LOG_CATEGORY.CRITICAL_ERROR), message, messageNumber);
-ELSE
-	IF aggregateException.InnerExceptionCount > 1 THEN
-		// reverce order
-		TryLogException := TryLogMessage(LOG_CATEGORY.ERROR, "<<< aggregate exception end <<<");
-		
-		FOR i := TO_DINT(aggregateException.InnerExceptionCount) - 1 TO 0 BY -1 DO
-			innerException := aggregateException.GetInnerException(i);
-			
-			message := WideStrings.Concat255("  ", innerException.GetMessage(TRUE, TIMESTAMP_DISPLAY_MODE.LOCAL));
-			
-			TryLogException := TryLogException AND TryLogMessage(SEL(severity = ERROR_SEVERITY.CRITICAL, LOG_CATEGORY.ERROR, LOG_CATEGORY.CRITICAL_ERROR), message);		
-		END_FOR
-		
-		TryLogException := TryLogException AND TryLogMessage(SEL(severity = ERROR_SEVERITY.CRITICAL, LOG_CATEGORY.ERROR, LOG_CATEGORY.CRITICAL_ERROR), ">>> aggregate exception start >>>", messageNumber);
-	ELSE		
-		innerException := aggregateException.GetInnerException(0);
-		
-		message := innerException.GetMessage(TRUE, TIMESTAMP_DISPLAY_MODE.LOCAL);
+	IF NOT __QUERYINTERFACE(exception, aggregateException) OR_ELSE aggregateException.InnerExceptionCount = 0 THEN
+		message := exception.GetMessage(TRUE, TIMESTAMP_DISPLAY_MODE.LOCAL);
 		
 		TryLogException := TryLogMessage(SEL(severity = ERROR_SEVERITY.CRITICAL, LOG_CATEGORY.ERROR, LOG_CATEGORY.CRITICAL_ERROR), message, messageNumber);
+	ELSE
+		IF aggregateException.InnerExceptionCount > 1 THEN
+			// reverce order
+			TryLogException := TryLogMessage(LOG_CATEGORY.ERROR, "<<< aggregate exception end <<<");
+			
+			FOR i := TO_DINT(aggregateException.InnerExceptionCount) - 1 TO 0 BY -1 DO
+				innerException := aggregateException.GetInnerException(i);
+				
+				message := WideStrings.Concat255("  ", innerException.GetMessage(TRUE, TIMESTAMP_DISPLAY_MODE.LOCAL));
+				
+				TryLogException := TryLogException AND TryLogMessage(SEL(severity = ERROR_SEVERITY.CRITICAL, LOG_CATEGORY.ERROR, LOG_CATEGORY.CRITICAL_ERROR), message);		
+			END_FOR
+			
+			TryLogException := TryLogException AND TryLogMessage(SEL(severity = ERROR_SEVERITY.CRITICAL, LOG_CATEGORY.ERROR, LOG_CATEGORY.CRITICAL_ERROR), ">>> aggregate exception start >>>", messageNumber);
+		ELSE		
+			innerException := aggregateException.GetInnerException(0);
+			
+			message := innerException.GetMessage(TRUE, TIMESTAMP_DISPLAY_MODE.LOCAL);
+			
+			TryLogException := TryLogMessage(SEL(severity = ERROR_SEVERITY.CRITICAL, LOG_CATEGORY.ERROR, LOG_CATEGORY.CRITICAL_ERROR), message, messageNumber);
+		END_IF
 	END_IF
-END_IF]]></ST>
+__CATCH
+	TryLogException := FALSE;
+__ENDTRY]]></ST>
       </Implementation>
     </Method>
     <Method Name="TryLogMessage" Id="{936430cf-8fdd-47d1-875f-690550891879}">
-      <Declaration><![CDATA[METHOD TryLogMessage : BOOL
+      <Declaration><![CDATA[(*!
+<summary>Attempts to write message text and an optional message number to the ADS log.</summary>
+<description>Uses the fixed ADS format %s and passes the converted text as its string argument. Format tokens within the message are not interpreted. Emits one record and allows trailing text to be truncated by conversion or ADS output limits; no continuation records are generated. A number prefix reduces the space available for message text. Borrows arguments only for the call. Returns TRUE when ADSLOGSTR returns success; this does not guarantee that the entire original ERROR_MESSAGE fits in the ADS output. Does not propagate exceptions, including failures while reading or formatting diagnostics and calling the backend; returns FALSE instead. Already emitted entries are not rolled back, so FALSE may follow partial output. Caught exceptions are not logged again. The fatal allocation latch is preserved for RaiseIfAllocationFailed at the task boundary outside recoverable handlers. Descendants cannot replace this non-throwing ADS logging path; implement ILogger separately for another backend.</description>
+<param name="category">Category used to select the ADS message mask and optional number prefix.</param>
+<param name="message">Message text converted to STRING for ADS output.</param>
+<param name="messageNumber">Optional borrowed number prepended to the message.</param>
+*)
+METHOD FINAL TryLogMessage : BOOL
 VAR_INPUT
 	category : LOG_CATEGORY;	
 END_VAR
@@ -144,25 +179,32 @@ VAR
 	messageControlMask : DWORD;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[CASE category OF
-	LOG_CATEGORY.DEBUG, LOG_CATEGORY.INFORMATION:
-		messageControlMask := Tc2_System.Global_Variables.ADSLOG_MSGTYPE_LOG;
+        <ST><![CDATA[__TRY
+	CASE category OF
+		LOG_CATEGORY.DEBUG, LOG_CATEGORY.INFORMATION:
+			messageControlMask := Tc2_System.Global_Variables.ADSLOG_MSGTYPE_LOG;
+			
+		LOG_CATEGORY.WARNING:
+			messageControlMask := Tc2_System.Global_Variables.ADSLOG_MSGTYPE_WARN;
 		
-	LOG_CATEGORY.WARNING:
-		messageControlMask := Tc2_System.Global_Variables.ADSLOG_MSGTYPE_WARN;
-	
-	LOG_CATEGORY.ERROR, LOG_CATEGORY.CRITICAL_ERROR:
-		messageControlMask := Tc2_System.Global_Variables.ADSLOG_MSGTYPE_ERROR;
-END_CASE
+		LOG_CATEGORY.ERROR, LOG_CATEGORY.CRITICAL_ERROR:
+			messageControlMask := Tc2_System.Global_Variables.ADSLOG_MSGTYPE_ERROR;
+	END_CASE
 
-IF __ISVALIDREF(messageNumber) THEN
-	TryLogMessage := Tc2_System.ADSLOGSTR(
-		msgCtrlMask := messageControlMask, 
-		msgFmtStr := Strings.Concat255(TO_STRING(Exceptions.MESSAGE_NUMBER_PREFIX), Exceptions.LOG_CATEGORY_PREFIXES[category], TO_STRING(messageNumber), TO_STRING(Exceptions.MESSAGE_NUMBER_SUFFIX), TO_STRING(message)), 
-		strArg := '') = 0;
-ELSE
-	TryLogMessage := Tc2_System.ADSLOGSTR(msgCtrlMask := messageControlMask, msgFmtStr := TO_STRING(message), strArg := '') = 0;
-END_IF]]></ST>
+	IF __ISVALIDREF(messageNumber) THEN
+		TryLogMessage := Tc2_System.ADSLOGSTR(
+			msgCtrlMask := messageControlMask, 
+			msgFmtStr := '%s',
+			strArg := Strings.Concat255(TO_STRING(Exceptions.MESSAGE_NUMBER_PREFIX), Exceptions.LOG_CATEGORY_PREFIXES[category], TO_STRING(messageNumber), TO_STRING(Exceptions.MESSAGE_NUMBER_SUFFIX), TO_STRING(message))) = 0;
+	ELSE
+		TryLogMessage := Tc2_System.ADSLOGSTR(
+			msgCtrlMask := messageControlMask,
+			msgFmtStr := '%s',
+			strArg := TO_STRING(message)) = 0;
+	END_IF
+__CATCH
+	TryLogMessage := FALSE;
+__ENDTRY]]></ST>
       </Implementation>
     </Method>
   </POU>

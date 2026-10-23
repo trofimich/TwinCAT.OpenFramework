@@ -1,0 +1,548 @@
+<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1" ProductVersion="3.1.4026.20">
+  <POU Name="DynamicStackTest" Id="{b21287d9-f4c2-443d-91d4-8258591a4c82}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+SPDX-FileCopyrightText: © 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+SPDX-License-Identifier: MIT
+License: https://opensource.org/license/mit
+*)
+
+(*!
+<summary>Exercises dynamic stack storage, LIFO order, borrowed views and ownership.</summary>
+<description>Runs each scenario once through TcUnit. Fixtures are cleared before returning; dynamic allocations use the framework terminal OOM mechanism.</description>
+*)
+FUNCTION_BLOCK DynamicStackTest EXTENDS TcUnit.FB_TestSuite
+VAR
+	{attribute 'hide'} 
+	_ClassName : STRING := __POUNAME();
+
+	_Stack : TOF_Collections.Stack<0>(0);
+
+	_ValueValidator : TOF_Core.GenericValueTypeValidator(TOF_Core.GENERIC_TYPE_CLASS.INT_16);
+	_ValidatedStack : TOF_Collections.Stack<0>(_ValueValidator);
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[OwnedObjectCleanup();
+ValidatorRejection();
+GrowthAndInvalidIncrement();
+IndexedAccessAndEnumeration();
+EmptyAndIndexBounds();
+CopiedAndBorrowedValues();
+Contains();
+ContainsGeneric();
+PushAndPeek();
+Clear();
+RemoveLast();]]></ST>
+    </Implementation>
+    <Property Name="ClassName" Id="{68096495-2ff8-4889-9254-f5cae7df5e8f}">
+      <Declaration><![CDATA[//!<summary>Provides the suite name for diagnostics.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{d0eda73b-7914-4068-9e47-f454d00129bf}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ClassName REF= _ClassName;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="Clear" Id="{1cec624e-4b5f-4f94-88d1-30de1861ae89}">
+      <Declaration><![CDATA[//!<summary>Checks clearing and reuse while preserving the storage policy.</summary>
+METHOD Clear
+VAR
+	value : INT := 7;
+END_VAR
+VAR_INST
+	testFinished : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN 
+	RETURN; 
+END_IF 
+
+TEST(__POUNAME());
+
+_Stack.Clear();
+_Stack.PushCopy(value);
+_Stack.Clear();
+AssertEquals_DINT(0, _Stack.Capacity, 'Clear must restore storage capacity');
+AssertTrue(_Stack.Empty, 'Clear must empty stack');
+_Stack.PushCopy(value);
+AssertEquals_INT(value, _Stack.Peek().AsInt(), 'Stack must be reusable after Clear');
+_Stack.Clear();
+
+AssertEquals_DINT(Expected := 0, Actual := _Stack.Length, Message := 'Invalid dynamic stack length after Clear');
+
+_Stack.Clear();
+
+testFinished := TRUE; 
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="Contains" Id="{9c5b67ae-bba3-4684-8f63-79f4e03a44af}">
+      <Declaration><![CDATA[//!<summary>Checks membership for present and absent copied values.</summary>
+METHOD Contains
+VAR
+	values : ARRAY [1..5] OF INT := [1, 2, 3, 4, 5];
+END_VAR
+VAR_INST
+	testFinished : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN 
+	RETURN; 
+END_IF 
+
+TEST(__POUNAME());
+
+_Stack
+	.Clear()
+	.PushCopy(values[1])
+	.PushCopy(values[2])
+	.PushCopy(values[3]);
+
+AssertEquals_BOOL(Expected := TRUE, Actual := _Stack.Contains(values[1]), Message := 'Value not found');
+AssertEquals_BOOL(Expected := TRUE, Actual := _Stack.Contains(values[3]), Message := 'Value not found');
+AssertEquals_BOOL(Expected := FALSE, Actual := _Stack.Contains(values[5]), Message := 'Value found');
+ 
+_Stack.Clear();
+
+testFinished := TRUE; 
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="ContainsGeneric" Id="{0cc8799c-6dee-4ed4-b0d8-6ad082e9521b}">
+      <Declaration><![CDATA[//!<summary>Checks generic membership with temporary owned queries.</summary>
+METHOD ContainsGeneric
+VAR
+	values : ARRAY [1..5] OF INT := [1, 2, 3, 4, 5];
+END_VAR
+VAR_INST
+	testFinished : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN 
+	RETURN; 
+END_IF 
+
+TEST(__POUNAME());
+
+_Stack
+	.Clear()
+	.PushCopy(values[1])
+	.PushCopy(values[2])
+	.PushCopy(values[3]);
+
+AssertEquals_BOOL(Expected := TRUE, Actual := _Stack.ContainsGeneric(TOF_Core.GenericValueFactory.FromIntValue(values[1])), Message := 'Value not found');
+AssertEquals_BOOL(Expected := TRUE, Actual := _Stack.ContainsGeneric(TOF_Core.GenericValueFactory.FromIntValue(values[3])), Message := 'Value not found');
+AssertEquals_BOOL(Expected := FALSE, Actual := _Stack.ContainsGeneric(TOF_Core.GenericValueFactory.FromIntValue(values[5])), Message := 'Value found');
+ 
+_Stack.Clear();
+
+testFinished := TRUE; 
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="PushAndPeek" Id="{982f36a6-ad5f-49e3-8bbc-a56b0d2b400b}">
+      <Declaration><![CDATA[//!<summary>Checks that each push makes the newest value the top.</summary>
+METHOD PushAndPeek
+VAR
+	values : ARRAY [1..4] OF INT := [1, 2, 3, 4];
+END_VAR
+VAR_INST
+	testFinished : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN 
+	RETURN; 
+END_IF 
+
+TEST(__POUNAME());
+
+_Stack.Clear();
+
+_Stack.PushCopy(values[1]);
+AssertEquals_DINT(Expected := values[1], Actual := _Stack.Peek().AsInt(), Message := 'Wrong value peeked after dynamic stack Push');
+
+_Stack.PushCopy(values[2]);
+AssertEquals_DINT(Expected := values[2], Actual := _Stack.Peek().AsInt(), Message := 'Wrong value peeked after dynamic stack Push');
+
+_Stack.PushCopy(values[3]);
+AssertEquals_DINT(Expected := values[3], Actual := _Stack.Peek().AsInt(), Message := 'Wrong value peeked after dynamic stack Push');
+
+AssertEquals_DINT(Expected := 3, Actual := _Stack.Length, Message := 'Wrong dynamic stack length');
+ 
+_Stack.Clear();
+
+testFinished := TRUE; 
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="NamespaceName" Id="{5d7c2d57-5431-401e-b079-9bddf846d8d5}">
+      <Declaration><![CDATA[//!<summary>Provides the test library namespace.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{a62302e4-2d13-4a96-bc0b-499e57fcf599}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[NamespaceName REF= CurrentNamespace.Name;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="RemoveLast" Id="{1821e55b-6aa9-42ab-910c-3c03c2198119}">
+      <Declaration><![CDATA[//!<summary>Checks LIFO removal and reuse of a vacated slot.</summary>
+METHOD RemoveLast
+VAR
+	values : ARRAY [1..3] OF INT := [1, 2, 3]; 
+END_VAR
+VAR_INST
+	testFinished : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN 
+	RETURN; 
+END_IF 
+
+TEST(__POUNAME());
+
+_Stack
+	.Clear()
+	.PushCopy(values[1])
+	.PushCopy(values[2])
+	.PushCopy(values[3]);
+
+_Stack.RemoveLast();
+AssertEquals_INT(Expected := values[2], Actual := _Stack.Peek().AsInt(), Message := 'Wrong value peeked after dynamic stack RemoveLast');
+
+_Stack.RemoveLast();
+AssertEquals_INT(Expected := values[1], Actual := _Stack.Peek().AsInt(), Message := 'Wrong value peeked after dynamic stack RemoveLast');
+
+_Stack.RemoveLast();
+AssertTrue(_Stack.Empty, 'Stack must be empty after removing all entries');
+_Stack.PushCopy(values[3]);
+AssertEquals_INT(values[3], _Stack.Peek().AsInt(), 'Push after draining must reuse storage');
+_Stack.Clear();
+
+testFinished := TRUE; 
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="IndexedAccessAndEnumeration" Id="{724b31ba-6490-46e6-9680-f898b96c52e3}">
+      <Declaration><![CDATA[(*!
+<summary>Checks top-first indexing, independent cursors, reset and repeated exhaustion.</summary>
+<description>Runs once and clears all entries before local fixture storage expires.</description>
+*)
+METHOD IndexedAccessAndEnumeration
+VAR
+	values : ARRAY [1..3] OF INT := [11, 22, 33];
+	i : DINT;
+	enumerator : TOF_Core.IEnumerator;
+	secondEnumerator : TOF_Core.IEnumerator;
+	ownedEnumerator : TOF_Core.IObject;
+END_VAR
+VAR_INST
+	testFinished : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN
+	RETURN;
+END_IF
+
+TEST(__POUNAME());
+
+_Stack.Clear();
+_Stack
+	.PushCopy(values[1])
+	.PushCopy(values[2])
+	.PushCopy(values[3]);
+
+FOR i := 0 TO 2 DO
+	AssertEquals_INT(values[3 - i], _Stack.GetByIndex(i).AsInt(), 'Index order must run from top to bottom');
+END_FOR
+
+enumerator := _Stack.CreateEnumerator();
+secondEnumerator := _Stack.CreateEnumerator();
+AssertTrue(enumerator.Current.TypeClass = TOF_Core.GENERIC_TYPE_CLASS.UNSPECIFIED, 'Current before MoveNext must be empty');
+FOR i := 3 TO 1 BY -1 DO
+	AssertTrue(enumerator.MoveNext(), 'Enumerator must visit each entry');
+	AssertEquals_INT(values[i], enumerator.Current.AsInt(), 'Enumerator must follow LIFO order');
+END_FOR
+AssertFalse(enumerator.MoveNext(), 'Enumerator must stop at end');
+AssertFalse(enumerator.MoveNext(), 'Exhausted enumerator must stay exhausted');
+AssertTrue(enumerator.Current.TypeClass = TOF_Core.GENERIC_TYPE_CLASS.UNSPECIFIED, 'Current after exhaustion must be empty');
+AssertTrue(secondEnumerator.MoveNext(), 'Second cursor must be independent');
+AssertEquals_INT(values[3], secondEnumerator.Current.AsInt(), 'Second cursor must start at top');
+enumerator.Reset();
+AssertTrue(enumerator.Current.TypeClass = TOF_Core.GENERIC_TYPE_CLASS.UNSPECIFIED, 'Current after Reset must be empty');
+AssertTrue(enumerator.MoveNext(), 'Reset must restart traversal');
+AssertEquals_INT(values[3], enumerator.Current.AsInt(), 'Reset must restart at top');
+
+ownedEnumerator := enumerator;
+enumerator := 0;
+AssertTrue(TOF_Core.Memory.TryReleaseDynamicObject(ownedEnumerator), 'Enumerator must be released');
+ownedEnumerator := secondEnumerator;
+secondEnumerator := 0;
+AssertTrue(TOF_Core.Memory.TryReleaseDynamicObject(ownedEnumerator), 'Second enumerator must be released');
+
+_Stack.Clear();
+enumerator := _Stack.CreateEnumerator();
+AssertFalse(enumerator.MoveNext(), 'Empty stack must have no current entry');
+AssertFalse(enumerator.MoveNext(), 'Empty cursor must stay exhausted');
+AssertTrue(enumerator.Current.TypeClass = TOF_Core.GENERIC_TYPE_CLASS.UNSPECIFIED, 'Empty cursor must expose an empty descriptor');
+ownedEnumerator := enumerator;
+enumerator := 0;
+AssertTrue(TOF_Core.Memory.TryReleaseDynamicObject(ownedEnumerator), 'Empty enumerator must be released');
+_Stack.Clear();
+
+testFinished := TRUE;
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="EmptyAndIndexBounds" Id="{2f506ba0-e4cb-45a6-967f-9912c7b593fc}">
+      <Declaration><![CDATA[(*!
+<summary>Checks empty access and invalid index rejection without changing entries.</summary>
+<description>Runs once and clears all entries before local fixture storage expires.</description>
+*)
+METHOD EmptyAndIndexBounds
+VAR
+	value : INT := 7;
+	result : TOF_Core.GENERIC_VALUE;
+	peekRejected : BOOL;
+	removeRejected : BOOL;
+	indexRejected : BOOL;
+END_VAR
+VAR_INST
+	testFinished : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN
+	RETURN;
+END_IF
+
+TEST(__POUNAME());
+
+_Stack.Clear();
+__TRY
+	result := _Stack.Peek();
+__CATCH
+	peekRejected := TRUE;
+__ENDTRY
+__TRY
+	_Stack.RemoveLast();
+__CATCH
+	removeRejected := TRUE;
+__ENDTRY
+AssertTrue(peekRejected, 'Peek on empty stack must raise');
+AssertTrue(removeRejected, 'RemoveLast on empty stack must raise');
+AssertTrue(_Stack.Empty, 'Rejected operations must preserve empty stack');
+
+_Stack.PushCopy(value);
+__TRY
+	result := _Stack.GetByIndex(_Stack.Length);
+__CATCH
+	indexRejected := TRUE;
+__ENDTRY
+AssertTrue(indexRejected, 'Index equal to Length must be rejected');
+AssertEquals_DINT(1, _Stack.Length, 'Rejected access must preserve Length');
+AssertEquals_INT(value, _Stack.Peek().AsInt(), 'Rejected access must preserve top');
+_Stack.Clear();
+
+testFinished := TRUE;
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="CopiedAndBorrowedValues" Id="{73e310d7-17c8-48cf-b8cd-07331bbde34e}">
+      <Declaration><![CDATA[(*!
+<summary>Checks copy isolation and borrowed descriptor lifetime without ownership transfer.</summary>
+<description>Runs once and clears all entries before local fixture storage expires.</description>
+*)
+METHOD CopiedAndBorrowedValues
+VAR
+	value : INT := 7;
+	borrowedValue : TOF_Core.GENERIC_VALUE;
+END_VAR
+VAR_INST
+	testFinished : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN
+	RETURN;
+END_IF
+
+TEST(__POUNAME());
+
+_Stack.Clear();
+_Stack.PushCopy(value);
+value := 9;
+AssertEquals_INT(7, _Stack.Peek().AsInt(), 'PushCopy must isolate the stored value');
+borrowedValue := TOF_Core.GenericValueFactory.FromAnyType(value, FALSE, TOF_Core.GENERIC_MEMORY_MANAGEMENT_BEHAVIOR.STORE_ORIGINAL_REFERENCE_AND_NOT_OWNS_MEMORY);
+_Stack.PushGeneric(borrowedValue);
+value := 11;
+AssertEquals_INT(value, _Stack.Peek().AsInt(), 'PushGeneric must retain borrowed storage');
+AssertFalse(_Stack.Peek().IsMemoryOwner, 'Borrowed entry must remain borrowed');
+AssertTrue(_Stack.ContainsGeneric(borrowedValue, releaseValue := FALSE), 'Borrowed query must find the top');
+_Stack.RemoveLast();
+AssertEquals_INT(11, value, 'Removing borrowed entry must preserve source');
+AssertEquals_INT(7, _Stack.Peek().AsInt(), 'Removing borrowed entry must reveal copied value');
+_Stack.Clear();
+
+testFinished := TRUE;
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="OwnedObjectCleanup" Id="{96a3945c-b618-427a-8841-cba655825c69}">
+      <Declaration><![CDATA[(*!
+<summary>Checks exactly-once destruction on RemoveLast and Clear.</summary>
+<description>Runs once; owned fixtures are released and borrowed fixtures are removed before returning.</description>
+*)
+METHOD OwnedObjectCleanup
+VAR
+	probe : POINTER TO ObjectExitProbe;
+	value : TOF_Core.GENERIC_VALUE;
+	exitCount : UDINT;
+	i : DINT;
+END_VAR
+VAR_INST
+	testFinished : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN
+	RETURN;
+END_IF
+
+TEST(__POUNAME());
+
+_Stack.Clear();
+FOR i := 1 TO 2 DO
+	probe := __NEW(ObjectExitProbe);
+	IF probe = 0 THEN
+		TOF_Core.DynamicMemoryManager.RaiseAllocationFailure();
+	END_IF
+	probe^.ObserveExit(exitCount);
+	value := TOF_Core.GenericValueFactory.FromAnyType(probe^, TRUE, TOF_Core.GENERIC_MEMORY_MANAGEMENT_BEHAVIOR.STORE_ORIGINAL_REFERENCE_AND_OWNS_MEMORY);
+	_Stack.PushGeneric(value);
+	value.Reset();
+	probe := 0;
+END_FOR
+AssertEquals_UDINT(0, exitCount, 'Insertion must retain owned objects');
+_Stack.RemoveLast();
+AssertEquals_UDINT(1, exitCount, 'RemoveLast must destroy only the top object');
+_Stack.Clear();
+AssertEquals_UDINT(2, exitCount, 'Clear must destroy the remaining object');
+_Stack.Clear();
+AssertEquals_UDINT(2, exitCount, 'Repeated Clear must not destroy objects twice');
+
+testFinished := TRUE;
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="ValidatorRejection" Id="{4bb6299e-3b28-4497-a098-737da0c597df}">
+      <Declaration><![CDATA[(*!
+<summary>Checks that validator rejection preserves storage and caller ownership.</summary>
+<description>Runs once; owned fixtures are released and borrowed fixtures are removed before returning.</description>
+*)
+METHOD ValidatorRejection
+VAR
+	probe : POINTER TO ObjectExitProbe;
+	value : TOF_Core.GENERIC_VALUE;
+	exitCount : UDINT;
+	originalCapacity : DINT;
+	rejected : BOOL;
+END_VAR
+VAR_INST
+	testFinished : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN
+	RETURN;
+END_IF
+
+TEST(__POUNAME());
+
+_Stack.Clear();
+_ValidatedStack.Clear();
+originalCapacity := _ValidatedStack.Capacity;
+probe := __NEW(ObjectExitProbe);
+IF probe = 0 THEN
+	TOF_Core.DynamicMemoryManager.RaiseAllocationFailure();
+END_IF
+probe^.ObserveExit(exitCount);
+value := TOF_Core.GenericValueFactory.FromAnyType(probe^, TRUE, TOF_Core.GENERIC_MEMORY_MANAGEMENT_BEHAVIOR.STORE_ORIGINAL_REFERENCE_AND_OWNS_MEMORY);
+__TRY
+	_ValidatedStack.PushGeneric(value);
+__CATCH
+	rejected := TRUE;
+__ENDTRY
+AssertTrue(rejected, 'Validator must reject an object when INT is required');
+AssertEquals_DINT(originalCapacity, _ValidatedStack.Capacity, 'Validation must run before growth');
+AssertTrue(_ValidatedStack.Empty, 'Validation failure must not insert an entry');
+AssertEquals_UDINT(0, exitCount, 'Rejected owned payload must remain alive');
+IF rejected THEN
+	value.Release();
+ELSE
+	value.Reset();
+END_IF
+probe := 0;
+_ValidatedStack.Clear();
+AssertEquals_UDINT(1, exitCount, 'Rejected payload must remain releasable by caller');
+_Stack.Clear();
+
+testFinished := TRUE;
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="GrowthAndInvalidIncrement" Id="{09b97fe9-6c9f-4968-b144-28dbd962c66b}">
+      <Declaration><![CDATA[(*!
+<summary>Checks several growth steps and rejection of zero growth without changing entries.</summary>
+<description>Runs once; owned fixtures are released and borrowed fixtures are removed before returning.</description>
+*)
+METHOD GrowthAndInvalidIncrement
+VAR
+	i : DINT;
+	value : INT := 99;
+	rejected : BOOL;
+END_VAR
+VAR_INST
+	testFinished : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN
+	RETURN;
+END_IF
+
+TEST(__POUNAME());
+
+_Stack.Clear();
+_Stack.DefaultDynamicAllocationElementCount := 2;
+AssertTrue(_Stack.Dynamic, 'Zero static capacity must select dynamic storage');
+FOR i := 1 TO 6 DO
+	_Stack.PushCopy(i);
+END_FOR
+AssertEquals_DINT(6, _Stack.Length, 'Growth must preserve all entries');
+AssertEquals_DINT(6, _Stack.Capacity, 'Growth must use the configured increment');
+AssertFalse(_Stack.Full, 'Dynamic storage must not report static Full');
+FOR i := 0 TO 5 DO
+	AssertEquals_DINT(6 - i, _Stack.GetByIndex(i).AsDInt(), 'Growth must preserve LIFO order');
+END_FOR
+_Stack.DefaultDynamicAllocationElementCount := 0;
+__TRY
+	_Stack.PushCopy(value);
+__CATCH
+	rejected := TRUE;
+__ENDTRY
+AssertTrue(rejected, 'Zero growth increment must be rejected');
+AssertEquals_DINT(6, _Stack.Length, 'Rejected growth must preserve Length');
+AssertEquals_DINT(6, _Stack.Capacity, 'Rejected growth must preserve Capacity');
+AssertEquals_DINT(6, _Stack.Peek().AsDInt(), 'Rejected growth must preserve top');
+_Stack.DefaultDynamicAllocationElementCount := 2;
+_Stack.PushCopy(value);
+AssertEquals_DINT(8, _Stack.Capacity, 'Valid growth must work after rejection');
+AssertEquals_INT(value, _Stack.Peek().AsInt(), 'Push after rejection must establish a new top');
+_Stack.Clear();
+_Stack.DefaultDynamicAllocationElementCount := 10;
+
+testFinished := TRUE;
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+  </POU>
+</TcPlcObject>

@@ -8,9 +8,12 @@ License: https://opensource.org/license/mit
 *)
 
 (*!
-<summary>Base identity and metadata implementation; dynamic instances are not automatically registered here.</summary>
+<summary>Base object equality, hashing and metadata; dynamic instances are not automatically registered here.</summary>
 <description>
-ReferencesEquals provides final instance-identity comparison, without comparing contents.
+ReferenceEquals provides final instance-identity comparison, without comparing contents.
+Equals and GetHashCode default to instance identity and may be overridden together for value semantics.
+Equal objects must have equal hashes; hash collisions do not imply equality.
+The base methods allocate no memory and retain no references or cached hashes.
 Descendants provide class and namespace names that remain unchanged throughout the instance lifetime.
 </description>
 *)
@@ -39,38 +42,26 @@ PROPERTY ABSTRACT ClassName : REFERENCE TO STRING]]></Declaration>
         </Implementation>
       </Get>
     </Property>
-    <Method Name="ReferencesEquals" Id="{c147fb9a-ab41-452b-8012-567d8446205b}">
+    <Method Name="Equals" Id="{ce3346d2-996b-483d-81c5-4a1af24f9bef}">
       <Declaration><![CDATA[(*!
-<summary>Compares instance addresses; object contents do not participate in the comparison.</summary>
+<summary>Compares objects by instance identity unless a descendant defines value equality.</summary>
 <description>
-Returns FALSE for a null argument or failed pointer conversion.
-A non-null argument must refer to a live instance. This method does not validate lifetime
-or transfer ownership. Descendants cannot override this identity comparison.
+The base implementation delegates to ReferenceEquals, returns FALSE for null and does not raise exceptions.
+Overrides must preserve reflexivity, symmetry and transitivity for supported live objects,
+return FALSE for null or an incompatible object, and provide a matching GetHashCode implementation.
+Equals determines equality; GetHashCode only helps a hash index select candidates for comparison.
+Direct equality comparison does not require computing a hash.
+Neither operand may be modified. Arguments remain borrowed; equality neither transfers ownership
+nor validates lifetime. An override's exceptions propagate to the caller.
 </description>
 *)
-
-{attribute "object_name" := "ReferencesEquals"}
-
-METHOD FINAL ReferencesEquals : BOOL
-VAR_INPUT 
-	object : IObject;
-END_VAR
-VAR
-	selfPointer : POINTER TO Object;
-	comparingPointer : POINTER TO Object;
+//!<param name="other">Borrowed live object to compare, or zero.</param>
+METHOD Equals : BOOL
+VAR_INPUT
+	other : IObject;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[ReferencesEquals := FALSE;
-
-IF object = 0 THEN
-	RETURN;
-END_IF
-
-selfPointer := THIS;
-
-IF __QUERYPOINTER(object, comparingPointer) THEN
-	ReferencesEquals := selfPointer = comparingPointer;
-END_IF]]></ST>
+        <ST><![CDATA[Equals := ReferenceEquals(other);]]></ST>
       </Implementation>
     </Method>
     <Method Name="FB_exit" Id="{2d9f8d8d-3924-4b67-aafc-98d5a0623fe6}">
@@ -94,7 +85,11 @@ END_VAR]]></Declaration>
       </Implementation>
     </Method>
     <Method Name="GetDefaultName" Id="{3ae22fad-cdcc-4ba8-a264-9144f84c2553}" FolderPath="Service members\">
-      <Declaration><![CDATA[METHOD PROTECTED FINAL GetDefaultName : WSTRING]]></Declaration>
+      <Declaration><![CDATA[(*!
+<summary>Builds a diagnostic name from the class name and instance address.</summary>
+<description>Returns a bounded WSTRING value. The address is formatted as hexadecimal; the name is diagnostic text, not a persistent identifier.</description>
+*)
+METHOD PROTECTED FINAL GetDefaultName : WSTRING]]></Declaration>
       <Implementation>
         <ST><![CDATA[GetDefaultName := TO_WSTRING(Strings.Concat255(ClassName, ' (0x', Tc2_Utilities.LWORD_TO_HEXSTR(TO_LWORD(THIS), 16, FALSE), ')'));]]></ST>
       </Implementation>
@@ -107,6 +102,34 @@ END_VAR]]></Declaration>
 METHOD FINAL GetFullTypeName : STRING]]></Declaration>
       <Implementation>
         <ST><![CDATA[GetFullTypeName := Strings.Concat255(NamespaceName, '.', ClassName);]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="GetHashCode" Id="{7b02717b-e80f-49fb-9b38-995ef4418223}">
+      <Declaration><![CDATA[(*!
+<summary>Produces an address-based hash matching the default instance equality.</summary>
+<description>
+Folds the instance address into a UDINT without allocation, cached state or exceptions.
+The address is used because the base Equals compares instance identity, not object contents.
+Hash indices use this result to select candidates and must resolve collisions with Equals;
+equal hashes alone never establish equality. Computing a hash without an index does not accelerate lookup.
+The result remains stable while the instance address is unchanged; relocation requires rebuilding
+any index that uses this hash. This is not a persistent identifier and collisions are allowed.
+Descendants that redefine Equals must provide hashes equal for all objects that compare equal.
+For value equality, compute the hash from data consistent with that equality instead of retaining
+the inherited address-based hash. For example, equality by Motor.Id requires equal Id values
+to produce equal hashes even when the objects occupy different addresses.
+Hashing must not modify the object. Equality-relevant state and hash results must remain stable
+while the object is used as a hashed key. An override's exceptions propagate to the caller.
+</description>
+*)
+METHOD GetHashCode : UDINT
+VAR
+	addressBits : LWORD;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[addressBits := TO_LWORD(THIS);
+
+GetHashCode := TO_UDINT((addressBits XOR SHR(addressBits, SIZEOF(DWORD) * 8)) AND TO_LWORD(UnsignedInt32.MAX_VALUE));]]></ST>
       </Implementation>
     </Method>
     <Method Name="GetName" Id="{257730f6-dd97-4461-8e3a-d2666d17bc44}">
@@ -127,7 +150,11 @@ END_IF]]></ST>
       </Implementation>
     </Method>
     <Property Name="IsDynamicInstance" Id="{24998a7a-78a1-4ed7-9b02-1f1a03f8b719}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Reports whether this instance address belongs to dynamic memory.</summary>
+<description>Memory-area classification does not transfer ownership or establish whether an arbitrary pointer still refers to a live object.</description>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY FINAL IsDynamicInstance : BOOL]]></Declaration>
       <Get Name="Get" Id="{13a65fb5-a1f5-4c18-8711-a901f8b8c50f}">
         <Declaration><![CDATA[
@@ -155,8 +182,45 @@ PROPERTY ABSTRACT NamespaceName : REFERENCE TO STRING]]></Declaration>
         </Implementation>
       </Get>
     </Property>
+    <Method Name="ReferenceEquals" Id="{c147fb9a-ab41-452b-8012-567d8446205b}">
+      <Declaration><![CDATA[(*!
+<summary>Compares instance addresses; object contents do not participate in the comparison.</summary>
+<description>
+Returns FALSE for a null argument or failed pointer conversion.
+A non-null argument must refer to a live instance. This method does not validate lifetime
+or transfer ownership. Descendants cannot override this identity comparison.
+</description>
+*)
+
+{attribute "object_name" := "ReferenceEquals"}
+METHOD FINAL ReferenceEquals : BOOL
+VAR_INPUT 
+	object : IObject;
+END_VAR
+VAR
+	selfPointer : POINTER TO Object;
+	comparingPointer : POINTER TO Object;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[ReferenceEquals := FALSE;
+
+IF object = 0 THEN
+	RETURN;
+END_IF
+
+selfPointer := THIS;
+
+IF __QUERYPOINTER(object, comparingPointer) THEN
+	ReferenceEquals := selfPointer = comparingPointer;
+END_IF]]></ST>
+      </Implementation>
+    </Method>
     <Property Name="SelfAddress" Id="{fb693a32-9773-4047-aa8f-22abdeeaa290}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Returns the address of this object instance.</summary>
+<description>Borrowed pointer valid only while the object remains alive. The result does not transfer ownership or validate other aliases.</description>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY FINAL SelfAddress : POINTER TO Object]]></Declaration>
       <Get Name="Get" Id="{9f8bbfa3-aa5e-447f-898b-426110e9c9ed}">
         <Declaration><![CDATA[]]></Declaration>

@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <TcPlcObject Version="1.1.0.1" ProductVersion="3.1.4026.20">
   <POU Name="DynamicDictionaryTest" Id="{d159496d-599c-4433-8a53-56a797e612ad}" SpecialFunc="None">
     <Declaration><![CDATA[(*
@@ -7,6 +7,16 @@ SPDX-License-Identifier: MIT
 License: https://opensource.org/license/mit
 *)
 
+(*!
+<summary>Exercises the DynamicDictionaryTest collection scenarios.</summary>
+<description>
+Owns the suite's test collection and runs the existing TcUnit cases.
+The collection is initialized explicitly with default key equality and hashing.
+Temporary owned query descriptors request explicit release; changing query defaults does not
+transfer those allocations to the test suite.
+Lookup assertions use equality and current returned positions without assuming sorted order.
+</description>
+*)
 FUNCTION_BLOCK DynamicDictionaryTest EXTENDS TcUnit.FB_TestSuite
 VAR
 	{attribute 'hide'} 
@@ -15,7 +25,7 @@ VAR
 	_KeyArray : ARRAY [0..6] OF INT := [0, 1, 2, 3, 4, 5, 6];
 	_ValueArray : ARRAY [0..6] OF STRING := ['String0', 'String1', 'String2', 'String3', 'String4', 'String5', 'String6'];
 	
-	_DictionaryToTest : TOF_Collections.Dictionary<0>(0, 0);
+	_DictionaryToTest : TOF_Collections.Dictionary<0>(keyValidator := 0, valueValidator := 0, keyEqualityComparer := 0);
 END_VAR]]></Declaration>
     <Implementation>
       <ST><![CDATA[SetAndGet();
@@ -55,7 +65,15 @@ TEST_FINISHED();]]></ST>
       </Implementation>
     </Method>
     <Method Name="Contains" Id="{d3baf0b9-cf4b-491a-b057-832b3cf2b167}">
-      <Declaration><![CDATA[METHOD Contains
+      <Declaration><![CDATA[(*!
+<summary>Exercises lookup for present and absent values.</summary>
+<description>
+Runs once per suite instance through the existing testFinished latch.
+Owned factory-created query descriptors request explicit release so the test retains its cleanup
+behavior with borrowed query defaults.
+</description>
+*)
+METHOD Contains
 VAR_INST
 	testFinished : BOOL;
 END_VAR]]></Declaration>
@@ -77,8 +95,8 @@ _DictionaryToTest
 	.SetCopy(_KeyArray[3], _ValueArray[3]);
 
 AssertEquals_BOOL(Expected := TRUE, Actual := _DictionaryToTest.ContainsKey(_KeyArray[3]), Message := 'ContainsKey did not find the value');
-AssertEquals_BOOL(Expected := TRUE, Actual := _DictionaryToTest.ContainsGenericKey(TOF_Core.GenericValueFactory.FromIntValue(3)), Message := 'ContainsGenericKey did not find the value');
-AssertEquals_BOOL(Expected := FALSE, Actual := _DictionaryToTest.ContainsGenericKey(TOF_Core.GenericValueFactory.FromIntValue(9)), Message := 'ContainsGenericKey found not existing value');
+AssertEquals_BOOL(Expected := TRUE, Actual := _DictionaryToTest.ContainsGenericKey(TOF_Core.GenericValueFactory.FromIntValue(3), releaseKey := TRUE), Message := 'ContainsGenericKey did not find the value');
+AssertEquals_BOOL(Expected := FALSE, Actual := _DictionaryToTest.ContainsGenericKey(TOF_Core.GenericValueFactory.FromIntValue(9), releaseKey := TRUE), Message := 'ContainsGenericKey found not existing value');
 
 testFinished := TRUE; 
 TEST_FINISHED();]]></ST>
@@ -95,7 +113,17 @@ PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
       </Get>
     </Property>
     <Method Name="Remove" Id="{93d5646e-318b-4558-ad34-b55297d3d003}">
-      <Declaration><![CDATA[METHOD Remove
+      <Declaration><![CDATA[(*!
+<summary>Exercises removal and the resulting collection state.</summary>
+<description>
+Runs once per suite instance through the existing testFinished latch.
+Owned factory-created query descriptors request explicit release so the test retains its cleanup
+behavior with borrowed query defaults.
+Removes the intended element using its current position and checks removed/retained membership
+rather than sorted ranks.
+</description>
+*)
+METHOD Remove
 VAR_INST
 	testFinished : BOOL;
 END_VAR]]></Declaration>
@@ -115,27 +143,40 @@ _DictionaryToTest.SetCopy(_KeyArray[1], _ValueArray[1]);
 _DictionaryToTest.SetCopy(_KeyArray[0], _ValueArray[0]);
 _DictionaryToTest.SetCopy(_KeyArray[3], _ValueArray[3]);
 
-_DictionaryToTest.RemoveAt(3);
+_DictionaryToTest.RemoveAt(_DictionaryToTest.GetKeyPosition(_KeyArray[3]));
 
 AssertEquals_DINT(Expected := 6, Actual := _DictionaryToTest.Length, Message := 'Invalid length after RemoveAt');
-AssertEquals_INT(Expected := 3, Actual := TO_INT(_DictionaryToTest.GetKeyPosition(_KeyArray[4])), Message := 'Invalid element position after RemoveAt');
+AssertEquals_BOOL(Expected := FALSE, Actual := _DictionaryToTest.ContainsKey(_KeyArray[3]), Message := 'Removed element is still present');
+AssertEquals_BOOL(Expected := TRUE, Actual := _DictionaryToTest.ContainsKey(_KeyArray[4]), Message := 'Removal lost a retained element');
 
 _DictionaryToTest.TryRemoveByKey(_KeyArray[2]);
 
 AssertEquals_DINT(Expected := 5, Actual := _DictionaryToTest.Length, Message := 'Invalid length after TryRemoveByKey');
-AssertEquals_INT(Expected := 2, Actual := TO_INT(_DictionaryToTest.GetKeyPosition(_KeyArray[4])), Message := 'Invalid element position after TryRemoveByKey');
+AssertEquals_BOOL(Expected := FALSE, Actual := _DictionaryToTest.ContainsKey(_KeyArray[2]), Message := 'Removed element is still present');
+AssertEquals_BOOL(Expected := TRUE, Actual := _DictionaryToTest.ContainsKey(_KeyArray[4]), Message := 'Removal lost a retained element');
 
-_DictionaryToTest.TryRemoveByGenericKey(TOF_Core.GenericValueFactory.FromIntValue(1));
+_DictionaryToTest.TryRemoveByGenericKey(TOF_Core.GenericValueFactory.FromIntValue(1), releaseKey := TRUE);
 
 AssertEquals_DINT(Expected := 4, Actual := _DictionaryToTest.Length, Message := 'Invalid length after TryRemoveByGenericKey');
-AssertEquals_INT(Expected := 1, Actual := TO_INT(_DictionaryToTest.GetKeyPosition(_KeyArray[4])), Message := 'Invalid element position after TryRemoveByGenericKey');
+AssertEquals_BOOL(Expected := FALSE, Actual := _DictionaryToTest.ContainsKey(_KeyArray[1]), Message := 'Removed element is still present');
+AssertEquals_BOOL(Expected := TRUE, Actual := _DictionaryToTest.ContainsKey(_KeyArray[4]), Message := 'Removal lost a retained element');
 
 testFinished := TRUE; 
 TEST_FINISHED();]]></ST>
       </Implementation>
     </Method>
     <Method Name="SetAndGet" Id="{fbd1236e-63ef-48f9-bcb2-74185b7c5660}">
-      <Declaration><![CDATA[METHOD SetAndGet
+      <Declaration><![CDATA[(*!
+<summary>Exercises storing entries and retrieving their positions or values.</summary>
+<description>
+Runs once per suite instance through the existing testFinished latch.
+Owned factory-created query descriptors request explicit release so the test retains its cleanup
+behavior with borrowed query defaults.
+Raw and generic queries must return the same current position; indexed reads use a queried position
+without assuming sorted order.
+</description>
+*)
+METHOD SetAndGet
 VAR
 	genericValue : TOF_Core.GENERIC_VALUE;
 	keyValuePair : TOF_Core.GENERIC_KEY_VALUE_PAIR;
@@ -163,17 +204,17 @@ _DictionaryToTest
 
 AssertEquals_DINT(Expected := 7, Actual := _DictionaryToTest.Length, Message := 'Invalid length after Set');
 
-AssertEquals_INT(Expected := 2, Actual := TO_INT(_DictionaryToTest.GetKeyPosition(_KeyArray[2])), Message := 'Invalid element position returned after Set and GetKeyPosition');
+AssertEquals_BOOL(Expected := TRUE, Actual := _DictionaryToTest.GetKeyPosition(_KeyArray[2]) >= TOF_Core.SignedInt32.ZERO, Message := 'Lookup did not return a valid position');
 
-AssertEquals_INT(Expected := 2, Actual := TO_INT(_DictionaryToTest.GetGenericKeyPosition(TOF_Core.GenericValueFactory.FromIntValue(2))), Message := 'Invalid element position returned after Set and GetGenericKeyPosition');
+AssertEquals_DINT(Expected := _DictionaryToTest.GetKeyPosition(_KeyArray[2]), Actual := _DictionaryToTest.GetGenericKeyPosition(TOF_Core.GenericValueFactory.FromIntValue(2), releaseKey := TRUE), Message := 'Raw and generic queries returned different positions');
 
 _DictionaryToTest.TryGetValueByKey(_KeyArray[2], value => genericValue);
 AssertEquals_STRING(Expected := 'String2', Actual := genericValue.AsString255(), Message := 'Invalid element found by TryGetValueByKey');
 
-_DictionaryToTest.TryGetValueByGenericKey(TOF_Core.GenericValueFactory.FromIntValue(2), value => genericValue);
+_DictionaryToTest.TryGetValueByGenericKey(TOF_Core.GenericValueFactory.FromIntValue(2), releaseKey := TRUE, value => genericValue);
 AssertEquals_STRING(Expected := 'String2', Actual := genericValue.AsString255(), Message := 'Invalid element found by TryGetValueByGenericKey');
 
-keyValuePair := _DictionaryToTest.GetKeyValuePairByIndex(3);
+keyValuePair := _DictionaryToTest.GetKeyValuePairByIndex(_DictionaryToTest.GetKeyPosition(_KeyArray[3]));
 AssertEquals_STRING(Expected := 'String3', Actual := keyValuePair.Value.AsString255(), Message := 'Invalid element position found by GetKeyValuePairByIndex');
 
 testFinished := TRUE; 

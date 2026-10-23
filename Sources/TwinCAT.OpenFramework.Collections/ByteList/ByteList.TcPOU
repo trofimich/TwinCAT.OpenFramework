@@ -1,4 +1,4 @@
-<?xml version="1.0" encoding="utf-8"?>
+﻿<?xml version="1.0" encoding="utf-8"?>
 <TcPlcObject Version="1.1.0.1">
   <POU Name="ByteList" Id="{44085af7-7241-03f1-3e6d-aeb87f0c58dd}" SpecialFunc="None">
     <Declaration><![CDATA[(*
@@ -12,12 +12,11 @@ License: https://opensource.org/license/mit
 <description>
 CreateEnumerator allocates an independent cursor owned by its caller.
 The collection must remain alive while that cursor is used.
+Static capacity zero selects dynamic storage; otherwise bytes reside in the instance. DataAddress exposes internal storage: external reassignment invalidates the collection, and growth or Clear(TRUE) invalidates borrowed addresses. Raw copy methods do not adopt input memory. Remove by value leaves the collection unchanged when no match exists, including on an empty dynamic instance. WriteData centralizes capacity checks, writes and buffer replacement. Internal sources and overlapping ranges are supported when the full source range is readable; growth keeps the old buffer alive until copying completes. Derived callers of WriteData must satisfy its validated-input preconditions.
 </description>
 *)
 
 {attribute 'no_explicit_call' := 'do not call this function block directly'} 
-{attribute 'enable_dynamic_creation'}
-
 FUNCTION_BLOCK ByteList 
 VAR_GENERIC CONSTANT
 	{attribute 'hide'} 
@@ -42,36 +41,15 @@ END_VAR]]></Declaration>
     <Implementation>
       <ST><![CDATA[]]></ST>
     </Implementation>
-    <Method Name="AllocateMemory" Id="{8ca653b8-50f7-445c-b10d-fbfed66a86d3}">
-      <Declaration><![CDATA[METHOD PROTECTED AllocateMemory
-VAR_INPUT
-	byteCount : TOF_Core.DINT_LENGTH;
-END_VAR
-VAR
-	newMemory : POINTER TO TOF_Core.GENERIC_KEY_VALUE_PAIR;
-END_VAR]]></Declaration>
-      <Implementation>
-        <ST><![CDATA[IF NOT Dynamic THEN
-	RETURN;
-END_IF
-
-newMemory := __NEW(BYTE, TO_UDINT(_DynamicCapacity + byteCount));
-
-IF _Length > 0 THEN
-	Tc2_System.MEMCPY(newMemory, DataAddress, TO_UDINT(_Length));
-END_IF
- 
-IF DataAddress <> 0 THEN
-	__DELETE(DataAddress);
-END_IF
-
-_DynamicCapacity := _DynamicCapacity + byteCount;
-
-DataAddress := newMemory;]]></ST>
-      </Implementation>
-    </Method>
+    <Folder Name="Service methods" Id="{685c0c64-63d7-45b0-8d80-202fe70951c4}" />
     <Method Name="AppendAny" Id="{fa939ac2-b614-4bc3-8ef3-f524865ffb5f}">
-      <Declaration><![CDATA[METHOD AppendAny : IByteList
+      <Declaration><![CDATA[(*!
+<summary>Appends the raw storage bytes of an ANY argument.</summary>
+<description>
+Borrows the argument for copying and uses its full runtime size, including string capacity and structure padding. Not portable serialization or object cloning. Shares AppendData capacity checks, overlap support and failure behavior.
+ Descendants cannot override this storage operation; capacity, indexing and disposal remain governed by this collection implementation.</description>
+*)
+METHOD FINAL AppendAny : IByteList
 VAR_INPUT
 	data : ANY;
 END_VAR]]></Declaration>
@@ -80,7 +58,13 @@ END_VAR]]></Declaration>
       </Implementation>
     </Method>
     <Method Name="AppendByte" Id="{90a35576-aaee-0fbc-214a-d1c0f81c72fb}">
-      <Declaration><![CDATA[METHOD AppendByte : IByteList
+      <Declaration><![CDATA[(*!
+<summary>Appends one byte by value.</summary>
+<description>
+Returns this list. Full static storage raises an exception; dynamic growth uses checked allocation and terminal OOM handling.
+ Descendants cannot override this storage operation; capacity, indexing and disposal remain governed by this collection implementation.</description>
+*)
+METHOD FINAL AppendByte : IByteList
 VAR_INPUT
 	value : BYTE;
 END_VAR
@@ -92,50 +76,66 @@ END_VAR]]></Declaration>
       </Implementation>
     </Method>
     <Method Name="AppendData" Id="{d35c3ee4-7daa-49d5-be43-e476b3efb046}">
-      <Declaration><![CDATA[METHOD AppendData : IByteList
+      <Declaration><![CDATA[(*!
+<summary>Appends bytes copied from a borrowed memory range.</summary>
+<description>
+For nonzero data and positive dataSize, the source must be readable. Negative sizes and a resulting length outside DINT raise ArgumentOutOfRangeException before copying. Null data or zero size remains a no-op. Static capacity exhaustion raises StaticCollectionFullException. Dynamic allocation uses checked growth and terminal OOM handling. The existing growth increment (free capacity plus input size) is retained and must also fit. The source may refer to this collection buffer, including overlapping ranges. The caller must provide a readable range of dataSize bytes; growth keeps the old buffer alive until copying completes. No restriction to logical Length is imposed on the source. Returns this list.
+ Descendants cannot override this storage operation; capacity, indexing and disposal remain governed by this collection implementation.</description>
+*)
+METHOD FINAL AppendData : IByteList
 VAR_INPUT
 	data : POINTER TO BYTE;
 	dataSize : TOF_Core.DINT_LENGTH;
 END_VAR
 VAR
-	staticCollectionFullException : TOF_Core.StaticCollectionFullException;
-
-	newMemory : POINTER TO BYTE;
+	rangeException : TOF_Core.ArgumentOutOfRangeException;
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[AppendData := THIS^;
 
-IF data = 0 OR_ELSE dataSize = 0 THEN
+IF data = 0 OR_ELSE dataSize = TOF_Core.SignedInt32.ZERO THEN
 	RETURN;
 END_IF
 
-// if existing memory is not enough
-IF _Length + TO_DINT(dataSize) > Capacity THEN
-	IF Dynamic THEN
-		AllocateMemory(Capacity - _Length + TO_DINT(dataSize));
-	ELSE
-		staticCollectionFullException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), GetName(), TO_UDINT(Capacity));
-	END_IF
+IF dataSize < TOF_Core.SignedInt32.ZERO
+	OR_ELSE dataSize > TOF_Core.SignedInt32.MAX_VALUE - _Length
+THEN
+	rangeException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), 'dataSize', dataSize);
 END_IF
 
-// append new bytes
-Tc2_System.MEMCPY(DataAddress + TO_DWORD(_Length), data, TO_UDINT(dataSize));
-
-// set new bytes count
-_Length := _Length + TO_DINT(dataSize);]]></ST>
+WriteData(data, dataSize, _Length, TO_ULINT(Capacity) + TO_ULINT(Capacity - _Length) + TO_ULINT(dataSize));]]></ST>
       </Implementation>
     </Method>
     <Method Name="AppendGeneric" Id="{ac72fb80-d130-4ae7-81e5-86ab3708db48}">
-      <Declaration><![CDATA[METHOD AppendGeneric : IByteList
+      <Declaration><![CDATA[(*!
+<summary>Appends the raw bytes referenced by a generic descriptor.</summary>
+<description>
+Borrows the descriptor without adopting or releasing it. Copies Address and Size without value conversion or object cloning. Size above SignedInt32.MAX_VALUE raises ArgumentOutOfRangeException before narrowing, including for a null Address. Shares AppendData aliasing and failure behavior.
+ Descendants cannot override this storage operation; capacity, indexing and disposal remain governed by this collection implementation.</description>
+*)
+METHOD FINAL AppendGeneric : IByteList
 VAR_INPUT
 	data : TOF_Core.GENERIC_VALUE;
+END_VAR
+VAR
+	rangeException : TOF_Core.ArgumentOutOfRangeException;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[AppendGeneric := AppendData(data.Address, TO_DINT(data.Size));]]></ST>
+        <ST><![CDATA[IF data.Size > TO_ULINT(TOF_Core.SignedInt32.MAX_VALUE) THEN
+	rangeException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), 'data.Size', data.Size);
+END_IF
+
+AppendGeneric := AppendData(data.Address, TO_DINT(data.Size));]]></ST>
       </Implementation>
     </Method>
     <Property Name="Capacity" Id="{3ae8e9be-a7d0-403a-8d29-c44983ebf381}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Reports the currently allocated number of slots.</summary>
+<description>
+Units are bytes for ByteList and entries for other collections. Static capacity is fixed; dynamic capacity can change on growth or clearing. This is not a guarantee that the next allocation succeeds.
+</description>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY FINAL Capacity : TOF_Core.DINT_LENGTH]]></Declaration>
       <Get Name="Get" Id="{b809a1de-e3ae-4897-8390-093667992014}">
         <Declaration><![CDATA[]]></Declaration>
@@ -145,7 +145,13 @@ PROPERTY FINAL Capacity : TOF_Core.DINT_LENGTH]]></Declaration>
       </Get>
     </Property>
     <Property Name="ClassName" Id="{3b9bf934-b83c-0948-370d-5e8e28db661a}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Provides the concrete type name for diagnostics.</summary>
+<description>
+Borrowed read-only reference to instance metadata; no ownership transfer.
+</description>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
       <Get Name="Get" Id="{a74d6b23-00f3-0fef-283c-b96c5cad2f8b}">
         <Declaration><![CDATA[]]></Declaration>
@@ -155,7 +161,13 @@ PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
       </Get>
     </Property>
     <Method Name="Clear" Id="{58795b0c-c9a9-0b7d-1801-4867f25906b7}">
-      <Declaration><![CDATA[METHOD Clear : IByteList
+      <Declaration><![CDATA[(*!
+<summary>Resets the byte count and optionally releases dynamic storage.</summary>
+<description>
+The default retains capacity for reuse. releaseDynamicMemory = TRUE deletes dynamic storage and sets capacity to zero. Static storage is retained. Returns this list; old contents are no longer logical entries.
+ Descendants cannot override this storage operation; capacity, indexing and disposal remain governed by this collection implementation.</description>
+*)
+METHOD FINAL Clear : IByteList
 VAR_INPUT
 	releaseDynamicMemory : BOOL := FALSE;
 END_VAR]]></Declaration>
@@ -194,7 +206,13 @@ CreateEnumerator := enumerator^;]]></ST>
       </Implementation>
     </Method>
     <Property Name="Dynamic" Id="{7fc86655-965e-4584-8395-7f580dc2445d}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Reports whether storage can grow dynamically.</summary>
+<description>
+Static capacity zero selects dynamic storage. Dynamic collections can still fail to allocate.
+</description>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY FINAL Dynamic : BOOL]]></Declaration>
       <Get Name="Get" Id="{8c679524-cf9f-40aa-9def-10c089c4abae}">
         <Declaration><![CDATA[]]></Declaration>
@@ -204,7 +222,13 @@ PROPERTY FINAL Dynamic : BOOL]]></Declaration>
       </Get>
     </Property>
     <Property Name="Empty" Id="{8cac260d-f211-4946-9f91-204b369e9bc6}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Reports whether the collection has no entries.</summary>
+<description>
+Reflects Length; not a check of payload lifetime or memory health.
+</description>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY FINAL Empty : BOOL]]></Declaration>
       <Get Name="Get" Id="{cdc3f172-a10e-45a6-be1f-94a4244848e7}">
         <Declaration><![CDATA[]]></Declaration>
@@ -214,7 +238,13 @@ PROPERTY FINAL Empty : BOOL]]></Declaration>
       </Get>
     </Property>
     <Method Name="FB_exit" Id="{58cee31c-ede5-0b41-17b5-f6dfb8c1dea7}">
-      <Declaration><![CDATA[//!<param name="bInCopyCode">if TRUE, the exit method is called for exiting an instance that is copied afterwards (online change).</param>
+      <Declaration><![CDATA[(*!
+<summary>Releases dynamic byte storage during destruction.</summary>
+<description>
+Calls Clear(TRUE); inline storage is not separately deleted. Lifecycle methods must complete without exceptions. No separate copy-code ownership handoff is implemented.
+</description>
+*)
+//!<param name="bInCopyCode">if TRUE, the exit method is called for exiting an instance that is copied afterwards (online change).</param>
 
 METHOD FB_exit : BOOL
 VAR_INPUT
@@ -226,7 +256,13 @@ END_VAR
       </Implementation>
     </Method>
     <Method Name="FB_init" Id="{9b89d2ed-7216-4482-ba21-51df798725b2}">
-      <Declaration><![CDATA[//!<param name="bInitRetains">if TRUE, the retain variables are initialized (warm start / cold start)</param>
+      <Declaration><![CDATA[(*!
+<summary>Binds inline byte storage for a static instance.</summary>
+<description>
+No allocation or callbacks are performed. Dynamic instances start without a backing buffer. No explicit online-change relocation repair is implemented.
+</description>
+*)
+//!<param name="bInitRetains">if TRUE, the retain variables are initialized (warm start / cold start)</param>
 
 //!<param name="bInCopyCode">if TRUE, the instance afterwards gets moved into the copy code (online change)</param>
 
@@ -245,7 +281,13 @@ END_IF]]></ST>
       </Implementation>
     </Method>
     <Method Name="Find" Id="{f870e801-4961-0438-0486-eeff60dc3fea}">
-      <Declaration><![CDATA[METHOD Find : BOOL
+      <Declaration><![CDATA[(*!
+<summary>Finds the first occurrence of a byte.</summary>
+<description>
+Searches from zero. TRUE makes index valid; on FALSE no index is promised. The collection is unchanged.
+ Descendants cannot override this storage operation; capacity, indexing and disposal remain governed by this collection implementation.</description>
+*)
+METHOD FINAL Find : BOOL
 VAR_INPUT
 	value : BYTE;
 END_VAR
@@ -268,7 +310,13 @@ END_IF]]></ST>
       </Implementation>
     </Method>
     <Property Name="Full" Id="{fb559251-67ca-4284-974d-f6b046168be3}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Reports whether fixed-capacity storage has no free slot.</summary>
+<description>
+Dynamic collections report FALSE even when Length equals Capacity. This does not guarantee available heap memory.
+</description>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY FINAL Full : BOOL]]></Declaration>
       <Get Name="Get" Id="{a258343f-e2ac-4ae3-91ec-9e66c42b2a82}">
         <Declaration><![CDATA[]]></Declaration>
@@ -278,7 +326,13 @@ PROPERTY FINAL Full : BOOL]]></Declaration>
       </Get>
     </Property>
     <Method Name="Get" Id="{7a2d32dc-2bf1-07fe-3b69-aed2ad5b300d}">
-      <Declaration><![CDATA[METHOD Get : BYTE
+      <Declaration><![CDATA[(*!
+<summary>Returns the byte at an existing zero-based position.</summary>
+<description>
+Raises an exception when backing storage is absent or the index is outside Length. The result is a byte copy.
+ Descendants cannot override this storage operation; capacity, indexing and disposal remain governed by this collection implementation.</description>
+*)
+METHOD FINAL Get : BYTE
 VAR_INPUT
 	index : TOF_Core.DINT_INDEX;
 END_VAR
@@ -302,7 +356,13 @@ Get := DataAddress[index];]]></ST>
       </Implementation>
     </Method>
     <Property Name="Length" Id="{d1b0052d-4e1b-09cb-235e-e87df6b9b5a5}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Reports the number of stored entries.</summary>
+<description>
+Units are bytes for ByteList and entries for other collections. Existing positions range from zero through Length minus one.
+</description>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY FINAL Length : TOF_Core.DINT_LENGTH]]></Declaration>
       <Get Name="Get" Id="{457f3f94-ecd5-03a2-1012-5eb779d04c66}">
         <Declaration><![CDATA[]]></Declaration>
@@ -312,7 +372,13 @@ PROPERTY FINAL Length : TOF_Core.DINT_LENGTH]]></Declaration>
       </Get>
     </Property>
     <Method Name="LoadFromAny" Id="{6ca12394-c5fc-0274-1ee4-d0bfc0727c06}">
-      <Declaration><![CDATA[METHOD LoadFromAny : IByteList
+      <Declaration><![CDATA[(*!
+<summary>Loads the full raw representation of an ANY argument at a position.</summary>
+<description>
+Delegates to LoadFromData using the runtime byte size, including padding and string capacity. Borrows the source and may truncate the previous tail. Shares LoadFromData limits; not portable serialization.
+ Descendants cannot override this storage operation; capacity, indexing and disposal remain governed by this collection implementation.</description>
+*)
+METHOD FINAL LoadFromAny : IByteList
 VAR_INPUT
 	data : ANY;
 	startIndex : TOF_Core.DINT_INDEX := 0;
@@ -322,7 +388,13 @@ END_VAR]]></Declaration>
       </Implementation>
     </Method>
     <Method Name="LoadFromData" Id="{9fe65b5e-87b5-0537-23bd-6a15d825d74e}">
-      <Declaration><![CDATA[METHOD LoadFromData : IByteList
+      <Declaration><![CDATA[(*!
+<summary>Copies bytes at a position and sets Length to the end of the copy.</summary>
+<description>
+startIndex must lie between zero and old Length inclusive, and dataSize must be nonnegative; invalid arguments raise ArgumentOutOfRangeException. Null data or zero size leaves Length unchanged after these checks. For a nonempty copy, the resulting length is checked against DINT before arithmetic or mutation. The prefix remains and the tail beyond the new end is logically truncated. Static capacity exhaustion raises StaticCollectionFullException; dynamic growth uses checked allocation and terminal OOM handling. Internal sources and overlapping ranges are supported. The caller must provide a readable source range of dataSize bytes; the old buffer remains alive throughout copying on growth. No restriction to logical Length is imposed on the source. Returns this list.
+ Descendants cannot override this storage operation; capacity, indexing and disposal remain governed by this collection implementation.</description>
+*)
+METHOD FINAL LoadFromData : IByteList
 VAR_INPUT
 	data : POINTER TO BYTE;
 	dataSize : TOF_Core.DINT_LENGTH;
@@ -330,51 +402,60 @@ VAR_INPUT
 END_VAR
 VAR
 	exception : TOF_Core.ArgumentOutOfRangeException;
-	staticCollectionFullException : TOF_Core.StaticCollectionFullException;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[IF startIndex > _Length THEN
+        <ST><![CDATA[IF startIndex < TOF_Core.SignedInt32.ZERO OR_ELSE startIndex > _Length THEN
 	exception.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), 'startIndex', startIndex);
 END_IF
 
-IF dataSize < 0 THEN
+IF dataSize < TOF_Core.SignedInt32.ZERO THEN
 	exception.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), 'dataSize', dataSize);
 END_IF
 
 LoadFromData := THIS^;
  
-IF data = 0 OR_ELSE dataSize = 0 THEN
+IF data = 0 OR_ELSE dataSize = TOF_Core.SignedInt32.ZERO THEN
 	RETURN;
 END_IF
 
-// if existing memory is not enough
-IF startIndex + TO_DINT(dataSize) > Capacity THEN
-	IF Dynamic THEN
-		AllocateMemory(startIndex + TO_DINT(dataSize) - Capacity);
-	ELSE
-		staticCollectionFullException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), GetName(), TO_UDINT(Capacity));
-	END_IF
+IF dataSize > TOF_Core.SignedInt32.MAX_VALUE - startIndex THEN
+	exception.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), 'dataSize', dataSize);
 END_IF
 
-// append new bytes
-Tc2_System.MEMCPY(DataAddress + TO_DWORD(startIndex), data, TO_UDINT(dataSize));
-
-// set new bytes count
-_Length := startIndex + TO_DINT(dataSize);	]]></ST>
+WriteData(data, dataSize, startIndex, TO_ULINT(startIndex) + TO_ULINT(dataSize));]]></ST>
       </Implementation>
     </Method>
     <Method Name="LoadFromGeneric" Id="{803d0535-a6e1-4d89-878a-9e90b4d80911}">
-      <Declaration><![CDATA[METHOD LoadFromGeneric : IByteList
+      <Declaration><![CDATA[(*!
+<summary>Loads the byte range referenced by a generic descriptor.</summary>
+<description>
+Borrows the descriptor without adoption or release. Size above SignedInt32.MAX_VALUE raises ArgumentOutOfRangeException before narrowing, including for a null Address. Shares LoadFromData index checks, truncation, aliasing and failure behavior.
+ Descendants cannot override this storage operation; capacity, indexing and disposal remain governed by this collection implementation.</description>
+*)
+METHOD FINAL LoadFromGeneric : IByteList
 VAR_INPUT
 	data : TOF_Core.GENERIC_VALUE;
 	startIndex : TOF_Core.DINT_INDEX := 0;
+END_VAR
+VAR
+	rangeException : TOF_Core.ArgumentOutOfRangeException;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[LoadFromGeneric := LoadFromData(data.Address, TO_DINT(data.Size), startIndex);]]></ST>
+        <ST><![CDATA[IF data.Size > TO_ULINT(TOF_Core.SignedInt32.MAX_VALUE) THEN
+	rangeException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), 'data.Size', data.Size);
+END_IF
+
+LoadFromGeneric := LoadFromData(data.Address, TO_DINT(data.Size), startIndex);]]></ST>
       </Implementation>
     </Method>
     <Property Name="NamespaceName" Id="{6affa192-b708-4407-b07b-3f99b221293a}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Provides the library namespace for diagnostics.</summary>
+<description>
+Borrowed read-only reference to compiler-initialized metadata; no ownership transfer.
+</description>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
       <Get Name="Get" Id="{08e774db-64ad-4b08-8c9f-7cf3351a9ee4}">
         <Declaration><![CDATA[]]></Declaration>
@@ -384,28 +465,21 @@ PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
       </Get>
     </Property>
     <Method Name="Remove" Id="{bf82b30e-92dd-0d23-0038-cce05024df18}">
-      <Declaration><![CDATA[METHOD Remove : IByteList
+      <Declaration><![CDATA[(*!
+<summary>Removes the first occurrence of a byte if present.</summary>
+<description>
+Removes only the first matching byte, compacts later bytes through RemoveAt and returns this list. An absent value or an empty static or dynamic list leaves the collection unchanged without raising an exception for absence. Capacity is retained. Requires an intact collection whose backing storage remains valid for its logical contents.
+ Descendants cannot override this storage operation; capacity, indexing and disposal remain governed by this collection implementation.</description>
+*)
+METHOD FINAL Remove : IByteList
 VAR_INPUT
 	value : BYTE;
 END_VAR
 VAR
 	index : DINT;
-	exception : TOF_Core.StandardException;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[IF DataAddress = 0 THEN
-	exception.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), "Dynamic byte array is empty");
-END_IF
-
-IF Length < 0 THEN
-	exception.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), "Count is less then zero");
-END_IF
-
-IF index + Length > _Length THEN
-	exception.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), "Index + count are outside the array bounds");
-END_IF
-
-Remove := THIS^;
+        <ST><![CDATA[Remove := THIS^;
 
 IF Find(value, index => index) THEN
 	RemoveAt(index, 1);
@@ -413,7 +487,13 @@ END_IF]]></ST>
       </Implementation>
     </Method>
     <Method Name="RemoveAt" Id="{13c7901e-f730-033f-2407-dd64a3fc2480}">
-      <Declaration><![CDATA[METHOD RemoveAt : IByteList
+      <Declaration><![CDATA[(*!
+<summary>Removes a contiguous byte range and compacts remaining bytes.</summary>
+<description>
+Requires an existing index and a nonnegative count no greater than the remaining length; otherwise raises ArgumentOutOfRangeException. The range is checked by subtraction before computing its end. Zero count is a no-op only after index validation. Capacity is retained. Returns this list.
+ Descendants cannot override this storage operation; capacity, indexing and disposal remain governed by this collection implementation.</description>
+*)
+METHOD FINAL RemoveAt : IByteList
 VAR_INPUT
 	index : TOF_Core.DINT_INDEX;
 	count : TOF_Core.DINT_LENGTH := 1;
@@ -422,17 +502,17 @@ VAR
 	argumentOutOfRangeException : TOF_Core.ArgumentOutOfRangeException;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[IF index < 0 OR_ELSE index >= _Length THEN
+        <ST><![CDATA[IF index < TOF_Core.SignedInt32.ZERO OR_ELSE index >= _Length THEN
 	argumentOutOfRangeException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), 'index', index);
 END_IF
 
-IF count < 0 OR_ELSE index + count > _Length THEN
+IF count < TOF_Core.SignedInt32.ZERO OR_ELSE count > _Length - index THEN
 	argumentOutOfRangeException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), 'count', count);
 END_IF
 
 RemoveAt := THIS^;
 
-IF count = 0 THEN
+IF count = TOF_Core.SignedInt32.ZERO THEN
 	RETURN;
 END_IF
 
@@ -444,7 +524,13 @@ _Length := _Length - count;]]></ST>
       </Implementation>
     </Method>
     <Property Name="SelfSize" Id="{eb116396-1c6b-495f-b284-5b142fa86f6c}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Reports the size of this function-block instance.</summary>
+<description>
+Measured in bytes; includes inline storage but excludes separately allocated buffers, payload and enumerators.
+</description>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY SelfSize : ULINT]]></Declaration>
       <Get Name="Get" Id="{9d568fff-ebc6-4d27-9dd9-94ca65277b07}">
         <Declaration><![CDATA[]]></Declaration>
@@ -454,7 +540,13 @@ PROPERTY SelfSize : ULINT]]></Declaration>
       </Get>
     </Property>
     <Method Name="Set" Id="{7b62d34d-7ee9-07a4-2e13-b032abd0cd09}">
-      <Declaration><![CDATA[METHOD Set : IByteList
+      <Declaration><![CDATA[(*!
+<summary>Overwrites one existing byte.</summary>
+<description>
+Requires allocated storage and an index within Length; otherwise raises an exception. Length and Capacity are unchanged. Returns this list.
+ Descendants cannot override this storage operation; capacity, indexing and disposal remain governed by this collection implementation.</description>
+*)
+METHOD FINAL Set : IByteList
 VAR_INPUT
 	index : TOF_Core.DINT_INDEX;
 	value : BYTE;
@@ -478,6 +570,69 @@ END_IF
 Set := THIS^;
 
 DataAddress[index] := value;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="WriteData" Id="{8ca653b8-50f7-445c-b10d-fbfed66a86d3}" FolderPath="Service methods\">
+      <Declaration><![CDATA[(*!
+<summary>Writes a prepared byte range and centrally manages any buffer replacement.</summary>
+<description>
+The caller must validate a non-null readable source, positive dataSize, startIndex within Length and a representable resulting length. requestedCapacity specifies the growth policy and is used only when the write exceeds Capacity. It must cover the resulting length and fit DINT. Static exhaustion raises StaticCollectionFullException. Invalid growth capacity raises ArgumentOutOfRangeException. Null NEW invokes terminal allocation failure before mutation. Without growth, MEMMOVE supports overlapping ranges. With growth, the old buffer remains alive until both existing bytes and source bytes have been copied; only then are pointer, capacity and length committed and the old allocation deleted. Source ranges may include the collection buffer, provided the full range is readable; no restriction to logical Length is imposed. Borrowed buffer addresses are invalidated by growth. This helper does not validate arbitrary pointer lifetime.
+</description>
+*)
+METHOD PROTECTED FINAL WriteData
+VAR_INPUT
+	data : POINTER TO BYTE;
+	dataSize : TOF_Core.DINT_LENGTH;
+	startIndex : TOF_Core.DINT_INDEX;
+	requestedCapacity : ULINT;
+END_VAR
+VAR
+	newLength : DINT;
+	newMemory : POINTER TO BYTE;
+	oldMemory : POINTER TO BYTE;
+
+	rangeException : TOF_Core.ArgumentOutOfRangeException;
+	staticCollectionFullException : TOF_Core.StaticCollectionFullException;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[newLength := startIndex + dataSize;
+
+IF newLength <= Capacity THEN
+	Tc2_System.MEMMOVE(DataAddress + TO_DWORD(startIndex), data, TO_UDINT(dataSize));
+	_Length := newLength;
+	RETURN;
+END_IF
+
+IF NOT Dynamic THEN
+	staticCollectionFullException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), GetName(), TO_UDINT(Capacity));
+END_IF
+
+IF requestedCapacity < TO_ULINT(newLength)
+	OR_ELSE requestedCapacity > TO_ULINT(TOF_Core.SignedInt32.MAX_VALUE)
+THEN
+	rangeException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), 'capacity', requestedCapacity);
+END_IF
+
+newMemory := __NEW(BYTE, TO_UDINT(requestedCapacity));
+IF newMemory = 0 THEN
+	TOF_Core.DynamicMemoryManager.RaiseAllocationFailure();
+END_IF
+
+oldMemory := DataAddress;
+IF _Length > TOF_Core.SignedInt32.ZERO THEN
+	Tc2_System.MEMCPY(newMemory, oldMemory, TO_UDINT(_Length));
+END_IF
+
+// The source may refer to the old buffer, which remains alive until this copy completes.
+Tc2_System.MEMCPY(newMemory + TO_DWORD(startIndex), data, TO_UDINT(dataSize));
+
+DataAddress := newMemory;
+_DynamicCapacity := TO_DINT(requestedCapacity);
+_Length := newLength;
+
+IF oldMemory <> 0 THEN
+	__DELETE(oldMemory);
+END_IF]]></ST>
       </Implementation>
     </Method>
   </POU>

@@ -10,7 +10,7 @@ License: https://opensource.org/license/mit
 {attribute 'no_explicit_call' := 'do not call this function block directly'} 
 (*!
 <summary>Provides the base lifecycle and diagnostics for workflow conditions.</summary>
-<description>Diagnostic string inputs are borrowed only during the call; retained diagnostic text is copied into owned storage.</description>
+<description>Diagnostic string inputs are borrowed only during the call; retained diagnostic text is copied into owned storage. The variable dictionary uses default key equality and hashing. Named variable lookup reports failure without propagating exceptions; its output is usable only on success. FB_init stores the workflow association only. Dynamic instances require explicit RegisterChild after construction; static instances remain caller-owned.</description>
 *)
 FUNCTION_BLOCK ABSTRACT Condition EXTENDS TOF_Core.Object IMPLEMENTS ICondition
 VAR
@@ -23,7 +23,7 @@ VAR
 	
 	_ParentCondition : ICondition;
 
-	_Variables : TOF_Collections.Dictionary<0>(0, 0);
+	_Variables : TOF_Collections.Dictionary<0>(keyValidator := 0, valueValidator := 0, keyEqualityComparer := 0);
 END_VAR]]></Declaration>
     <Implementation>
       <ST><![CDATA[]]></ST>
@@ -70,6 +70,10 @@ END_IF]]></ST>
 
 //!<param name="bInCopyCode">if TRUE, the instance afterwards gets moved into the copy code (online change)</param>
 
+(*!
+<summary>Stores the borrowed workflow association without registering ownership.</summary>
+<description>Does not allocate registry storage. The creator must call workflow.RegisterChild after __NEW succeeds, outside lifecycle methods, if the workflow is to own this dynamic instance.</description>
+*)
 METHOD FB_init : BOOL
 VAR_INPUT
 	
@@ -80,11 +84,7 @@ VAR_INPUT
 END_VAR
 ]]></Declaration>
       <Implementation>
-        <ST><![CDATA[_Workflow := workflow;
-
-IF _Workflow <> 0 THEN
-	_Workflow.RegisterChild(THIS^);
-END_IF]]></ST>
+        <ST><![CDATA[_Workflow := workflow;]]></ST>
       </Implementation>
     </Method>
     <Property Name="Name" Id="{71961bbf-f4ff-4ba9-a45a-cd1279b7b5ac}">
@@ -159,7 +159,11 @@ END_IF]]></ST>
       </Set>
     </Property>
     <Method Name="TryGetVariable" Id="{54c0b438-a23e-4e9d-a1fa-12698a06e3ed}">
-      <Declaration><![CDATA[METHOD TryGetVariable : BOOL
+      <Declaration><![CDATA[(*!
+<summary>Attempts to resolve a named variable from the available variable containers.</summary>
+<description>Returns FALSE when resolution fails or a nested call raises an exception. Use the output only when TRUE is returned. Does not propagate exceptions or clear terminal allocation state.</description>
+*)
+METHOD TryGetVariable : BOOL
 VAR_INPUT
 	name : STRING;
 END_VAR
@@ -168,21 +172,25 @@ VAR_OUTPUT
 END_VAR
 ]]></Declaration>
       <Implementation>
-        <ST><![CDATA[IF TryGetVariable := _Variables.TryGetValueByKey(name, value => variable) THEN
-	RETURN;
-END_IF
+        <ST><![CDATA[__TRY
+	IF TryGetVariable := _Variables.TryGetValueByKey(name, value => variable) THEN
+		RETURN;
+	END_IF
 
-IF _ParentCondition <> 0 AND_THEN (TryGetVariable := _ParentCondition.TryGetVariable(name, variable => variable)) THEN
-	RETURN;
-END_IF
+	IF _ParentCondition <> 0 AND_THEN (TryGetVariable := _ParentCondition.TryGetVariable(name, variable => variable)) THEN
+		RETURN;
+	END_IF
 
-IF _ParentActivity <> 0 AND_THEN (TryGetVariable := _ParentActivity.TryGetVariable(name, variable => variable)) THEN
-	RETURN;
-END_IF
+	IF _ParentActivity <> 0 AND_THEN (TryGetVariable := _ParentActivity.TryGetVariable(name, variable => variable)) THEN
+		RETURN;
+	END_IF
 
-IF _Workflow <> 0 THEN
-	TryGetVariable := _Workflow.TryGetVariable(name, variable => variable);
-END_IF]]></ST>
+	IF _Workflow <> 0 THEN
+		TryGetVariable := _Workflow.TryGetVariable(name, variable => variable);
+	END_IF
+__CATCH
+	TryGetVariable := FALSE;
+__ENDTRY]]></ST>
       </Implementation>
     </Method>
   </POU>

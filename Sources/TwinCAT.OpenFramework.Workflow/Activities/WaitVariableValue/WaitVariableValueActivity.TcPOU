@@ -1,7 +1,11 @@
 ﻿<?xml version="1.0" encoding="utf-8"?>
 <TcPlcObject Version="1.1.0.1">
   <POU Name="WaitVariableValueActivity" Id="{9ae865c9-381c-4131-8577-ff22adc6b1cb}" SpecialFunc="None">
-    <Declaration><![CDATA[{attribute 'no_explicit_call' := 'do not call this function block directly'} 
+    <Declaration><![CDATA[(*!
+<summary>Waits until a workflow variable matches a configured value.</summary>
+<description>Its internal condition is created and registered on first Configure, not in FB_init. Configure must succeed before execution. The condition is workflow-owned; repeated Configure calls reuse it. Before creation, MonitoredVariableName is empty and ReferenceValue is null.</description>
+*)
+{attribute 'no_explicit_call' := 'do not call this function block directly'} 
 {attribute 'enable_dynamic_creation'}
 FUNCTION_BLOCK WaitVariableValueActivity EXTENDS Activity IMPLEMENTS IWaitVariableValueActivity
 VAR
@@ -28,14 +32,20 @@ PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
       </Get>
     </Property>
     <Method Name="Configure" Id="{7d435cb4-1a46-4754-a63c-ac457cf11689}">
-      <Declaration><![CDATA[METHOD Configure
+      <Declaration><![CDATA[(*!
+<summary>Creates the internal condition on first use and configures the value to wait for.</summary>
+<description>Requires an associated live workflow. Registers the condition before configuring it; the workflow owns it until disposal. Later calls reuse the condition. A failed condition configuration leaves this activity unconfigured. Allocation and configuration failures propagate from this ordinary method, never from FB_init.</description>
+*)
+METHOD Configure
 VAR_INPUT
 	monitoredVariableName : STRING;
 	referenceValue : ANY; 
 END_VAR
 VAR
 	variableNameEmptyException : TOF_Core.ArgumentOutOfRangeException;
-	referenceValueNullException : TOF_Core.ArgumentNotSpecifiedException; 
+	argumentNotSpecifiedException : TOF_Core.ArgumentNotSpecifiedException;
+
+	condition : POINTER TO VariableHasValueCondition; 
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[IF monitoredVariableName = '' THEN
@@ -43,7 +53,25 @@ END_VAR]]></Declaration>
 END_IF
 
 IF referenceValue.pValue = 0 OR_ELSE referenceValue.diSize = 0 THEN
-	referenceValueNullException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), 'referenceValue');
+	argumentNotSpecifiedException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), 'referenceValue');
+END_IF
+
+IF _Workflow = 0 THEN
+	argumentNotSpecifiedException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), 'Workflow');
+END_IF
+
+_Configured := FALSE;
+
+IF _Condition = 0 THEN
+	condition := __NEW(VariableHasValueCondition(workflow := _Workflow));
+
+	IF condition = 0 THEN
+		TOF_Core.DynamicMemoryManager.RaiseAllocationFailure();
+	END_IF
+
+	_Workflow.RegisterChild(condition^);
+	condition^.ParentActivity := THIS^;
+	_Condition := condition^;
 END_IF
 
 _Condition.Configure(monitoredVariableName, referenceValue);
@@ -51,37 +79,20 @@ _Condition.Configure(monitoredVariableName, referenceValue);
 _Configured := TRUE;]]></ST>
       </Implementation>
     </Method>
-    <Method Name="FB_init" Id="{851e7ea8-dcef-4c8d-a5b3-45622032645e}">
-      <Declaration><![CDATA[//!<param name="bInitRetains">if TRUE, the retain variables are initialized (warm start / cold start)</param>
-
-//!<param name="bInCopyCode">if TRUE, the instance afterwards gets moved into the copy code (online change)</param>
-
-METHOD FB_init : BOOL
-VAR_INPUT
-	
-	bInitRetains	: BOOL;
-	
-	bInCopyCode	: BOOL;
-	workflow : IWorkflow;
-END_VAR
-VAR
-	condition : POINTER TO VariableHasValueCondition;
-END_VAR]]></Declaration>
-      <Implementation>
-        <ST><![CDATA[condition := __NEW(VariableHasValueCondition(workflow := workflow));
-
-condition^.ParentActivity := THIS^;
-
-_Condition := condition^;]]></ST>
-      </Implementation>
-    </Method>
     <Property Name="MonitoredVariableName" Id="{1d438d91-52fe-4f5c-94af-3d961ae45a4b}">
       <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+(*!
+<summary>Returns the monitored variable name, or an empty string before the condition is created.</summary>
+*)
 PROPERTY MonitoredVariableName : STRING]]></Declaration>
       <Get Name="Get" Id="{7e079cbe-d346-42a9-a0e0-28dfd64715e9}">
         <Declaration><![CDATA[]]></Declaration>
         <Implementation>
-          <ST><![CDATA[MonitoredVariableName := _Condition.MonitoredVariableName;]]></ST>
+          <ST><![CDATA[IF _Condition <> 0 THEN
+	MonitoredVariableName := _Condition.MonitoredVariableName;
+ELSE
+	MonitoredVariableName := '';
+END_IF]]></ST>
         </Implementation>
       </Get>
     </Property>
@@ -134,11 +145,19 @@ END_VAR]]></Declaration>
     </Method>
     <Property Name="ReferenceValue" Id="{dc6c9824-324d-4558-96e2-a00d3db704a7}">
       <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+(*!
+<summary>Returns a borrowed reference to the configured comparison value.</summary>
+<description>Returns a null reference before the condition is created. The reference does not transfer ownership and expires when the workflow disposes the condition.</description>
+*)
 PROPERTY ReferenceValue : REFERENCE TO TOF_Core.GENERIC_VALUE]]></Declaration>
       <Get Name="Get" Id="{0bc02602-5ac3-40ea-858c-396fd965ca04}">
         <Declaration><![CDATA[]]></Declaration>
         <Implementation>
-          <ST><![CDATA[ReferenceValue REF= _Condition.ReferenceValue;]]></ST>
+          <ST><![CDATA[IF _Condition <> 0 THEN
+	ReferenceValue REF= _Condition.ReferenceValue;
+ELSE
+	ReferenceValue REF= 0;
+END_IF]]></ST>
         </Implementation>
       </Get>
     </Property>

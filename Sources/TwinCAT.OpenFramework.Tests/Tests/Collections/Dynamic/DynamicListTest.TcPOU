@@ -7,6 +7,10 @@ SPDX-License-Identifier: MIT
 License: https://opensource.org/license/mit
 *)
 
+(*!
+<summary>Exercises list operations with copied and borrowed string values.</summary>
+<description>Allocates owned string fixtures on the first suite execution, outside lifecycle initialization. Allocation failure is terminal. FB_exit releases fixtures, including a partially prepared set; list entries borrow those fixtures.</description>
+*)
 FUNCTION_BLOCK DynamicListTest EXTENDS TcUnit.FB_TestSuite
 VAR
 	{attribute 'hide'} 
@@ -14,11 +18,14 @@ VAR
 
 	_StaticStringArray : ARRAY [0..5] OF STRING := ['String0', 'String1', 'String2', 'String3', 'String4', 'String5'];
 	_DynamicStringArray : ARRAY [0..5] OF POINTER TO STRING;
+	_StringsPrepared : BOOL;
 	
 	_ListToTest : TOF_Collections.List<0>(0);
 END_VAR]]></Declaration>
     <Implementation>
-      <ST><![CDATA[Append();
+      <ST><![CDATA[prepareStrings();
+
+Append();
 Insert();
 GetAndSet();
 Find();
@@ -175,11 +182,8 @@ TEST_FINISHED();]]></ST>
     </Method>
     <Method Name="FB_Exit" Id="{35985d5a-82ef-4502-8f35-09e527e7a8a1}">
       <Declaration><![CDATA[(*!
-<summary>FB_Exit must be implemented explicitly. If there is an implementation, then the</summary>
-<description>
-method is called before the controller removes the code of the function block instance
-(implicit call). The return value is not evaluated.
-</description>
+<summary>Releases the suite-owned string fixtures during destruction.</summary>
+<description>Handles a partially prepared fixture set. Does not allocate or create exceptions. Borrowed references into these strings become invalid.</description>
 *)
 
 //!<param name="bInCopyCode">TRUE: the exit method is called in order to leave the instance which will be copied afterwards (online change).</param>
@@ -193,34 +197,39 @@ VAR
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[FOR i := 0 TO 5 DO
-	__DELETE(_DynamicStringArray[i]);	
+	IF _DynamicStringArray[i] <> 0 THEN
+		__DELETE(_DynamicStringArray[i]);
+	END_IF	
 END_FOR]]></ST>
       </Implementation>
     </Method>
-    <Method Name="FB_init" Id="{1d99c210-5f51-4989-904e-4bb2bc9c2d71}">
-      <Declaration><![CDATA[//!<param name="bInitRetains">if TRUE, the retain variables are initialized (warm start / cold start)</param>
-
-//!<param name="bInCopyCode">if TRUE, the instance afterwards gets moved into the copy code (online change)</param>
-
-METHOD FB_init : BOOL
-VAR_INPUT
-	
-	bInitRetains	: BOOL;
-	
-	bInCopyCode	: BOOL;
-END_VAR
+    <Method Name="prepareStrings" Id="{1d99c210-5f51-4989-904e-4bb2bc9c2d71}">
+      <Declaration><![CDATA[(*!
+<summary>Prepares owned string fixtures once during ordinary suite execution.</summary>
+<description>Checks each allocation before use. Completed allocations remain owned by the suite for FB_exit cleanup if a later allocation fails. Does not run from FB_init.</description>
+*)
+METHOD PRIVATE prepareStrings
 VAR
 	i : DINT;
-	dynamicString : POINTER TO STRING;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[FOR i := 0 TO 5 DO
-	dynamicString := __NEW(STRING);
-	
-	dynamicString^ := Tc2_Standard.CONCAT('String', DINT_TO_STRING(i));
-	
-	_DynamicStringArray[i] := dynamicString;	
-END_FOR]]></ST>
+        <ST><![CDATA[IF _StringsPrepared THEN
+	RETURN;
+END_IF
+
+TOF_Core.DynamicMemoryManager.RaiseIfAllocationFailed();
+
+FOR i := 0 TO 5 DO
+	_DynamicStringArray[i] := __NEW(STRING);
+
+	IF _DynamicStringArray[i] = 0 THEN
+		TOF_Core.DynamicMemoryManager.RaiseAllocationFailure();
+	END_IF
+
+	_DynamicStringArray[i]^ := _StaticStringArray[i];
+END_FOR
+
+_StringsPrepared := TRUE;]]></ST>
       </Implementation>
     </Method>
     <Method Name="Find" Id="{b2ed03c1-86b3-4bf7-a06a-0831862f9511}">
@@ -229,7 +238,7 @@ VAR
 	result : BOOL;
 	index : DINT;
 		
-	identicalDataPredicate : TOF_Comparision.IdenticalDataPredicate;
+	bytewiseEqualityPredicate : TOF_Comparison.BytewiseEqualityPredicate;
 END_VAR
 VAR_INST
 	testFinished : BOOL;
@@ -252,8 +261,8 @@ _ListToTest
 	.AppendCopy(_StaticStringArray[2])
 	.AppendCopy(_StaticStringArray[3]);
 
-identicalDataPredicate.SetReferenceValueByAny(_StaticStringArray[2]);
-result := _ListToTest.FindSingle(identicalDataPredicate, 0, index => index);
+bytewiseEqualityPredicate.SetReferenceValueByAny(_StaticStringArray[2]);
+result := _ListToTest.FindSingle(bytewiseEqualityPredicate, 0, index => index);
 
 AssertEquals_BOOL(Expected := TRUE, Actual := result, Message := 'Value not found');
 AssertEquals_DINT(Expected := 2, Actual := index, Message := 'Wrong index of found element');
@@ -412,7 +421,7 @@ VAR
 	result : BOOL;
 	index : DINT;
 		
-	sameDataPredicate : TOF_Comparision.IdenticalDataPredicate;
+	bytewiseEqualityPredicate : TOF_Comparison.BytewiseEqualityPredicate;
 END_VAR
 VAR_INST
 	testFinished : BOOL;
@@ -435,8 +444,8 @@ _ListToTest
 	.AppendCopy(_StaticStringArray[2])
 	.AppendCopy(_StaticStringArray[3]);
 
-sameDataPredicate.SetReferenceValueByAny(_StaticStringArray[2]);
-_ListToTest.RemoveMatched(sameDataPredicate);
+bytewiseEqualityPredicate.SetReferenceValueByAny(_StaticStringArray[2]);
+_ListToTest.RemoveMatched(bytewiseEqualityPredicate);
 
 AssertEquals_DINT(Expected := 6, Actual := _ListToTest.Length, Message := 'Wrong length after RemoveMatched');
  
@@ -445,7 +454,11 @@ TEST_FINISHED();]]></ST>
       </Implementation>
     </Method>
     <Method Name="Sort" Id="{a9a5625a-dfa8-4934-9b30-394868f8e3b6}">
-      <Declaration><![CDATA[METHOD Sort
+      <Declaration><![CDATA[(*!
+<summary>Checks ascending and descending ordering in both list sorting branches.</summary>
+<description>Runs once. Sorts 16 copied strings with StringComparer and 101 copied DINT values with DIntComparer, checking every resulting position. Exercises insertion sort and heap sort with comparers matching their payload types.</description>
+*)
+METHOD Sort
 VAR
 	stringArrayOf15Elements : ARRAY [0..15] OF STRING := ['S00', 'S01', 'S02', 'S03', 'S04', 'S05', 'S06', 'S07', 'S08', 'S09', 'S10', 'S11', 'S12', 'S13', 'S14', 'S15'];
 	
@@ -474,7 +487,7 @@ FOR index := 0 TO 15 DO
 	_ListToTest.AppendCopy(stringArrayOf15Elements[index]);
 END_FOR
 
-_ListToTest.Sort(TOF_Comparision.StandardComparers.StringComparer, TOF_Core.SORT_DIRECTION.DESCENDING);
+_ListToTest.Sort(TOF_Comparison.StandardComparers.StringComparer, TOF_Core.SORT_DIRECTION.DESCENDING);
 
 FOR index := 0 TO 15 DO
 	expectedString := stringArrayOf15Elements[15 - index];
@@ -483,7 +496,7 @@ FOR index := 0 TO 15 DO
 	AssertEquals_STRING(Expected := expectedString, Actual := inFactString, Message := TOF_Core.Strings.Concat255('Value not found after descending STRING sorting: expected ', TO_STRING(expectedString), ', in fact ', TO_STRING(inFactString)));
 END_FOR
 
-_ListToTest.Sort(TOF_Comparision.StandardComparers.StringComparer, TOF_Core.SORT_DIRECTION.ASCENDING);
+_ListToTest.Sort(TOF_Comparison.StandardComparers.StringComparer, TOF_Core.SORT_DIRECTION.ASCENDING);
 
 FOR index := 0 TO 15 DO
 	expectedString := stringArrayOf15Elements[index];
@@ -499,7 +512,7 @@ FOR index := 0 TO 100 DO
 	_ListToTest.AppendCopy(index);
 END_FOR
 
-_ListToTest.Sort(TOF_Comparision.StandardComparers.StringComparer, TOF_Core.SORT_DIRECTION.DESCENDING);
+_ListToTest.Sort(TOF_Comparison.StandardComparers.DIntComparer, TOF_Core.SORT_DIRECTION.DESCENDING);
 
 FOR index := 0 TO 100 DO 
 	expectedDInt := 100 - index;
@@ -508,7 +521,7 @@ FOR index := 0 TO 100 DO
 	AssertEquals_DINT(Expected := expectedDInt, Actual := inFactDInt, Message := TOF_Core.Strings.Concat255('Value not found after descending DINT sorting: ', TO_STRING(expectedDInt), ', in fact ', TO_STRING(inFactDInt)));
 END_FOR
 
-_ListToTest.Sort(TOF_Comparision.StandardComparers.StringComparer, TOF_Core.SORT_DIRECTION.ASCENDING);
+_ListToTest.Sort(TOF_Comparison.StandardComparers.DIntComparer, TOF_Core.SORT_DIRECTION.ASCENDING);
 
 FOR index := 0 TO 100 DO 
 	expectedDInt := index;

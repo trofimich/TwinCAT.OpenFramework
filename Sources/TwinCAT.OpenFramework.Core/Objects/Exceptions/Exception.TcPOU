@@ -8,9 +8,9 @@ License: https://opensource.org/license/mit
 *)
 
 (*!
-<summary>Provides shared exception metadata, formatting and automatic cleanup registration.</summary>
+<summary>Provides shared exception metadata and formatting for task-owned clones.</summary>
 <description>
-Dynamic descendants are owned by DynamicMemoryManager until cleanup; static instances remain caller-owned.
+Registered dynamic descendants are owned by DynamicMemoryManager until cleanup; static instances remain caller-owned. Clone overrides must register each new instance through DynamicMemoryManager.RegisterAutoDisposedObject after __NEW and before copying fields. Plain __NEW does not register an instance.
 Each dynamic exception belongs to the cyclic PLC task that created it; do not pass exception objects between tasks.
 Do not throw or create dynamic exceptions during application FB_init. Static templates remain supported.
 Clone implementations must return an IException-compatible object; clients borrow registered clones.
@@ -31,14 +31,17 @@ VAR
 	_LocalTimestamp : LDATE_AND_TIME;	
 	_UtcTimestamp : LDATE_AND_TIME;	
 	
-	_AutoDisposeRegistrar : AutoDisposeRegistrar(THIS^);
 END_VAR]]></Declaration>
     <Implementation>
       <ST><![CDATA[]]></ST>
     </Implementation>
     <Folder Name="Service members" Id="{a47a20ca-4953-4e09-8f4d-fc2e8d3ac96e}" />
     <Method Name="AppendTimestampDescription" Id="{a316d3b4-0094-41d5-a4cb-9fba6e2a6883}" FolderPath="Service members\">
-      <Declaration><![CDATA[METHOD PROTECTED AppendTimestampDescription
+      <Declaration><![CDATA[(*!
+<summary>Appends the selected timestamp to an existing diagnostic builder.</summary>
+<description>Hidden mode leaves the builder unchanged; otherwise appends the supplied local or UTC timestamp, with a UTC suffix for UTC mode. Does not clear existing text. Buffer growth follows the builder allocation-failure contract. Descendants cannot replace this shared metadata formatter; custom diagnostic payload formatting belongs in GetMessage or ToError.</description>
+*)
+METHOD PROTECTED FINAL AppendTimestampDescription
 VAR_IN_OUT CONSTANT
 	stringBuilder : WideStringBuilder;
 END_VAR
@@ -88,13 +91,21 @@ _UtcTimestamp := LongDateAndTimes.EPOCH;	]]></ST>
       </Implementation>
     </Method>
     <Method Name="Clone" Id="{ff7ec3e0-b6aa-4a29-8b78-e576a86138cb}">
-      <Declaration><![CDATA[METHOD ABSTRACT Clone : IObject]]></Declaration>
+      <Declaration><![CDATA[(*!
+<summary>Creates an independent task-managed exception snapshot.</summary>
+<description>Concrete descendants allocate and register the clone with DynamicMemoryManager before copying its state. The manager owns the clone until task cleanup; callers borrow it and must not delete it. Allocation failure follows the terminal allocation-failure policy.</description>
+*)
+METHOD ABSTRACT Clone : IObject]]></Declaration>
       <Implementation>
         <ST><![CDATA[]]></ST>
       </Implementation>
     </Method>
     <Property Name="Empty" Id="{bd97cee3-a16c-4148-a36f-41860b6b4283}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Reports whether the concrete exception contains an error.</summary>
+<description>Concrete descendants define which stored fields make an exception nonempty. Reading does not clear or modify it.</description>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY ABSTRACT Empty : BOOL]]></Declaration>
       <Get Name="Get" Id="{32775313-ab40-46b6-a69f-434f332e1416}">
         <Declaration><![CDATA[]]></Declaration>
@@ -104,7 +115,11 @@ PROPERTY ABSTRACT Empty : BOOL]]></Declaration>
       </Get>
     </Property>
     <Method Name="ExtractClassName" Id="{2741f852-3263-48be-9dbc-ba747f8558d6}" FolderPath="Service members\">
-      <Declaration><![CDATA[METHOD PROTECTED ExtractClassName : STRING
+      <Declaration><![CDATA[(*!
+<summary>Extracts the first component yielded by splitting a POU name on dots.</summary>
+<description>Returns a bounded independent string. Temporary splitter storage is released at method exit; fragment allocation follows the normal allocation-failure policy. Descendants cannot replace this shared metadata formatter; custom diagnostic payload formatting belongs in GetMessage or ToError.</description>
+*)
+METHOD PROTECTED FINAL ExtractClassName : STRING
 VAR_IN_OUT CONSTANT
 	sourcePOUName : STRING;
 END_VAR
@@ -122,7 +137,11 @@ END_WHILE]]></ST>
       </Implementation>
     </Method>
     <Method Name="ExtractMethodName" Id="{be44e9a6-255a-48b7-a062-fbf15488833a}" FolderPath="Service members\">
-      <Declaration><![CDATA[METHOD PROTECTED ExtractMethodName : STRING
+      <Declaration><![CDATA[(*!
+<summary>Extracts the last component yielded by splitting a POU name on dots.</summary>
+<description>Returns a bounded independent string. Temporary splitter storage is released at method exit; fragment allocation follows the normal allocation-failure policy. Descendants cannot replace this shared metadata formatter; custom diagnostic payload formatting belongs in GetMessage or ToError.</description>
+*)
+METHOD PROTECTED FINAL ExtractMethodName : STRING
 VAR_IN_OUT CONSTANT
 	sourcePOUName : STRING;
 END_VAR
@@ -138,7 +157,11 @@ END_WHILE]]></ST>
       </Implementation>
     </Method>
     <Method Name="FB_exit" Id="{11857425-e8b4-42f5-9cda-87a6242433d1}">
-      <Declaration><![CDATA[//!<param name="bInCopyCode">if TRUE, the exit method is called for exiting an instance that is copied afterwards (online change).</param>
+      <Declaration><![CDATA[(*!
+<summary>Clears exception state during destruction.</summary>
+<description>Calls Clear; descendant cleanup must not raise or create exceptions. Referenced exceptions follow their own ownership rules and must not be deleted merely because they are referenced.</description>
+*)
+//!<param name="bInCopyCode">if TRUE, the exit method is called for exiting an instance that is copied afterwards (online change).</param>
 
 METHOD FB_exit : BOOL
 VAR_INPUT
@@ -155,10 +178,10 @@ END_VAR]]></Declaration>
 <description>
 With a class name, uses the last nonempty POU name segment as the method name and appends parentheses.
 Returns the first 128 characters when the full name exceeds the result capacity; truncation does not raise an exception.
-</description>
+ Descendants cannot replace this shared metadata formatter; custom diagnostic payload formatting belongs in GetMessage or ToError.</description>
 *)
 
-METHOD PROTECTED GetFullPOUName : STRING(128)
+METHOD PROTECTED FINAL GetFullPOUName : STRING(128)
 VAR_IN_OUT CONSTANT
 	sourceNamespaceName : STRING;
 	sourceClassName : STRING;
@@ -182,7 +205,11 @@ END_IF]]></ST>
       </Implementation>
     </Method>
     <Method Name="GetMessage" Id="{6f101456-9a5d-4c21-8b11-8b9151d71824}">
-      <Declaration><![CDATA[METHOD ABSTRACT GetMessage : ERROR_MESSAGE
+      <Declaration><![CDATA[(*!
+<summary>Formats the exception as bounded diagnostic text.</summary>
+<description>Returns an independent ERROR_MESSAGE. showSource requests available source information; timestampDisplayMode selects a stored timestamp or hides it. Concrete exception types define their message composition; unavailable native throw-source information cannot be reconstructed.</description>
+*)
+METHOD ABSTRACT GetMessage : ERROR_MESSAGE
 VAR_INPUT
 	showSource : BOOL := FALSE;
 	timestampDisplayMode : TIMESTAMP_DISPLAY_MODE := TIMESTAMP_DISPLAY_MODE.HIDDEN;
@@ -203,7 +230,11 @@ METHOD ABSTRACT GetRootException : IReadOnlyException]]></Declaration>
       </Implementation>
     </Method>
     <Method Name="GetSourceDescription" Id="{d08299fd-3dd9-413a-badd-9a2833bcb01e}">
-      <Declaration><![CDATA[METHOD GetSourceDescription : STRING(255)
+      <Declaration><![CDATA[(*!
+<summary>Formats the available exception source description.</summary>
+<description>Returns an independent bounded string. Native exceptions without original throw-site information return the unspecified-source marker; catch-point information is not an original throw site. Descendants cannot replace this shared metadata formatter; custom diagnostic payload formatting belongs in GetMessage or ToError.</description>
+*)
+METHOD FINAL GetSourceDescription : STRING(255)
 VAR
 	stringBuilder : WideStringBuilder;
 	
@@ -220,7 +251,11 @@ GetSourceDescription := TO_STRING(result);]]></ST>
       </Implementation>
     </Method>
     <Property Name="LocalTimestamp" Id="{4c2d5866-231e-4105-a6bb-6c19851f1e45}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Provides the stored local timestamp of this exception.</summary>
+<description>Framework exceptions capture it when thrown; native exceptions capture it when GetLastException obtains their description. Cloning preserves the timestamp; reading it does not read the current clock.</description>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY FINAL LocalTimestamp : LDATE_AND_TIME]]></Declaration>
       <Get Name="Get" Id="{4cb9fd2f-3b41-4625-9c08-af3725cdee6c}">
         <Declaration><![CDATA[]]></Declaration>
@@ -275,8 +310,8 @@ PROPERTY FINAL SourcePosition : REFERENCE TO STRING(32)]]></Declaration>
     </Property>
     <Method Name="ToError" Id="{8d25c83e-d9af-49a8-90c4-2ced5ac3b9ee}">
       <Declaration><![CDATA[(*!
-<summary>Prepares diagnostic text locally before passing it to read-only logging or exception parameters.</summary>
-<description>Computed diagnostic strings are held in local buffers for the duration of the receiving call.</description>
+<summary>Copies exception diagnostics and timestamps into an ERROR value.</summary>
+<description>An invalid target reference is ignored. Otherwise fills both top and root descriptions from this exception using the supplied severity and stored timestamps. Formatting uses default source and timestamp display options. The target retains copied text, not an exception reference; formatting may follow the allocation-failure policy of the concrete formatter.</description>
 *)
 METHOD ToError
 VAR_IN_OUT CONSTANT
@@ -313,7 +348,11 @@ targetError.Fill(
       </Implementation>
     </Method>
     <Property Name="UtcTimestamp" Id="{6ae20a8f-f2b2-4c7c-96e2-30787aae9908}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Provides the stored UTC timestamp of this exception.</summary>
+<description>Framework exceptions capture it when thrown; native exceptions capture it when GetLastException obtains their description. Cloning preserves the timestamp; reading it does not read the current clock.</description>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY FINAL UtcTimestamp : LDATE_AND_TIME]]></Declaration>
       <Get Name="Get" Id="{68e22629-e573-41bd-b400-d1cb3c398e1f}">
         <Declaration><![CDATA[]]></Declaration>

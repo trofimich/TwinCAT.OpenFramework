@@ -13,7 +13,7 @@ License: https://opensource.org/license/mit
 Input graphs must already be acyclic, including graphs from custom implementations. AddInnerException rejects paths back to this instance before adding any entries, using a StandardException without an inner cause.
 Stored entries and GetInnerException use read-only views; ownership remains with the task memory manager. Root lookup returns a borrowed read-only view of the first entry's root, or this instance when empty.
 ToError copies the aggregate message and the first entry's deepest cause into one ERROR, using the aggregate timestamps and caller-supplied severity.
-</description>
+ Dynamic copies are explicitly registered by Clone after construction; plain __NEW does not transfer ownership to the task manager.</description>
 *)
 
 {attribute 'enable_dynamic_creation'}	
@@ -109,7 +109,11 @@ END_IF]]></ST>
       </Implementation>
     </Method>
     <Property Name="ClassName" Id="{bd878664-be6a-49ac-98d9-c91ba460da65}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Provides the diagnostic type name without copying its storage.</summary>
+<description>Borrowed read-only reference. Do not modify the referenced name; keep the owning instance alive while using the reference.</description>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
       <Get Name="Get" Id="{998929b6-4b31-437f-a5e5-a39dd1d6dc61}">
         <Declaration><![CDATA[]]></Declaration>
@@ -142,7 +146,7 @@ SUPER^.Clear();]]></ST>
 <summary>Returns a distinct auto-disposed aggregate with copied metadata and its own reference array.</summary>
 <description>
 Empty aggregates also produce a distinct empty clone. Copies source metadata and timestamps; entries retain their order and their prepared dynamic causes remain shared. The task memory manager owns the clone until cleanup; callers must not delete or adopt it. Clearing the source aggregate does not clear the clone or its causes. Allocation failure uses the shared terminal memory mechanism. Descendants with additional payload must override Clone to preserve that payload and their concrete type.
-</description>
+ Registers the newly constructed instance before copying payload, outside FB_init. Registration failure releases the unregistered instance and raises a terminal error; copy failure leaves the registered instance owned by the task manager for cleanup. Custom overrides must follow the same ownership sequence.</description>
 *)
 
 METHOD Clone : IObject
@@ -155,6 +159,8 @@ END_VAR]]></Declaration>
 IF exceptionClone = 0 THEN
 	DynamicMemoryManager.RaiseAllocationFailure();
 END_IF
+
+DynamicMemoryManager.RegisterAutoDisposedObject(exceptionClone^);
 
 exceptionClone^.CopyFields(THIS^);
 
@@ -171,25 +177,29 @@ Destination must be empty and distinct from source. This helper does not clear e
 
 METHOD PROTECTED CopyFields
 VAR_IN_OUT CONSTANT
-	sourceExxception : AggregateException;	
+	sourceException : AggregateException;	
 END_VAR
 VAR
 	i : DINT;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[_SourceFullPOUName := sourceExxception.SourceFullPOUName;
-_SourcePosition := sourceExxception.SourcePosition;
-_LocalTimestamp := sourceExxception.LocalTimestamp;	
-_UtcTimestamp := sourceExxception.UtcTimestamp;	
+        <ST><![CDATA[_SourceFullPOUName := sourceException.SourceFullPOUName;
+_SourcePosition := sourceException.SourcePosition;
+_LocalTimestamp := sourceException.LocalTimestamp;	
+_UtcTimestamp := sourceException.UtcTimestamp;	
 
-FOR i := 0 TO TO_DINT(sourceExxception.InnerExceptionCount) - 1 DO
-	AddInnerException(sourceExxception.GetInnerException(i));
+FOR i := 0 TO TO_DINT(sourceException.InnerExceptionCount) - 1 DO
+	AddInnerException(sourceException.GetInnerException(i));
 END_FOR
 ]]></ST>
       </Implementation>
     </Method>
     <Property Name="Empty" Id="{d2ade75f-e0d1-434c-8840-7186cc0e6f7a}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Reports whether the aggregate has no entries.</summary>
+<description>Equivalent to a zero immediate-entry count; does not inspect whether individual entries are empty.</description>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY Empty : BOOL]]></Declaration>
       <Get Name="Get" Id="{c0b1f376-6cae-43f3-86ac-6339a2e458c0}">
         <Declaration><![CDATA[]]></Declaration>
@@ -199,7 +209,11 @@ PROPERTY Empty : BOOL]]></Declaration>
       </Get>
     </Property>
     <Method Name="FB_exit" Id="{56b27e89-e503-4505-9d3d-a810a3015a78}">
-      <Declaration><![CDATA[//!<param name="bInCopyCode">if TRUE, the exit method is called for exiting an instance that is copied afterwards (online change).</param>
+      <Declaration><![CDATA[(*!
+<summary>Clears the aggregate during destruction.</summary>
+<description>Releases its own entry storage according to Clear. Referenced exception objects remain owned by their lifetime manager; cleanup must not raise exceptions.</description>
+*)
+//!<param name="bInCopyCode">if TRUE, the exit method is called for exiting an instance that is copied afterwards (online change).</param>
 
 METHOD FB_exit : BOOL
 VAR_INPUT
@@ -214,10 +228,10 @@ END_VAR
     <Method Name="GetInnerException" Id="{208441ce-95c7-4cde-b727-858df1415649}">
       <Declaration><![CDATA[(*!
 <summary>Returns a borrowed read-only view of an entry at a zero-based index.</summary>
-<description>Returns null for an index outside the stored range. Does not clone or transfer ownership, and does not extend the entry lifetime beyond its task cleanup. The view is not an immutable snapshot; modifying an attached dynamic cause through another alias is forbidden.</description>
+<description>Returns null for an index outside the stored range. Does not clone or transfer ownership, and does not extend the entry lifetime beyond its task cleanup. The view is not an immutable snapshot; modifying an attached dynamic cause through another alias is forbidden. Descendants cannot replace this view of the stored aggregate entries; entry indexing and count refer to the same internal storage.</description>
 <param name="index">Zero-based entry index.</param>
 *)
-METHOD GetInnerException : IReadOnlyException
+METHOD FINAL GetInnerException : IReadOnlyException
 VAR_INPUT
 	index : DINT;
 END_VAR]]></Declaration>
@@ -297,8 +311,12 @@ END_IF]]></ST>
       </Implementation>
     </Method>
     <Property Name="InnerExceptionCount" Id="{734e1c9b-9746-493a-8ce4-7a56d60ff952}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
-PROPERTY InnerExceptionCount : UINT]]></Declaration>
+      <Declaration><![CDATA[(*!
+<summary>Returns the number of immediate exceptions in the aggregate.</summary>
+<description>Counts direct entries, not recursively nested causes. The aggregate supports at most 255 entries. Descendants cannot replace this view of the stored aggregate entries; entry indexing and count refer to the same internal storage.</description>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY FINAL InnerExceptionCount : UINT]]></Declaration>
       <Get Name="Get" Id="{d38858e5-3bfc-4ef7-a005-fb8d5b223e97}">
         <Declaration><![CDATA[]]></Declaration>
         <Implementation>
@@ -307,7 +325,11 @@ PROPERTY InnerExceptionCount : UINT]]></Declaration>
       </Get>
     </Property>
     <Property Name="NamespaceName" Id="{494a86d9-380f-42f2-920d-5159f570a5a6}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Provides the library namespace used in diagnostics.</summary>
+<description>Borrowed read-only reference to the compiler-initialized library namespace; no ownership transfer.</description>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
       <Get Name="Get" Id="{d3864769-88da-4cdf-9783-f994cd245ebc}">
         <Declaration><![CDATA[]]></Declaration>
@@ -317,7 +339,11 @@ PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
       </Get>
     </Property>
     <Property Name="SelfSize" Id="{174b7a67-11f4-4a03-a1cf-384fffd912fd}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Reports the byte size of this concrete instance.</summary>
+<description>Uses XSIZEOF on the instance. Does not include separately allocated payloads or prove that an arbitrary address is valid.</description>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY SelfSize : ULINT]]></Declaration>
       <Get Name="Get" Id="{0f74268c-6818-41c3-9fc5-eec449ba75e8}">
         <Declaration><![CDATA[]]></Declaration>
@@ -327,7 +353,11 @@ PROPERTY SelfSize : ULINT]]></Declaration>
       </Get>
     </Property>
     <Method Name="Throw" Id="{1b8b1f86-dba3-4290-8289-61d8dd5d28c8}">
-      <Declaration><![CDATA[METHOD Throw
+      <Declaration><![CDATA[(*!
+<summary>Throws a task-managed snapshot of the aggregate exception.</summary>
+<description>Sets the supplied source metadata and current local and UTC timestamps, then delegates to ExceptionManager.Throw. The original aggregate remains caller-owned; the registered snapshot is valid only until task cleanup. Requires a cyclic task and follows the terminal allocation-failure policy.</description>
+*)
+METHOD Throw
 VAR_INPUT
 	sourceNamespaceName : STRING;
 	sourceClassName : STRING;

@@ -1,4 +1,4 @@
-<?xml version="1.0" encoding="utf-8"?>
+﻿<?xml version="1.0" encoding="utf-8"?>
 <TcPlcObject Version="1.1.0.1">
   <POU Name="SimpleTextFileLogger" Id="{83e72a06-d888-49e4-a1fa-5926cd0560d7}" SpecialFunc="None">
     <Declaration><![CDATA[(*
@@ -10,7 +10,7 @@ License: https://opensource.org/license/mit
 {attribute 'no_explicit_call' := 'do not call this function block directly'} 
 (*!
 <summary>Formats diagnostics for text-file logging and advances file operations through cyclic execution.</summary>
-<description>Exception logging accepts IReadOnlyException and reads borrowed diagnostics without transferring ownership. Implementations must not retain exception references beyond their task cleanup. Buffered text preserves the optional message number and category prefix; oversized text is truncated to ERROR_MESSAGE capacity with a final ellipsis.</description>
+<description>Use this backend for buffered text-file output. Direct TryLog and Execute calls on one instance must belong to one task: its message queue, buffers and file-operation state are not synchronized for concurrent access. For callers in multiple tasks, use QueuedLogger and let its owner task service this backend; do not bypass the wrapper with concurrent direct calls. Separate instances writing independently must use separate output files. Cyclic Execute is required to advance writing and cleanup. Exception logging accepts IReadOnlyException and reads borrowed diagnostics without transferring ownership. Implementations must not retain exception references beyond their task cleanup. FAILED is terminal for this instance: no automatic retry or recovery is provided. Continue calling Execute after failure to discard queued messages, cancel active tasks and release the send buffer once file operations have finished. Pending messages are not retried. The instance must remain alive during cleanup. Busy reports pending initialization, messages, file operations or failure cleanup; an idle open file alone does not make it TRUE. Busy = FALSE does not mean the file handle is closed. In FAILED state or when the per-instance message queue reaches Parameters.MAX_PENDING_LOG_MESSAGES, all TryLog methods return FALSE before formatting or queuing new diagnostics. Full-queue rejection preserves already accepted messages; the current send batch is separate from this limit. Buffered text preserves the optional message number and category prefix; oversized text is truncated to ERROR_MESSAGE capacity with a final ellipsis. TryLog methods and Execute do not propagate exceptions. Failed admission returns FALSE; Execute failures enter FAILED and require further cleanup calls. The terminal allocation latch is preserved for the task boundary.</description>
 *)
 FUNCTION_BLOCK SimpleTextFileLogger EXTENDS TOF_Core.Object IMPLEMENTS TOF_Core.ILogger
 VAR
@@ -20,6 +20,8 @@ VAR
 	_State : SIMPLE_TEXT_FILE_LOGGER_STATE;
 	{attribute 'hide'} 
 	_ErrorMessage : TOF_Core.ERROR_MESSAGE;
+	{attribute 'hide'}
+	_CleanupPending : BOOL;
 	
 	_LogFilePrefix : STRING(32);
 
@@ -41,7 +43,7 @@ VAR
 	{attribute 'hide'} 
 	_LogNewMessageException : TOF_Core.StandardException;
 	{attribute 'hide'} 
-	_FilePathOverflowException : TOF_Core.StringOwerflowException;	
+	_FilePathOverflowException : TOF_Core.StringOverflowException;	
 END_VAR]]></Declaration>
     <Implementation>
       <ST><![CDATA[]]></ST>
@@ -55,6 +57,27 @@ PROPERTY AmsNetId : Tc2_System.T_AmsNetID]]></Declaration>
         <Declaration><![CDATA[]]></Declaration>
         <Implementation>
           <ST><![CDATA[AmsNetId := _CreateDirectoryIfNotExists.AmsNetId;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="Busy" Id="{592a2ef0-f70e-46be-b435-2b32d7b1865a}">
+      <Declaration><![CDATA[(*!
+<summary>Reports unfinished initialization, message processing, file operations or failure cleanup.</summary>
+<description>TRUE before initialization finishes, while messages or file tasks remain pending, during file acquisition or release, and until failure cleanup completes. An open file waiting for new messages does not make the logger busy. FALSE does not certify successful writes or a closed file handle. Continue Execute while cleanup is pending after FAILED.</description>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY Busy : BOOL]]></Declaration>
+      <Get Name="Get" Id="{369a6e60-cede-41f5-8312-2b57e21b7316}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[Busy := _State = SIMPLE_TEXT_FILE_LOGGER_STATE.INITIAL
+	OR_ELSE _State = SIMPLE_TEXT_FILE_LOGGER_STATE.CREATING_DIRECTORY
+	OR_ELSE _CleanupPending
+	OR_ELSE _MessageBuffer.Length > 0
+	OR_ELSE _FileContentManager.PendingTaskCount > 0
+	OR_ELSE _WriteBytesTask.State.Running
+	OR_ELSE _WriteBytesTask.FileOperationInProgress
+	OR_ELSE (_FileContentManager.State.Running AND_THEN NOT _FileContentManager.RunningSubstate.Processing);]]></ST>
         </Implementation>
       </Get>
     </Property>
@@ -123,8 +146,8 @@ PROPERTY ErrorMessage : REFERENCE TO TOF_Core.ERROR_MESSAGE]]></Declaration>
     </Property>
     <Method Name="Execute" Id="{17cdfc70-e5ab-42fe-ab86-0d76e3d26166}">
       <Declaration><![CDATA[(*!
-<summary>Prepares diagnostic text locally before passing it to read-only logging or exception parameters.</summary>
-<description>Computed diagnostic strings are held in local buffers for the duration of the receiving call.</description>
+<summary>Advances initialization and file writing, or cleanup after terminal failure.</summary>
+<description>Does not propagate exceptions. On the first failure, enters FAILED and attempts to store the diagnostic. If diagnostic extraction fails, stores a fixed fallback message without allocating an exception. Subsequent calls discard queued messages and advance cancellation without starting new writes. The send buffer is released only after its task and file operation have finished and the manager is no longer running. Cleanup exceptions are caught; cleanup remains pending for a later call without replacing the original ErrorMessage or recovering the logger. Fatal allocation state remains latched for the task boundary.</description>
 *)
 METHOD Execute
 VAR	
@@ -136,6 +159,39 @@ VAR
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[__TRY
+	IF _State = SIMPLE_TEXT_FILE_LOGGER_STATE.FAILED THEN
+		IF NOT _CleanupPending THEN
+			RETURN;
+		END_IF
+
+		_MessageBuffer.Clear();
+
+		IF _CreateDirectoryIfNotExists.State.Running THEN
+			_CreateDirectoryIfNotExists.Cancel();
+			_CreateDirectoryIfNotExists.Execute();
+		END_IF
+
+		IF _FileContentManager.State.Running THEN
+			_FileContentManager.Cancel();
+			_FileContentManager.Execute();
+		END_IF
+
+		IF NOT _CreateDirectoryIfNotExists.State.Running
+			AND_THEN NOT _FileContentManager.State.Running
+			AND_THEN NOT _WriteBytesTask.State.Running
+			AND_THEN NOT _WriteBytesTask.FileOperationInProgress
+		THEN
+			_FileContentManager.ClearWaitingTasks();
+
+			_WriteBytesTask.SourceBuffer := 0;
+			_WriteBytesTask.BytesCountToWrite := 0;
+			_SendBuffer.Clear(releaseDynamicMemory := TRUE);
+			_CleanupPending := FALSE;
+		END_IF
+
+		RETURN;
+	END_IF
+
 	CASE _State OF
 		SIMPLE_TEXT_FILE_LOGGER_STATE.INITIAL:				
 			_CreateDirectoryIfNotExists.Start();
@@ -162,16 +218,20 @@ END_VAR]]></Declaration>
 				_CreateDirectoryException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), formattedExceptionMessage);
 			END_IF	
 			
-			tryLogNewMessages();
+			processPendingMessages();
 	END_CASE
 __CATCH(exceptionCode)
-	_State := SIMPLE_TEXT_FILE_LOGGER_STATE.FAILED;
-	
-	exception := TOF_Core.ExceptionManager.GetLastException(exceptionCode, NamespaceName, __POUNAME(), __POSITION());
-	
-	_ErrorMessage := exception.GetMessage();
-	
-	TOF_Core.ExceptionManager.Throw(exception);
+	IF _State <> SIMPLE_TEXT_FILE_LOGGER_STATE.FAILED THEN
+		_State := SIMPLE_TEXT_FILE_LOGGER_STATE.FAILED;
+		_CleanupPending := TRUE;
+
+		__TRY
+			exception := TOF_Core.ExceptionManager.GetLastException(exceptionCode, NamespaceName, __POUNAME(), __POSITION());
+			_ErrorMessage := exception.GetMessage();
+		__CATCH
+			_ErrorMessage := "File logger failed; diagnostic information is unavailable.";
+		__ENDTRY
+	END_IF
 __ENDTRY]]></ST>
       </Implementation>
     </Method>
@@ -226,16 +286,6 @@ PROPERTY LogFilePrefix : STRING(32)]]></Declaration>
         </Implementation>
       </Get>
     </Property>
-    <Property Name="Logging" Id="{592a2ef0-f70e-46be-b435-2b32d7b1865a}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
-PROPERTY Logging : BOOL]]></Declaration>
-      <Get Name="Get" Id="{369a6e60-cede-41f5-8312-2b57e21b7316}">
-        <Declaration><![CDATA[]]></Declaration>
-        <Implementation>
-          <ST><![CDATA[Logging := _MessageBuffer.Length > 0 OR_ELSE _WriteBytesTask.State.Running;]]></ST>
-        </Implementation>
-      </Get>
-    </Property>
     <Property Name="MaxRecordsPerFile" Id="{beb3d3d9-cff4-4690-9465-35ffe8503203}" FolderPath="Settings\">
       <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
 PROPERTY MaxRecordsPerFile : UINT]]></Declaration>
@@ -267,7 +317,11 @@ PROPERTY SelfSize : ULINT]]></Declaration>
       </Get>
     </Property>
     <Property Name="State" Id="{3a575e6f-bb16-4315-8c99-6e30e5beab57}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Reports initialization, logging or terminal failure state.</summary>
+<description>FAILED does not recover automatically and rejects new diagnostics. It does not by itself certify that pending file operations have finished or buffered memory has been released.</description>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY State : SIMPLE_TEXT_FILE_LOGGER_STATE]]></Declaration>
       <Get Name="Get" Id="{3db3f673-1f63-4a8b-861c-f15fab2f1187}">
         <Declaration><![CDATA[]]></Declaration>
@@ -287,7 +341,13 @@ PROPERTY Timeout : TIME]]></Declaration>
       </Get>
     </Property>
     <Method Name="TryLogError" Id="{1ef519f1-badf-441c-b011-cbd27899462a}">
-      <Declaration><![CDATA[METHOD TryLogError : BOOL
+      <Declaration><![CDATA[(*!
+<summary>Formats an error and queues its text for later file writing.</summary>
+<description>Returns FALSE in FAILED state or when the message queue is full before reading or formatting the error. An invalid reference is ignored. Otherwise delegates to TryLogMessage; TRUE confirms buffering, not completion of the file write. Exceptions are caught and reported as FALSE without further logging. The terminal allocation latch is preserved.</description>
+<param name="error">Borrowed error to format.</param>
+<param name="messageNumber">Optional borrowed number to include in the buffered text.</param>
+*)
+METHOD TryLogError : BOOL
 VAR_INPUT
 	error : REFERENCE TO TOF_Core.ERROR;
 	messageNumber : REFERENCE TO ULINT := 0;
@@ -296,19 +356,28 @@ VAR
 	message : TOF_Core.ERROR_MESSAGE;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[IF NOT __ISVALIDREF(error) THEN
-	RETURN;
-END_IF
+        <ST><![CDATA[__TRY
+	IF _State = SIMPLE_TEXT_FILE_LOGGER_STATE.FAILED OR_ELSE _MessageBuffer.Length >= Parameters.MAX_PENDING_LOG_MESSAGES THEN
+		TryLogError := FALSE;
+		RETURN;
+	END_IF
 
-message := error.ToString(TOF_Core.ERROR_SOURCE_DISPLAY_MODE.HIDDEN, TOF_Core.TIMESTAMP_DISPLAY_MODE.LOCAL);
+	IF NOT __ISVALIDREF(error) THEN
+		RETURN;
+	END_IF
 
-TryLogError := TryLogMessage(SEL(error.Severity = TOF_Core.ERROR_SEVERITY.CRITICAL, TOF_Core.LOG_CATEGORY.ERROR, TOF_Core.LOG_CATEGORY.CRITICAL_ERROR), message, messageNumber);]]></ST>
+	message := error.ToString(TOF_Core.ERROR_SOURCE_DISPLAY_MODE.HIDDEN, TOF_Core.TIMESTAMP_DISPLAY_MODE.LOCAL);
+
+	TryLogError := TryLogMessage(SEL(error.Severity = TOF_Core.ERROR_SEVERITY.CRITICAL, TOF_Core.LOG_CATEGORY.ERROR, TOF_Core.LOG_CATEGORY.CRITICAL_ERROR), message, messageNumber);
+__CATCH
+	TryLogError := FALSE;
+__ENDTRY]]></ST>
       </Implementation>
     </Method>
     <Method Name="TryLogException" Id="{e7bb0a19-d38b-4050-ac16-1d13038e54cb}">
       <Declaration><![CDATA[(*!
 <summary>Attempts to log diagnostic information from a read-only exception view.</summary>
-<description>Borrows the exception for the call without clearing it or taking ownership. The exception and its inner causes must remain live while their diagnostics are read. Logging does not extend their lifetime.</description>
+<description>Borrows the exception for the call without clearing it or taking ownership. The exception and its inner causes must remain live while their diagnostics are read. Logging does not extend their lifetime. Returns FALSE in FAILED state or when the message queue is full before reading or formatting the exception. Otherwise TRUE confirms buffering, not completion of the file write. Exceptions are caught and reported as FALSE without further logging. The terminal allocation latch is preserved.</description>
 <param name="exception">Exception view to read; null is ignored.</param>
 <param name="severity">Severity used to select the log category.</param>
 *)
@@ -322,19 +391,28 @@ VAR
 	message : TOF_Core.ERROR_MESSAGE;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[IF exception = 0 THEN
-	RETURN;
-END_IF
+        <ST><![CDATA[__TRY
+	IF _State = SIMPLE_TEXT_FILE_LOGGER_STATE.FAILED OR_ELSE _MessageBuffer.Length >= Parameters.MAX_PENDING_LOG_MESSAGES THEN
+		TryLogException := FALSE;
+		RETURN;
+	END_IF
 
-message := exception.GetMessage(TRUE, TOF_Core.TIMESTAMP_DISPLAY_MODE.LOCAL);
+	IF exception = 0 THEN
+		RETURN;
+	END_IF
 
-TryLogException := TryLogMessage(SEL(severity = TOF_Core.ERROR_SEVERITY.CRITICAL, TOF_Core.LOG_CATEGORY.ERROR, TOF_Core.LOG_CATEGORY.CRITICAL_ERROR), message, messageNumber);]]></ST>
+	message := exception.GetMessage(TRUE, TOF_Core.TIMESTAMP_DISPLAY_MODE.LOCAL);
+
+	TryLogException := TryLogMessage(SEL(severity = TOF_Core.ERROR_SEVERITY.CRITICAL, TOF_Core.LOG_CATEGORY.ERROR, TOF_Core.LOG_CATEGORY.CRITICAL_ERROR), message, messageNumber);
+__CATCH
+	TryLogException := FALSE;
+__ENDTRY]]></ST>
       </Implementation>
     </Method>
     <Method Name="TryLogMessage" Id="{f95238b0-2f26-4019-bd69-7afd783a5817}">
       <Declaration><![CDATA[(*!
 <summary>Formats a diagnostic and queues its text for later file writing.</summary>
-<description>Formats an optional message number followed by the category and message. Preserves the prefixes and marks truncated text with an ellipsis. Formatting uses local storage without raising a size-overflow exception; creating and queuing the owned text still requires memory. Returns TRUE after successful insertion into the message buffer; this confirms acceptance, not completion of the asynchronous file write.</description>
+<description>Returns FALSE in FAILED state or when the queue reaches Parameters.MAX_PENDING_LOG_MESSAGES, before formatting or allocating buffered text. Queue rejection does not discard previously accepted messages. Otherwise formats an optional message number followed by the category and message. Preserves the prefixes and marks truncated text with an ellipsis. Formatting uses local storage without raising a size-overflow exception; creating and queuing the owned text still requires memory. Returns TRUE after successful insertion into the message buffer; this confirms acceptance, not completion of the asynchronous file write. Exceptions are caught and reported as FALSE without further logging. The terminal allocation latch is preserved. An owned text copy is released if insertion fails before ownership transfers to the queue.</description>
 *)
 METHOD TryLogMessage : BOOL
 VAR_INPUT
@@ -348,31 +426,53 @@ VAR_INPUT
 END_VAR
 VAR
 	textToLog : TOF_Core.ERROR_MESSAGE;
+	queuedMessage : TOF_Core.GENERIC_VALUE;
 	messageCharacters : POINTER TO WORD;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[IF __ISVALIDREF(messageNumber) THEN
-	textToLog := TOF_Core.WideStrings.Concat255(TO_WSTRING(TOF_Core.Exceptions.MESSAGE_NUMBER_PREFIX), TO_WSTRING(messageNumber), TO_WSTRING(TOF_Core.Exceptions.MESSAGE_NUMBER_SUFFIX));
-END_IF
+        <ST><![CDATA[__TRY
+	IF _State = SIMPLE_TEXT_FILE_LOGGER_STATE.FAILED OR_ELSE _MessageBuffer.Length >= Parameters.MAX_PENDING_LOG_MESSAGES THEN
+		TryLogMessage := FALSE;
+		RETURN;
+	END_IF
 
-TOF_Core.WideStrings.AppendToTarget255(textToLog, "[", TO_WSTRING(category), "] ");
+	IF __ISVALIDREF(messageNumber) THEN
+		textToLog := TOF_Core.WideStrings.Concat255(TO_WSTRING(TOF_Core.Exceptions.MESSAGE_NUMBER_PREFIX), TO_WSTRING(messageNumber), TO_WSTRING(TOF_Core.Exceptions.MESSAGE_NUMBER_SUFFIX));
+	END_IF
 
-IF NOT TOF_Core.WideStrings.TryAppendToTarget(textToLog, message) THEN
-	messageCharacters := ADR(textToLog);
-	messageCharacters[SIZEOF(textToLog) / TOF_Core.WideStrings.CharSize - 2] := TOF_Core.WideStrings.ELLIPSIS;
-END_IF
+	TOF_Core.WideStrings.AppendToTarget255(textToLog, "[", TO_WSTRING(category), "] ");
 
-_MessageBuffer.AppendGeneric(TOF_Core.GenericValueFactory.FromWStringValue(textToLog));
+	IF NOT TOF_Core.WideStrings.TryAppendToTarget(textToLog, message) THEN
+		messageCharacters := ADR(textToLog);
+		messageCharacters[SIZEOF(textToLog) / TOF_Core.WideStrings.CharSize - 2] := TOF_Core.WideStrings.ELLIPSIS;
+	END_IF
 
-TryLogMessage := TRUE;]]></ST>
+	queuedMessage := TOF_Core.GenericValueFactory.FromWStringValue(textToLog);
+	_MessageBuffer.AppendGeneric(queuedMessage);
+	queuedMessage.Reset();
+
+	TryLogMessage := TRUE;
+__CATCH
+	__TRY
+		queuedMessage.Release();
+	__CATCH
+		// Do not propagate a secondary cleanup exception.
+	__ENDTRY
+
+	TryLogMessage := FALSE;
+__ENDTRY]]></ST>
       </Implementation>
     </Method>
-    <Method Name="tryLogNewMessages" Id="{b3206f74-587e-4877-b310-0e0e64ffdebf}" FolderPath="Service memebers\">
+    <Method Name="processPendingMessages" Id="{b3206f74-587e-4877-b310-0e0e64ffdebf}" FolderPath="Service memebers\">
       <Declaration><![CDATA[(*!
-<summary>Prepares diagnostic text locally before passing it to read-only logging or exception parameters.</summary>
-<description>Computed diagnostic strings are held in local buffers for the duration of the receiving call.</description>
+<summary>Transfers queued messages into a batch and schedules its asynchronous file write.</summary>
+<description>Called by Execute. Leaves messages queued while a previous file task or file rotation is pending.
+Removes messages from the queue as they are copied into the send buffer, up to the per-file record limit.
+The send buffer must remain alive until the write operation finishes. Invalid write-task state and
+failures from nested operations propagate to Execute for its failure handling and cleanup.
+Returning does not mean that the messages have been written to the file.</description>
 *)
-METHOD PRIVATE tryLogNewMessages
+METHOD PRIVATE processPendingMessages
 VAR
 	formattedExceptionMessage : WSTRING(255);
 
@@ -417,7 +517,7 @@ IF _FileContentManager.FilePath = '' OR_ELSE _RecordsPerFile >= _MaxRecordsPerFi
 	
 	_FileContentManager.Start();
 	
-	_SendBuffer.AppendData(ADR(TOF_Core.WideStrings.ByteOrderMask), SIZEOF(TOF_Core.WideStrings.ByteOrderMask));
+	_SendBuffer.AppendData(ADR(TOF_Core.WideStrings.ByteOrderMark), SIZEOF(TOF_Core.WideStrings.ByteOrderMark));
 END_IF
 
 WHILE _MessageBuffer.Length > 0 DO

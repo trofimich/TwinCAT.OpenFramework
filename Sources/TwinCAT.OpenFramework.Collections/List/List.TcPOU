@@ -1,4 +1,4 @@
-<?xml version="1.0" encoding="utf-8"?>
+﻿<?xml version="1.0" encoding="utf-8"?>
 <TcPlcObject Version="1.1.0.1">
   <POU Name="List" Id="{423efb90-4c6a-41e3-8889-647ff943b33e}" SpecialFunc="None">
     <Declaration><![CDATA[(*
@@ -12,6 +12,10 @@ License: https://opensource.org/license/mit
 <description>
 CreateEnumerator allocates an independent cursor owned by its caller.
 The collection must remain alive while that cursor is used.
+Dynamic growth preserves the existing buffer on allocation failure and invokes the terminal allocation-failure mechanism.
+Sort passes generic descriptors directly to its borrowed ordering strategy, preserving OBJECT and USER_DEFINED categories.
+Successful insertion transfers disposal responsibility for owned payload; borrowed payload must remain alive while stored. The caller-side descriptor copy is not reset and must not be released again after transfer. Independent owning aliases and overlapping owned allocations are unsupported. Entries retain order and duplicates. Same-allocation replacement preserves ownership without releasing retained storage. Get, FindSingle and enumerators only borrow payload. ContainsGeneric defaults to releasing its query. Validators are borrowed for the collection lifetime. No locking or mutation-version checks are implemented; callbacks that mutate the collection can invalidate in-progress operations.
+Generic lookup with requested query release also attempts cleanup on lookup failure before propagating the captured exception; terminal OOM takes precedence.
 </description>
 *)
 
@@ -23,7 +27,8 @@ VAR_GENERIC CONSTANT
 END_VAR
 EXTENDS TOF_Core.Object IMPLEMENTS IList
 VAR_INPUT
-	DefaultDynamicAllocationElemetCount : BYTE := 10;	
+	//! <summary>Number of slots added when dynamic storage is full; must be positive when growth is required.</summary>
+	DefaultDynamicAllocationElementCount : BYTE := 10;	
 END_VAR
 VAR
 	{attribute 'hide'} 
@@ -46,36 +51,67 @@ END_VAR]]></Declaration>
       <ST><![CDATA[]]></ST>
     </Implementation>
     <Folder Name="Service methods" Id="{3188279f-4192-4144-9219-d1281be18b24}" />
-    <Method Name="AllocateMemory" Id="{7805ad4a-1088-4228-99dd-d8b7fe4579c3}">
-      <Declaration><![CDATA[METHOD PROTECTED AllocateMemory 
+    <Method Name="AllocateMemory" Id="{7805ad4a-1088-4228-99dd-d8b7fe4579c3}" FolderPath="Service methods\">
+      <Declaration><![CDATA[(*!
+<summary>Grows the dynamic element buffer while preserving existing values.</summary>
+<description>
+Static instances return without allocation. A positive increment must fit DINT capacity and the UDINT allocation-byte limit; invalid ranges raise ArgumentOutOfRangeException before storage changes. A null allocation invokes the terminal allocation-failure mechanism before copying or deleting the old buffer. Existing descriptors are moved without cloning payload; incoming ownership is not accepted by this helper.
+ Descendants cannot override this storage operation; capacity, indexing and disposal remain governed by this collection implementation.</description>
+*)
+METHOD PROTECTED FINAL AllocateMemory 
 VAR_INPUT
 	elementCount : TOF_Core.DINT_LENGTH;
 END_VAR
-VAR	
+VAR CONSTANT
+	ENTRY_ALLOCATION_SIZE : ULINT := XSIZEOF(TOF_Core.GENERIC_VALUE);
+END_VAR
+VAR
 	newMemory : POINTER TO TOF_Core.GENERIC_VALUE;
+	newCapacity : ULINT;
+
+	rangeException : TOF_Core.ArgumentOutOfRangeException;
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[IF NOT Dynamic THEN
 	RETURN;
 END_IF
 
-newMemory := __NEW(BYTE, TO_UDINT(SIZEOF(TOF_Core.GENERIC_VALUE) * (_DynamicCapacity + elementCount)));
-
-IF _Length > 0 THEN
-	Tc2_System.MEMCPY(newMemory, _Array, TO_UDINT(SIZEOF(TOF_Core.GENERIC_VALUE) * _Length));
+IF elementCount <= TOF_Core.SignedInt32.ZERO THEN
+	rangeException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), 'elementCount', elementCount);
 END_IF
- 
+
+newCapacity := TO_ULINT(_DynamicCapacity) + TO_ULINT(elementCount);
+IF newCapacity > TO_ULINT(TOF_Core.SignedInt32.MAX_VALUE)
+	OR_ELSE newCapacity > TO_ULINT(TOF_Core.UnsignedInt32.MAX_VALUE) / ENTRY_ALLOCATION_SIZE
+THEN
+	rangeException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), 'capacity', newCapacity);
+END_IF
+
+newMemory := __NEW(BYTE, TO_UDINT(ENTRY_ALLOCATION_SIZE * newCapacity));
+IF newMemory = 0 THEN
+	TOF_Core.DynamicMemoryManager.RaiseAllocationFailure();
+END_IF
+
+IF _Length > TOF_Core.SignedInt32.ZERO THEN
+	Tc2_System.MEMCPY(newMemory, _Array, TO_UDINT(ENTRY_ALLOCATION_SIZE * TO_ULINT(_Length)));
+END_IF
+
 IF _Array <> 0 THEN
 	__DELETE(_Array);
 END_IF
 
-_DynamicCapacity := _DynamicCapacity + elementCount;
-
+_DynamicCapacity := TO_DINT(newCapacity);
 _Array := newMemory;]]></ST>
       </Implementation>
     </Method>
     <Method Name="AppendCopy" Id="{c48f84f5-3206-4f8e-a06b-95fdd5877efa}">
-      <Declaration><![CDATA[METHOD AppendCopy : IList
+      <Declaration><![CDATA[(*!
+<summary>Copies a value and appends the owned descriptor.</summary>
+<description>
+Borrows the original during the call. isObject = TRUE requires a live Object FB instance implementing ICloneable; other data is copied as bytes without recursively cloning references. A prepared copy is released if insertion fails before acceptance; exceptions propagate. Engine-managed exception objects are unsupported. index is meaningful only on success.
+ Descendants cannot override this storage operation; capacity, indexing and disposal remain governed by this collection implementation.</description>
+*)
+METHOD FINAL AppendCopy : IList
 VAR_INPUT
 	value : ANY;
 	isObject : BOOL := FALSE;
@@ -100,7 +136,13 @@ __ENDTRY]]></ST>
       </Implementation>
     </Method>
     <Method Name="AppendGeneric" Id="{f1ff6a71-50a0-45d9-ae86-164a44b67bf8}">
-      <Declaration><![CDATA[METHOD AppendGeneric : IList
+      <Declaration><![CDATA[(*!
+<summary>Appends a descriptor to the list.</summary>
+<description>
+Successful insertion transfers disposal responsibility for owned payload; borrowed payload must remain alive while stored. The caller-side descriptor copy is not reset and must not be released again after transfer. Independent owning aliases and overlapping owned allocations are unsupported. Delegates to InsertGeneric; index is meaningful only on success.
+ Descendants cannot override this storage operation; capacity, indexing and disposal remain governed by this collection implementation.</description>
+*)
+METHOD FINAL AppendGeneric : IList
 VAR_INPUT
 	value : TOF_Core.GENERIC_VALUE;
 END_VAR
@@ -114,7 +156,13 @@ AppendGeneric := InsertGeneric(index, value);]]></ST>
       </Implementation>
     </Method>
     <Property Name="Capacity" Id="{f88ebbc6-043e-4384-9aab-efeb366abd1b}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Reports the currently allocated number of slots.</summary>
+<description>
+Units are bytes for ByteList and entries for other collections. Static capacity is fixed; dynamic capacity can change on growth or clearing. This is not a guarantee that the next allocation succeeds.
+</description>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY FINAL Capacity : TOF_Core.DINT_LENGTH]]></Declaration>
       <Get Name="Get" Id="{e0e73894-ad23-446a-99c0-aacf7f854d6b}">
         <Declaration><![CDATA[]]></Declaration>
@@ -124,7 +172,13 @@ PROPERTY FINAL Capacity : TOF_Core.DINT_LENGTH]]></Declaration>
       </Get>
     </Property>
     <Property Name="ClassName" Id="{33e07dae-fed5-4e1d-8f43-eee6214a3816}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Provides the concrete type name for diagnostics.</summary>
+<description>
+Borrowed read-only reference to instance metadata; no ownership transfer.
+</description>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
       <Get Name="Get" Id="{f6501ffd-91a8-433d-945c-613d26b30c47}">
         <Declaration><![CDATA[]]></Declaration>
@@ -134,7 +188,13 @@ PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
       </Get>
     </Property>
     <Method Name="Clear" Id="{6eeb2dd8-b2fb-4bd3-af28-3d4655f329b4}">
-      <Declaration><![CDATA[METHOD Clear : IList
+      <Declaration><![CDATA[(*!
+<summary>Removes all entries and releases dynamic backing storage.</summary>
+<description>
+Owned payload is released best effort through GENERIC_VALUE.Release; borrowed storage is not freed. Static capacity and the borrowed validator are retained. Dynamic capacity becomes zero. Returns this collection and invalidates positions and views. Cleanup callbacks must not reenter mutation.
+ Descendants cannot override this storage operation; capacity, indexing and disposal remain governed by this collection implementation.</description>
+*)
+METHOD FINAL Clear : IList
 VAR
 	i : DINT;
 END_VAR]]></Declaration>
@@ -154,7 +214,13 @@ END_IF]]></ST>
       </Implementation>
     </Method>
     <Method Name="Contains" Id="{6470b115-1732-45d7-86e6-432cfb852dab}">
-      <Declaration><![CDATA[METHOD Contains : BOOL
+      <Declaration><![CDATA[(*!
+<summary>Searches for a value using default generic equality.</summary>
+<description>
+Borrows the ANY argument during a linear search without cloning or releasing it. isObject = TRUE means a live Object FB instance, not a pointer or interface variable. Equality exceptions propagate; callbacks that mutate the collection can invalidate traversal.
+ Descendants cannot override this storage operation; capacity, indexing and disposal remain governed by this collection implementation.</description>
+*)
+METHOD FINAL Contains : BOOL
 VAR_INPUT
 	value : ANY;
 	isObject : BOOL := FALSE;
@@ -175,24 +241,51 @@ END_FOR]]></ST>
       </Implementation>
     </Method>
     <Method Name="ContainsGeneric" Id="{4f27da2f-dece-43c4-8992-282ab34ccb18}">
-      <Declaration><![CDATA[METHOD ContainsGeneric : BOOL
+      <Declaration><![CDATA[(*!
+<summary>Searches for an equal generic value and optionally releases the query.</summary>
+<description>
+Uses GENERIC_VALUE.Equals in a linear search. releaseValue defaults to TRUE: after a completed search, Release is called on the local query copy, including on a miss. Caller-side aliases are not reset. The query must not own storage retained by the collection. Requested release is attempted after both successful lookup and lookup failure. Before cleanup, the original framework exception is retained and a borrowed static system exception is cloned to preserve its code, catch point and timestamps across cleanup callbacks. The captured exception is then propagated through ExceptionManager.Throw in the current cyclic task; native errors use the framework SystemException representation. If capturing the system exception fails with terminal OOM, query cleanup is still attempted and terminal OOM takes precedence. Terminal allocation state is never cleared. Release is best effort and does not prove successful deallocation. Cleanup callbacks must not reenter collection mutation.
+ Descendants cannot override this storage operation; capacity, indexing and disposal remain governed by this collection implementation.</description>
+*)
+METHOD FINAL ContainsGeneric : BOOL
 VAR_INPUT
 	value : TOF_Core.GENERIC_VALUE;
 	releaseValue : BOOL := TRUE;
 END_VAR
 VAR
+	exceptionCode : __SYSTEM.ExceptionCode;
+	caughtException : TOF_Core.IException;
+
 	i : DINT;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[FOR i := 0 TO _Length - 1 DO
-	IF _Array[i].Equals(value) THEN
-		ContainsGeneric := TRUE;
-		EXIT;
-	END_IF
-END_FOR
+        <ST><![CDATA[__TRY
+	FOR i := 0 TO _Length - 1 DO
+		IF _Array[i].Equals(value) THEN
+			ContainsGeneric := TRUE;
+			EXIT;
+		END_IF
+	END_FOR
+__CATCH(exceptionCode)
+	caughtException := TOF_Core.ExceptionManager.GetLastException(exceptionCode, NamespaceName, __POUNAME(), __POSITION());
+__ENDTRY
 
 IF releaseValue THEN
+	IF caughtException <> 0 AND_THEN NOT caughtException.IsDynamicInstance THEN
+		__TRY
+			__QUERYINTERFACE(caughtException.Clone(), caughtException);
+		__CATCH(exceptionCode)
+			value.Release();
+
+			TOF_Core.ExceptionManager.ReThrowLastException(exceptionCode := exceptionCode, catchPointNamespaceName := NamespaceName, catchPointPOUName := __POUNAME(), catchPointPosition := __POSITION());
+		__ENDTRY
+	END_IF
+
 	value.Release();
+END_IF
+
+IF caughtException <> 0 THEN
+	TOF_Core.ExceptionManager.Throw(caughtException);
 END_IF]]></ST>
       </Implementation>
     </Method>
@@ -220,7 +313,13 @@ CreateEnumerator := enumerator^;]]></ST>
       </Implementation>
     </Method>
     <Property Name="Dynamic" Id="{166b951e-511c-4d32-bb47-240a0b602e17}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Reports whether storage can grow dynamically.</summary>
+<description>
+Static capacity zero selects dynamic storage. Dynamic collections can still fail to allocate.
+</description>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY FINAL Dynamic : BOOL]]></Declaration>
       <Get Name="Get" Id="{629e79ca-4190-4ac7-928c-69e20f8bf579}">
         <Declaration><![CDATA[]]></Declaration>
@@ -230,7 +329,13 @@ PROPERTY FINAL Dynamic : BOOL]]></Declaration>
       </Get>
     </Property>
     <Property Name="Empty" Id="{6c336543-2ac9-4adb-b317-6015c15c963c}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Reports whether the collection has no entries.</summary>
+<description>
+Reflects Length; not a check of payload lifetime or memory health.
+</description>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY FINAL Empty : BOOL]]></Declaration>
       <Get Name="Get" Id="{cbbea261-31d9-4fda-a46a-9b7d9838e2ea}">
         <Declaration><![CDATA[]]></Declaration>
@@ -240,7 +345,13 @@ PROPERTY FINAL Empty : BOOL]]></Declaration>
       </Get>
     </Property>
     <Method Name="FB_exit" Id="{8d8b7b19-3218-490a-a08e-e708f6895db1}">
-      <Declaration><![CDATA[//!<param name="bInCopyCode">if TRUE, the exit method is called for exiting an instance that is copied afterwards (online change).</param>
+      <Declaration><![CDATA[(*!
+<summary>Releases owned payload and backing storage during destruction.</summary>
+<description>
+Calls Clear; lifecycle methods and payload cleanup callbacks must not raise exceptions or reenter mutation. Payload release is best effort, not proof of successful destruction. No separate copy-code ownership handoff is implemented.
+</description>
+*)
+//!<param name="bInCopyCode">if TRUE, the exit method is called for exiting an instance that is copied afterwards (online change).</param>
 
 METHOD FB_exit : BOOL
 VAR_INPUT
@@ -252,7 +363,13 @@ END_VAR
       </Implementation>
     </Method>
     <Method Name="FB_init" Id="{7bc30a89-0227-48d6-bfc1-e831cfff4350}">
-      <Declaration><![CDATA[//!<param name="bInitRetains">if TRUE, the retain variables are initialized (warm start / cold start)</param>
+      <Declaration><![CDATA[(*!
+<summary>Binds the optional validator and inline storage during initialization.</summary>
+<description>
+The validator is borrowed and must remain alive while used; it is not invoked here. Static storage is bound without allocation. Lifecycle methods must not raise exceptions. No explicit online-change relocation repair is implemented.
+</description>
+*)
+//!<param name="bInitRetains">if TRUE, the retain variables are initialized (warm start / cold start)</param>
 
 //!<param name="bInCopyCode">if TRUE, the instance afterwards gets moved into the copy code (online change)</param>
 
@@ -274,7 +391,13 @@ END_IF]]></ST>
       </Implementation>
     </Method>
     <Method Name="FindSingle" Id="{5bd8df97-f8f3-46ed-97e0-2baa71205501}">
-      <Declaration><![CDATA[METHOD FindSingle : BOOL
+      <Declaration><![CDATA[(*!
+<summary>Finds a predicate match in the requested traversal direction.</summary>
+<description>
+skip counts matches, not visited entries. A null predicate or no match returns FALSE; outputs are meaningful only on TRUE. The result is borrowed even if IsMemoryOwner is TRUE. Predicate input uses AsAnyType without preserving the explicit generic OBJECT category. Predicate exceptions propagate; callbacks must not mutate the traversed collection.
+ Descendants cannot override this storage operation; capacity, indexing and disposal remain governed by this collection implementation.</description>
+*)
+METHOD FINAL FindSingle : BOOL
 VAR_INPUT
 	predicate : TOF_Core.IPredicate;
 	skip : UDINT := 0;
@@ -293,7 +416,7 @@ VAR
 	
 	currentValue : __SYSTEM.AnyType;
 
-	skiped : UDINT := 0;
+	skippedMatchCount : UDINT := 0;
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[index := 0;
@@ -310,20 +433,26 @@ FOR i := startSearchIndex TO maxSearchIndex BY indexStep DO
 	currentValue := _Array[i].AsAnyType();
 	
 	IF predicate.Check(currentValue) THEN
-		IF skip = skiped THEN
+		IF skip = skippedMatchCount THEN
 			value := _Array[i];
 			index := i;
 			FindSingle := TRUE;
 			RETURN;
 		ELSE
-			skiped := skiped + 1;
+			skippedMatchCount := skippedMatchCount + 1;
 		END_IF
 	END_IF
 END_FOR]]></ST>
       </Implementation>
     </Method>
     <Property Name="Full" Id="{142088f9-89b6-4514-9bf8-182d44bd5096}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Reports whether fixed-capacity storage has no free slot.</summary>
+<description>
+Dynamic collections report FALSE even when Length equals Capacity. This does not guarantee available heap memory.
+</description>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY FINAL Full : BOOL]]></Declaration>
       <Get Name="Get" Id="{60f38d2d-7d5e-4f53-bd6e-39eabf1a5689}">
         <Declaration><![CDATA[]]></Declaration>
@@ -333,7 +462,13 @@ PROPERTY FINAL Full : BOOL]]></Declaration>
       </Get>
     </Property>
     <Method Name="Get" Id="{35156606-e33f-4fd7-a3f8-50e4c6feea06}">
-      <Declaration><![CDATA[METHOD Get : REFERENCE TO TOF_Core.GENERIC_VALUE
+      <Declaration><![CDATA[(*!
+<summary>Borrows the descriptor at a zero-based list position.</summary>
+<description>
+An out-of-range index raises an exception. Returned descriptors and payload are borrowed, not clones. Do not modify descriptor metadata or release payload through this view, even when IsMemoryOwner is TRUE. Keep the source and borrowed storage alive; mutation or destruction can invalidate the view.
+ Descendants cannot override this storage operation; capacity, indexing and disposal remain governed by this collection implementation.</description>
+*)
+METHOD FINAL Get : REFERENCE TO TOF_Core.GENERIC_VALUE
 VAR_INPUT
 	index : TOF_Core.DINT_INDEX;
 END_VAR
@@ -349,7 +484,13 @@ Get REF= _Array[index];]]></ST>
       </Implementation>
     </Method>
     <Method Name="InsertCopy" Id="{7c5e7ea9-1602-45c2-9555-47aa08559820}">
-      <Declaration><![CDATA[METHOD InsertCopy : IList
+      <Declaration><![CDATA[(*!
+<summary>Copies a value and inserts it at the requested position.</summary>
+<description>
+Borrows the original during the call. isObject = TRUE requires a live Object FB instance implementing ICloneable; other data is copied as bytes without recursively cloning references. A prepared copy is released if insertion fails before acceptance; exceptions propagate. Engine-managed exception objects are unsupported. The position may range from zero through Length inclusive.
+ Descendants cannot override this storage operation; capacity, indexing and disposal remain governed by this collection implementation.</description>
+*)
+METHOD FINAL InsertCopy : IList
 VAR_INPUT
 	index : TOF_Core.DINT_INDEX;
 	value : ANY;
@@ -372,7 +513,13 @@ __ENDTRY]]></ST>
       </Implementation>
     </Method>
     <Method Name="InsertGeneric" Id="{2dcf43ab-5d4d-40f0-ba4f-54f191c32509}">
-      <Declaration><![CDATA[METHOD InsertGeneric : IList
+      <Declaration><![CDATA[(*!
+<summary>Inserts a descriptor and shifts subsequent entries to the right.</summary>
+<description>
+Successful insertion transfers disposal responsibility for owned payload; borrowed payload must remain alive while stored. The caller-side descriptor copy is not reset and must not be released again after transfer. Independent owning aliases and overlapping owned allocations are unsupported. index may range from zero through Length inclusive. Invalid indices and full static storage raise exceptions. Validation precedes insertion. Dynamic growth rejects nonpositive increments and unrepresentable capacity or allocation sizes before insertion.
+ Descendants cannot override this storage operation; capacity, indexing and disposal remain governed by this collection implementation.</description>
+*)
+METHOD FINAL InsertGeneric : IList
 VAR_INPUT
 	index : TOF_Core.DINT_INDEX;
 	value : TOF_Core.GENERIC_VALUE;	
@@ -396,7 +543,7 @@ InsertGeneric := THIS^;
 
 IF _Length >= Capacity THEN
 	IF Dynamic THEN
-		AllocateMemory(DefaultDynamicAllocationElemetCount);
+		AllocateMemory(DefaultDynamicAllocationElementCount);
 	ELSE
 		staticCollectionFullException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), GetName(), TO_UDINT(Capacity));
 	END_IF
@@ -415,7 +562,13 @@ _Array[i] := value;]]></ST>
       </Implementation>
     </Method>
     <Property Name="Length" Id="{8b78c4a9-2b51-4df9-a89b-35d75f4063d7}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Reports the number of stored entries.</summary>
+<description>
+Units are bytes for ByteList and entries for other collections. Existing positions range from zero through Length minus one.
+</description>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY FINAL Length : TOF_Core.DINT_LENGTH]]></Declaration>
       <Get Name="Get" Id="{40434b4f-ac59-4ed2-adb0-38a6ead17ebd}">
         <Declaration><![CDATA[]]></Declaration>
@@ -425,7 +578,13 @@ PROPERTY FINAL Length : TOF_Core.DINT_LENGTH]]></Declaration>
       </Get>
     </Property>
     <Property Name="NamespaceName" Id="{790d2c44-7c10-4ff7-8e9f-92d4936a4655}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Provides the library namespace for diagnostics.</summary>
+<description>
+Borrowed read-only reference to compiler-initialized metadata; no ownership transfer.
+</description>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
       <Get Name="Get" Id="{dfd8ff83-c535-4eea-abbd-5a05ac36fe99}">
         <Declaration><![CDATA[]]></Declaration>
@@ -435,7 +594,13 @@ PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
       </Get>
     </Property>
     <Method Name="RemoveAt" Id="{0e28301b-e63b-49ca-a697-ef9528fc2481}">
-      <Declaration><![CDATA[METHOD RemoveAt : IList
+      <Declaration><![CDATA[(*!
+<summary>Removes an existing list entry and compacts subsequent entries.</summary>
+<description>
+Invalid indices raise an exception. Owned payload is released best effort through GENERIC_VALUE.Release; borrowed payload is not freed. Returns this list. Positions and descriptor references may change; cleanup callbacks must not reenter mutation.
+ Descendants cannot override this storage operation; capacity, indexing and disposal remain governed by this collection implementation.</description>
+*)
+METHOD FINAL RemoveAt : IList
 VAR_INPUT
 	index : TOF_Core.DINT_INDEX;
 END_VAR
@@ -467,7 +632,13 @@ _Length := _Length - 1;]]></ST>
       </Implementation>
     </Method>
     <Method Name="RemoveFirst" Id="{ab28382f-e74f-44a6-bee2-f905f3030356}">
-      <Declaration><![CDATA[METHOD RemoveFirst : IList
+      <Declaration><![CDATA[(*!
+<summary>Removes the first list entry equal to a borrowed query.</summary>
+<description>
+Uses default GENERIC_VALUE equality; isObject = TRUE requires a live Object FB instance. Reports removed on a successful match and returns this list. Owned stored payload is released; the query is not adopted or separately released. Equality exceptions propagate.
+ Descendants cannot override this storage operation; capacity, indexing and disposal remain governed by this collection implementation.</description>
+*)
+METHOD FINAL RemoveFirst : IList
 VAR_INPUT
 	value : ANY;
 	isObject : BOOL := FALSE;
@@ -496,11 +667,17 @@ END_IF]]></ST>
       </Implementation>
     </Method>
     <Method Name="RemoveMatched" Id="{e5cc38ae-8b20-4e35-acc9-fcd84e9d10bd}">
-      <Declaration><![CDATA[METHOD RemoveMatched : IList
+      <Declaration><![CDATA[(*!
+<summary>Removes predicate matches while traversing from the end.</summary>
+<description>
+skip counts matches from the end. A null predicate or maxRemoved = 0 performs no removal. Removes at most maxRemoved matching entries after skipping the requested matches. Stops immediately after reaching the limit, without invoking the predicate for remaining entries. Predicate exceptions propagate after any completed removals, without rollback. removedCount counts completed removals. Callbacks must not mutate the traversed collection.
+ Descendants cannot override this storage operation; capacity, indexing and disposal remain governed by this collection implementation.</description>
+*)
+METHOD FINAL RemoveMatched : IList
 VAR_INPUT
 	predicate : TOF_Core.IPredicate;
 	skip : UDINT := 0;
-	maxRemoved : UDINT := 16#FFFFFFFF;
+	maxRemoved : UDINT := TOF_Core.UnsignedInt32.MAX_VALUE;
 END_VAR
 VAR_OUTPUT
 	removedCount : DINT;
@@ -510,12 +687,12 @@ VAR
 
 	currentValue : __SYSTEM.AnyType;
 
-	skiped : UDINT := 0;
+	skippedMatchCount : UDINT := 0;
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[RemoveMatched := THIS^;
 
-IF TO_DINT(skip) >= _Length OR_ELSE predicate = 0 OR_ELSE maxRemoved = 0 THEN
+IF TO_DINT(skip) >= _Length OR_ELSE predicate = 0 OR_ELSE maxRemoved = TOF_Core.UnsignedInt32.MIN_VALUE THEN
 	RETURN;
 END_IF
 
@@ -523,18 +700,26 @@ FOR i := _Length - 1 TO 0 BY -1 DO
 	currentValue := _Array[i].AsAnyType();
 	
 	IF predicate.Check(currentValue) THEN
-		IF skip <= skiped THEN
+		IF skip <= skippedMatchCount THEN
 			RemoveAt(i);
 			removedCount := removedCount + 1;
+
+			IF TO_UDINT(removedCount) >= maxRemoved THEN
+				EXIT;
+			END_IF
 		ELSE
-			skiped := skiped + 1;
+			skippedMatchCount := skippedMatchCount + 1;
 		END_IF
 	END_IF
 END_FOR]]></ST>
       </Implementation>
     </Method>
     <Method Name="restoreHeapFrom" Id="{1a1c5c77-8af0-4f17-a539-272de7e4b0a4}" FolderPath="Service methods\">
-      <Declaration><![CDATA[METHOD PRIVATE restoreHeapFrom
+      <Declaration><![CDATA[(*!
+<summary>Restores the heap order below a root within the active sort range.</summary>
+<description>Requires valid indices and the same live comparer used by Sort. Addresses complete GENERIC_VALUE entries through typed array indexing, compares their descriptors without converting categories and swaps entries in place. Comparer exceptions propagate; completed swaps are not rolled back.</description>
+*)
+METHOD PRIVATE restoreHeapFrom
 VAR_INPUT
     rootIndex : DINT;
     heapSize : DINT;
@@ -546,9 +731,9 @@ VAR
     childIndex : DINT;
     selectedIndex : DINT;
 
-    comparisonResult : TOF_Core.COMPARISION_RESULT;
+    comparisonResult : TOF_Core.COMPARISON_RESULT;
 
-    value1, value2 : __SYSTEM.AnyType;
+    value1, value2 : POINTER TO TOF_Core.GENERIC_VALUE;
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[currentIndex := rootIndex;
@@ -557,33 +742,33 @@ WHILE (currentIndex * 2 + 1) < heapSize DO
     childIndex := currentIndex * 2 + 1;
     selectedIndex := currentIndex;
 
-    value1 := _Array[selectedIndex].AsAnyType();
-    value2 := _Array[childIndex].AsAnyType();
+    value1 := ADR(_Array[selectedIndex]);
+    value2 := ADR(_Array[childIndex]);
 
-    comparisonResult := comparer.Compare(value1, value2);
+    comparisonResult := comparer.Compare(value1^, value2^);
 
     IF direction = TOF_Core.SORT_DIRECTION.ASCENDING THEN
-        IF comparisonResult = TOF_Core.COMPARISION_RESULT.FIRST_LESS_THAN_SECOND THEN
+        IF comparisonResult = TOF_Core.COMPARISON_RESULT.FIRST_LESS_THAN_SECOND THEN
             selectedIndex := childIndex;
         END_IF
     ELSE
-        IF comparisonResult = TOF_Core.COMPARISION_RESULT.FIRST_GREATER_THAN_SECOND THEN
+        IF comparisonResult = TOF_Core.COMPARISON_RESULT.FIRST_GREATER_THAN_SECOND THEN
             selectedIndex := childIndex;
         END_IF
     END_IF
 
     IF (childIndex + 1) < heapSize THEN
-        value1 := _Array[selectedIndex].AsAnyType();
-        value2 := _Array[childIndex + 1].AsAnyType();
+        value1 := ADR(_Array[selectedIndex]);
+        value2 := ADR(_Array[childIndex + 1]);
 
-        comparisonResult := comparer.Compare(value1, value2);
+        comparisonResult := comparer.Compare(value1^, value2^);
 
         IF direction = TOF_Core.SORT_DIRECTION.ASCENDING THEN
-            IF comparisonResult = TOF_Core.COMPARISION_RESULT.FIRST_LESS_THAN_SECOND THEN
+            IF comparisonResult = TOF_Core.COMPARISON_RESULT.FIRST_LESS_THAN_SECOND THEN
                 selectedIndex := childIndex + 1;
             END_IF
         ELSE
-            IF comparisonResult = TOF_Core.COMPARISION_RESULT.FIRST_GREATER_THAN_SECOND THEN
+            IF comparisonResult = TOF_Core.COMPARISON_RESULT.FIRST_GREATER_THAN_SECOND THEN
                 selectedIndex := childIndex + 1;
             END_IF
         END_IF
@@ -600,7 +785,13 @@ END_WHILE]]></ST>
       </Implementation>
     </Method>
     <Property Name="SelfSize" Id="{b8f1c23e-6bde-4d17-b77f-f3d1373a6f6b}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Reports the size of this function-block instance.</summary>
+<description>
+Measured in bytes; includes inline storage but excludes separately allocated buffers, payload and enumerators.
+</description>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY SelfSize : ULINT]]></Declaration>
       <Get Name="Get" Id="{0c60dbce-56ff-4644-ae28-c3c705772b31}">
         <Declaration><![CDATA[]]></Declaration>
@@ -610,7 +801,13 @@ PROPERTY SelfSize : ULINT]]></Declaration>
       </Get>
     </Property>
     <Method Name="SetCopy" Id="{e9638d43-e88c-48cb-a07f-937c5e87c232}">
-      <Declaration><![CDATA[METHOD SetCopy : IList
+      <Declaration><![CDATA[(*!
+<summary>Copies a value and stores it through SetGeneric.</summary>
+<description>
+Borrows the original during the call. isObject = TRUE requires a live Object FB instance implementing ICloneable; other data is copied as bytes without recursively cloning references. A prepared copy is released if insertion fails before acceptance; exceptions propagate. Engine-managed exception objects are unsupported. Any index output is meaningful only on success.
+ Descendants cannot override this storage operation; capacity, indexing and disposal remain governed by this collection implementation.</description>
+*)
+METHOD FINAL SetCopy : IList
 VAR_INPUT
 	index : TOF_Core.DINT_INDEX;
 	value : ANY;
@@ -633,16 +830,24 @@ __ENDTRY]]></ST>
       </Implementation>
     </Method>
     <Method Name="SetGeneric" Id="{28fb4746-7d53-4b08-a432-54d437f989bb}">
-      <Declaration><![CDATA[METHOD SetGeneric : IList
+      <Declaration><![CDATA[(*!
+<summary>Replaces the descriptor at an existing list position.</summary>
+<description>
+Successful replacement transfers disposal responsibility for owned payload; borrowed payload must remain alive while stored. The caller-side descriptor copy is not reset and must not be released again after transfer. Invalid indices and rejected validation raise exceptions before replacement. Reusing the same allocation preserves existing ownership or accepts incoming ownership without releasing that allocation. Aliases must have compatible disposal semantics; independently owned aliases and overlapping owned ranges are unsupported. A different displaced allocation is released best effort after installing the new descriptor. Cleanup callbacks must not reenter collection mutation.
+ Descendants cannot override this storage operation; capacity, indexing and disposal remain governed by this collection implementation.</description>
+*)
+METHOD FINAL SetGeneric : IList
 VAR_INPUT
 	index : TOF_Core.DINT_INDEX;
 	value : TOF_Core.GENERIC_VALUE;	
 END_VAR
 VAR
 	argumentOutOfRangeException : TOF_Core.ArgumentOutOfRangeException;
+
+	displacedValue : TOF_Core.GENERIC_VALUE;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[IF index < 0 OR_ELSE index >= _Length THEN
+        <ST><![CDATA[IF index < TOF_Core.SignedInt32.ZERO OR_ELSE index >= _Length THEN
 	argumentOutOfRangeException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), 'index', index);
 END_IF
 
@@ -652,14 +857,27 @@ END_IF
 
 SetGeneric := THIS^;
 
-IF _Array[index].TypeClass <> value.TypeClass OR_ELSE _Array[index].Address <> value.Address OR_ELSE _Array[index].Size <> value.Size OR_ELSE _Array[index].IsMemoryOwner <> value.IsMemoryOwner THEN
-	_Array[index].Release();	
-	_Array[index] := value;
-END_IF]]></ST>
+displacedValue := _Array[index];
+IF displacedValue.Address = value.Address THEN
+	IF displacedValue.IsMemoryOwner AND_THEN NOT value.IsMemoryOwner THEN
+		value := TOF_Core.GenericValueFactory.FromParts(value.TypeClass, value.Address, value.Size, TOF_Core.GENERIC_MEMORY_MANAGEMENT_BEHAVIOR.STORE_ORIGINAL_REFERENCE_AND_OWNS_MEMORY);
+	END_IF
+
+	displacedValue.Reset();
+END_IF
+
+_Array[index] := value;
+displacedValue.Release();]]></ST>
       </Implementation>
     </Method>
     <Method Name="Sort" Id="{cd2a8a15-72bb-44f7-9e5d-ecb76fed56a8}">
-      <Declaration><![CDATA[METHOD Sort : IReadOnlyList
+      <Declaration><![CDATA[(*!
+<summary>Reorders entries in place using the supplied generic-value ordering strategy.</summary>
+<description>The comparer and payload are borrowed. For two or more entries, the caller must supply a live, compatible comparer with a consistent order. Descriptors retain their type categories, including OBJECT. Comparer callbacks must not modify operands or the collection. Exceptions propagate and completed swaps are not rolled back. Returns this list; ownership of entries is unchanged. Descendants cannot override this storage operation; capacity, indexing and disposal remain governed by this collection implementation.</description>
+*)
+//!<param name="comparer">Borrowed ordering strategy for the stored generic values.</param>
+//!<param name="direction">Requested ordering direction.</param>
+METHOD FINAL Sort : IList
 VAR_INPUT
 	comparer : TOF_Core.IComparer;
 	direction : TOF_Core.SORT_DIRECTION := TOF_Core.SORT_DIRECTION.ASCENDING;
@@ -672,9 +890,9 @@ VAR
     startIndex : DINT;
     endIndex : DINT;
 
-    comparisonResult : TOF_Core.COMPARISION_RESULT;
+    comparisonResult : TOF_Core.COMPARISON_RESULT;
 
-    value1, value2 : __SYSTEM.AnyType;
+    value1, value2 : TOF_Core.GENERIC_VALUE;
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[Sort := THIS^;
@@ -689,17 +907,17 @@ IF _Length <= 16 THEN
         j := i;
 
         WHILE j > 0 DO
-            value1 := _Array[j - 1].AsAnyType();
-            value2 := _Array[j].AsAnyType();
+            value1 := _Array[j - 1];
+            value2 := _Array[j];
 
             comparisonResult := comparer.Compare(value1, value2);
 
             IF direction = TOF_Core.SORT_DIRECTION.ASCENDING THEN
-                IF comparisonResult <> TOF_Core.COMPARISION_RESULT.FIRST_GREATER_THAN_SECOND THEN
+                IF comparisonResult <> TOF_Core.COMPARISON_RESULT.FIRST_GREATER_THAN_SECOND THEN
                     EXIT;
                 END_IF
             ELSE
-                IF comparisonResult <> TOF_Core.COMPARISION_RESULT.FIRST_LESS_THAN_SECOND THEN
+                IF comparisonResult <> TOF_Core.COMPARISON_RESULT.FIRST_LESS_THAN_SECOND THEN
                     EXIT;
                 END_IF
             END_IF
@@ -735,7 +953,13 @@ END_WHILE]]></ST>
       </Implementation>
     </Method>
     <Method Name="Swap" Id="{eb0e8297-edd7-472f-a573-82e2ae740339}">
-      <Declaration><![CDATA[METHOD Swap : IReadOnlyList
+      <Declaration><![CDATA[(*!
+<summary>Exchanges two positions without cloning or releasing payload.</summary>
+<description>
+Returns this list. Different indices must be valid or an exception is raised. Current implementation returns immediately for equal indices without validating them. Payload ownership is preserved.
+ Descendants cannot override this storage operation; capacity, indexing and disposal remain governed by this collection implementation.</description>
+*)
+METHOD FINAL Swap : IList
 VAR_INPUT
 	index1 : TOF_Core.DINT_INDEX;
 	index2 : TOF_Core.DINT_INDEX;
@@ -761,7 +985,13 @@ _Array[index2] := tmp;]]></ST>
       </Implementation>
     </Method>
     <Property Name="ValueValidator" Id="{b948083e-197f-42c4-870d-0ac963bd346a}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Exposes the configured value validator.</summary>
+<description>
+Borrowed optional reference fixed at initialization. Zero means no validator. The collection does not own or release it.
+</description>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY FINAL ValueValidator : TOF_Core.IGenericValueValidator]]></Declaration>
       <Get Name="Get" Id="{cb2fa504-489a-4e73-8b3c-20c2650b6edd}">
         <Declaration><![CDATA[]]></Declaration>

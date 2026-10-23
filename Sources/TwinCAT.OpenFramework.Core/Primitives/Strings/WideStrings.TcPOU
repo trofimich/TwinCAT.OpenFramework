@@ -9,7 +9,7 @@ License: https://opensource.org/license/mit
 
 (*!
 <summary>Provides WSTRING constants and helpers for text manipulation and value formatting.</summary>
-<description>Buffer ownership and size requirements are defined by each operation. ANY formatting reads the caller's value through its type descriptor.</description>
+<description>Buffer ownership and size requirements are defined by each operation. ANY formatting reads the caller's value through its type descriptor. Try methods contain exceptions; this does not validate buffer lifetime or undo partial modifications.</description>
 *)
 {attribute 'no_explicit_call' := 'Direct call is not allowed'} 
 PROGRAM WideStrings
@@ -17,7 +17,8 @@ VAR_INPUT CONSTANT
 	CharSize : BYTE := 2;
 	NewLine : WSTRING(1) := "$R"; 
 	Empty : WSTRING(0) := "";
-	ByteOrderMask : WORD := 16#FEFF;
+	//! <summary>UTF-16 byte-order mark U+FEFF, written before text to identify the byte order of its encoding.</summary>
+	ByteOrderMark : WORD := 16#FEFF;
 	//! <summary>UTF-16 code unit for the ellipsis character U+2026 ('…'), used to mark truncated text.</summary>
 	ELLIPSIS : WORD := WORD#16#2026;
 END_VAR
@@ -35,7 +36,11 @@ END_VAR]]></Declaration>
     <Folder Name="Split" Id="{3fe01d04-7439-4837-881a-92e26af7a9f4}" />
     <Folder Name="Trim" Id="{222b85cc-d2c6-46ad-a621-67a695bdca8e}" />
     <Method Name="AnyToString255" Id="{5eddfbb1-a4c4-4bf3-95de-4ec7342266cd}">
-      <Declaration><![CDATA[METHOD AnyToString255 : WSTRING(255)
+      <Declaration><![CDATA[(*!
+<summary>Formats a supported ANY value as text of at most 255 characters.</summary>
+<description>Reads the borrowed live payload of supported types. Unsupported type classes produce a diagnostic marker containing the type and size instead of interpreting the payload. The result is an independent bounded value.</description>
+*)
+METHOD AnyToString255 : WSTRING(255)
 VAR_INPUT
 	value : ANY;
 END_VAR]]></Declaration>
@@ -61,7 +66,7 @@ VAR
 	formattedExceptionMessage : WSTRING(255);
 
 	stringTypeNotSupportedException : NotSupportedException;
-	targetStringMemoryOverflowExcepton : TargetVariableMemoryOverflowException;	
+	targetStringMemoryOverflowException : TargetVariableMemoryOverflowException;	
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[IF targetString.TypeClass <> __SYSTEM.TYPE_CLASS.TYPE_WSTRING THEN
@@ -71,7 +76,7 @@ END_VAR]]></Declaration>
 END_IF
 
 IF NOT InternalAppendToTarget(targetString, ADR(sourceString), 0, 0, 0, 0, 0, 0, 0, 0, 0) THEN
-	targetStringMemoryOverflowExcepton.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), 'targetString', TO_ULINT(targetString.diSize)); 
+	targetStringMemoryOverflowException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), 'targetString', TO_ULINT(targetString.diSize)); 
 END_IF]]></ST>
       </Implementation>
     </Method>
@@ -98,7 +103,7 @@ VAR
 	formattedExceptionMessage : WSTRING(255);
 
 	stringTypeNotSupportedException : NotSupportedException;
-	targetStringMemoryOverflowExcepton : TargetVariableMemoryOverflowException;	
+	targetStringMemoryOverflowException : TargetVariableMemoryOverflowException;	
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[IF targetString.TypeClass <> __SYSTEM.TYPE_CLASS.TYPE_WSTRING THEN
@@ -108,12 +113,16 @@ END_VAR]]></Declaration>
 END_IF
 
 IF NOT InternalAppendToTarget(targetString, ADR(sourceString1), ADR(sourceString2), ADR(sourceString3), ADR(sourceString4), ADR(sourceString5), ADR(sourceString6), ADR(sourceString7), ADR(sourceString8), ADR(sourceString9), ADR(sourceString10)) THEN
-	targetStringMemoryOverflowExcepton.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), 'targetString', TO_ULINT(targetString.diSize)); 
+	targetStringMemoryOverflowException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), 'targetString', TO_ULINT(targetString.diSize)); 
 END_IF]]></ST>
       </Implementation>
     </Method>
     <Property Name="ClassName" Id="{1a6c82de-d589-49d7-9c77-f4f624ad8685}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Provides the diagnostic type name without copying its storage.</summary>
+<description>Borrowed read-only reference. Do not modify the referenced name; keep the owning instance alive while using the reference.</description>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
       <Get Name="Get" Id="{9690cba0-2d05-4c7a-ad00-db2bf2465f2d}">
         <Declaration><![CDATA[]]></Declaration>
@@ -221,9 +230,9 @@ END_IF]]></ST>
 METHOD CreateSplitter : WideStringSplittingEnumerator
 VAR_IN_OUT CONSTANT
 	sourceString : WSTRING;
-	separator : WSTRING;
 END_VAR
 VAR_INPUT
+	separator : WSTRING;
 	maxCount : UDINT := 0;
 	trimEntries : BOOL := FALSE;
 	removeEmptyEntries : BOOL := FALSE;
@@ -235,10 +244,6 @@ END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[IF NOT __ISVALIDREF(sourceString) THEN
 	sourceStringIsNullException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), 'sourceString');
-END_IF
-
-IF NOT __ISVALIDREF(separator) THEN
-	sourceStringIsNullException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), 'separator');
 END_IF
 
 IF separator = "" OR_ELSE InternalGetLength(ADR(separator)) > 80 THEN
@@ -281,7 +286,11 @@ Find := InternalFind(ADR(stringToSearchIn), InternalGetLength(ADR(stringToSearch
       </Implementation>
     </Method>
     <Method Name="GetActualSize" Id="{f88efc62-cf38-4f16-a4e6-1677f1ebb799}">
-      <Declaration><![CDATA[METHOD GetActualSize : UDINT
+      <Declaration><![CDATA[(*!
+<summary>Returns the occupied byte size of terminated text.</summary>
+<description>Includes the terminating zero. This is the current text size, not the declared or allocated capacity; the supplied string must remain valid during the call.</description>
+*)
+METHOD GetActualSize : UDINT
 VAR_IN_OUT CONSTANT
 	value : WSTRING;
 END_VAR
@@ -291,7 +300,11 @@ END_VAR
       </Implementation>
     </Method>
     <Method Name="GetLength" Id="{92cb56d9-db9c-4638-bd53-1d463d8daa4a}">
-      <Declaration><![CDATA[METHOD GetLength : UDINT
+      <Declaration><![CDATA[(*!
+<summary>Returns the number of characters before the terminating zero.</summary>
+<description>Requires valid terminated text and excludes the terminator. Does not copy or modify the input.</description>
+*)
+METHOD GetLength : UDINT
 VAR_IN_OUT CONSTANT
 	value : WSTRING;
 END_VAR
@@ -571,7 +584,11 @@ END_FOR]]></ST>
       </Implementation>
     </Method>
     <Method Name="InternalGetLength" Id="{28a2b8aa-3a94-4df4-930f-bfbe80fc9784}" FolderPath="Service members\">
-      <Declaration><![CDATA[METHOD INTERNAL InternalGetLength : UDINT
+      <Declaration><![CDATA[(*!
+<summary>Returns the length of text at the supplied address.</summary>
+<description>Returns zero for a null address. A nonzero address must point to readable, correctly terminated text; this method does not establish pointer validity or buffer capacity.</description>
+*)
+METHOD INTERNAL InternalGetLength : UDINT
 VAR_INPUT
 	value : POINTER TO WSTRING;
 END_VAR
@@ -583,7 +600,7 @@ END_VAR
     <Method Name="InternalJoinToTarget" Id="{539a1d8c-df73-40de-ba36-7c4b6d44491c}" FolderPath="Service members\">
       <Declaration><![CDATA[(*!
 <summary>Builds joined text from the selected enumerated values in the supplied buffer.</summary>
-<description>Clears the target before joining and consumes the enumerator from its current position. Values formatted through the 255-character conversion use a matching 255-character local buffer. Returns FALSE on an incompatible target or append failure; partial text is not rolled back. Referenced data must remain valid during each append.</description>
+<description>Clears the target before joining and consumes the enumerator from its current position. Strings of the target encoding use a borrowed reference regardless of their byte size. Other types use AsWString255 and a matching 255-character local buffer, with that conversion method's truncation and exception behavior. Returns FALSE on an incompatible target or append failure; partial text is not rolled back. Referenced data must remain valid during each append.</description>
 *)
 METHOD INTERNAL InternalJoinToTarget : BOOL
 VAR_INPUT
@@ -625,14 +642,14 @@ WHILE sourceEnumerator.MoveNext() DO
 		RETURN;
 	END_IF
 		
-	IF currentValue.Size < 255 THEN
-		string255 := currentValue.AsWString255();
-		
-		InternalJoinToTarget := InternalJoinToTarget AND Tc2_Utilities.WCONCAT2(targetString.pValue, ADR(string255), targetString.pValue, TO_UDINT(targetString.diSize));
-	ELSE
+	IF currentValue.TypeClass = GENERIC_TYPE_CLASS.STRING_UTF16 THEN
 		stringReference REF= currentValue.AsWStringReference();
-		
-		InternalJoinToTarget := InternalJoinToTarget AND Tc2_Utilities.WCONCAT2(targetString.pValue, ADR(stringReference), targetString.pValue, TO_UDINT(targetString.diSize));		
+
+		InternalJoinToTarget := InternalJoinToTarget AND Tc2_Utilities.WCONCAT2(targetString.pValue, ADR(stringReference), targetString.pValue, TO_UDINT(targetString.diSize));
+	ELSE
+		string255 := currentValue.AsWString255();
+
+		InternalJoinToTarget := InternalJoinToTarget AND Tc2_Utilities.WCONCAT2(targetString.pValue, ADR(string255), targetString.pValue, TO_UDINT(targetString.diSize));
 	END_IF
 	
 	IF NOT InternalJoinToTarget THEN
@@ -890,7 +907,11 @@ IsInteger := digitFound;]]></ST>
       </Implementation>
     </Method>
     <Method Name="IsNullOrWhiteSpace" Id="{f6d91594-f8c2-4b36-b45d-e7cc6eae55c4}">
-      <Declaration><![CDATA[METHOD IsNullOrWhiteSpace : BOOL
+      <Declaration><![CDATA[(*!
+<summary>Reports whether the reference is absent, empty or contains only recognized whitespace.</summary>
+<description>A valid reference must designate readable terminated text. Uses the whitespace characters explicitly recognized by this implementation; does not validate arbitrary addresses or normalize text.</description>
+*)
+METHOD IsNullOrWhiteSpace : BOOL
 VAR_INPUT
 	stringToCheck : REFERENCE TO WSTRING;
 END_VAR
@@ -968,9 +989,14 @@ IsUnsignedInteger := digitFound;]]></ST>
     </Method>
     <Method Name="JoinToTarget" Id="{89b0f7d2-300b-4f0f-adfc-90540eb76ea8}" FolderPath="Join\">
       <Declaration><![CDATA[(*!
-<summary>Prepares diagnostic text locally before passing it to read-only logging or exception parameters.</summary>
-<description>Computed diagnostic strings are held in local buffers for the duration of the receiving call.</description>
+<summary>Joins selected enumerated values into the supplied WSTRING buffer with a separator.</summary>
+<description>Validates the target string type and a non-null enumerator, then clears the target and advances the enumerator from its current position without resetting it. Invalid Current references are skipped. Inserts separators between included values, including empty text values. Does not dispose or retain the enumerator; its lifetime remains the caller's responsibility. Raises NotSupportedException for the wrong target type, ArgumentNotSpecifiedException for a null enumerator and TargetVariableMemoryOverflowException on append failure. Enumerator and conversion exceptions propagate. Partial text and the advanced enumerator position are not rolled back. The caller supplies live writable target storage and source data that remain valid during the operation. Strings of the target encoding are joined through a borrowed reference without a 255-character intermediate limit. Other values use AsWString255 with its default conversion policy and 255-character capacity; unsupported conversions raise an exception.</description>
 *)
+//!<param name="targetString">Destination buffer, including capacity for the terminator; previous contents are cleared after argument validation.</param>
+//!<param name="separator">Text inserted between included values.</param>
+//!<param name="sourceEnumerator">Borrowed enumerator, consumed by MoveNext without Reset.</param>
+//!<param name="startIndex">Number of positions to skip among subsequent MoveNext results, including invalid Current references.</param>
+//!<param name="count">Maximum number of included values; zero consumes all remaining eligible values.</param>
 METHOD JoinToTarget
 VAR_INPUT
 	targetString : ANY_STRING;
@@ -986,7 +1012,7 @@ VAR
 
 	stringTypeNotSupportedException : NotSupportedException;
 	sourceEnumeratorNullException : ArgumentNotSpecifiedException;
-	targetStringMemoryOverflowExcepton : TargetVariableMemoryOverflowException;	
+	targetStringMemoryOverflowException : TargetVariableMemoryOverflowException;	
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[IF targetString.TypeClass <> __SYSTEM.TYPE_CLASS.TYPE_WSTRING THEN
@@ -1000,12 +1026,16 @@ IF sourceEnumerator = 0 THEN
 END_IF
 
 IF NOT InternalJoinToTarget(targetString, ADR(separator), sourceEnumerator, startIndex, count) THEN
-	targetStringMemoryOverflowExcepton.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), 'targetString', TO_ULINT(targetString.diSize)); 
+	targetStringMemoryOverflowException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), 'targetString', TO_ULINT(targetString.diSize)); 
 END_IF]]></ST>
       </Implementation>
     </Method>
     <Property Name="NamespaceName" Id="{06787fa4-fd31-454c-be97-5c26e13d97fa}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Provides the library namespace used in diagnostics.</summary>
+<description>Borrowed read-only reference to the compiler-initialized library namespace; no ownership transfer.</description>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
       <Get Name="Get" Id="{404a412b-96d2-4c44-ae43-0c154ea517e4}">
         <Declaration><![CDATA[]]></Declaration>
@@ -1039,7 +1069,7 @@ VAR_OUTPUT
 END_VAR
 VAR	
 	stringTypeNotSupportedException : NotSupportedException;
-	sourceStringMemoryOverflowExcepton : TargetVariableMemoryOverflowException;
+	sourceStringMemoryOverflowException : TargetVariableMemoryOverflowException;
 	
 	replaceResult : BOOL; 
 END_VAR
@@ -1054,7 +1084,7 @@ END_VAR]]></Declaration>
 END_IF
 
 IF NOT InternalReplaceInSource(sourceString, ADR(oldSubstring), ADR(newSubstring), maxReplacements, skipReplacements, replacementCount => replacementCount) THEN
-	sourceStringMemoryOverflowExcepton.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), 'sourceString', TO_UDINT(sourceString.diSize));
+	sourceStringMemoryOverflowException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), 'sourceString', TO_UDINT(sourceString.diSize));
 END_IF]]></ST>
       </Implementation>
     </Method>
@@ -1079,7 +1109,7 @@ VAR_OUTPUT
 END_VAR
 VAR	
 	stringTypeNotSupportedException : NotSupportedException;
-	sourceStringMemoryOverflowExcepton : TargetVariableMemoryOverflowException;
+	sourceStringMemoryOverflowException : TargetVariableMemoryOverflowException;
 	
 	replaceResult : BOOL; 
 END_VAR
@@ -1094,12 +1124,16 @@ END_VAR]]></Declaration>
 END_IF
 
 IF NOT InternalReplaceInSource(sourceString, ADR(oldSubstring), ADR(newSubstring), maxReplacements, skipReplacements, replacementCount => replacementCount) THEN
-	sourceStringMemoryOverflowExcepton.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), 'sourceString', TO_UDINT(sourceString.diSize));
+	sourceStringMemoryOverflowException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), 'sourceString', TO_UDINT(sourceString.diSize));
 END_IF]]></ST>
       </Implementation>
     </Method>
     <Method Name="StringPointerToAnyType" Id="{e7b7eb9d-23fd-4387-8408-e33d707c6233}">
-      <Declaration><![CDATA[METHOD StringPointerToAnyType : __System.AnyType
+      <Declaration><![CDATA[(*!
+<summary>Builds a borrowed ANY descriptor for text at an address.</summary>
+<description>Requires a nonzero address to valid terminated text. Records occupied bytes including the terminator, not buffer capacity; size must fit DINT. Does not copy, allocate or acquire ownership. Keep the source alive while using the descriptor.</description>
+*)
+METHOD StringPointerToAnyType : __System.AnyType
 VAR_INPUT
 	value : POINTER TO WSTRING;
 END_VAR
@@ -1111,7 +1145,11 @@ StringPointerToAnyType.diSize := TO_DINT(GetActualSize(value^));]]></ST>
       </Implementation>
     </Method>
     <Method Name="StringReferenceToAnyType" Id="{8467a0c9-fba0-4e3d-9b58-fb51783bbdec}">
-      <Declaration><![CDATA[METHOD StringReferenceToAnyType : __System.AnyType
+      <Declaration><![CDATA[(*!
+<summary>Builds a borrowed ANY descriptor for a string reference.</summary>
+<description>Requires a valid reference to terminated text. Records occupied bytes including the terminator, not buffer capacity; size must fit DINT. Keep the source alive while using the descriptor; no ownership is transferred.</description>
+*)
+METHOD StringReferenceToAnyType : __System.AnyType
 VAR_INPUT
 	value : REFERENCE TO WSTRING;
 END_VAR
@@ -1123,7 +1161,11 @@ StringReferenceToAnyType.diSize := TO_DINT(GetActualSize(value));]]></ST>
       </Implementation>
     </Method>
     <Method Name="TrimChar" Id="{e2ff62b2-4701-4d44-a6fc-9b69cb60ec38}" FolderPath="Trim\">
-      <Declaration><![CDATA[METHOD TrimChar
+      <Declaration><![CDATA[(*!
+<summary>Removes repetitions of one character from the selected ends of a string.</summary>
+<description>Modifies the supplied string in place using TrimChars and the requested trim mode. Preserves the remaining character order and requires writable terminated text.</description>
+*)
+METHOD TrimChar
 VAR_IN_OUT
 	stringToTrim : WSTRING;
 END_VAR
@@ -1230,7 +1272,7 @@ END_IF]]></ST>
     <Method Name="TryAppendToTarget" Id="{4de57109-f456-48e2-92b9-7ccc4d2d48fb}" FolderPath="Append\">
       <Declaration><![CDATA[(*!
 <summary>Appends one WSTRING to a caller-owned buffer and reports success.</summary>
-<description>Requires live, null-terminated source strings and a writable WSTRING target with valid capacity metadata. Empty fragments do not stop processing; if all are empty, the target is unchanged and the operation succeeds. Returns FALSE for a non-WSTRING target or when appending fails. Processing stops on the first append failure; earlier modifications are not rolled back. Source storage is borrowed only for this call.</description>
+<description>Requires live, null-terminated source strings and a writable WSTRING target with valid capacity metadata. Empty fragments do not stop processing; if all are empty, the target is unchanged and the operation succeeds. Returns FALSE for a non-WSTRING target or when appending fails. Processing stops on the first append failure; earlier modifications are not rolled back. Source storage is borrowed only for this call. Catches exceptions and returns FALSE; terminal allocation state is preserved for the task boundary. Partial writes are not rolled back. Valid buffer lifetime and capacity remain caller preconditions.</description>
 *)
 METHOD TryAppendToTarget : BOOL
 VAR_INPUT
@@ -1240,13 +1282,17 @@ VAR_IN_OUT CONSTANT
 	sourceString : WSTRING;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[TryAppendToTarget := InternalAppendToTarget(targetString, ADR(sourceString), 0, 0, 0, 0, 0, 0, 0, 0, 0);]]></ST>
+        <ST><![CDATA[__TRY
+	TryAppendToTarget := InternalAppendToTarget(targetString, ADR(sourceString), 0, 0, 0, 0, 0, 0, 0, 0, 0);
+__CATCH
+	TryAppendToTarget := FALSE;
+__ENDTRY]]></ST>
       </Implementation>
     </Method>
     <Method Name="TryAppendToTarget255" Id="{85ee2c53-41c4-4f11-9049-314aaf814c0e}" FolderPath="Append\">
       <Declaration><![CDATA[(*!
 <summary>Appends up to ten WSTRING fragments in argument order, skipping empty fragments.</summary>
-<description>Requires live, null-terminated source strings and a writable WSTRING target with valid capacity metadata. Empty fragments do not stop processing; if all are empty, the target is unchanged and the operation succeeds. Returns FALSE for a non-WSTRING target or when appending fails. Processing stops on the first append failure; earlier modifications are not rolled back. Source storage is borrowed only for this call.</description>
+<description>Requires live, null-terminated source strings and a writable WSTRING target with valid capacity metadata. Empty fragments do not stop processing; if all are empty, the target is unchanged and the operation succeeds. Returns FALSE for a non-WSTRING target or when appending fails. Processing stops on the first append failure; earlier modifications are not rolled back. Source storage is borrowed only for this call. Catches exceptions and returns FALSE; terminal allocation state is preserved for the task boundary. Partial writes are not rolled back. Valid buffer lifetime and capacity remain caller preconditions.</description>
 *)
 METHOD TryAppendToTarget255 : BOOL
 VAR_INPUT
@@ -1263,20 +1309,24 @@ VAR_INPUT
 	sourceString10 : WSTRING(255) := "";
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[TryAppendToTarget255 := InternalAppendToTarget(targetString, ADR(sourceString1), ADR(sourceString2), ADR(sourceString3), ADR(sourceString4), ADR(sourceString5), ADR(sourceString6), ADR(sourceString7), ADR(sourceString8), ADR(sourceString9), ADR(sourceString10));]]></ST>
+        <ST><![CDATA[__TRY
+	TryAppendToTarget255 := InternalAppendToTarget(targetString, ADR(sourceString1), ADR(sourceString2), ADR(sourceString3), ADR(sourceString4), ADR(sourceString5), ADR(sourceString6), ADR(sourceString7), ADR(sourceString8), ADR(sourceString9), ADR(sourceString10));
+__CATCH
+	TryAppendToTarget255 := FALSE;
+__ENDTRY]]></ST>
       </Implementation>
     </Method>
     <Method Name="TryCreateSplitter" Id="{527506d6-1420-4056-93a4-b1b0eacd1e2d}" FolderPath="Split\">
       <Declaration><![CDATA[(*!
 <summary>Initializes a splitter when the source has the supported string type.</summary>
-<description>The source must remain alive and unchanged during iteration. The splitter owns its current fragment; borrowed fragment references expire on MoveNext, Reset or destruction. This method does not allocate the splitter with __NEW. The initialized result has no fragment allocation until MoveNext; assigning it must not overwrite an instance with an unreleased fragment. The caller is responsible for the result lifetime and cleanup, including Reset when abandoning iteration. Do not copy an active splitter by value; use references. Only an instance explicitly allocated with __NEW may be deleted with __DELETE.</description>
+<description>The source must remain alive and unchanged during iteration. The splitter owns its current fragment; borrowed fragment references expire on MoveNext, Reset or destruction. This method does not allocate the splitter with __NEW. The initialized result has no fragment allocation until MoveNext; assigning it must not overwrite an instance with an unreleased fragment. The caller is responsible for the result lifetime and cleanup, including Reset when abandoning iteration. Do not copy an active splitter by value; use references. Only an instance explicitly allocated with __NEW may be deleted with __DELETE. Catches exceptions and returns FALSE; terminal allocation state is preserved for the task boundary. Use the output only after TRUE is returned.</description>
 *)
 //!<param name="maxCount">Maximum number of returned fragments; zero means unlimited. Empty fragments removed after optional trimming do not count toward the limit. Remaining text is not returned after the limit is reached and is not merged into the last fragment.</param>
 //!<param name="separator">Copied separator containing 1 to 80 characters. An empty or longer value returns FALSE before initialization.</param>
 METHOD TryCreateSplitter : BOOL
 VAR_INPUT
 	sourceString : ANY_STRING;
-	separator : WSTRING(255);
+	separator : WSTRING;
 	maxCount : UDINT := 0;
 	trimEntries : BOOL := FALSE;
 	removeEmptyEntries : BOOL := FALSE;
@@ -1284,27 +1334,29 @@ END_VAR
 VAR_OUTPUT
 	splitter : WideStringSplittingEnumerator;
 END_VAR
-VAR
-	stringTypeNotSupportedException : NotSupportedException;
-END_VAR]]></Declaration>
+]]></Declaration>
       <Implementation>
-        <ST><![CDATA[IF sourceString.TypeClass <> __SYSTEM.TYPE_CLASS.TYPE_WSTRING THEN
-	RETURN;
-END_IF
+        <ST><![CDATA[__TRY
+	IF sourceString.TypeClass <> __SYSTEM.TYPE_CLASS.TYPE_WSTRING THEN
+		RETURN;
+	END_IF
 
-IF separator = "" OR_ELSE InternalGetLength(ADR(separator)) > 80 THEN
-	RETURN;
-END_IF
+	IF separator = "" OR_ELSE InternalGetLength(ADR(separator)) > 80 THEN
+		RETURN;
+	END_IF
 
-splitter.Initialize(sourceString.pValue, separator, maxCount, trimEntries, removeEmptyEntries);
+	splitter.Initialize(sourceString.pValue, separator, maxCount, trimEntries, removeEmptyEntries);
 
-TryCreateSplitter := TRUE;]]></ST>
+	TryCreateSplitter := TRUE;
+__CATCH
+	TryCreateSplitter := FALSE;
+__ENDTRY]]></ST>
       </Implementation>
     </Method>
     <Method Name="TryJoinToTarget" Id="{6a88a02e-5b86-47c2-b1f3-2c945ae12a0f}" FolderPath="Join\">
       <Declaration><![CDATA[(*!
 <summary>Joins enumerated values into a WSTRING buffer using a WSTRING separator.</summary>
-<description>Borrows the target and enumerator during the call. Returns the internal join result, or FALSE if an exception is caught. Earlier target modifications are not rolled back on failure.</description>
+<description>Borrows the target and enumerator during the call. Returns the internal join result, or FALSE if an exception is caught. Earlier target modifications are not rolled back on failure. Catches exceptions and returns FALSE; terminal allocation state is preserved for the task boundary. Partial writes are not rolled back. Valid buffer lifetime and capacity remain caller preconditions.</description>
 *)
 //!<param name="separator">Wide text inserted between included values.</param>
 METHOD TryJoinToTarget : BOOL
@@ -1321,13 +1373,14 @@ END_VAR]]></Declaration>
         <ST><![CDATA[__TRY
 	TryJoinToTarget := InternalJoinToTarget(targetString, ADR(separator), sourceEnumerator, startIndex, count);
 __CATCH
+	TryJoinToTarget := FALSE;
 __ENDTRY]]></ST>
       </Implementation>
     </Method>
     <Method Name="TryReplaceInSource" Id="{4174b626-3bd8-4d6b-815f-679d9353671f}" FolderPath="Replace\">
       <Declaration><![CDATA[(*!
 <summary>Replaces matching substrings in the supplied text buffer.</summary>
-<description>Replaces exact, case-sensitive, non-overlapping occurrences in place. An empty oldSubstring succeeds without changes and sets replacementCount to zero. An empty newSubstring deletes matched text. Zero maxReplacements means no replacement limit; skipReplacements skips the first matching occurrences. Returns FALSE for an incompatible source type or if replacement cannot complete. Replacement is not atomic. If the next replacement would exceed buffer capacity, it is not performed; completed replacements remain, replacementCount reports their count, and the valid source remains null-terminated. These guarantees concern capacity failure with valid input buffers, not invalid memory access. The caller supplies live buffers of the correct encoding; sourceString must be writable and its size must include space for the terminator.</description>
+<description>Replaces exact, case-sensitive, non-overlapping occurrences in place. An empty oldSubstring succeeds without changes and sets replacementCount to zero. An empty newSubstring deletes matched text. Zero maxReplacements means no replacement limit; skipReplacements skips the first matching occurrences. Returns FALSE for an incompatible source type or if replacement cannot complete. Replacement is not atomic. If the next replacement would exceed buffer capacity, it is not performed; completed replacements remain, replacementCount reports their count, and the valid source remains null-terminated. These guarantees concern capacity failure with valid input buffers, not invalid memory access. The caller supplies live buffers of the correct encoding; sourceString must be writable and its size must include space for the terminator. Catches exceptions and returns FALSE; terminal allocation state is preserved for the task boundary. Partial writes are not rolled back. Valid buffer lifetime and capacity remain caller preconditions.</description>
 *)
 //!<param name="oldSubstring">Text to replace; empty performs no replacements.</param>
 //!<param name="newSubstring">Replacement text; empty deletes each selected match.</param>
@@ -1349,17 +1402,21 @@ VAR_OUTPUT
 END_VAR
 ]]></Declaration>
       <Implementation>
-        <ST><![CDATA[IF sourceString.TypeClass <> __SYSTEM.TYPE_CLASS.TYPE_WSTRING THEN
-	RETURN;
-END_IF
+        <ST><![CDATA[__TRY
+	IF sourceString.TypeClass <> __SYSTEM.TYPE_CLASS.TYPE_WSTRING THEN
+		RETURN;
+	END_IF
 
-TryReplaceInSource := InternalReplaceInSource(sourceString, ADR(oldSubstring), ADR(newSubstring), maxReplacements, skipReplacements, replacementCount => replacementCount);]]></ST>
+	TryReplaceInSource := InternalReplaceInSource(sourceString, ADR(oldSubstring), ADR(newSubstring), maxReplacements, skipReplacements, replacementCount => replacementCount);
+__CATCH
+	TryReplaceInSource := FALSE;
+__ENDTRY]]></ST>
       </Implementation>
     </Method>
     <Method Name="TryReplaceInSource255" Id="{79d89556-eff6-43ae-9899-d26b8dfe9a56}" FolderPath="Replace\">
       <Declaration><![CDATA[(*!
 <summary>Replaces matching substrings in the supplied text buffer.</summary>
-<description>Replaces exact, case-sensitive, non-overlapping occurrences in place. An empty oldSubstring succeeds without changes and sets replacementCount to zero. An empty newSubstring deletes matched text. Zero maxReplacements means no replacement limit; skipReplacements skips the first matching occurrences. Returns FALSE for an incompatible source type or if replacement cannot complete. Replacement is not atomic. If the next replacement would exceed buffer capacity, it is not performed; completed replacements remain, replacementCount reports their count, and the valid source remains null-terminated. These guarantees concern capacity failure with valid input buffers, not invalid memory access. The caller supplies live buffers of the correct encoding; sourceString must be writable and its size must include space for the terminator.</description>
+<description>Replaces exact, case-sensitive, non-overlapping occurrences in place. An empty oldSubstring succeeds without changes and sets replacementCount to zero. An empty newSubstring deletes matched text. Zero maxReplacements means no replacement limit; skipReplacements skips the first matching occurrences. Returns FALSE for an incompatible source type or if replacement cannot complete. Replacement is not atomic. If the next replacement would exceed buffer capacity, it is not performed; completed replacements remain, replacementCount reports their count, and the valid source remains null-terminated. These guarantees concern capacity failure with valid input buffers, not invalid memory access. The caller supplies live buffers of the correct encoding; sourceString must be writable and its size must include space for the terminator. Catches exceptions and returns FALSE; terminal allocation state is preserved for the task boundary. Partial writes are not rolled back. Valid buffer lifetime and capacity remain caller preconditions.</description>
 *)
 //!<param name="oldSubstring">Text to replace; empty performs no replacements.</param>
 //!<param name="newSubstring">Replacement text; empty deletes each selected match.</param>
@@ -1377,11 +1434,15 @@ VAR_OUTPUT
 END_VAR
 ]]></Declaration>
       <Implementation>
-        <ST><![CDATA[IF sourceString.TypeClass <> __SYSTEM.TYPE_CLASS.TYPE_WSTRING THEN
-	RETURN;
-END_IF
+        <ST><![CDATA[__TRY
+	IF sourceString.TypeClass <> __SYSTEM.TYPE_CLASS.TYPE_WSTRING THEN
+		RETURN;
+	END_IF
 
-TryReplaceInSource255 := InternalReplaceInSource(sourceString, ADR(oldSubstring), ADR(newSubstring), maxReplacements, skipReplacements, replacementCount => replacementCount);]]></ST>
+	TryReplaceInSource255 := InternalReplaceInSource(sourceString, ADR(oldSubstring), ADR(newSubstring), maxReplacements, skipReplacements, replacementCount => replacementCount);
+__CATCH
+	TryReplaceInSource255 := FALSE;
+__ENDTRY]]></ST>
       </Implementation>
     </Method>
   </POU>

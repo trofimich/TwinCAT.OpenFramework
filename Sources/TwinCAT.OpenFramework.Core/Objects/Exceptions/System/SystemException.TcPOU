@@ -1,4 +1,4 @@
-<?xml version="1.0" encoding="utf-8"?>
+﻿<?xml version="1.0" encoding="utf-8"?>
 <TcPlcObject Version="1.1.0.1">
   <POU Name="SystemException" Id="{003dda89-959c-4208-b47c-eab6a22da353}" SpecialFunc="None">
     <Declaration><![CDATA[(*
@@ -10,16 +10,15 @@ License: https://opensource.org/license/mit
 (*!
 <summary>Wraps native exception codes; the manager provides a separate borrowed static view for each cyclic PLC task.</summary>
 <description>
-Dynamic instances/clones belong to DynamicMemoryManager and must not be deleted manually.
+Registered dynamic instances/clones belong to DynamicMemoryManager and must not be deleted manually.
 Instances and borrowed views must not cross task boundaries. The static view changes on the next native catch in its owning task.
 Framework propagation preserves the captured code, catch point and timestamps in a dynamic clone.
 Implements ISystemException so handlers can query the captured native code through an interface.
 Root lookup returns this instance as a borrowed read-only view.
 The native throw source is unknown. Messages include the captured catch point regardless of showSource; the catch point is not the throw source.
-</description>
+ Dynamic copies are explicitly registered by Clone after construction; plain __NEW does not transfer ownership to the task manager.</description>
 *)
 
-//!<param name="_AutoDisposeRegistrar">Dynamic system exceptions share the manager-owned lifetime of other exceptions.</param>
 
 {attribute 'enable_dynamic_creation'}	
 {attribute 'no_explicit_call' := 'do not call this function block directly'} 
@@ -48,14 +47,17 @@ VAR
 	_UnspecifiedPosition : STRING(32);
 
 	
-	_AutoDisposeRegistrar : AutoDisposeRegistrar(THIS^);
 END_VAR]]></Declaration>
     <Implementation>
       <ST><![CDATA[]]></ST>
     </Implementation>
     <Folder Name="Service methods" Id="{e40f07a0-bb69-43d2-9344-558beb521327}" />
     <Method Name="appendTimestampDescription" Id="{dcf3179b-315e-43cb-bffb-a9cc08face8f}" FolderPath="Service methods\">
-      <Declaration><![CDATA[METHOD PRIVATE appendTimestampDescription
+      <Declaration><![CDATA[(*!
+<summary>Appends the selected timestamp to an existing diagnostic builder.</summary>
+<description>Hidden mode leaves the builder unchanged; otherwise appends the supplied local or UTC timestamp, with a UTC suffix for UTC mode. Does not clear existing text. Buffer growth follows the builder allocation-failure contract.</description>
+*)
+METHOD PRIVATE appendTimestampDescription
 VAR_IN_OUT CONSTANT
 	stringBuilder : WideStringBuilder;
 END_VAR
@@ -79,7 +81,11 @@ END_CASE]]></ST>
       </Implementation>
     </Method>
     <Property Name="ClassName" Id="{f6998750-94de-4b27-9017-ad7539ef8bae}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Provides the diagnostic type name without copying its storage.</summary>
+<description>Borrowed read-only reference. Do not modify the referenced name; keep the owning instance alive while using the reference.</description>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
       <Get Name="Get" Id="{cb7835e8-806f-4442-837f-895002f84c14}">
         <Declaration><![CDATA[]]></Declaration>
@@ -109,7 +115,7 @@ _UtcTimestamp := LongDateAndTimes.EPOCH;]]></ST>
 <description>
 Captured timestamps are copied unchanged; cloning does not create a new occurrence time.
 Allocation failure latches and raises fatal OUT_OF_MEMORY, without a heap exception.
-</description>
+ Registers the newly constructed instance before copying payload, outside FB_init. Registration failure releases the unregistered instance and raises a terminal error; copy failure leaves the registered instance owned by the task manager for cleanup. Custom overrides must follow the same ownership sequence.</description>
 *)
 
 METHOD Clone : IObject
@@ -124,6 +130,8 @@ IF exceptionClone = 0 THEN
 	DynamicMemoryManager.RaiseAllocationFailure();
 END_IF
 
+DynamicMemoryManager.RegisterAutoDisposedObject(exceptionClone^);
+
 exceptionClone^._ExceptionCode := _ExceptionCode;
 exceptionClone^._CatchPointNamespaceName := _CatchPointNamespaceName;
 exceptionClone^._CatchPointPOUName := _CatchPointPOUName;
@@ -134,12 +142,13 @@ exceptionClone^._UtcTimestamp := _UtcTimestamp;
 Clone := exceptionClone^;]]></ST>
       </Implementation>
     </Method>
-    <Method Name="Configure" Id="{297ea316-2fb7-4596-b05c-db0f46e37b1b}">
+    <Method Name="Configure" Id="{297ea316-2fb7-4596-b05c-db0f46e37b1b}" FolderPath="Service methods\">
       <Declaration><![CDATA[(*!
-<summary>Captures the time GetLastException observes the native exception, not the unavailable native throw time.</summary>
+<summary>Captures a native exception code, catch point and observation time.</summary>
+<description>Replaces the previous code and catch-point strings with copies of the supplied values. Captures the current task local and UTC time when GetLastException observes the exception; the original native throw time and source are unavailable. Input references are not retained. Descendants cannot replace native exception capture; this operation preserves the configured code, catch location and timestamps.</description>
 *)
 
-METHOD INTERNAL Configure
+METHOD INTERNAL FINAL Configure
 VAR_IN_OUT CONSTANT
 	exceptionCode : __SYSTEM.ExceptionCode;
 	catchPointNamespaceName : STRING;
@@ -157,7 +166,11 @@ _UtcTimestamp := System.SystemUtcDateTime;]]></ST>
       </Implementation>
     </Method>
     <Property Name="Empty" Id="{038c5f5f-d26f-4e70-a390-6d5e8f198afd}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Reports whether no native exception code is stored.</summary>
+<description>TRUE exactly when ExceptionCode is NOEXCEPTION; does not change the captured description.</description>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY Empty : BOOL]]></Declaration>
       <Get Name="Get" Id="{60ffea73-58f0-48cd-a1b6-f69c50756f23}">
         <Declaration><![CDATA[]]></Declaration>
@@ -167,7 +180,11 @@ PROPERTY Empty : BOOL]]></Declaration>
       </Get>
     </Property>
     <Property Name="ExceptionCode" Id="{98df4acc-7b54-406f-b517-a9c22c0f0d8e}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Returns the captured native exception code.</summary>
+<description>Reading preserves the stored code; NOEXCEPTION represents an empty system exception.</description>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY FINAL ExceptionCode : __SYSTEM.ExceptionCode]]></Declaration>
       <Get Name="Get" Id="{90619a75-6b17-438b-a2b1-b465d62fd70b}">
         <Declaration><![CDATA[]]></Declaration>
@@ -177,7 +194,11 @@ PROPERTY FINAL ExceptionCode : __SYSTEM.ExceptionCode]]></Declaration>
       </Get>
     </Property>
     <Method Name="FB_init" Id="{9df7f179-6b56-448d-8f6f-07eac327896a}">
-      <Declaration><![CDATA[//!<param name="bInitRetains">if TRUE, the retain variables are initialized (warm start / cold start)</param>
+      <Declaration><![CDATA[(*!
+<summary>Initializes placeholders for unavailable native source metadata.</summary>
+<description>Does not capture an exception, allocate a diagnostic exception or raise an exception.</description>
+*)
+//!<param name="bInitRetains">if TRUE, the retain variables are initialized (warm start / cold start)</param>
 
 //!<param name="bInCopyCode">if TRUE, the instance afterwards gets moved into the copy code (online change)</param>
 
@@ -215,7 +236,7 @@ END_VAR]]></Declaration>
 	stringBuilder
 		.AppendString("System exception ")
 		.AppendString255(TO_WSTRING(_ExceptionCode))
-		.AppendString(" occured. Сaught in ")
+		.AppendString(" occured. Caught in ")
 		.AppendString255(TO_WSTRING(_CatchPointNamespaceName))
 		.AppendString(".")
 		.AppendString255(TO_WSTRING(_CatchPointPOUName))
@@ -245,13 +266,21 @@ METHOD FINAL GetRootException : IReadOnlyException]]></Declaration>
       </Implementation>
     </Method>
     <Method Name="GetSourceDescription" Id="{933b59e0-81e6-42d6-ba36-d2e00c47553a}">
-      <Declaration><![CDATA[METHOD FINAL GetSourceDescription : STRING(255)]]></Declaration>
+      <Declaration><![CDATA[(*!
+<summary>Formats the available exception source description.</summary>
+<description>Returns an independent bounded string. Native exceptions without original throw-site information return the unspecified-source marker; catch-point information is not an original throw site.</description>
+*)
+METHOD FINAL GetSourceDescription : STRING(255)]]></Declaration>
       <Implementation>
         <ST><![CDATA[GetSourceDescription := Exceptions.UNSPECIFIED_SOURCE;]]></ST>
       </Implementation>
     </Method>
     <Property Name="LocalTimestamp" Id="{243bf917-8856-414f-8657-d2ad403ee832}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Provides the stored local timestamp of this exception.</summary>
+<description>Framework exceptions capture it when thrown; native exceptions capture it when GetLastException obtains their description. Cloning preserves the timestamp; reading it does not read the current clock.</description>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY FINAL LocalTimestamp : LDATE_AND_TIME]]></Declaration>
       <Get Name="Get" Id="{79d470da-f79a-4a33-bf4f-89aa38c370f7}">
         <Declaration><![CDATA[]]></Declaration>
@@ -261,7 +290,11 @@ PROPERTY FINAL LocalTimestamp : LDATE_AND_TIME]]></Declaration>
       </Get>
     </Property>
     <Property Name="NamespaceName" Id="{ca510274-b070-4a45-bc4b-9eb8a5a40ec1}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Provides the library namespace used in diagnostics.</summary>
+<description>Borrowed read-only reference to the compiler-initialized library namespace; no ownership transfer.</description>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
       <Get Name="Get" Id="{6c4acd0f-2e61-4a39-b5a8-d3f83794230d}">
         <Declaration><![CDATA[]]></Declaration>
@@ -271,7 +304,11 @@ PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
       </Get>
     </Property>
     <Property Name="SelfSize" Id="{45a123fb-1e78-493d-ab14-ef856a5a55f6}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Reports the byte size of this concrete instance.</summary>
+<description>Uses XSIZEOF on the instance. Does not include separately allocated payloads or prove that an arbitrary address is valid.</description>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY SelfSize : ULINT]]></Declaration>
       <Get Name="Get" Id="{adba8c9d-7fbf-47a5-ad28-a9aff99bf348}">
         <Declaration><![CDATA[]]></Declaration>
@@ -281,7 +318,11 @@ PROPERTY SelfSize : ULINT]]></Declaration>
       </Get>
     </Property>
     <Property Name="Severity" Id="{5e42d487-fb84-4ef7-8167-9ccf2b832212}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Reports CRITICAL severity for a native system exception.</summary>
+<description>This implementation uses a fixed severity, independent of the captured native exception code.</description>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY FINAL Severity : ERROR_SEVERITY]]></Declaration>
       <Get Name="Get" Id="{deb70a32-6e78-47a9-8646-53719a2a7ac5}">
         <Declaration><![CDATA[]]></Declaration>
@@ -291,7 +332,11 @@ PROPERTY FINAL Severity : ERROR_SEVERITY]]></Declaration>
       </Get>
     </Property>
     <Property Name="SourceFullPOUName" Id="{bb5b4681-7cbe-4420-8da3-3eab8d25b3a6}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Returns a borrowed unspecified-source marker.</summary>
+<description>Native exceptions do not provide their original POU name. The reference is read-only by contract and remains valid only while this instance exists.</description>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY FINAL SourceFullPOUName : REFERENCE TO STRING(128)]]></Declaration>
       <Get Name="Get" Id="{000c96a6-91dd-487f-a89a-7a0a528ae1fc}">
         <Declaration><![CDATA[]]></Declaration>
@@ -301,7 +346,11 @@ PROPERTY FINAL SourceFullPOUName : REFERENCE TO STRING(128)]]></Declaration>
       </Get>
     </Property>
     <Property Name="SourcePosition" Id="{a0036bdf-f7b1-4700-90c9-8ba4e7777c8e}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Returns a borrowed unspecified-position marker.</summary>
+<description>Native exceptions do not provide their original throw position. The reference is read-only by contract and remains valid only while this instance exists.</description>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY FINAL SourcePosition : REFERENCE TO STRING(32)]]></Declaration>
       <Get Name="Get" Id="{81eb6bc3-98ea-458a-b91b-7e4c86ab7dcc}">
         <Declaration><![CDATA[]]></Declaration>
@@ -312,8 +361,8 @@ PROPERTY FINAL SourcePosition : REFERENCE TO STRING(32)]]></Declaration>
     </Property>
     <Method Name="ToError" Id="{5bcd52e5-ca90-49d6-b86c-fe61de2dd705}">
       <Declaration><![CDATA[(*!
-<summary>Prepares diagnostic text locally before passing it to read-only logging or exception parameters.</summary>
-<description>Computed diagnostic strings are held in local buffers for the duration of the receiving call.</description>
+<summary>Copies exception diagnostics and timestamps into an ERROR value.</summary>
+<description>An invalid target reference is ignored. Otherwise fills both top and root descriptions from this exception using the supplied severity and stored timestamps. Formatting uses default source and timestamp display options. The target retains copied text, not an exception reference; formatting may follow the allocation-failure policy of the concrete formatter.</description>
 *)
 METHOD ToError
 VAR_IN_OUT CONSTANT
@@ -350,7 +399,11 @@ targetError.Fill(
       </Implementation>
     </Method>
     <Property Name="UtcTimestamp" Id="{b9a20ffe-1a2b-4d8b-a985-efb4f4570353}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Provides the stored UTC timestamp of this exception.</summary>
+<description>Framework exceptions capture it when thrown; native exceptions capture it when GetLastException obtains their description. Cloning preserves the timestamp; reading it does not read the current clock.</description>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY FINAL UtcTimestamp : LDATE_AND_TIME]]></Declaration>
       <Get Name="Get" Id="{9ac21bad-7080-4914-9567-5b68982f14d9}">
         <Declaration><![CDATA[]]></Declaration>

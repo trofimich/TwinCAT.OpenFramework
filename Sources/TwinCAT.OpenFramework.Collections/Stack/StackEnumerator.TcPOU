@@ -1,0 +1,162 @@
+<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="StackEnumerator" Id="{e416d399-9dd5-4cb2-b9ab-6df401117b4b}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+SPDX-FileCopyrightText: © 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+SPDX-License-Identifier: MIT
+License: https://opensource.org/license/mit
+*)
+
+(*!
+<summary>Enumerates a borrowed stack using an independent cursor.</summary>
+<description>
+The source must be non-null, outlive the cursor and remain structurally unchanged during traversal. The caller explicitly releases a dynamically created cursor. Current is borrowed read-only data, never an ownership transfer. Traverses from top to bottom. Supports both fixed-capacity and dynamic stacks.
+MoveNext stops advancing at the end position of an unchanged source; repeated exhausted calls return FALSE until Reset.
+</description>
+*)
+
+{attribute 'no_explicit_call' := 'do not call this function block directly'} 
+{attribute 'enable_dynamic_creation'}
+FUNCTION_BLOCK StackEnumerator EXTENDS TOF_Core.Object IMPLEMENTS TOF_Core.IEnumerator
+VAR
+	{attribute 'hide'} 
+	_ClassName : STRING := __POUNAME();
+	
+	{attribute 'hide'} 
+	_Stack : IReadOnlyStack;
+	{attribute 'hide'} 
+	//!<summary>Top-relative position; minus one represents the cursor before the first entry.</summary>
+	_CurrentIndex : DINT := -1;
+	
+	{attribute 'hide'} 
+	_GenericValue : TOF_Core.GENERIC_VALUE;
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[]]></ST>
+    </Implementation>
+    <Property Name="ClassName" Id="{26c6f006-587c-4952-acea-42d8f9ee18b5}">
+      <Declaration><![CDATA[(*!
+<summary>Provides the concrete type name for diagnostics.</summary>
+<description>
+Borrowed read-only reference to instance metadata; no ownership transfer.
+</description>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{625934d1-371a-449b-80c4-6fdb2abaadd7}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ClassName REF= _ClassName;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="Current" Id="{7b130588-92b9-47cf-9ece-7bab9548bbf7}">
+      <Declaration><![CDATA[(*!
+<summary>Exposes a read-only borrowed view of the current entry.</summary>
+<description>
+Reading Current before the first successful MoveNext, after Reset or after exhaustion yields an empty descriptor. Otherwise payload is borrowed, with no disposal rights. Do not modify or release the descriptor. The view may change on subsequent property access, cursor movement or source mutation.
+</description>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY FINAL Current : REFERENCE TO TOF_Core.GENERIC_VALUE]]></Declaration>
+      <Get Name="Get" Id="{2a2cfc97-9e56-485a-990c-1429fa351b49}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[IF _CurrentIndex >= TOF_Core.SignedInt32.ZERO AND_THEN _CurrentIndex < _Stack.Length THEN
+	_GenericValue := _Stack.GetByIndex(_CurrentIndex); 
+ELSE
+	_GenericValue.Reset();	
+END_IF 
+
+Current REF= _GenericValue;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="FB_init" Id="{058de72d-67eb-4fa1-bd5e-1ce98906e144}">
+      <Declaration><![CDATA[(*!
+<summary>Binds the borrowed source for enumeration.</summary>
+<description>
+The source must be non-null and outlive the cursor. Only the reference is assigned; no allocation, callbacks or throwing validation are performed.
+</description>
+*)
+//!<param name="bInitRetains">if TRUE, the retain variables are initialized (warm start / cold start)</param>
+
+//!<param name="bInCopyCode">if TRUE, the instance afterwards gets moved into the copy code (online change)</param>
+
+METHOD FB_init : BOOL
+VAR_INPUT
+	
+	bInitRetains	: BOOL;
+	
+	bInCopyCode	: BOOL;
+	stack : IReadOnlyStack;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_Stack := stack;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="MoveNext" Id="{60bdc8b6-a79f-413f-a052-685c1b66ff7c}">
+      <Declaration><![CDATA[(*!
+<summary>Advances the cursor to the next source position.</summary>
+<description>
+The source must be live, non-null and structurally unchanged during traversal. TRUE identifies a current entry. The index advances only while below source Length and stops at the end position. Repeated exhausted calls return FALSE without incrementing the index; reading Current yields an empty descriptor. Reset allows traversal from the beginning again. No snapshot or mutation detection is provided.
+ Descendants cannot override this cursor operation; advancement, reset and borrowed current views use the same cursor state.</description>
+*)
+{attribute "object_name" := "MoveNext"}
+METHOD FINAL MoveNext : BOOL]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF _CurrentIndex < _Stack.Length THEN
+	_CurrentIndex := _CurrentIndex + 1;
+END_IF
+
+MoveNext := _CurrentIndex < _Stack.Length;]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="NamespaceName" Id="{41db8516-569e-46a2-b3c2-7e7b20f0c340}">
+      <Declaration><![CDATA[(*!
+<summary>Provides the library namespace for diagnostics.</summary>
+<description>
+Borrowed read-only reference to compiler-initialized metadata; no ownership transfer.
+</description>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{7c548c9d-cc27-4886-9a7d-beb0d647cfc5}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[NamespaceName REF= CurrentNamespace.Name;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="Reset" Id="{bbc5a77c-4535-4950-b859-06b46db423a4}">
+      <Declaration><![CDATA[(*!
+<summary>Places the cursor before the first source entry.</summary>
+<description>
+The next MoveNext starts at zero. Does not modify the source or release payload; reading Current now yields an empty descriptor.
+ Descendants cannot override this cursor operation; advancement, reset and borrowed current views use the same cursor state.</description>
+*)
+{attribute "object_name" := "Reset"}
+METHOD FINAL Reset
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_CurrentIndex := -1;]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="SelfSize" Id="{c679d536-5abc-4b01-9533-75c921118918}">
+      <Declaration><![CDATA[(*!
+<summary>Reports the size of this function-block instance.</summary>
+<description>
+Measured in bytes; includes inline storage but excludes separately allocated buffers, payload and enumerators.
+</description>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY SelfSize : ULINT]]></Declaration>
+      <Get Name="Get" Id="{e4c32193-d837-407c-aab4-c3a364acec64}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[SelfSize := XSIZEOF(THIS^);]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+  </POU>
+</TcPlcObject>

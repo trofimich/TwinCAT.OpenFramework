@@ -9,6 +9,10 @@ License: https://opensource.org/license/mit
 
 {attribute 'enable_dynamic_creation'}	
 {attribute 'no_explicit_call' := 'do not call this function block directly'} 
+(*!
+<summary>Represents exception diagnostics with task-owned cloning.</summary>
+<description>Dynamic copies are explicitly registered by Clone after construction; plain __NEW does not transfer ownership to the task manager.</description>
+*)
 FUNCTION_BLOCK InvalidNestedWorkflowStateException EXTENDS TOF_Core.GeneralException IMPLEMENTS IInvalidNestedWorkflowStateException
 VAR
 	{attribute 'hide'} 
@@ -28,12 +32,22 @@ PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
       </Get>
     </Property>
     <Method Name="Clone" Id="{ff7ed493-92b3-4b7a-acd1-6efb44d9be7a}">
-      <Declaration><![CDATA[METHOD Clone : TOF_Core.IObject
+      <Declaration><![CDATA[(*!
+<summary>Creates a task-owned copy of this exception and its diagnostic payload.</summary>
+<description>Registers the newly constructed instance before copying payload, outside FB_init. Registration failure releases the unregistered instance and raises a terminal error; copy failure leaves the registered instance owned by the task manager for cleanup. Custom overrides must follow the same ownership sequence. The returned reference is borrowed until task cleanup and must not be deleted by the caller.</description>
+*)
+METHOD Clone : TOF_Core.IObject
 VAR
 	exceptionClone : POINTER TO InvalidNestedWorkflowStateException;
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[exceptionClone := __NEW(InvalidNestedWorkflowStateException);
+
+IF exceptionClone = 0 THEN
+	TOF_Core.DynamicMemoryManager.RaiseAllocationFailure();
+END_IF
+
+TOF_Core.DynamicMemoryManager.RegisterAutoDisposedObject(exceptionClone^);
 
 exceptionClone^.CopyGeneralFields(THIS^);
 

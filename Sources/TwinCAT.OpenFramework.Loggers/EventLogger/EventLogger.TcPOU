@@ -10,7 +10,7 @@ License: https://opensource.org/license/mit
 {attribute 'no_explicit_call' := 'do not call this function block directly'} 
 (*!
 <summary>Writes diagnostics through TwinCAT EventLogger and expands aggregate exceptions into entries.</summary>
-<description>Exception logging accepts IReadOnlyException and reads borrowed diagnostics without transferring ownership. Implementations must not retain exception references beyond their task cleanup. Numbered messages preserve the number and truncate oversized text to ERROR_MESSAGE capacity with a final ellipsis.</description>
+<description>Use this backend for TwinCAT EventLogger events with structured source information when logging errors and exceptions directly. Use one task for direct calls on each instance; concurrent use of its internal FB_TcEventLogger has no established guarantee here. For callers in multiple tasks, use QueuedLogger and let only its owner task access this backend; do not bypass the wrapper with concurrent direct calls. QueuedLogger forwards text records, so exception source is included in text rather than the structured source field, and backend-specific aggregate formatting is not preserved. Execute performs no cyclic work. Exception logging accepts IReadOnlyException and reads borrowed diagnostics without transferring ownership. Implementations must not retain exception references beyond their task cleanup. Numbered messages preserve the number and truncate oversized text to ERROR_MESSAGE capacity with a final ellipsis. TryLog methods must satisfy the no-throw contract even when called directly, without LogManager. Does not propagate exceptions, including failures while reading or formatting diagnostics and calling the backend; returns FALSE instead. Already emitted entries are not rolled back, so FALSE may follow partial output. Caught exceptions are not logged again. The fatal allocation latch is preserved for RaiseIfAllocationFailed at the task boundary outside recoverable handlers.</description>
 *)
 FUNCTION_BLOCK EventLogger EXTENDS TOF_Core.Object IMPLEMENTS TOF_Core.ILogger
 VAR
@@ -40,7 +40,11 @@ PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
       </Get>
     </Property>
     <Method Name="Execute" Id="{45bb9e14-c21d-4ace-9cc8-e5705603b0cc}">
-      <Declaration><![CDATA[METHOD Execute
+      <Declaration><![CDATA[(*!
+<summary>Completes without work because this logger has no cyclic processing.</summary>
+<description>Does not raise exceptions.</description>
+*)
+METHOD Execute
 ]]></Declaration>
       <Implementation>
         <ST><![CDATA[// nothing to do for ADS logger]]></ST>
@@ -175,7 +179,11 @@ PROPERTY SelfSize : ULINT]]></Declaration>
       </Get>
     </Property>
     <Method Name="TryLogError" Id="{4a210b47-12f5-416e-800c-6b940764fae5}">
-      <Declaration><![CDATA[METHOD TryLogError : BOOL
+      <Declaration><![CDATA[(*!
+<summary>Attempts to log a borrowed error without propagating exceptions.</summary>
+<description>Borrows inputs only for the call. TRUE reports backend acceptance, not guaranteed durable storage. Does not propagate exceptions, including failures while reading or formatting diagnostics and calling the backend; returns FALSE instead. Already emitted entries are not rolled back, so FALSE may follow partial output. Caught exceptions are not logged again. The fatal allocation latch is preserved for RaiseIfAllocationFailed at the task boundary outside recoverable handlers.</description>
+*)
+METHOD TryLogError : BOOL
 VAR_INPUT
 	error : REFERENCE TO TOF_Core.ERROR;
 	messageNumber : REFERENCE TO ULINT := 0;
@@ -184,19 +192,23 @@ VAR
 	message : TOF_Core.ERROR_MESSAGE;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[IF NOT __ISVALIDREF(error) THEN
-	RETURN;
-END_IF
+        <ST><![CDATA[__TRY
+	IF NOT __ISVALIDREF(error) THEN
+		RETURN;
+	END_IF
 
-message := error.ToString(TOF_Core.ERROR_SOURCE_DISPLAY_MODE.HIDDEN, TOF_Core.TIMESTAMP_DISPLAY_MODE.HIDDEN);
+	message := error.ToString(TOF_Core.ERROR_SOURCE_DISPLAY_MODE.HIDDEN, TOF_Core.TIMESTAMP_DISPLAY_MODE.HIDDEN);
 
-TryLogError := InternalTryLogMessage(SEL(error.Severity = TOF_Core.ERROR_SEVERITY.CRITICAL, TOF_Core.LOG_CATEGORY.ERROR, TOF_Core.LOG_CATEGORY.CRITICAL_ERROR), message, error.GetSource(TRUE), messageNumber);]]></ST>
+	TryLogError := InternalTryLogMessage(SEL(error.Severity = TOF_Core.ERROR_SEVERITY.CRITICAL, TOF_Core.LOG_CATEGORY.ERROR, TOF_Core.LOG_CATEGORY.CRITICAL_ERROR), message, error.GetSource(TRUE), messageNumber);
+__CATCH
+	TryLogError := FALSE;
+__ENDTRY]]></ST>
       </Implementation>
     </Method>
     <Method Name="TryLogException" Id="{1990277d-d5d3-4267-af7a-8be26122cbfe}">
       <Declaration><![CDATA[(*!
 <summary>Attempts to log diagnostic information from a read-only exception view.</summary>
-<description>Borrows the exception for the call without clearing it or taking ownership. The exception and its inner causes must remain live while their diagnostics are read. Logging does not extend their lifetime.</description>
+<description>Borrows the exception for the call without clearing it or taking ownership. The exception and its inner causes must remain live while their diagnostics are read. Logging does not extend their lifetime. Does not propagate exceptions, including failures while reading or formatting diagnostics and calling the backend; returns FALSE instead. Already emitted entries are not rolled back, so FALSE may follow partial output. Caught exceptions are not logged again. The fatal allocation latch is preserved for RaiseIfAllocationFailed at the task boundary outside recoverable handlers.</description>
 <param name="exception">Exception view to read; null is ignored.</param>
 <param name="severity">Severity used to select the log category.</param>
 *)
@@ -212,24 +224,32 @@ VAR
 	i : DINT;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[IF exception = 0 THEN
-	RETURN;
-END_IF
+        <ST><![CDATA[__TRY
+	IF exception = 0 THEN
+		RETURN;
+	END_IF
 
-IF NOT __QUERYINTERFACE(exception, aggregateException) OR_ELSE aggregateException.InnerExceptionCount = 0 THEN
-	message := exception.GetMessage(FALSE, TOF_Core.TIMESTAMP_DISPLAY_MODE.LOCAL);
-	TryLogException := InternalTryLogMessage(SEL(severity = TOF_Core.ERROR_SEVERITY.CRITICAL, TOF_Core.LOG_CATEGORY.ERROR, TOF_Core.LOG_CATEGORY.CRITICAL_ERROR), message, exception.GetSourceDescription(), messageNumber);
-ELSE
-	TryLogException := TRUE;
-	
-	FOR i := 0 TO aggregateException.InnerExceptionCount - 1 DO
-		TryLogException := TryLogException AND THIS^.TryLogException(aggregateException.GetInnerException(i), severity, messageNumber);		
-	END_FOR
-END_IF]]></ST>
+	IF NOT __QUERYINTERFACE(exception, aggregateException) OR_ELSE aggregateException.InnerExceptionCount = 0 THEN
+		message := exception.GetMessage(FALSE, TOF_Core.TIMESTAMP_DISPLAY_MODE.LOCAL);
+		TryLogException := InternalTryLogMessage(SEL(severity = TOF_Core.ERROR_SEVERITY.CRITICAL, TOF_Core.LOG_CATEGORY.ERROR, TOF_Core.LOG_CATEGORY.CRITICAL_ERROR), message, exception.GetSourceDescription(), messageNumber);
+	ELSE
+		TryLogException := TRUE;
+		
+		FOR i := 0 TO aggregateException.InnerExceptionCount - 1 DO
+			TryLogException := TryLogException AND THIS^.TryLogException(aggregateException.GetInnerException(i), severity, messageNumber);		
+		END_FOR
+	END_IF
+__CATCH
+	TryLogException := FALSE;
+__ENDTRY]]></ST>
       </Implementation>
     </Method>
     <Method Name="TryLogMessage" Id="{68073492-716c-4ee9-a006-f48bbbfa1f4f}">
-      <Declaration><![CDATA[METHOD TryLogMessage : BOOL
+      <Declaration><![CDATA[(*!
+<summary>Attempts to log borrowed message text without propagating exceptions.</summary>
+<description>Borrows inputs only for the call. TRUE reports backend acceptance, not guaranteed durable storage. Does not propagate exceptions, including failures while reading or formatting diagnostics and calling the backend; returns FALSE instead. Already emitted entries are not rolled back, so FALSE may follow partial output. Caught exceptions are not logged again. The fatal allocation latch is preserved for RaiseIfAllocationFailed at the task boundary outside recoverable handlers.</description>
+*)
+METHOD TryLogMessage : BOOL
 VAR_INPUT
 	category : TOF_Core.LOG_CATEGORY;	
 END_VAR
@@ -245,7 +265,11 @@ VAR
 	methodResult : HRESULT;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[TryLogMessage := InternalTryLogMessage(category, message, '', messageNumber);]]></ST>
+        <ST><![CDATA[__TRY
+	TryLogMessage := InternalTryLogMessage(category, message, '', messageNumber);
+__CATCH
+	TryLogMessage := FALSE;
+__ENDTRY]]></ST>
       </Implementation>
     </Method>
   </POU>

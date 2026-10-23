@@ -1,0 +1,169 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="SameStoragePredicate" Id="{ddbd19a6-cabe-4848-833d-1f8983917ab8}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+SPDX-FileCopyrightText: © 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+SPDX-License-Identifier: MIT
+License: https://opensource.org/license/mit
+*)
+
+(*!
+<summary>Tests whether a query describes the same borrowed storage.</summary>
+<description>
+Borrows the original source storage without copying or owning it.
+The caller keeps that storage alive and its address and representation valid until the next setter
+call or predicate destruction.
+Check tests the same address and either the same size or matching mapped type; it does not compare
+payload content or call Object.Equals.
+ReferenceValue is a read-only view by contract; only the setters may change the reference.
+</description>
+*)
+FUNCTION_BLOCK SameStoragePredicate EXTENDS TOF_Core.Object IMPLEMENTS TOF_Core.IPredicate
+VAR
+	{attribute 'hide'} 
+	_ClassName : STRING := __POUNAME();
+	
+	{attribute 'hide'} 
+	_ReferenceValue : TOF_Core.GENERIC_VALUE;
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[]]></ST>
+    </Implementation>
+    <Method Name="Check" Id="{35c8a3af-5588-4846-ab97-7e0e1082c853}">
+      <Declaration><![CDATA[(*!
+<summary>Checks address identity with size or mapped-type compatibility.</summary>
+<description>
+The query must have valid runtime metadata and live storage for the call.
+Returns TRUE only for equal addresses and either equal byte sizes or equal mapped runtime types.
+Null metadata follows the same rule.
+Type conversion exceptions propagate.
+No payload is read, copied or released.
+ Descendants cannot override this reference-value operation; implement IPredicate separately for different matching or storage semantics.</description>
+*)
+METHOD FINAL Check : BOOL
+VAR_INPUT
+	valueToCompare : __SYSTEM.AnyType; 
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[// same address and type class, but diffirent size can be in case of string comparison where size determined in diffirent ways: with length function which searches for zero and with compiler by real allocated memory size 
+// same address and size, but diffirent type class can be in case of integer/enum/range type comparison
+Check := _ReferenceValue.Address = valueToCompare.pValue 
+	AND_THEN (
+		TO_DINT(_ReferenceValue.Size) = valueToCompare.diSize 
+		OR_ELSE TOF_Core.SystemTypeClassConvertor.GetSystemTypeClassByGenericTypeClass(_ReferenceValue.TypeClass) = valueToCompare.TypeClass
+	);]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="ClassName" Id="{0f0f4f1b-f736-46d7-b0fe-2b1a692afb8a}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{48637cf3-74bd-4840-a502-e264f1448455}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ClassName REF= _ClassName;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="FB_exit" Id="{51fd8ac6-6067-4184-8676-0a7db000891d}">
+      <Declaration><![CDATA[(*!
+<summary>Finishes the predicate without releasing caller-owned storage.</summary>
+<description>
+The borrowed reference transfers no ownership; its source remains the caller's responsibility.
+No allocation, payload cleanup or throwing path is invoked.
+</description>
+*)
+//!<param name="bInCopyCode">if TRUE, the exit method is called for exiting an instance that is copied afterwards (online change).</param>
+
+METHOD FB_exit : BOOL
+VAR_INPUT
+	bInCopyCode	: BOOL;
+END_VAR
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="NamespaceName" Id="{c43d2823-61c1-460f-b4a3-57db1b9244d0}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{9a33a61f-82c0-4bb0-973a-547ed775c8d6}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[NamespaceName REF= CurrentNamespace.Name;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="ReferenceValue" Id="{3a6361dc-cd05-497a-ae3e-0922ee4a25e7}">
+      <Declaration><![CDATA[(*!
+<summary>Exposes a borrowed read-only view of the current reference descriptor.</summary>
+<description>
+The REFERENCE TO signature is retained for compatibility; it does not grant mutation or disposal
+rights.
+Do not assign through the view, alter descriptor fields or payload, or call mutating/cleanup methods
+on it.
+Change the reference only through SetReferenceValueByAny or SetReferenceValueByAnyType.
+Do not retain the view or payload aliases across setter calls or predicate destruction.
+ Descendants cannot override this reference-value operation; implement IPredicate separately for different matching or storage semantics.</description>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY FINAL ReferenceValue : REFERENCE TO TOF_Core.GENERIC_VALUE]]></Declaration>
+      <Get Name="Get" Id="{6680e3a5-1741-40fe-944e-98ad83061ed3}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ReferenceValue REF= _ReferenceValue;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="SelfSize" Id="{b813da18-a809-462b-a4de-1884c9edb817}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+PROPERTY SelfSize : ULINT]]></Declaration>
+      <Get Name="Get" Id="{077ac4cd-c491-495e-895c-1321ae8834d3}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[SelfSize := XSIZEOF(THIS^);]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="SetReferenceValueByAny" Id="{c7a48568-b0d3-494c-86f2-965f9dbd55dd}">
+      <Declaration><![CDATA[(*!
+<summary>Stores a borrowed descriptor for the original source storage.</summary>
+<description>
+Does not clone or release source storage.
+The caller keeps the source alive at its recorded address with a valid representation until
+replacement or destruction.
+Runtime type mapping uses isObject = FALSE.
+If conversion fails, the previous reference remains intact.
+Replacing the reference does not dispose of the previous borrowed source.
+ Descendants cannot override this reference-value operation; implement IPredicate separately for different matching or storage semantics.</description>
+*)
+METHOD FINAL SetReferenceValueByAny
+VAR_INPUT
+	referenceValue : ANY;
+END_VAR
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_ReferenceValue := TOF_Core.GenericValueFactory.FromAnyType(referenceValue, FALSE, TOF_Core.GENERIC_MEMORY_MANAGEMENT_BEHAVIOR.STORE_ORIGINAL_REFERENCE_AND_NOT_OWNS_MEMORY);]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="SetReferenceValueByAnyType" Id="{180ffd21-4342-4518-baa0-ee950af19a4a}">
+      <Declaration><![CDATA[(*!
+<summary>Stores a borrowed descriptor for the original source storage.</summary>
+<description>
+Does not clone or release source storage.
+The caller keeps the source alive at its recorded address with a valid representation until
+replacement or destruction.
+Runtime type mapping uses isObject = FALSE.
+If conversion fails, the previous reference remains intact.
+Replacing the reference does not dispose of the previous borrowed source.
+ Descendants cannot override this reference-value operation; implement IPredicate separately for different matching or storage semantics.</description>
+*)
+METHOD FINAL SetReferenceValueByAnyType
+VAR_INPUT
+	referenceValue : __SYSTEM.AnyType;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_ReferenceValue := TOF_Core.GenericValueFactory.FromAnyType(referenceValue, FALSE, TOF_Core.GENERIC_MEMORY_MANAGEMENT_BEHAVIOR.STORE_ORIGINAL_REFERENCE_AND_NOT_OWNS_MEMORY);]]></ST>
+      </Implementation>
+    </Method>
+  </POU>
+</TcPlcObject>

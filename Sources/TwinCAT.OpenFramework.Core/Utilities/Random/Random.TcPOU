@@ -7,7 +7,11 @@ SPDX-License-Identifier: MIT
 License: https://opensource.org/license/mit
 *)
 
-PROGRAM Random
+(*!
+<summary>Provides random values, range scaling and bounded deviations around a base value.</summary>
+<description>Each Random instance owns a separate Tc2_System.DRAND generator used by all its methods. Use separate Random instances in different PLC tasks; do not call the same instance concurrently from multiple tasks. Dispersion helpers generate a value first and then apply optional bounds; NaN disables the corresponding bound.</description>
+*)
+FUNCTION_BLOCK Random EXTENDS Object
 VAR
 	{attribute 'hide'} 
 	_ClassName : STRING := __POUNAME();
@@ -19,7 +23,11 @@ END_VAR]]></Declaration>
       <ST><![CDATA[]]></ST>
     </Implementation>
     <Property Name="ClassName" Id="{24a50f11-c336-4169-858d-033eca05c0f6}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Provides the diagnostic type name without copying its storage.</summary>
+<description>Borrowed read-only reference. Do not modify the referenced name; keep the owning instance alive while using the reference.</description>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
       <Get Name="Get" Id="{fcf10432-9332-4acf-98e3-287a9648de1d}">
         <Declaration><![CDATA[]]></Declaration>
@@ -29,18 +37,30 @@ PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
       </Get>
     </Property>
     <Method Name="GetInRange" Id="{3e18b7d6-6f35-4d7b-82c9-f1518581fc71}">
-      <Declaration><![CDATA[METHOD GetInRange : LREAL
+      <Declaration><![CDATA[(*!
+<summary>Scales a random value to the specified interval.</summary>
+<description>The caller must supply minValue less than or equal to maxValue. Both bounds and all intermediate arithmetic results must be finite. NaN does not disable bounds in this method. The method does not validate these preconditions or reorder bounds. Descendants cannot replace this generator operation; all helpers use the same instance-owned DRAND state and scaling rules.</description>
+<param name="minValue">Lower interval bound.</param>
+<param name="maxValue">Upper interval bound, not less than minValue.</param>
+<param name="seed">Seed argument forwarded to this instance's generator.</param>
+*)
+METHOD FINAL GetInRange : LREAL
 VAR_INPUT
 	minValue : LREAL;
 	maxValue : LREAL;
 	seed : INT := 0;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[GetInRange := minValue + (Random.GetValue(seed) * (maxValue - minValue));]]></ST>
+        <ST><![CDATA[GetInRange := minValue + (GetValue(seed) * (maxValue - minValue));]]></ST>
       </Implementation>
     </Method>
     <Method Name="GetValue" Id="{4713ed65-ae03-40ec-91e1-bcd41fed7f92}">
-      <Declaration><![CDATA[METHOD GetValue : LREAL
+      <Declaration><![CDATA[(*!
+<summary>Obtains the next value from this instance's DRAND generator.</summary>
+<description>Calls the owned Tc2_System.DRAND instance and returns its Num output. The generator state belongs to this Random instance; calls must not overlap across PLC tasks. Descendants cannot replace this generator operation; all helpers use the same instance-owned DRAND state and scaling rules.</description>
+<param name="seed">Seed argument forwarded unchanged to Tc2_System.DRAND.</param>
+*)
+METHOD FINAL GetValue : LREAL
 VAR_INPUT
 	seed : INT := 0;
 END_VAR]]></Declaration>
@@ -49,20 +69,25 @@ END_VAR]]></Declaration>
       </Implementation>
     </Method>
     <Method Name="GetWithDispersion" Id="{8bf15025-f111-4fb3-8a11-8cb62be45b16}">
-      <Declaration><![CDATA[//!<param name="minValue">default is NaN</param>
-
-//!<param name="maxValue">default is NaN</param>
-
-METHOD GetWithDispersion : LREAL
+      <Declaration><![CDATA[(*!
+<summary>Generates a deviation around a base value and applies optional output bounds.</summary>
+<description>The caller must supply a non-negative dispersion; this precondition is not checked at runtime. Generates baseValue - dispersion + 2 * dispersion * randomValue, then clamps the result to the enabled bounds. Bounds do not narrow the generation interval; values outside a bound become equal to that bound. NaN independently disables each bound. When both bounds are enabled, the caller must supply minValue less than or equal to maxValue. The base value, deviation and enabled bounds must be finite, and all intermediate arithmetic results must remain finite. NaN is supported only for disabling the optional bounds. These preconditions are not checked at runtime; bounds are not reordered. Descendants cannot replace this generator operation; all helpers use the same instance-owned DRAND state and scaling rules.</description>
+<param name="baseValue">Center value used to generate the deviation.</param>
+<param name="dispersion">Non-negative deviation magnitude; zero is allowed.</param>
+<param name="minValue">Optional lower output bound; defaults to NaN, which disables it.</param>
+<param name="maxValue">Optional upper output bound; defaults to NaN, which disables it.</param>
+<param name="seed">Seed argument forwarded to this instance's generator.</param>
+*)
+METHOD FINAL GetWithDispersion : LREAL
 VAR_INPUT
 	baseValue : LREAL;
 	dispersion : LREAL;	
-	minValue : LREAL := LOG(-1); 
-	maxValue : LREAL := LOG(-1); 
+	minValue : LREAL := LongReals.NOT_A_NUMBER; 
+	maxValue : LREAL := LongReals.NOT_A_NUMBER; 
 	seed : INT := 0;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[GetWithDispersion := baseValue - dispersion + (dispersion * 2 * Random.GetValue(seed));
+        <ST><![CDATA[GetWithDispersion := baseValue - dispersion + (dispersion * 2 * GetValue(seed));
 
 IF NOT Tc2_Utilities.LrealIsNaN(minValue) AND_THEN GetWithDispersion < minValue THEN
 	GetWithDispersion := minValue;
@@ -74,29 +99,52 @@ END_IF]]></ST>
       </Implementation>
     </Method>
     <Method Name="GetWithDispersionPercent" Id="{da86a01f-1827-4193-a6a3-df07cb7a72e3}">
-      <Declaration><![CDATA[//!<param name="minValue">default is NaN</param>
-
-//!<param name="maxValue">default is NaN</param>
-
-METHOD GetWithDispersionPercent : LREAL
+      <Declaration><![CDATA[(*!
+<summary>Generates a percentage-based deviation and applies optional output bounds.</summary>
+<description>The caller must supply a non-negative dispersionPercent; this precondition is not checked at runtime. Calculates dispersion as ABS(baseValue) / 100 * dispersionPercent and delegates to GetWithDispersion. Bounds clamp the generated result rather than narrowing the generation interval. NaN independently disables each bound. When both bounds are enabled, the caller must supply minValue less than or equal to maxValue. The base value, percentage and enabled bounds must be finite, and all intermediate arithmetic results must remain finite, including the calculated dispersion. NaN is supported only for disabling the optional bounds. These preconditions are not checked at runtime; bounds are not reordered. Descendants cannot replace this generator operation; all helpers use the same instance-owned DRAND state and scaling rules.</description>
+<param name="baseValue">Base value used to calculate the deviation.</param>
+<param name="dispersionPercent">Non-negative percentage of the absolute base value; zero is allowed.</param>
+<param name="minValue">Optional lower output bound; defaults to NaN, which disables it.</param>
+<param name="maxValue">Optional upper output bound; defaults to NaN, which disables it.</param>
+<param name="seed">Seed argument forwarded to this instance's generator.</param>
+*)
+METHOD FINAL GetWithDispersionPercent : LREAL
 VAR_INPUT
 	baseValue : LREAL;
 	dispersionPercent : LREAL;	
-	minValue : LREAL := LOG(-1); 
-	maxValue : LREAL := LOG(-1); 
+	minValue : LREAL := LongReals.NOT_A_NUMBER; 
+	maxValue : LREAL := LongReals.NOT_A_NUMBER; 
 	seed : INT := 0;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[GetWithDispersionPercent := GetWithDispersion(baseValue, baseValue / 100 * dispersionPercent, minValue, maxValue, seed);]]></ST>
+        <ST><![CDATA[GetWithDispersionPercent := GetWithDispersion(baseValue, ABS(baseValue) / 100 * dispersionPercent, minValue, maxValue, seed);]]></ST>
       </Implementation>
     </Method>
     <Property Name="NamespaceName" Id="{48cc4197-c19c-4579-a073-44730ca905e8}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Provides the library namespace used in diagnostics.</summary>
+<description>Borrowed read-only reference to the compiler-initialized library namespace; no ownership transfer.</description>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
       <Get Name="Get" Id="{7759f733-519b-40e1-a4d1-b60196c7eb3b}">
         <Declaration><![CDATA[]]></Declaration>
         <Implementation>
           <ST><![CDATA[NamespaceName REF= CurrentNamespace.Name;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="SelfSize" Id="{c2108bbb-95da-46cc-8dd6-6205387c6694}">
+      <Declaration><![CDATA[(*!
+<summary>Reports the byte size of this concrete instance.</summary>
+<description>Uses XSIZEOF on the instance. Does not include separately allocated payloads or prove that an arbitrary address is valid.</description>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY SelfSize : ULINT]]></Declaration>
+      <Get Name="Get" Id="{08b21b9d-152f-4994-a452-762ec702be80}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[SelfSize := XSIZEOF(THIS^);]]></ST>
         </Implementation>
       </Get>
     </Property>

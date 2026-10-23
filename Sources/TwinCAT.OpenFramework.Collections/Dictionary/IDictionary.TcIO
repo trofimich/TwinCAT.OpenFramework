@@ -1,7 +1,46 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <TcPlcObject Version="1.1.0.1">
   <Itf Name="IDictionary" Id="{57e81792-3900-4cad-861e-9c1a745a287a}">
-    <Declaration><![CDATA[(*
+    <Declaration><![CDATA[(*!
+<summary>Associates generic keys with values.</summary>
+<description>
+SetGeneric retains an existing matching key and replaces its value.
+SetGeneric preserves disposal responsibility when the same allocation is reused; transferred
+caller-side owning aliases must not be released again.
+SetCopy prepares owned copies and cleans up prepared copies on failure before acceptance.
+Try lookup/removal operations contain exceptions without rolling back partial effects.
+Generic query arguments are borrowed by default.
+Explicitly requested release in Try operations is attempted even after lookup failure; caller-side
+owning aliases are not reset.
+OBJECT keys are permitted when their descriptors refer to live Object instances.
+A borrowed key (IsMemoryOwner = FALSE) is not owned or destroyed by the dictionary; its owner must
+keep it alive for every operation that may access the stored key.
+An owned key must not be deleted or transferred to another owner through a caller-side alias.
+While a key is stored, do not change data used by the active comparison rules, its equality/hash
+results, or equality-relevant comparer configuration.
+Remove the entry before such a change, then insert it again.
+Queries and callbacks must not mutate keys or reenter collection mutation.
+Do not use explicit query release to dispose of a stored key or other storage still retained by the
+collection.
+An address-based identity index must be rebuilt after address relocation; stale indices must not be
+used.
+Borrowing does not pin an object or extend its lifetime.
+A copied object has its own identity; lookup using the original requires an equality strategy under
+which original and copy are equal.
+Default OBJECT lookup delegates to Object.Equals/GetHashCode; fields unrelated to equality/hash may
+change.
+Discard and populate the index again after equality-relevant address relocation before further
+lookup.
+Lookup uses one equality/hash strategy fixed for the collection lifetime; zero selects GENERIC_VALUE
+default equality and hashing.
+A custom comparer is borrowed, stays alive and retains stable equality-relevant configuration.
+Empty descriptors are supported unless rejected by a validator.
+No entry or enumeration order is guaranteed; a position is a current storage slot, not a sorted
+rank.
+Do not modify stored descriptors through returned references.
+</description>
+*)
+(*
 SPDX-FileCopyrightText: © 2026 Oleksandr Tiutyk <trofimich@gmail.com>
 SPDX-License-Identifier: MIT
 License: https://opensource.org/license/mit
@@ -9,23 +48,62 @@ License: https://opensource.org/license/mit
 
 INTERFACE IDictionary EXTENDS IReadOnlyDictionary]]></Declaration>
     <Method Name="Clear" Id="{b1563b71-bd6a-4263-830c-984583112e42}">
-      <Declaration><![CDATA[METHOD Clear : IDictionary]]></Declaration>
+      <Declaration><![CDATA[(*!
+<summary>Removes all entries and releases owned payload.</summary>
+<description>
+Disposal is best effort.
+Dynamic entry and index storage are released; static capacity and lifetime comparer/validators are
+retained.
+References, positions and active enumeration are invalidated.
+Cleanup callbacks must not reenter mutation.
+</description>
+*)
+METHOD Clear : IDictionary]]></Declaration>
     </Method>
     <Property Name="KeyValidator" Id="{92f9f0be-92c2-4492-ae57-6e7c17023a23}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Exposes the configured key validator.</summary>
+<description>
+Borrowed optional reference fixed at initialization. Zero means no validator. The collection does not own or release it.
+</description>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY FINAL KeyValidator : TOF_Core.IGenericValueValidator]]></Declaration>
       <Get Name="Get" Id="{42575a64-1c39-4806-863c-d88935d3981e}">
         <Declaration><![CDATA[]]></Declaration>
       </Get>
     </Property>
     <Method Name="RemoveAt" Id="{a1586ec5-b74e-4671-96ad-ae4197067882}">
-      <Declaration><![CDATA[METHOD RemoveAt : IDictionary
+      <Declaration><![CDATA[(*!
+<summary>Removes the entry at a current storage position.</summary>
+<description>
+The index must be within Length and is not a sorted rank.
+Removal invalidates positions and references as entries are compacted; owned payload disposal is
+best effort.
+Invalid indices raise an exception.
+</description>
+*)
+METHOD RemoveAt : IDictionary
 VAR_INPUT
 	index : DINT;
 END_VAR]]></Declaration>
     </Method>
     <Method Name="SetCopy" Id="{f13fbbaa-2923-411c-9a7c-638998bcf36d}">
-      <Declaration><![CDATA[METHOD SetCopy : IDictionary
+      <Declaration><![CDATA[(*!
+<summary>Copies source key and value storage and stores the prepared copies.</summary>
+<description>
+Original arguments remain borrowed.
+Object copies follow ICloneable; other payload is copied as bytes.
+Prepared copies are released if copying or insertion fails before ownership is accepted.
+Exceptions propagate after cleanup, without clearing terminal allocation state.
+The index output is meaningful only on success.
+</description>
+*)
+//!<param name="key">Borrowed source key.</param>
+//!<param name="value">Borrowed source value.</param>
+//!<param name="keyIsObject">Explicitly interprets the key as object storage.</param>
+//!<param name="valueIsObject">Explicitly interprets the value as object storage.</param>
+METHOD SetCopy : IDictionary
 VAR_INPUT
 	key : ANY;
 	value : ANY;
@@ -37,7 +115,32 @@ VAR_OUTPUT
 END_VAR]]></Declaration>
     </Method>
     <Method Name="SetGeneric" Id="{9a515aa5-db44-4d5d-9fbd-7695318ffa56}">
-      <Declaration><![CDATA[METHOD SetGeneric : IDictionary
+      <Declaration><![CDATA[(*!
+<summary>Stores a key-value pair, retaining the existing key when a matching entry is updated.</summary>
+<description>
+Uses the lifetime equality/hash strategy, with no ordering guarantee.
+Empty descriptors are permitted unless rejected by a validator.
+A successful call accepts owned arguments; borrowed payload must remain alive while stored.
+Validation, lookup and growth occur before acceptance; failure before acceptance leaves incoming
+ownership with the caller.
+An unused owned incoming key and a displaced owned value are released after the new entry is
+installed, unless their allocation is retained.
+Reusing the same allocation preserves existing ownership or accepts incoming ownership; it never
+returns ownership implicitly.
+When key and value alias one allocation, the key descriptor holds the pair's disposal
+responsibility.
+Input descriptor copies are not reset in the caller: transferred owning aliases must not be released
+or reused as owners.
+Aliases must describe the same allocation with compatible disposal semantics; overlapping owned
+ranges and ownership already held by another entry or owner are not supported.
+Callbacks must not mutate or reenter this collection.
+Cleanup is best effort through GENERIC_VALUE.Release and does not guarantee successful deallocation.
+The index output is valid only on success.
+</description>
+*)
+//!<param name="key">Incoming key descriptor; owned storage is transferred on success.</param>
+//!<param name="value">Incoming value descriptor; owned storage is transferred on success.</param>
+METHOD SetGeneric : IDictionary
 VAR_INPUT
 	key : TOF_Core.GENERIC_VALUE;
 	value : TOF_Core.GENERIC_VALUE;
@@ -47,26 +150,62 @@ VAR_OUTPUT
 END_VAR]]></Declaration>
     </Method>
     <Method Name="TryRemoveByGenericKey" Id="{ed98c14c-8b20-4e0c-b155-925d2858a0a4}">
-      <Declaration><![CDATA[METHOD TryRemoveByGenericKey : IDictionary
+      <Declaration><![CDATA[(*!
+<summary>Attempts to remove a matching entry.</summary>
+<description>
+Returns the collection for chaining. removed is TRUE only after the matching entry has been removed;
+FALSE means no completed removal was reported.
+Removal is not transactional and does not prove successful destruction of an owned payload.
+Catches exceptions without propagating them or clearing terminal allocation state.
+Partial changes are not rolled back.
+The query is borrowed by default.
+When releaseKey is explicitly TRUE, attempts to release the supplied generic argument after
+lookup/removal even on failure.
+The caller must have disposal rights and must not reuse aliases of an owned argument after release.
+</description>
+*)
+METHOD TryRemoveByGenericKey : IDictionary
 VAR_INPUT
 	key : TOF_Core.GENERIC_VALUE;
-	releaseKey : BOOL := TRUE;
+	releaseKey : BOOL := FALSE;
 END_VAR
 VAR_OUTPUT
 	removed : BOOL;
 END_VAR]]></Declaration>
     </Method>
     <Method Name="TryRemoveByKey" Id="{2539d3ce-1d3f-4331-818e-1181097b6910}">
-      <Declaration><![CDATA[METHOD TryRemoveByKey : IDictionary
+      <Declaration><![CDATA[(*!
+<summary>Attempts to remove a matching entry.</summary>
+<description>
+Returns the collection for chaining. removed is TRUE only after the matching entry has been removed;
+FALSE means no completed removal was reported.
+Removal is not transactional and does not prove successful destruction of an owned payload.
+Catches exceptions without propagating them or clearing terminal allocation state.
+Partial changes are not rolled back.
+The raw ANY argument is borrowed without cloning or ownership transfer. keyIsObject = TRUE requires
+a live Object function-block instance, not a pointer or interface variable.
+FALSE uses ordinary runtime type mapping.
+The caller keeps the query storage alive for the call.
+</description>
+*)
+//!<param name="keyIsObject">Explicitly interprets the raw argument as a live Object instance.</param>
+METHOD TryRemoveByKey : IDictionary
 VAR_INPUT
 	key : ANY;
+	keyIsObject : BOOL := FALSE;
 END_VAR
 VAR_OUTPUT
 	removed : BOOL;
 END_VAR]]></Declaration>
     </Method>
     <Property Name="ValueValidator" Id="{a4d8a2d8-7635-4460-bcb5-588610d86052}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Exposes the configured value validator.</summary>
+<description>
+Borrowed optional reference fixed at initialization. Zero means no validator. The collection does not own or release it.
+</description>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY FINAL ValueValidator : TOF_Core.IGenericValueValidator]]></Declaration>
       <Get Name="Get" Id="{31d569db-ff61-4467-bd5c-a827d305ce71}">
         <Declaration><![CDATA[]]></Declaration>

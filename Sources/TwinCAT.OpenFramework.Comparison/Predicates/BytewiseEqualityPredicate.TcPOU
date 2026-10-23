@@ -1,0 +1,209 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="BytewiseEqualityPredicate" Id="{69d89670-0944-46d2-b34c-f87cdf7e100c}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+SPDX-FileCopyrightText: © 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+SPDX-License-Identifier: MIT
+License: https://opensource.org/license/mit
+*)
+
+(*!
+<summary>Tests whether query bytes match an owned reference snapshot.</summary>
+<description>
+Owns a shallow byte snapshot prepared by the reference setters.
+Check compares bytes, using actual terminated sizes for matching string categories; it does not use
+GENERIC_VALUE.Equals or Object.Equals.
+Pointer fields and padding remain part of the snapshot.
+A successful setter replaces the snapshot and releases the old allocation; preparation failure
+preserves the old snapshot.
+ReferenceValue is a read-only view by contract; only the setters may change the reference.
+</description>
+*)
+FUNCTION_BLOCK BytewiseEqualityPredicate EXTENDS TOF_Core.Object IMPLEMENTS TOF_Core.IPredicate
+VAR
+	{attribute 'hide'} 
+	_ClassName : STRING := __POUNAME();
+	
+	{attribute 'hide'} 
+	_ReferenceValue : TOF_Core.GENERIC_VALUE;
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[]]></ST>
+    </Implementation>
+    <Method Name="Check" Id="{cec5bd44-71ec-48bd-974d-4ba41cd8e3ee}">
+      <Declaration><![CDATA[(*!
+<summary>Compares a borrowed query with the reference byte snapshot.</summary>
+<description>
+The query must have a nonnegative byte size and live readable storage of that size; strings must be
+properly terminated within their storage.
+Both empty operands compare equal; one empty operand does not equal a nonempty operand.
+Matching STRING or WSTRING categories compare their actual terminated bytes.
+Other representations compare their full byte sizes and contents, without requiring equal type tags.
+No numeric widening, NaN normalization or object equality dispatch is performed.
+The query remains borrowed.
+ Descendants cannot override this reference-value operation; implement IPredicate separately for different matching or storage semantics.</description>
+*)
+METHOD FINAL Check : BOOL
+VAR_INPUT
+	valueToCompare : __SYSTEM.AnyType; 
+END_VAR
+VAR
+	stringPointer : POINTER TO STRING;
+	wideStringPointer : POINTER TO WSTRING;
+	referenceDataSize : DINT;
+	valueToCompareDataSize : DINT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF _ReferenceValue.Address = 0 OR_ELSE _ReferenceValue.Size = 0 OR_ELSE valueToCompare.pValue = 0 OR_ELSE valueToCompare.diSize = 0 THEN
+	Check := (_ReferenceValue.Address = 0 OR_ELSE _ReferenceValue.Size = 0) AND_THEN (valueToCompare.pValue = 0 OR_ELSE valueToCompare.diSize = 0);
+ELSE
+	IF _ReferenceValue.TypeClass = TOF_Core.GENERIC_TYPE_CLASS.STRING_ASCII AND_THEN valueToCompare.TypeClass = __SYSTEM.TYPE_CLASS.TYPE_STRING THEN
+		stringPointer := _ReferenceValue.Address;
+		referenceDataSize := TO_DINT(TOF_Core.Strings.GetActualSize(stringPointer^));
+		
+		stringPointer := valueToCompare.pValue;		
+		valueToCompareDataSize := TO_DINT(TOF_Core.Strings.GetActualSize(stringPointer^));
+	ELSIF _ReferenceValue.TypeClass = TOF_Core.GENERIC_TYPE_CLASS.STRING_UTF16 AND_THEN valueToCompare.TypeClass = __SYSTEM.TYPE_CLASS.TYPE_WSTRING THEN
+		wideStringPointer := _ReferenceValue.Address;
+		referenceDataSize := TO_DINT(TOF_Core.WideStrings.GetActualSize(wideStringPointer^));
+		
+		wideStringPointer := valueToCompare.pValue;		
+		valueToCompareDataSize := TO_DINT(TOF_Core.WideStrings.GetActualSize(wideStringPointer^));
+	ELSE
+		referenceDataSize := TO_DINT(_ReferenceValue.Size);
+		valueToCompareDataSize := valueToCompare.diSize;		
+	END_IF
+ 
+	Check := referenceDataSize = valueToCompareDataSize AND_THEN Tc2_System.MEMCMP(_ReferenceValue.Address, valueToCompare.pValue, TO_UDINT(referenceDataSize)) = 0;
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="ClassName" Id="{8e5ab7c3-2f39-4002-b1dc-2aeb600ea841}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{cf2504cf-80f7-4f82-801a-33325d77d0b0}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ClassName REF= _ClassName;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="FB_exit" Id="{d05e9858-8a0c-459a-8e82-d6877f44d432}">
+      <Declaration><![CDATA[(*!
+<summary>Releases the owned reference snapshot during destruction.</summary>
+<description>
+Uses GENERIC_VALUE.Release for best-effort raw snapshot disposal and descriptor reset.
+Does not allocate or invoke object equality/clone callbacks; disposal failure does not guarantee
+successful deallocation.
+</description>
+*)
+//!<param name="bInCopyCode">if TRUE, the exit method is called for exiting an instance that is copied afterwards (online change).</param>
+
+METHOD FB_exit : BOOL
+VAR_INPUT
+	bInCopyCode	: BOOL;
+END_VAR
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_ReferenceValue.Release();]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="NamespaceName" Id="{3055752a-4441-45eb-a886-3ee93e0fc81b}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{f2bbe44a-7978-4436-9525-efb70f004014}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[NamespaceName REF= CurrentNamespace.Name;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="ReferenceValue" Id="{9cd7fd1d-8654-4942-b166-4c2c2e170f03}">
+      <Declaration><![CDATA[(*!
+<summary>Exposes a borrowed read-only view of the current reference descriptor.</summary>
+<description>
+The REFERENCE TO signature is retained for compatibility; it does not grant mutation or disposal
+rights.
+Do not assign through the view, alter descriptor fields or payload, or call mutating/cleanup methods
+on it.
+Change the reference only through SetReferenceValueByAny or SetReferenceValueByAnyType.
+Do not retain the view or payload aliases across setter calls or predicate destruction.
+ Descendants cannot override this reference-value operation; implement IPredicate separately for different matching or storage semantics.</description>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY FINAL ReferenceValue : REFERENCE TO TOF_Core.GENERIC_VALUE]]></Declaration>
+      <Get Name="Get" Id="{b8cc6388-67b7-4249-afa3-baf099683d6c}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ReferenceValue REF= _ReferenceValue;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="SelfSize" Id="{807678b9-ec28-4f30-9f23-d752d98349af}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+PROPERTY SelfSize : ULINT]]></Declaration>
+      <Get Name="Get" Id="{7c7a200b-5a01-4955-8f62-0234eb0a28fb}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[SelfSize := XSIZEOF(THIS^);]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="SetReferenceValueByAny" Id="{d2db5743-54df-4a10-9415-dd40ad903d0e}">
+      <Declaration><![CDATA[(*!
+<summary>Prepares and installs an owned byte snapshot of the source.</summary>
+<description>
+The source is borrowed for the call, including when it aliases the current snapshot.
+Prepares a shallow byte copy with isObject = FALSE before replacing the reference, then releases the
+previous snapshot.
+If preparation raises, the previous snapshot remains intact; terminal allocation state is not
+cleared.
+No Object.Clone call or source ownership transfer occurs.
+ Descendants cannot override this reference-value operation; implement IPredicate separately for different matching or storage semantics.</description>
+*)
+METHOD FINAL SetReferenceValueByAny
+VAR_INPUT
+	referenceValue : ANY;
+END_VAR
+VAR
+	preparedReference : TOF_Core.GENERIC_VALUE;
+	displacedReference : TOF_Core.GENERIC_VALUE;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[preparedReference := TOF_Core.GenericValueFactory.FromAnyType(referenceValue, FALSE, TOF_Core.GENERIC_MEMORY_MANAGEMENT_BEHAVIOR.CLONE_ORIGINAL_VALUE_AND_OWNS_MEMORY);
+
+displacedReference := _ReferenceValue;
+_ReferenceValue := preparedReference;
+displacedReference.Release();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="SetReferenceValueByAnyType" Id="{47a51104-523c-4416-8ae4-bda16604c8b3}">
+      <Declaration><![CDATA[(*!
+<summary>Prepares and installs an owned byte snapshot of the source.</summary>
+<description>
+The source is borrowed for the call, including when it aliases the current snapshot.
+Prepares a shallow byte copy with isObject = FALSE before replacing the reference, then releases the
+previous snapshot.
+If preparation raises, the previous snapshot remains intact; terminal allocation state is not
+cleared.
+No Object.Clone call or source ownership transfer occurs.
+ Descendants cannot override this reference-value operation; implement IPredicate separately for different matching or storage semantics.</description>
+*)
+METHOD FINAL SetReferenceValueByAnyType
+VAR_INPUT
+	referenceValue : __SYSTEM.AnyType;
+END_VAR
+VAR
+	preparedReference : TOF_Core.GENERIC_VALUE;
+	displacedReference : TOF_Core.GENERIC_VALUE;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[preparedReference := TOF_Core.GenericValueFactory.FromAnyType(referenceValue, FALSE, TOF_Core.GENERIC_MEMORY_MANAGEMENT_BEHAVIOR.CLONE_ORIGINAL_VALUE_AND_OWNS_MEMORY);
+
+displacedReference := _ReferenceValue;
+_ReferenceValue := preparedReference;
+displacedReference.Release();]]></ST>
+      </Implementation>
+    </Method>
+  </POU>
+</TcPlcObject>

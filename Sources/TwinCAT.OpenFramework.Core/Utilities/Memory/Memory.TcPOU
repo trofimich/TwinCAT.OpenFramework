@@ -9,7 +9,7 @@ License: https://opensource.org/license/mit
 
 (*!
 <summary>Provides object address conversion, memory-area classification and explicit dynamic memory release.</summary>
-<description>Release requires a live allocation owned by the caller. These helpers do not log object disposal; object FB_exit implementations must complete without exceptions.</description>
+<description>Release requires a live allocation owned by the caller. These helpers do not log object disposal; object FB_init, FB_exit and FB_reinit implementations must not create or raise exceptions. TryRelease methods contain exceptions and clear the supplied address/reference on exceptional failure; this does not clear other aliases.</description>
 *)
 
 {attribute 'no_explicit_call' := 'Direct call is not allowed'} 
@@ -22,7 +22,11 @@ END_VAR]]></Declaration>
       <ST><![CDATA[]]></ST>
     </Implementation>
     <Property Name="ClassName" Id="{f0cb7e04-3fa7-438c-9fb8-38f358e717d9}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Provides the diagnostic type name without copying its storage.</summary>
+<description>Borrowed read-only reference. Do not modify the referenced name; keep the owning instance alive while using the reference.</description>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
       <Get Name="Get" Id="{9465e911-db84-4abe-a766-2f2cfe6e21d4}">
         <Declaration><![CDATA[]]></Declaration>
@@ -68,7 +72,11 @@ END_VAR
       </Implementation>
     </Method>
     <Property Name="NamespaceName" Id="{5aeb5d90-3cbf-4d4b-8537-6b3b6ccb7bea}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Provides the library namespace used in diagnostics.</summary>
+<description>Borrowed read-only reference to the compiler-initialized library namespace; no ownership transfer.</description>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
       <Get Name="Get" Id="{464e75ad-f0ba-4929-8b1e-1713c91d4754}">
         <Declaration><![CDATA[]]></Declaration>
@@ -82,7 +90,8 @@ PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
 <summary>Caller must own a live allocation. Registered auto-disposed objects are released only by their manager.</summary>
 <description>
 Object FB_exit implementations must not raise exceptions. This method does not log disposal.
-Try refers to refusing null/non-dynamic addresses; exceptions are not caught here.
+Returns FALSE for null/non-dynamic addresses without changing them. Catches exceptions and returns FALSE with address set to zero to prevent reuse of a possibly partially destroyed allocation.
+TRUE means deletion completed. FALSE after an exception does not guarantee that memory was freed. Other aliases are not cleared and must not be used or deleted after a destruction failure. Terminal allocation state is preserved.
 </description>
 *)
 
@@ -97,27 +106,32 @@ VAR
 	objectPointer : POINTER TO Object;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[IF address = 0 OR_ELSE NOT Memory.IsDynamicData(address, 1) THEN
-	RETURN;
-END_IF
+        <ST><![CDATA[__TRY
+	IF address = 0 OR_ELSE NOT Memory.IsDynamicData(address, 1) THEN
+		RETURN;
+	END_IF
 
-IF isObject THEN
-	objectPointer := address;
-	
-	__DELETE(objectPointer);
+	IF isObject THEN
+		objectPointer := address;
+		
+		__DELETE(objectPointer);
+		address := 0;
+	ELSE
+		__DELETE(address);
+	END_IF
+
+	TryReleaseDynamicMemory := TRUE;
+__CATCH
 	address := 0;
-ELSE
-	__DELETE(address);
-END_IF
-
-TryReleaseDynamicMemory := TRUE;]]></ST>
+	TryReleaseDynamicMemory := FALSE;
+__ENDTRY]]></ST>
       </Implementation>
     </Method>
     <Method Name="TryReleaseDynamicObject" Id="{1a29f8e6-f929-40c9-bee2-ed6219c50a45}">
       <Declaration><![CDATA[(*!
 <summary>Caller must own the object; registered auto-disposed objects are released only by their manager.</summary>
 <description>
-Uses TryReleaseDynamicMemory and its cleanup-without-exceptions contract.
+Uses TryReleaseDynamicMemory. Returns FALSE for null or non-dynamic objects; non-dynamic references remain unchanged. Clears instance after successful deletion or when the release helper clears the address on an exception. Exceptions from obtaining SelfAddress are also caught with instance cleared. Other aliases remain the caller's responsibility; FALSE does not guarantee an intact object or successful deallocation.
 </description>
 *)
 
@@ -129,17 +143,22 @@ VAR
 	objectPointer : POINTER TO Object;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[IF instance = 0 THEN
-	RETURN;
-END_IF
-	
-objectPointer := instance.SelfAddress;
+        <ST><![CDATA[__TRY
+	IF instance = 0 THEN
+		RETURN;
+	END_IF
+		
+	objectPointer := instance.SelfAddress;
 
-TryReleaseDynamicObject := TryReleaseDynamicMemory(objectPointer, TRUE);
+	TryReleaseDynamicObject := TryReleaseDynamicMemory(objectPointer, TRUE);
 
-IF TryReleaseDynamicObject THEN
+	IF TryReleaseDynamicObject OR_ELSE objectPointer = 0 THEN
+		instance := 0;
+	END_IF	
+__CATCH
 	instance := 0;
-END_IF	]]></ST>
+	TryReleaseDynamicObject := FALSE;
+__ENDTRY]]></ST>
       </Implementation>
     </Method>
   </POU>
