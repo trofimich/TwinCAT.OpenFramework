@@ -1,0 +1,733 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1" ProductVersion="3.1.4026.21">
+  <POU Name="TaskQueueCleanupTest" Id="{7f671713-8128-4879-b019-6eb56294106a}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+SPDX-FileCopyrightText: © 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+SPDX-License-Identifier: MIT
+License: https://opensource.org/license/mit
+*)
+
+(*!
+<summary>Exercises TaskQueue failure cleanup and cancellation contracts across PLC cycles.</summary>
+<description>
+Each case owns independent static queue, resource and child fixtures and advances the production queue
+at most once per suite call. The queue borrows the resource manager; the scenario configures and observes
+the resource directly. Resource observations persist across queue reuse.
+Faults are injected through ITask; resources are synthetic. AutomationRunner supplies exception cleanup
+and the terminal allocation boundary. A bounded call budget reports regressions without waiting forever.
+These tests do not establish physical-resource cleanup or worst-case execution-time guarantees.
+</description>
+*)
+FUNCTION_BLOCK TaskQueueCleanupTest EXTENDS TcUnit.FB_TestSuite
+VAR CONSTANT
+	//! <summary>Maximum suite calls per scenario run, allowing acquisition, injected failures and release.</summary>
+	_MaxScenarioCycles : UINT := 32;
+	//! <summary>Observe this many PLC calls with cleanup held before allowing the child to finish.</summary>
+	_HeldObservationCycles : UINT := 8;
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[DelayedCleanupAndReuse();
+RepeatedExecuteFailure();
+CancelRequestFailure();
+MessageFormattingFailure();
+ExternalCancelDuringCleanup();
+HeldCleanup();
+ExternalCancelWithReleaseFailure();]]></ST>
+    </Implementation>
+    <Method Name="CancelRequestFailure" Id="{5a36f44d-2a41-4d18-b4d5-d24a95a3952e}">
+      <Declaration><![CDATA[(*!
+<summary>Retries failed child cancellation without abandoning cleanup or replacing the first reason.</summary>
+<description>
+Runs once across PLC cycles with a bounded call budget. Uses independent static fixtures and no hardware.
+Unexpected exceptionEscaped exceptions fail the test; terminal allocation state is left for AutomationRunner.
+</description>
+*)
+METHOD CancelRequestFailure
+VAR
+	exceptionEscaped : BOOL;
+END_VAR
+VAR_INST
+	testFinished : BOOL;
+	initialized : BOOL;
+	cycles : UINT;
+	queue : QueueCleanupQueue;
+	resource : QueueCleanupResource;
+	child : QueueCleanupChild;
+	waiting : CounterTask;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN
+	RETURN;
+END_IF
+
+TEST(__POUNAME());
+
+cycles := cycles + 1;
+IF cycles > _MaxScenarioCycles THEN
+	AssertTrue(FALSE, 'Queue cleanup scenario exceeded its cycle budget');
+	testFinished := TRUE;
+	TEST_FINISHED();
+	RETURN;
+END_IF
+
+IF NOT initialized THEN
+	initialized := TRUE;
+	child.CancelFailures := 2;
+	resource.SetChild(child);
+	queue.SetResourceManager(resource);
+	queue.StopWhenNoPendingTasks := TRUE;
+	queue.Enqueue(child);
+	queue.Enqueue(waiting);
+	IF NOT queue.Start() THEN
+		AssertTrue(FALSE, 'Prepared queue must accept Start');
+		testFinished := TRUE;
+		TEST_FINISHED();
+		RETURN;
+	END_IF
+END_IF
+
+__TRY
+	queue.Execute();
+__CATCH
+	exceptionEscaped := TRUE;
+__ENDTRY
+
+IF exceptionEscaped THEN
+	AssertTrue(FALSE, 'Queue Execute must contain the injected child or cleanup exception');
+	testFinished := TRUE;
+	TEST_FINISHED();
+	RETURN;
+END_IF
+
+IF child.ExecuteFailuresRaised > 0 AND_THEN child.State.Running THEN
+	AssertTrue(queue.State.Running, 'Parent must remain RUNNING during child cleanup');
+	AssertTrue(resource.ResourceAcquired, 'Parent must retain its resource during child cleanup');
+	AssertEquals_UINT(0, resource.ReleaseCalls, 'Parent must not start release before child cleanup');
+	AssertTrue(waiting.State.Ready, 'Waiting child must not start after the first failure');
+END_IF
+
+IF queue.State.Stopped THEN
+	AssertTrue(child.State.Stopped, 'Parent must not stop before child cleanup');
+	AssertEquals_UINT(1, child.ExecuteFailuresRaised, 'Expected child Execute faults must actually occur');
+	AssertEquals_UINT(2, child.CancelFailuresRaised, 'Expected child Cancel faults must actually occur');
+	AssertEquals_UINT(3, child.CompletedCleanupSteps, 'Child must complete every cleanup step');
+	AssertTrue(child.FinalStopReason.ExternalCancel, 'Failed child must finish its cancellation');
+	AssertTrue(waiting.State.Ready, 'Waiting child must remain READY');
+	AssertEquals_INT(0, waiting.Counter, 'Waiting child must never execute');
+	AssertEquals_DINT(2, queue.PendingTaskCount, 'Failed current and waiting entries must be retained');
+	AssertEquals_UINT(1, resource.ReleaseCalls, 'Parent must request release exactly once');
+	AssertFalse(resource.EarlyRelease, 'Parent release must follow child cleanup');
+	AssertFalse(resource.ResourceAcquired, 'Parent release must finish');
+	AssertTrue(queue.OriginalStopReason.Failure, 'Original queue result must remain FAILURE');
+	AssertTrue(queue.FinalStopReason.Failure, 'Final queue result must remain FAILURE');
+	AssertEquals_WSTRING("First child failure", queue.OriginalStopReason.Message, 'Original diagnostics must retain the first failure');
+	AssertEquals_WSTRING("First child failure", queue.FinalStopReason.Message, 'Later cleanup must not replace the first diagnostics');
+	testFinished := TRUE;
+	TEST_FINISHED();
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="DelayedCleanupAndReuse" Id="{b7403a07-e353-4aef-b478-76b6c839f4e3}">
+      <Declaration><![CDATA[(*!
+<summary>Waits for child cleanup before parent release, then verifies Reset and a successful second run.</summary>
+<description>
+Runs once across PLC cycles with a bounded call budget. Uses independent static fixtures and no hardware.
+Unexpected exceptionEscaped exceptions fail the test; terminal allocation state is left for AutomationRunner.
+</description>
+*)
+METHOD DelayedCleanupAndReuse
+VAR
+	exceptionEscaped : BOOL;
+END_VAR
+VAR_INST
+	testFinished : BOOL;
+	initialized : BOOL;
+	cycles : UINT;
+	queue : QueueCleanupQueue;
+	resource : QueueCleanupResource;
+	child : QueueCleanupChild;
+	waiting : CounterTask;
+	secondRun : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN
+	RETURN;
+END_IF
+
+TEST(__POUNAME());
+
+cycles := cycles + 1;
+IF cycles > _MaxScenarioCycles THEN
+	AssertTrue(FALSE, 'Queue cleanup scenario exceeded its cycle budget');
+	testFinished := TRUE;
+	TEST_FINISHED();
+	RETURN;
+END_IF
+
+IF NOT initialized THEN
+	initialized := TRUE;
+	resource.SetChild(child);
+	queue.SetResourceManager(resource);
+	queue.StopWhenNoPendingTasks := TRUE;
+	queue.Enqueue(child);
+	queue.Enqueue(waiting);
+	IF NOT queue.Start() THEN
+		AssertTrue(FALSE, 'Prepared queue must accept Start');
+		testFinished := TRUE;
+		TEST_FINISHED();
+		RETURN;
+	END_IF
+END_IF
+
+__TRY
+	queue.Execute();
+__CATCH
+	exceptionEscaped := TRUE;
+__ENDTRY
+
+IF exceptionEscaped THEN
+	AssertTrue(FALSE, 'Queue Execute must contain the injected child or cleanup exception');
+	testFinished := TRUE;
+	TEST_FINISHED();
+	RETURN;
+END_IF
+
+IF secondRun THEN
+	IF queue.State.Stopped THEN
+		AssertTrue(child.FinalStopReason.WorkDone, 'Reused child must complete normally');
+		AssertTrue(queue.FinalStopReason.WorkDone, 'Pending failure must not survive Reset');
+		AssertEquals_DINT(0, queue.PendingTaskCount, 'Successful reused queue must be empty');
+		AssertEquals_UINT(2, resource.ReleaseCalls, 'Each run must release once');
+		AssertEquals_WSTRING("", queue.OriginalStopReason.Message, 'Old failure text must not survive reuse');
+		testFinished := TRUE;
+		TEST_FINISHED();
+	END_IF
+	RETURN;
+END_IF
+
+IF child.ExecuteFailuresRaised > 0 AND_THEN child.State.Running THEN
+	AssertTrue(queue.State.Running, 'Parent must remain RUNNING during child cleanup');
+	AssertTrue(resource.ResourceAcquired, 'Parent must retain its resource during child cleanup');
+	AssertEquals_UINT(0, resource.ReleaseCalls, 'Parent must not start release before child cleanup');
+	AssertTrue(waiting.State.Ready, 'Waiting child must not start after the first failure');
+END_IF
+
+IF queue.State.Stopped THEN
+	AssertTrue(child.State.Stopped, 'Parent must not stop before child cleanup');
+	AssertEquals_UINT(1, child.ExecuteFailuresRaised, 'Expected child Execute faults must actually occur');
+	AssertEquals_UINT(0, child.CancelFailuresRaised, 'Expected child Cancel faults must actually occur');
+	AssertEquals_UINT(3, child.CompletedCleanupSteps, 'Child must complete every cleanup step');
+	AssertTrue(child.FinalStopReason.ExternalCancel, 'Failed child must finish its cancellation');
+	AssertTrue(waiting.State.Ready, 'Waiting child must remain READY');
+	AssertEquals_INT(0, waiting.Counter, 'Waiting child must never execute');
+	AssertEquals_DINT(2, queue.PendingTaskCount, 'Failed current and waiting entries must be retained');
+	AssertEquals_UINT(1, resource.ReleaseCalls, 'Parent must request release exactly once');
+	AssertFalse(resource.EarlyRelease, 'Parent release must follow child cleanup');
+	AssertFalse(resource.ResourceAcquired, 'Parent release must finish');
+	AssertTrue(queue.OriginalStopReason.Failure, 'Original queue result must remain FAILURE');
+	AssertTrue(queue.FinalStopReason.Failure, 'Final queue result must remain FAILURE');
+	AssertEquals_WSTRING("First child failure", queue.OriginalStopReason.Message, 'Original diagnostics must retain the first failure');
+	AssertEquals_WSTRING("First child failure", queue.FinalStopReason.Message, 'Later cleanup must not replace the first diagnostics');
+	AssertTrue(queue.Reset(), 'Stopped queue must accept Reset');
+	AssertEquals_DINT(0, queue.PendingTaskCount, 'Reset must clear both retained entries');
+	AssertTrue(queue.State.Ready, 'Reset must prepare the queue');
+	AssertEquals_WSTRING("", queue.OriginalStopReason.Message, 'Reset must clear original diagnostics');
+	AssertEquals_WSTRING("", queue.FinalStopReason.Message, 'Reset must clear final diagnostics');
+	AssertTrue(child.Reset(), 'Stopped child must be prepared explicitly for reuse');
+	child.ThrowOnFirstExecute := FALSE;
+	queue.Enqueue(child);
+	IF NOT queue.Start() THEN
+		AssertTrue(FALSE, 'Reset queue must accept a second Start');
+		testFinished := TRUE;
+		TEST_FINISHED();
+		RETURN;
+	END_IF
+	secondRun := TRUE;
+	cycles := 0;
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="ExternalCancelDuringCleanup" Id="{2d413841-9de4-4990-be92-be979d9727e9}">
+      <Declaration><![CDATA[(*!
+<summary>Preserves EXTERNAL_CANCEL when the owner cancels a queue waiting for failed-child cleanup.</summary>
+<description>
+Runs once across PLC cycles with a bounded call budget. Uses independent static fixtures and no hardware.
+Unexpected exceptionEscaped exceptions fail the test; terminal allocation state is left for AutomationRunner.
+</description>
+*)
+METHOD ExternalCancelDuringCleanup
+VAR
+	exceptionEscaped : BOOL;
+END_VAR
+VAR_INST
+	testFinished : BOOL;
+	initialized : BOOL;
+	cycles : UINT;
+	queue : QueueCleanupQueue;
+	resource : QueueCleanupResource;
+	child : QueueCleanupChild;
+	waiting : CounterTask;
+	cancelRequested : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN
+	RETURN;
+END_IF
+
+TEST(__POUNAME());
+
+cycles := cycles + 1;
+IF cycles > _MaxScenarioCycles THEN
+	AssertTrue(FALSE, 'Queue cleanup scenario exceeded its cycle budget');
+	testFinished := TRUE;
+	TEST_FINISHED();
+	RETURN;
+END_IF
+
+IF NOT initialized THEN
+	initialized := TRUE;
+	resource.SetChild(child);
+	queue.SetResourceManager(resource);
+	queue.StopWhenNoPendingTasks := TRUE;
+	queue.Enqueue(child);
+	queue.Enqueue(waiting);
+	IF NOT queue.Start() THEN
+		AssertTrue(FALSE, 'Prepared queue must accept Start');
+		testFinished := TRUE;
+		TEST_FINISHED();
+		RETURN;
+	END_IF
+END_IF
+
+__TRY
+	queue.Execute();
+__CATCH
+	exceptionEscaped := TRUE;
+__ENDTRY
+
+IF exceptionEscaped THEN
+	AssertTrue(FALSE, 'Queue Execute must contain the injected child or cleanup exception');
+	testFinished := TRUE;
+	TEST_FINISHED();
+	RETURN;
+END_IF
+
+IF child.ExecuteFailuresRaised > 0 AND_THEN child.State.Running THEN
+	AssertTrue(queue.State.Running, 'Parent must remain RUNNING during child cleanup');
+	AssertTrue(resource.ResourceAcquired, 'Parent must retain its resource during child cleanup');
+	AssertEquals_UINT(0, resource.ReleaseCalls, 'Parent must not start release before child cleanup');
+	AssertTrue(waiting.State.Ready, 'Waiting child must not start after the first failure');
+	IF NOT cancelRequested THEN
+		cancelRequested := TRUE;
+		AssertTrue(queue.Cancel(), 'External cancellation must be accepted during pending failure');
+		AssertTrue(queue.OriginalStopReason.ExternalCancel, 'Accepted Cancel must retain its original reason');
+	END_IF
+END_IF
+
+IF queue.State.Stopped THEN
+	AssertTrue(child.State.Stopped, 'Parent must not stop before child cleanup');
+	AssertEquals_UINT(1, child.ExecuteFailuresRaised, 'Expected child Execute faults must actually occur');
+	AssertEquals_UINT(0, child.CancelFailuresRaised, 'Expected child Cancel faults must actually occur');
+	AssertEquals_UINT(3, child.CompletedCleanupSteps, 'Child must complete every cleanup step');
+	AssertTrue(child.FinalStopReason.ExternalCancel, 'Failed child must finish its cancellation');
+	AssertTrue(waiting.State.Ready, 'Waiting child must remain READY');
+	AssertEquals_INT(0, waiting.Counter, 'Waiting child must never execute');
+	AssertEquals_DINT(2, queue.PendingTaskCount, 'Failed current and waiting entries must be retained');
+	AssertEquals_UINT(1, resource.ReleaseCalls, 'Parent must request release exactly once');
+	AssertFalse(resource.EarlyRelease, 'Parent release must follow child cleanup');
+	AssertFalse(resource.ResourceAcquired, 'Parent release must finish');
+	AssertTrue(queue.OriginalStopReason.ExternalCancel, 'Late Cancel must remain the original reason');
+	AssertTrue(queue.FinalStopReason.ExternalCancel, 'Successful cleanup must retain EXTERNAL_CANCEL');
+	testFinished := TRUE;
+	TEST_FINISHED();
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="ExternalCancelWithReleaseFailure" Id="{33b2d7ea-ce2c-4fe4-b834-b6cf27254871}">
+      <Declaration><![CDATA[(*!
+<summary>Keeps original EXTERNAL_CANCEL while a later parent release failure becomes final FAILURE.</summary>
+<description>
+Runs once across PLC cycles with a bounded call budget. Uses independent static fixtures and no hardware.
+Unexpected exceptionEscaped exceptions fail the test; terminal allocation state is left for AutomationRunner.
+</description>
+*)
+METHOD ExternalCancelWithReleaseFailure
+VAR
+	exceptionEscaped : BOOL;
+END_VAR
+VAR_INST
+	testFinished : BOOL;
+	initialized : BOOL;
+	cycles : UINT;
+	queue : QueueCleanupQueue;
+	resource : QueueCleanupResource;
+	child : QueueCleanupChild;
+	waiting : CounterTask;
+	cancelRequested : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN
+	RETURN;
+END_IF
+
+TEST(__POUNAME());
+
+cycles := cycles + 1;
+IF cycles > _MaxScenarioCycles THEN
+	AssertTrue(FALSE, 'Queue cleanup scenario exceeded its cycle budget');
+	testFinished := TRUE;
+	TEST_FINISHED();
+	RETURN;
+END_IF
+
+IF NOT initialized THEN
+	initialized := TRUE;
+	resource.SetThrowOnStartRelease(TRUE);
+	resource.SetChild(child);
+	queue.SetResourceManager(resource);
+	queue.StopWhenNoPendingTasks := TRUE;
+	queue.Enqueue(child);
+	queue.Enqueue(waiting);
+	IF NOT queue.Start() THEN
+		AssertTrue(FALSE, 'Prepared queue must accept Start');
+		testFinished := TRUE;
+		TEST_FINISHED();
+		RETURN;
+	END_IF
+END_IF
+
+__TRY
+	queue.Execute();
+__CATCH
+	exceptionEscaped := TRUE;
+__ENDTRY
+
+IF exceptionEscaped THEN
+	AssertTrue(FALSE, 'Queue Execute must contain the injected child or cleanup exception');
+	testFinished := TRUE;
+	TEST_FINISHED();
+	RETURN;
+END_IF
+
+IF child.ExecuteFailuresRaised > 0 AND_THEN child.State.Running THEN
+	AssertTrue(queue.State.Running, 'Parent must remain RUNNING during child cleanup');
+	AssertTrue(resource.ResourceAcquired, 'Parent must retain its resource during child cleanup');
+	AssertEquals_UINT(0, resource.ReleaseCalls, 'Parent must not start release before child cleanup');
+	AssertTrue(waiting.State.Ready, 'Waiting child must not start after the first failure');
+	IF NOT cancelRequested THEN
+		cancelRequested := TRUE;
+		AssertTrue(queue.Cancel(), 'External cancellation must be accepted during pending failure');
+		AssertTrue(queue.OriginalStopReason.ExternalCancel, 'Accepted Cancel must retain its original reason');
+	END_IF
+END_IF
+
+IF queue.State.Stopped THEN
+	AssertTrue(child.State.Stopped, 'Parent must not stop before child cleanup');
+	AssertEquals_UINT(1, child.ExecuteFailuresRaised, 'Expected child Execute faults must actually occur');
+	AssertEquals_UINT(0, child.CancelFailuresRaised, 'Expected child Cancel faults must actually occur');
+	AssertEquals_UINT(3, child.CompletedCleanupSteps, 'Child must complete every cleanup step');
+	AssertTrue(child.FinalStopReason.ExternalCancel, 'Failed child must finish its cancellation');
+	AssertTrue(waiting.State.Ready, 'Waiting child must remain READY');
+	AssertEquals_INT(0, waiting.Counter, 'Waiting child must never execute');
+	AssertEquals_DINT(2, queue.PendingTaskCount, 'Failed current and waiting entries must be retained');
+	AssertEquals_UINT(1, resource.ReleaseCalls, 'Parent must request release exactly once');
+	AssertFalse(resource.EarlyRelease, 'Parent release must follow child cleanup');
+	AssertTrue(resource.ResourceAcquired, 'Failed release leaves the synthetic resource held');
+	AssertTrue(queue.OriginalStopReason.ExternalCancel, 'Release failure must preserve original EXTERNAL_CANCEL');
+	AssertTrue(queue.FinalStopReason.Failure, 'Release failure must determine the final result');
+	AssertEquals_WSTRING("Parent release failure", queue.FinalStopReason.Message, 'Final diagnostics must identify parent release failure');
+	testFinished := TRUE;
+	TEST_FINISHED();
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="HeldCleanup" Id="{ac4306e4-4131-4715-9357-e6f97eff9598}">
+      <Declaration><![CDATA[(*!
+<summary>Keeps the queue running while cleanup is held, then completes after the test releases the hold.</summary>
+<description>
+Runs once across PLC cycles with a bounded call budget. Uses independent static fixtures and no hardware.
+Unexpected exceptionEscaped exceptions fail the test; terminal allocation state is left for AutomationRunner.
+</description>
+*)
+METHOD HeldCleanup
+VAR
+	exceptionEscaped : BOOL;
+END_VAR
+VAR_INST
+	testFinished : BOOL;
+	initialized : BOOL;
+	cycles : UINT;
+	queue : QueueCleanupQueue;
+	resource : QueueCleanupResource;
+	child : QueueCleanupChild;
+	waiting : CounterTask;
+	heldCycles : UINT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN
+	RETURN;
+END_IF
+
+TEST(__POUNAME());
+
+cycles := cycles + 1;
+IF cycles > _MaxScenarioCycles THEN
+	AssertTrue(FALSE, 'Queue cleanup scenario exceeded its cycle budget');
+	testFinished := TRUE;
+	TEST_FINISHED();
+	RETURN;
+END_IF
+
+IF NOT initialized THEN
+	initialized := TRUE;
+	child.HoldCleanup := TRUE;
+	resource.SetChild(child);
+	queue.SetResourceManager(resource);
+	queue.StopWhenNoPendingTasks := TRUE;
+	queue.Enqueue(child);
+	queue.Enqueue(waiting);
+	IF NOT queue.Start() THEN
+		AssertTrue(FALSE, 'Prepared queue must accept Start');
+		testFinished := TRUE;
+		TEST_FINISHED();
+		RETURN;
+	END_IF
+END_IF
+
+__TRY
+	queue.Execute();
+__CATCH
+	exceptionEscaped := TRUE;
+__ENDTRY
+
+IF exceptionEscaped THEN
+	AssertTrue(FALSE, 'Queue Execute must contain the injected child or cleanup exception');
+	testFinished := TRUE;
+	TEST_FINISHED();
+	RETURN;
+END_IF
+
+IF child.ExecuteFailuresRaised > 0 AND_THEN child.State.Running THEN
+	AssertTrue(queue.State.Running, 'Parent must remain RUNNING during child cleanup');
+	AssertTrue(resource.ResourceAcquired, 'Parent must retain its resource during child cleanup');
+	AssertEquals_UINT(0, resource.ReleaseCalls, 'Parent must not start release before child cleanup');
+	AssertTrue(waiting.State.Ready, 'Waiting child must not start after the first failure');
+	IF child.HoldCleanup THEN
+		heldCycles := heldCycles + 1;
+		AssertEquals_UINT(0, child.CompletedCleanupSteps, 'Held cleanup must not advance');
+		IF heldCycles >= _HeldObservationCycles THEN
+			child.HoldCleanup := FALSE;
+		END_IF
+	END_IF
+END_IF
+
+IF queue.State.Stopped THEN
+	AssertTrue(child.State.Stopped, 'Parent must not stop before child cleanup');
+	AssertEquals_UINT(1, child.ExecuteFailuresRaised, 'Expected child Execute faults must actually occur');
+	AssertEquals_UINT(0, child.CancelFailuresRaised, 'Expected child Cancel faults must actually occur');
+	AssertEquals_UINT(3, child.CompletedCleanupSteps, 'Child must complete every cleanup step');
+	AssertTrue(child.FinalStopReason.ExternalCancel, 'Failed child must finish its cancellation');
+	AssertTrue(waiting.State.Ready, 'Waiting child must remain READY');
+	AssertEquals_INT(0, waiting.Counter, 'Waiting child must never execute');
+	AssertEquals_DINT(2, queue.PendingTaskCount, 'Failed current and waiting entries must be retained');
+	AssertEquals_UINT(1, resource.ReleaseCalls, 'Parent must request release exactly once');
+	AssertFalse(resource.EarlyRelease, 'Parent release must follow child cleanup');
+	AssertFalse(resource.ResourceAcquired, 'Parent release must finish');
+	AssertTrue(queue.OriginalStopReason.Failure, 'Original queue result must remain FAILURE');
+	AssertTrue(queue.FinalStopReason.Failure, 'Final queue result must remain FAILURE');
+	AssertEquals_WSTRING("First child failure", queue.OriginalStopReason.Message, 'Original diagnostics must retain the first failure');
+	AssertEquals_WSTRING("First child failure", queue.FinalStopReason.Message, 'Later cleanup must not replace the first diagnostics');
+	AssertEquals_UINT(_HeldObservationCycles, heldCycles, 'Observe the entire held-cleanup interval before releasing it');
+	testFinished := TRUE;
+	TEST_FINISHED();
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="MessageFormattingFailure" Id="{57708671-414a-4eaa-a634-3703d032a93c}">
+      <Declaration><![CDATA[(*!
+<summary>Waits for cleanup even when formatting the first exception fails.</summary>
+<description>
+Runs once across PLC cycles with a bounded call budget. Uses independent static fixtures and no hardware.
+Unexpected exceptionEscaped exceptions fail the test; terminal allocation state is left for AutomationRunner.
+</description>
+*)
+METHOD MessageFormattingFailure
+VAR
+	exceptionEscaped : BOOL;
+END_VAR
+VAR_INST
+	testFinished : BOOL;
+	initialized : BOOL;
+	cycles : UINT;
+	queue : QueueCleanupQueue;
+	resource : QueueCleanupResource;
+	child : QueueCleanupChild;
+	waiting : CounterTask;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN
+	RETURN;
+END_IF
+
+TEST(__POUNAME());
+
+cycles := cycles + 1;
+IF cycles > _MaxScenarioCycles THEN
+	AssertTrue(FALSE, 'Queue cleanup scenario exceeded its cycle budget');
+	testFinished := TRUE;
+	TEST_FINISHED();
+	RETURN;
+END_IF
+
+IF NOT initialized THEN
+	initialized := TRUE;
+	child.ThrowOnGetMessage := TRUE;
+	resource.SetChild(child);
+	queue.SetResourceManager(resource);
+	queue.StopWhenNoPendingTasks := TRUE;
+	queue.Enqueue(child);
+	queue.Enqueue(waiting);
+	IF NOT queue.Start() THEN
+		AssertTrue(FALSE, 'Prepared queue must accept Start');
+		testFinished := TRUE;
+		TEST_FINISHED();
+		RETURN;
+	END_IF
+END_IF
+
+__TRY
+	queue.Execute();
+__CATCH
+	exceptionEscaped := TRUE;
+__ENDTRY
+
+IF exceptionEscaped THEN
+	AssertTrue(FALSE, 'Queue Execute must contain the injected child or cleanup exception');
+	testFinished := TRUE;
+	TEST_FINISHED();
+	RETURN;
+END_IF
+
+IF child.ExecuteFailuresRaised > 0 AND_THEN child.State.Running THEN
+	AssertTrue(queue.State.Running, 'Parent must remain RUNNING during child cleanup');
+	AssertTrue(resource.ResourceAcquired, 'Parent must retain its resource during child cleanup');
+	AssertEquals_UINT(0, resource.ReleaseCalls, 'Parent must not start release before child cleanup');
+	AssertTrue(waiting.State.Ready, 'Waiting child must not start after the first failure');
+END_IF
+
+IF queue.State.Stopped THEN
+	AssertTrue(child.State.Stopped, 'Parent must not stop before child cleanup');
+	AssertEquals_UINT(1, child.ExecuteFailuresRaised, 'Expected child Execute faults must actually occur');
+	AssertEquals_UINT(0, child.CancelFailuresRaised, 'Expected child Cancel faults must actually occur');
+	AssertEquals_UINT(3, child.CompletedCleanupSteps, 'Child must complete every cleanup step');
+	AssertTrue(child.FinalStopReason.ExternalCancel, 'Failed child must finish its cancellation');
+	AssertTrue(waiting.State.Ready, 'Waiting child must remain READY');
+	AssertEquals_INT(0, waiting.Counter, 'Waiting child must never execute');
+	AssertEquals_DINT(2, queue.PendingTaskCount, 'Failed current and waiting entries must be retained');
+	AssertEquals_UINT(1, resource.ReleaseCalls, 'Parent must request release exactly once');
+	AssertFalse(resource.EarlyRelease, 'Parent release must follow child cleanup');
+	AssertFalse(resource.ResourceAcquired, 'Parent release must finish');
+	AssertTrue(queue.OriginalStopReason.Failure, 'Original queue result must remain FAILURE');
+	AssertTrue(queue.FinalStopReason.Failure, 'Final queue result must remain FAILURE');
+	AssertEquals_WSTRING("Child task execution failed", queue.OriginalStopReason.Message, 'Original diagnostics must retain the first failure');
+	AssertEquals_WSTRING("Child task execution failed", queue.FinalStopReason.Message, 'Later cleanup must not replace the first diagnostics');
+	testFinished := TRUE;
+	TEST_FINISHED();
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="RepeatedExecuteFailure" Id="{0fe90f2c-af1a-4c6e-8f9d-e08dbebe6e61}">
+      <Declaration><![CDATA[(*!
+<summary>Retains the first reason across later cleanup exceptions on separate PLC cycles.</summary>
+<description>
+Runs once across PLC cycles with a bounded call budget. Uses independent static fixtures and no hardware.
+Unexpected exceptionEscaped exceptions fail the test; terminal allocation state is left for AutomationRunner.
+</description>
+*)
+METHOD RepeatedExecuteFailure
+VAR
+	exceptionEscaped : BOOL;
+END_VAR
+VAR_INST
+	testFinished : BOOL;
+	initialized : BOOL;
+	cycles : UINT;
+	queue : QueueCleanupQueue;
+	resource : QueueCleanupResource;
+	child : QueueCleanupChild;
+	waiting : CounterTask;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN
+	RETURN;
+END_IF
+
+TEST(__POUNAME());
+
+cycles := cycles + 1;
+IF cycles > _MaxScenarioCycles THEN
+	AssertTrue(FALSE, 'Queue cleanup scenario exceeded its cycle budget');
+	testFinished := TRUE;
+	TEST_FINISHED();
+	RETURN;
+END_IF
+
+IF NOT initialized THEN
+	initialized := TRUE;
+	child.CleanupFailures := 2;
+	resource.SetChild(child);
+	queue.SetResourceManager(resource);
+	queue.StopWhenNoPendingTasks := TRUE;
+	queue.Enqueue(child);
+	queue.Enqueue(waiting);
+	IF NOT queue.Start() THEN
+		AssertTrue(FALSE, 'Prepared queue must accept Start');
+		testFinished := TRUE;
+		TEST_FINISHED();
+		RETURN;
+	END_IF
+END_IF
+
+__TRY
+	queue.Execute();
+__CATCH
+	exceptionEscaped := TRUE;
+__ENDTRY
+
+IF exceptionEscaped THEN
+	AssertTrue(FALSE, 'Queue Execute must contain the injected child or cleanup exception');
+	testFinished := TRUE;
+	TEST_FINISHED();
+	RETURN;
+END_IF
+
+IF child.ExecuteFailuresRaised > 0 AND_THEN child.State.Running THEN
+	AssertTrue(queue.State.Running, 'Parent must remain RUNNING during child cleanup');
+	AssertTrue(resource.ResourceAcquired, 'Parent must retain its resource during child cleanup');
+	AssertEquals_UINT(0, resource.ReleaseCalls, 'Parent must not start release before child cleanup');
+	AssertTrue(waiting.State.Ready, 'Waiting child must not start after the first failure');
+END_IF
+
+IF queue.State.Stopped THEN
+	AssertTrue(child.State.Stopped, 'Parent must not stop before child cleanup');
+	AssertEquals_UINT(3, child.ExecuteFailuresRaised, 'Expected child Execute faults must actually occur');
+	AssertEquals_UINT(0, child.CancelFailuresRaised, 'Expected child Cancel faults must actually occur');
+	AssertEquals_UINT(3, child.CompletedCleanupSteps, 'Child must complete every cleanup step');
+	AssertTrue(child.FinalStopReason.ExternalCancel, 'Failed child must finish its cancellation');
+	AssertTrue(waiting.State.Ready, 'Waiting child must remain READY');
+	AssertEquals_INT(0, waiting.Counter, 'Waiting child must never execute');
+	AssertEquals_DINT(2, queue.PendingTaskCount, 'Failed current and waiting entries must be retained');
+	AssertEquals_UINT(1, resource.ReleaseCalls, 'Parent must request release exactly once');
+	AssertFalse(resource.EarlyRelease, 'Parent release must follow child cleanup');
+	AssertFalse(resource.ResourceAcquired, 'Parent release must finish');
+	AssertTrue(queue.OriginalStopReason.Failure, 'Original queue result must remain FAILURE');
+	AssertTrue(queue.FinalStopReason.Failure, 'Final queue result must remain FAILURE');
+	AssertEquals_WSTRING("First child failure", queue.OriginalStopReason.Message, 'Original diagnostics must retain the first failure');
+	AssertEquals_WSTRING("First child failure", queue.FinalStopReason.Message, 'Later cleanup must not replace the first diagnostics');
+	testFinished := TRUE;
+	TEST_FINISHED();
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+  </POU>
+</TcPlcObject>

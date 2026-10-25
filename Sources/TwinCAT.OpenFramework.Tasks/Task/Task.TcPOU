@@ -1,4 +1,4 @@
-<?xml version="1.0" encoding="utf-8"?>
+﻿<?xml version="1.0" encoding="utf-8"?>
 <TcPlcObject Version="1.1.0.1">
   <POU Name="Task" Id="{4f3cf4ac-1772-4e42-a725-ba88b4bb1e14}" SpecialFunc="None">
     <Declaration><![CDATA[(*
@@ -8,13 +8,17 @@ License: https://opensource.org/license/mit
 *)
 
 (*!
-<summary>Implements a reusable task with acquisition, processing and release phases.</summary>
+<summary>Runs a reusable cooperative operation through acquisition, processing and release.</summary>
 <description>
-Each resource phase issues its start request once, then advances the manager through Execute.
-Cancellation and stop callbacks control when processing ends and resource release begins.
+One owner drives the task through Start, cyclic Execute and Reset; no worker thread or PLC scheduler task is
+created. Keep callbacks short and avoid concurrent or recursive Execute. The resource manager is borrowed
+and must remain live and stable during a run. Cancellation waits through OnCancelling before release.
+Ordinary work and resource exceptions are converted into stop diagnostics where handled. If obtaining their
+messages fails, fixed fallback text preserves the intended failure transition; preparation and reset use
+the same fallback policy for refusal. This is not a universal no-throw boundary. The caller still provides
+exception cleanup and terminal allocation-failure checks at its PLC task boundary.
 </description>
 *)
-
 {attribute 'no_explicit_call' := 'do not call this function block directly'} 
 FUNCTION_BLOCK ABSTRACT Task EXTENDS TOF_Core.Object IMPLEMENTS ITask
 VAR
@@ -59,13 +63,15 @@ END_VAR]]></Declaration>
     <Folder Name="Service members" Id="{fcccf993-7a8e-4ed0-ab1b-398389fd2b3c}" />
     <Method Name="Cancel" Id="{70542690-0d14-4f0e-bd58-570de50ff500}">
       <Declaration><![CDATA[(*!
-<summary>TRUE means cancellation was accepted, not that cleanup is complete.</summary>
+<summary>Requests cooperative cancellation of a running task.</summary>
 <description>
-Continue calling Execute until the task reaches STOPPED.
-FALSE means cancellation was refused; see refuseReason.
+Accepted only while RUNNING, with no pending cancellation and before RESOURCE_RELEASING. Sets the
+cancellation flag and original reason before invoking OnCancelRequest once. TRUE means accepted, not
+completed; continue Execute until STOPPED. Repeated or ineligible requests return FALSE with refuseReason.
+Callback exceptions are logged without withdrawing the request.
 </description>
+<param name="refuseReason">Reason for refusal; meaningful when the method returns FALSE.</param>
 *)
-
 METHOD FINAL Cancel : BOOL
 VAR_OUTPUT
 	refuseReason : TOF_Core.ERROR_MESSAGE;
@@ -92,7 +98,17 @@ Cancel := TRUE;
       </Implementation>
     </Method>
     <Method Name="Execute" Id="{0c44d2a0-6aaa-455c-bf4e-d065a6e8ebfd}">
-      <Declaration><![CDATA[METHOD FINAL Execute ]]></Declaration>
+      <Declaration><![CDATA[(*!
+<summary>Advances the running task and clears its transition indicator.</summary>
+<description>
+Clears State.StateChanged on every call, including READY and STOPPED calls. While RUNNING, advances
+cancellation or the selected acquire/process/release phase without a blocking wait. Acquisition completion
+normally defers processing to the next Execute; cancellation readiness can enter release in the same call.
+The owner determines call frequency and must keep calling during cleanup. No automatic scheduling or general
+callback reentrancy protection is provided.
+</description>
+*)
+METHOD FINAL Execute ]]></Declaration>
       <Implementation>
         <ST><![CDATA[_StateChanged := FALSE;
 
@@ -102,15 +118,19 @@ END_IF]]></ST>
       </Implementation>
     </Method>
     <Method Name="FB_init" Id="{4a40010f-36b0-4b8e-9bdb-42fc8f2b04c7}">
-      <Declaration><![CDATA[//!<param name="bInitRetains">if TRUE, the retain variables are initialized (warm start / cold start)</param>
-
-//!<param name="bInCopyCode">if TRUE, the instance afterwards gets moved into the copy code (online change)</param>
-
+      <Declaration><![CDATA[(*!
+<summary>Initializes the task's diagnostic name.</summary>
+<description>
+Captures GetDefaultName during construction; the name is not recomputed on Start or Reset. Construction does
+not start work or acquire resources. Metadata getters used by initialization must complete without
+exceptions.
+</description>
+<param name="bInitRetains">TRUE when retain variables are initialized.</param>
+<param name="bInCopyCode">TRUE when the instance is subsequently copied for online change.</param>
+*)
 METHOD FB_init : BOOL
-VAR_INPUT
-	
-	bInitRetains	: BOOL;
-	
+VAR_INPUT	
+	bInitRetains	: BOOL;	
 	bInCopyCode	: BOOL;
 END_VAR
 ]]></Declaration>
@@ -141,7 +161,16 @@ PROPERTY FINAL FinalStopReason : REFERENCE TO TaskStopReason]]></Declaration>
       </Get>
     </Property>
     <Method Name="GetProcessingStateByStopReason" Id="{2c7b7363-a7d0-4c80-8f77-2fdbbb832cf9}" FolderPath="Service members\">
-      <Declaration><![CDATA[METHOD PROTECTED GetProcessingStateByStopReason : TASK_PROCESSING_STATE
+      <Declaration><![CDATA[(*!
+<summary>Maps a completed task's stop reason to a processing result.</summary>
+<description>
+WORK_DONE maps to DONE, INTERNAL_ABORT and EXTERNAL_CANCEL to ABORTED, and FAILURE to ERROR. Call with a
+defined TASK_STOP_REASON after completion. No state is modified; an unrecognized value is not rejected and
+leaves the default BUSY result.
+</description>
+<param name="taskStopReason">Completed task result to translate.</param>
+*)
+METHOD PROTECTED GetProcessingStateByStopReason : TASK_PROCESSING_STATE
 VAR_INPUT
 	taskStopReason : TASK_STOP_REASON;
 END_VAR]]></Declaration>
@@ -159,7 +188,15 @@ END_CASE ]]></ST>
       </Implementation>
     </Method>
     <Method Name="GetStopReasonByProcessingState" Id="{c77bcf33-94ab-426f-a1b5-c4dac370b49f}" FolderPath="Service members\">
-      <Declaration><![CDATA[METHOD PROTECTED GetStopReasonByProcessingState : TASK_STOP_REASON
+      <Declaration><![CDATA[(*!
+<summary>Maps a terminal processing result to the reason for stopping.</summary>
+<description>
+DONE maps to WORK_DONE, ABORTED to INTERNAL_ABORT, and ERROR to FAILURE. BUSY and unrecognized values raise
+ArgumentOutOfRangeException. Does not modify task state.
+</description>
+<param name="taskpPocessingState">Terminal result from OnRunning.</param>
+*)
+METHOD PROTECTED GetStopReasonByProcessingState : TASK_STOP_REASON
 VAR_INPUT
 	taskpPocessingState : TASK_PROCESSING_STATE;
 END_VAR
@@ -188,8 +225,14 @@ END_CASE
     </Method>
     <Method Name="handleRunning" Id="{0c0b3c2d-2039-40cf-90c1-1bc48ceedfa2}" FolderPath="Service members\">
       <Declaration><![CDATA[(*!
-<summary>Advances cancellation or the current resource and processing phase.</summary>
-<description>Each resource phase calls its start method once, then Execute until completion.</description>
+<summary>Advances cancellation or one selected execution phase.</summary>
+<description>
+Requires RUNNING and a stable resource-manager binding. Pending cancellation suppresses ordinary processing
+and acquisition until OnCancelling permits stopping. Each resource phase starts once and advances through
+manager.Execute. Release exceptions end the release attempt with final FAILURE while retaining the original
+reason. If obtaining a caught exception's message fails, retains fixed phase-specific diagnostics and
+continues the failure path. This does not roll back interrupted work or clear terminal allocation failure.
+</description>
 *)
 METHOD PRIVATE handleRunning
 VAR
@@ -242,8 +285,14 @@ CASE _RunningSubstate OF
 				setRunningSubstate(TASK_RUNNING_SUBSTATE.PROCESSING);
 			END_IF
 		__CATCH(exceptionCode)
-			exception := TOF_Core.ExceptionManager.GetLastException(exceptionCode, NamespaceName, __POUNAME(), __POSITION());
-			_TemporaryErrorMessage := exception.GetMessage();
+			_TemporaryErrorMessage := "Resource acquisition failed";
+
+			__TRY
+				exception := TOF_Core.ExceptionManager.GetLastException(exceptionCode, NamespaceName, __POUNAME(), __POSITION());
+				_TemporaryErrorMessage := exception.GetMessage();
+			__CATCH
+				// Keep the fallback text and any terminal allocation-failure latch.
+			__ENDTRY
 			
 			IF _OriginalStopReason = TASK_STOP_REASON.WORK_DONE THEN
 				_OriginalStopReason := TASK_STOP_REASON.FAILURE;
@@ -279,8 +328,14 @@ CASE _RunningSubstate OF
 				END_IF
 			END_IF
 		__CATCH(exceptionCode)
-			exception := TOF_Core.ExceptionManager.GetLastException(exceptionCode, NamespaceName, __POUNAME(), __POSITION());
-			_TemporaryErrorMessage := exception.GetMessage();
+			_TemporaryErrorMessage := "Task processing failed";
+
+			__TRY
+				exception := TOF_Core.ExceptionManager.GetLastException(exceptionCode, NamespaceName, __POUNAME(), __POSITION());
+				_TemporaryErrorMessage := exception.GetMessage();
+			__CATCH
+				// Keep the fallback text and any terminal allocation-failure latch.
+			__ENDTRY
 			
 			IF _OriginalStopReason = TASK_STOP_REASON.WORK_DONE THEN
 				_OriginalStopReason := TASK_STOP_REASON.FAILURE;
@@ -313,8 +368,14 @@ CASE _RunningSubstate OF
 				safeCallOnAfterStop();
 			END_IF				
 		__CATCH(exceptionCode)
-			exception := TOF_Core.ExceptionManager.GetLastException(exceptionCode, NamespaceName, __POUNAME(), __POSITION());
-			_TemporaryErrorMessage := exception.GetMessage();
+			_TemporaryErrorMessage := "Resource release failed";
+
+			__TRY
+				exception := TOF_Core.ExceptionManager.GetLastException(exceptionCode, NamespaceName, __POUNAME(), __POSITION());
+				_TemporaryErrorMessage := exception.GetMessage();
+			__CATCH
+				// Keep the fallback text and any terminal allocation-failure latch.
+			__ENDTRY
 			
 					
 			setStoppedState(TASK_STOP_REASON.FAILURE, _TemporaryErrorMessage);
@@ -326,7 +387,15 @@ END_CASE
       </Implementation>
     </Method>
     <Property Name="Name" Id="{4e451f29-f53d-4bcf-8f0a-083cf67f553b}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Provides the task's diagnostic name.</summary>
+<description>
+Borrowed read-only reference initialized during construction from the class name and instance address. Valid
+only while the task lives; do not write through the reference. It is not a persistent identity or a
+configurable display-name setter.
+</description>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY FINAL Name : REFERENCE TO WSTRING]]></Declaration>
       <Get Name="Get" Id="{758bcc09-602f-41b4-b11f-e8268c4f3c3a}">
         <Declaration><![CDATA[]]></Declaration>
@@ -337,14 +406,15 @@ PROPERTY FINAL Name : REFERENCE TO WSTRING]]></Declaration>
     </Property>
     <Method Name="OnAfterStop" Id="{86e85a1b-93eb-4520-a6b2-faaa5a3db20e}" FolderPath="Members to override\">
       <Declaration><![CDATA[(*!
-<summary>Called after transition to STOPPED and assignment of FinalStopReason,</summary>
+<summary>Notifies descendants after final termination has been recorded.</summary>
 <description>
-following resource release when required. Use for termination notifications
-or final bookkeeping, regardless of the stop reason. Exceptions are logged
-and do not change the final result.
+Called after transition to STOPPED and assignment of FinalStopReason, following the release attempt when
+required. Use for short notifications or bookkeeping for any stop reason. Callback exceptions are logged and
+do not replace the recorded result. Reset from this hook can change the visible state and clear results
+before Execute returns; it does not schedule another run. General recursive lifecycle control is not
+guaranteed.
 </description>
 *)
-
 METHOD PROTECTED OnAfterStop
 ]]></Declaration>
       <Implementation>
@@ -353,14 +423,13 @@ METHOD PROTECTED OnAfterStop
     </Method>
     <Method Name="OnBeforeStart" Id="{5fb86c1f-5c4e-4feb-b7c4-caeef1bc2031}" FolderPath="Members to override\">
       <Declaration><![CDATA[(*!
-<summary>Called synchronously by Start while the task is READY, before RUNNING</summary>
+<summary>Prepares a READY task synchronously before starting.</summary>
 <description>
-and before resource acquisition. Validate or prepare the task for this run;
-keep the callback short. An exception refuses Start and supplies refuseReason.
-No rollback of changes made by this callback is performed on refusal.
+Called by Start before RUNNING and resource acquisition. Validate or prepare one run without waiting in a
+loop. A callback exception refuses Start and supplies refuseReason, using fixed fallback text if obtaining
+the exception message fails. Preparation already performed is not rolled back. The base does nothing.
 </description>
 *)
-
 METHOD PROTECTED OnBeforeStart]]></Declaration>
       <Implementation>
         <ST><![CDATA[]]></ST>
@@ -368,15 +437,13 @@ METHOD PROTECTED OnBeforeStart]]></Declaration>
     </Method>
     <Method Name="OnBeforeStop" Id="{698786bc-ab3a-40d9-bc3c-8b44edd3a764}" FolderPath="Members to override\">
       <Declaration><![CDATA[(*!
-<summary>Called when entering the stopping path, before resource release or direct</summary>
+<summary>Prepares termination before release or direct transition to STOPPED.</summary>
 <description>
-transition to STOPPED. Use for short actions that prepare termination for
-completion, cancellation, internal abort or failure. During cancellation,
-OnCancelling has returned readyToStop=TRUE; perform waiting work there.
-Exceptions are logged; stopping continues without changing the stop reasons.
+Called for completion, internal abort, failure or accepted cancellation. During cancellation, OnCancelling
+has already returned TRUE; perform asynchronous cancellation work there. This hook cannot postpone stopping.
+Callback exceptions are logged and do not change stop reasons. The base implementation does nothing.
 </description>
 *)
-
 METHOD PROTECTED OnBeforeStop
 ]]></Declaration>
       <Implementation>
@@ -385,16 +452,16 @@ METHOD PROTECTED OnBeforeStop
     </Method>
     <Method Name="OnCancelling" Id="{2ad060bf-91d2-42fc-8f3b-934bf7b4d05f}" FolderPath="Members to override\">
       <Declaration><![CDATA[(*!
-<summary>Called by Execute while accepted cancellation is pending, before resource</summary>
+<summary>Advances pending cancellation before resource release.</summary>
 <description>
-release. Advance only cancellation-related work, such as child cleanup.
-Set readyToStop on every call: FALSE requires another Execute without ordinary
-OnRunning or acquisition; TRUE permits OnBeforeStop and resource release.
-TRUE does not mean the task is already STOPPED. The base returns TRUE.
-Exceptions are logged and treated as readyToStop=FALSE for this call.
+Set readyToStop on every call. FALSE requires another Execute without ordinary OnRunning or acquisition;
+TRUE permits OnBeforeStop and release but does not mean STOPPED. The base returns TRUE immediately.
+Descendants with pending asynchronous work or acquisition must finish the required cancellation steps here
+before permitting release; the base does not drain a manager automatically. Callback exceptions are logged
+and treated as FALSE for that call.
 </description>
+<param name="readyToStop">TRUE only when cancellation-specific work no longer prevents release.</param>
 *)
-
 METHOD PROTECTED OnCancelling
 VAR_OUTPUT
 	readyToStop : BOOL;
@@ -405,15 +472,13 @@ END_VAR]]></Declaration>
     </Method>
     <Method Name="OnCancelRequest" Id="{ec05160b-b364-40ca-9992-6a0764b0e3eb}" FolderPath="Members to override\">
       <Declaration><![CDATA[(*!
-<summary>Called once, synchronously in Cancel, after cancellation is accepted</summary>
+<summary>Initiates an accepted cancellation once.</summary>
 <description>
-and the cancellation flag and stop reason are set. Not called for refused
-or repeated requests. Perform only short actions that initiate cancellation;
-cleanup completion is advanced by Execute. Exceptions are logged and do not
-withdraw the accepted cancellation request.
+Called synchronously by Cancel after its flag and original stop reason are set. Not called for refused or
+repeated requests. Initiate only short cancellation actions; Execute and OnCancelling advance completion.
+Callback exceptions are logged without withdrawing the request. The base implementation does nothing.
 </description>
 *)
-
 METHOD PROTECTED OnCancelRequest]]></Declaration>
       <Implementation>
         <ST><![CDATA[]]></ST>
@@ -421,15 +486,14 @@ METHOD PROTECTED OnCancelRequest]]></Declaration>
     </Method>
     <Method Name="OnReset" Id="{a7e8974b-7e43-4ce5-8790-6b98c2babadd}" FolderPath="Members to override\">
       <Declaration><![CDATA[(*!
-<summary>Called synchronously by Reset only in STOPPED, before transition to READY</summary>
+<summary>Resets descendant state before returning a stopped task to READY.</summary>
 <description>
-and clearing the task's stop reasons and cancellation flag. Reset per-run
-state for reuse. Not called when Reset is invoked on an already READY task.
-An exception refuses Reset and supplies refuseReason; changes already made
-by this callback are not rolled back.
+Called synchronously by Reset only in STOPPED, before base stop reasons and cancellation state are cleared.
+READY Reset does not call this hook. A callback exception refuses Reset, using fixed fallback text if
+obtaining the exception message fails; changes already made are not rolled back. The base implementation
+does nothing. Descendants must preserve any reset work required by their immediate base class.
 </description>
 *)
-
 METHOD PROTECTED OnReset ]]></Declaration>
       <Implementation>
         <ST><![CDATA[]]></ST>
@@ -437,16 +501,17 @@ METHOD PROTECTED OnReset ]]></Declaration>
     </Method>
     <Method Name="OnRunning" Id="{fa525f37-9567-4dcb-9fc7-ad672f39a641}" FolderPath="Members to override\">
       <Declaration><![CDATA[(*!
-<summary>Called by Execute in the PROCESSING substate, after resource acquisition</summary>
+<summary>Advances one step of the operation after resource acquisition.</summary>
 <description>
-when required. Advance one bounded step of work. Return BUSY to continue,
-DONE to complete, ABORTED for internal abort or ERROR for failure; provide
-stopReasonMessage when useful. A non-BUSY result starts the stopping path.
-Exceptions are handled by the task's failure/cleanup logic. Not called while
-accepted cancellation is pending, during acquisition or during release.
+Called only in PROCESSING with no accepted cancellation pending. Return BUSY to continue, DONE to complete,
+ABORTED for internal abort or ERROR for failure. A terminal result begins stopping. The stop message is the
+task's live per-run buffer and is not cleared before every callback. Exceptions enter the task's failure and
+cleanup path; completed side effects are not rolled back. Keep execution bounded and do not block waiting
+for an asynchronous result.
 </description>
+<param name="processingState">Result of this processing step; the default value is BUSY.</param>
+<param name="stopReasonMessage">Optional diagnostic message retained for termination; not an owned buffer.</param>
 *)
-
 METHOD PROTECTED ABSTRACT OnRunning
 VAR_OUTPUT
 	processingState : TASK_PROCESSING_STATE;
@@ -480,7 +545,14 @@ PROPERTY FINAL OriginalStopReason : REFERENCE TO TaskStopReason]]></Declaration>
       </Get>
     </Property>
     <Property Name="ReleaseResourceRequired" Id="{f0fd2b26-a815-4a05-9799-39dece9b0738}" FolderPath="Service members\">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Reports whether the current manager has an acquired resource.</summary>
+<description>
+TRUE only for a nonzero ResourceManager reporting ResourceAcquired. Does not initiate cleanup or determine
+whether acquisition is still pending. Both getters must be non-throwing and free of side effects.
+</description>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY PROTECTED FINAL ReleaseResourceRequired : BOOL]]></Declaration>
       <Get Name="Get" Id="{146f8d24-87e8-452d-aa8d-94dc970b416d}">
         <Declaration><![CDATA[]]></Declaration>
@@ -491,15 +563,15 @@ PROPERTY PROTECTED FINAL ReleaseResourceRequired : BOOL]]></Declaration>
     </Property>
     <Method Name="Reset" Id="{98e72552-cae8-4b2c-b8c6-8047c79b882a}">
       <Declaration><![CDATA[(*!
-<summary>Prepares a STOPPED task for reuse; TRUE means the task is READY.</summary>
+<summary>Prepares a stopped task for reuse.</summary>
 <description>
-An already READY task returns TRUE without invoking reset callbacks.
-Reset does not cancel a RUNNING task. FALSE means reset was refused;
-see refuseReason. A successful reset from STOPPED restores default stop
-reasons and clears their messages.
+READY returns TRUE without callbacks or clearing state. RUNNING returns FALSE; cancel and drive Execute to
+STOPPED first. In STOPPED, OnReset must succeed before base state returns to READY and stop diagnostics are
+cleared. Partial callback effects are not rolled back on refusal. Failure to obtain a callback exception's
+message uses fixed refusal text; terminal allocation failure still requires the caller's task-boundary check.
 </description>
+<param name="refuseReason">Reason for refusal; meaningful when the method returns FALSE.</param>
 *)
-
 METHOD FINAL Reset : BOOL
 VAR_OUTPUT
 	refuseReason : TOF_Core.ERROR_MESSAGE;
@@ -524,18 +596,16 @@ END_IF]]></ST>
     </Method>
     <Property Name="ResourceManager" Id="{d940cf50-89bd-4d74-bb1c-dbd9609c4f14}">
       <Declaration><![CDATA[(*!
-<summary>Override to supply this task's resource manager; the base returns 0</summary>
+<summary>Provides the borrowed manager used for resource acquisition and release.</summary>
 <description>
-for tasks without a managed resource. Task drives acquisition before work
-and release during stopping, calling StartAcquire or StartRelease once per phase
-and Execute to advance it. A release exception terminates the task with
-FAILURE without an automatic release retry; the manager defines recovery
-for any resource still held. Return a stable manager throughout a run;
-Keep ResourceManager and ResourceAcquired getters free of side effects;
-they must not throw exceptions.
+The base returns zero. Keep a nonzero manager alive and stable throughout the run; only the task drives its
+StartAcquire, StartRelease and Execute methods. Start skips acquisition when already acquired, but normal
+stopping still releases an acquired resource. During cancellation, descendants must complete pending
+acquisition as required by the manager before permitting release. Release exceptions terminate the attempt
+with final FAILURE and no automatic retry. ResourceManager and ResourceAcquired getters must not throw or
+have side effects.
 </description>
 *)
-
 {attribute 'monitoring' := 'call'}
 
 PROPERTY ResourceManager : TOF_Core.IResourceManager]]></Declaration>
@@ -547,7 +617,14 @@ PROPERTY ResourceManager : TOF_Core.IResourceManager]]></Declaration>
       </Get>
     </Property>
     <Property Name="RunningSubstate" Id="{66935ac7-34a7-4c86-b67d-8cd08feeed21}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Provides a live read-only view of the current execution phase.</summary>
+<description>
+Meaningful only while State.Running is TRUE. The view borrows this task's fields and must not outlive it.
+Observing a phase does not authorize external callers to drive the resource manager.
+</description>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY FINAL RunningSubstate : REFERENCE TO TaskRunningSubstate]]></Declaration>
       <Get Name="Get" Id="{7f57d865-76a7-4394-ab4e-08fffeb4344f}">
         <Declaration><![CDATA[]]></Declaration>
@@ -557,7 +634,14 @@ PROPERTY FINAL RunningSubstate : REFERENCE TO TaskRunningSubstate]]></Declaratio
       </Get>
     </Property>
     <Method Name="safeCallOnAfterStop" Id="{0c327d25-c1a4-490a-bffb-4b7b77fe9c81}" FolderPath="Service members\">
-      <Declaration><![CDATA[METHOD PRIVATE safeCallOnAfterStop
+      <Declaration><![CDATA[(*!
+<summary>Invokes the termination hook and attempts to log a callback exception.</summary>
+<description>
+Does not change the final result to reflect callback failure. Logging is best effort; a callback can already
+have changed observable task state. Exception transport requires cyclic task context.
+</description>
+*)
+METHOD PRIVATE safeCallOnAfterStop
 VAR
 	exceptionCode : __SYSTEM.ExceptionCode;
 	exception : TOF_Core.IException;
@@ -573,7 +657,16 @@ __ENDTRY]]></ST>
       </Implementation>
     </Method>
     <Method Name="safeCallOnBeforeStart" Id="{4d5ec1be-1747-41c1-b234-c3cc18f33f59}" FolderPath="Service members\">
-      <Declaration><![CDATA[METHOD PRIVATE safeCallOnBeforeStart : BOOL
+      <Declaration><![CDATA[(*!
+<summary>Invokes start preparation and converts a callback exception to refusal.</summary>
+<description>
+Returns TRUE when OnBeforeStart returns normally. On exception, copies its formatted message to refuseReason
+and leaves FALSE. If obtaining the message raises, retains fixed refusal text. Does not roll back callback
+effects or clear terminal allocation failure; the caller's fatal boundary remains required.
+</description>
+<param name="refuseReason">Receives formatted diagnostics when preparation throws.</param>
+*)
+METHOD PRIVATE safeCallOnBeforeStart : BOOL
 VAR_IN_OUT
 	refuseReason : TOF_Core.ERROR_MESSAGE;
 END_VAR
@@ -587,14 +680,26 @@ END_VAR]]></Declaration>
 	
 	safeCallOnBeforeStart := TRUE;
 __CATCH(exceptionCode)
-	exception := TOF_Core.ExceptionManager.GetLastException(exceptionCode, NamespaceName, __POUNAME(), __POSITION());
-	
-	refuseReason := exception.GetMessage();
+	refuseReason := "Task start preparation failed";
+
+	__TRY
+		exception := TOF_Core.ExceptionManager.GetLastException(exceptionCode, NamespaceName, __POUNAME(), __POSITION());
+		refuseReason := exception.GetMessage();
+	__CATCH
+		// Keep the fallback text and any terminal allocation-failure latch.
+	__ENDTRY
 __ENDTRY]]></ST>
       </Implementation>
     </Method>
     <Method Name="safeCallOnBeforeStop" Id="{793a8a6d-c6e3-4043-9860-ceb426a80e28}" FolderPath="Service members\">
-      <Declaration><![CDATA[METHOD PRIVATE safeCallOnBeforeStop
+      <Declaration><![CDATA[(*!
+<summary>Invokes the pre-stop hook and attempts to log a callback exception.</summary>
+<description>
+Callback failure does not veto stopping or replace stop reasons. This wrapper does not wait for resources or
+child tasks. Exception transport requires cyclic task context.
+</description>
+*)
+METHOD PRIVATE safeCallOnBeforeStop
 VAR
 	exceptionCode : __SYSTEM.ExceptionCode;
 	exception : TOF_Core.IException;
@@ -610,7 +715,15 @@ __ENDTRY]]></ST>
       </Implementation>
     </Method>
     <Method Name="safeCallOnCancelling" Id="{3899c078-a9f5-451e-b1b5-dd53d6ba75fc}" FolderPath="Service members\">
-      <Declaration><![CDATA[METHOD PRIVATE safeCallOnCancelling
+      <Declaration><![CDATA[(*!
+<summary>Invokes cancellation progress with a conservative readiness result.</summary>
+<description>
+Initializes readyToStop to FALSE, accepts the hook's result on normal return, and restores FALSE if the hook
+throws. Attempts to log that exception; another Execute is needed to retry cancellation progress.
+</description>
+<param name="readyToStop">Whether cancellation-specific work permits stopping.</param>
+*)
+METHOD PRIVATE safeCallOnCancelling
 VAR_OUTPUT
 	readyToStop : BOOL;
 END_VAR
@@ -633,7 +746,14 @@ __ENDTRY]]></ST>
       </Implementation>
     </Method>
     <Method Name="safeCallOnCancelRequest" Id="{905ed24a-5192-4ad8-85ce-047a09b432af}" FolderPath="Service members\">
-      <Declaration><![CDATA[METHOD PRIVATE safeCallOnCancelRequest
+      <Declaration><![CDATA[(*!
+<summary>Invokes the cancellation notification and attempts to log a callback exception.</summary>
+<description>
+The cancellation request has already been accepted; callback failure does not undo its flag or reason.
+Exception transport requires cyclic task context.
+</description>
+*)
+METHOD PRIVATE safeCallOnCancelRequest
 VAR
 	exceptionCode : __SYSTEM.ExceptionCode;
 	exception : TOF_Core.IException;
@@ -649,7 +769,16 @@ __ENDTRY]]></ST>
       </Implementation>
     </Method>
     <Method Name="safeCallOnReset" Id="{15a9e5da-1c2d-41c3-b3ce-bb3ffe792a82}" FolderPath="Service members\">
-      <Declaration><![CDATA[METHOD PRIVATE safeCallOnReset : BOOL
+      <Declaration><![CDATA[(*!
+<summary>Invokes reset preparation and converts a callback exception to refusal.</summary>
+<description>
+Returns TRUE when OnReset returns normally. On exception, formats refuseReason and leaves FALSE. Does not
+undo partial reset effects. If obtaining the message raises, retains fixed refusal text. Does not clear
+terminal allocation failure; the caller's fatal boundary remains required.
+</description>
+<param name="refuseReason">Receives formatted diagnostics when reset preparation throws.</param>
+*)
+METHOD PRIVATE safeCallOnReset : BOOL
 VAR_IN_OUT
 	refuseReason : TOF_Core.ERROR_MESSAGE;
 END_VAR
@@ -663,16 +792,25 @@ END_VAR]]></Declaration>
 	
 	safeCallOnReset := TRUE;
 __CATCH(exceptionCode)
-	exception := TOF_Core.ExceptionManager.GetLastException(exceptionCode, NamespaceName, __POUNAME(), __POSITION());
-	
-	refuseReason := exception.GetMessage();
+	refuseReason := "Task reset failed";
+
+	__TRY
+		exception := TOF_Core.ExceptionManager.GetLastException(exceptionCode, NamespaceName, __POUNAME(), __POSITION());
+		refuseReason := exception.GetMessage();
+	__CATCH
+		// Keep the fallback text and any terminal allocation-failure latch.
+	__ENDTRY
 __ENDTRY]]></ST>
       </Implementation>
     </Method>
     <Method Name="setIdleState" Id="{d671c618-6e83-4250-9051-fb8450c86902}" FolderPath="Service members\">
       <Declaration><![CDATA[(*!
-<summary>Prepares the ready state and clears the previous resource operation marker.</summary>
-<description>Computed diagnostic strings are held in local buffers for the duration of the receiving call.</description>
+<summary>Enters READY and clears per-run task state.</summary>
+<description>
+Used after successful reset preparation. Attempts transition logging, sets StateChanged when the lifecycle
+state changes, clears cancellation and resource-operation markers, and resets both stop reasons and
+messages. Does not release resources or invoke reset hooks.
+</description>
 *)
 METHOD PRIVATE FINAL setIdleState
 VAR CONSTANT
@@ -710,8 +848,12 @@ _FinalStopReasonMessage := "";	]]></ST>
     </Method>
     <Method Name="setRunningState" Id="{1d4e1480-16f7-42b7-b601-af024b62cfc3}" FolderPath="Service members\">
       <Declaration><![CDATA[(*!
-<summary>Initializes a new run and prepares its first resource phase.</summary>
-<description>Computed diagnostic strings are held in local buffers for the duration of the receiving call.</description>
+<summary>Prepares the first execution phase and enters RUNNING.</summary>
+<description>
+Reads the stable resource manager before publishing RUNNING. Selects acquisition only for a nonzero manager
+without an acquired resource, otherwise PROCESSING. Clears stop diagnostics and the resource-operation
+marker and attempts transition logging. Does not invoke StartAcquire or OnRunning; Execute advances them.
+</description>
 *)
 METHOD PRIVATE FINAL setRunningState
 VAR
@@ -761,7 +903,11 @@ END_IF]]></ST>
     </Method>
     <Method Name="setRunningSubstate" Id="{d7f6ee1f-b4e3-4b35-9d2a-d0008766d37e}" FolderPath="Service members\">
       <Declaration><![CDATA[(*!
-<summary>Enters a running phase and prepares its one-time resource start request.</summary>
+<summary>Selects a running phase and resets its one-time resource request marker.</summary>
+<description>
+Does not change the lifecycle state or StateChanged and does not invoke the resource manager.
+</description>
+<param name="runningSubState">Phase to execute on the next applicable dispatch.</param>
 *)
 METHOD PRIVATE setRunningSubstate
 VAR_INPUT
@@ -775,8 +921,14 @@ _ResourceOperationStarted := FALSE;]]></ST>
     </Method>
     <Method Name="setStoppedState" Id="{8d421360-d406-412c-baae-5d7b7f498ca6}" FolderPath="Service members\">
       <Declaration><![CDATA[(*!
-<summary>Prepares diagnostic text locally before passing it to read-only logging or exception parameters.</summary>
-<description>Computed diagnostic strings are held in local buffers for the duration of the receiving call.</description>
+<summary>Records the final result and enters STOPPED.</summary>
+<description>
+Attempts transition logging and sets StateChanged on a lifecycle transition. Copies a nonempty supplied
+message, otherwise uses the original message or a default for the final reason. Preserves the original
+reason and does not itself invoke OnAfterStop. STOPPED does not prove physical resource release.
+</description>
+<param name="finalStopReason">Final lifecycle result, including any release failure.</param>
+<param name="finalStopReasonMessage">Borrowed diagnostic text copied during this call; may alias the task's original message.</param>
 *)
 METHOD PRIVATE FINAL setStoppedState
 VAR_INPUT
@@ -834,14 +986,15 @@ END_IF]]></ST>
     </Method>
     <Method Name="Start" Id="{ce59c237-31f2-4c66-aa57-58d7b3210a0c}">
       <Declaration><![CDATA[(*!
-<summary>TRUE means the task lifecycle has started and the task is RUNNING,</summary>
+<summary>Starts a prepared task in READY.</summary>
 <description>
-not that the work is complete. Continue calling Execute to advance execution.
-FALSE means starting was refused; see refuseReason.
-Changes already made by OnBeforeStart are not rolled back.
+Returns TRUE after OnBeforeStart succeeds and RUNNING is established; work and acquisition are advanced by
+subsequent Execute calls. An ineligible state or a caught preparation failure returns FALSE with
+refuseReason. Callback effects are not rolled back. Failure to obtain a callback exception's message uses
+fixed refusal text; terminal allocation failure still requires the caller's task-boundary check.
 </description>
+<param name="refuseReason">Reason for refusal; meaningful when the method returns FALSE.</param>
 *)
-
 METHOD FINAL Start : BOOL
 VAR_OUTPUT
 	refuseReason : TOF_Core.ERROR_MESSAGE;
@@ -862,7 +1015,15 @@ END_IF]]></ST>
       </Implementation>
     </Method>
     <Property Name="State" Id="{dafc5e3d-e24c-471f-9fe0-3ccb7b88ba9e}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Provides a live read-only lifecycle view.</summary>
+<description>
+READY permits Start, RUNNING includes work and cleanup, and STOPPED permits result inspection and Reset.
+StateChanged is cleared at the beginning of each Execute and set on a lifecycle transition; it is not a
+global one-cycle pulse. The view must not outlive this task.
+</description>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY FINAL State : REFERENCE TO TaskState]]></Declaration>
       <Get Name="Get" Id="{194ca53a-f3b4-4af6-941f-9e148bc75ff7}">
         <Declaration><![CDATA[]]></Declaration>

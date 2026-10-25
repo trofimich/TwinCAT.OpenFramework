@@ -1,0 +1,212 @@
+<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1" ProductVersion="3.1.4026.21">
+  <POU Name="QueueCleanupResource" Id="{a974a31d-e888-4192-a36d-7424fa95549f}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+SPDX-FileCopyrightText: © 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+SPDX-License-Identifier: MIT
+License: https://opensource.org/license/mit
+*)
+
+(*!
+<summary>Observes parent resource release without using a real resource.</summary>
+<description>
+Configure Child and ThrowOnStartRelease through SetChild and SetThrowOnStartRelease before the queue starts. Child is borrowed and must outlive this manager.
+Acquisition takes one Execute; release takes two. EarlyRelease records any request while Child is RUNNING.
+ReleaseCalls and EarlyRelease are observations only. No physical resource or external side effect is created.
+</description>
+*)
+FUNCTION_BLOCK QueueCleanupResource EXTENDS TOF_Core.Object IMPLEMENTS TOF_Core.IResourceManager
+VAR_OUTPUT
+	//! <summary>Borrowed child whose RUNNING state must prevent parent release.</summary>
+	Child : TOF_Tasks.ITask;
+	//! <summary>Raise a terminal release-attempt error on StartRelease.</summary>
+	ThrowOnStartRelease : BOOL;
+	//! <summary>Total StartRelease calls; read-only to tests.</summary>
+	ReleaseCalls : UINT;
+	//! <summary>Records whether release was requested while Child was RUNNING.</summary>
+	EarlyRelease : BOOL;
+END_VAR
+VAR CONSTANT
+	//! <summary>Execute calls required to complete synthetic release after its request.</summary>
+	_ReleaseSteps : UINT := 2;
+END_VAR
+VAR
+	_ClassName : STRING := __POUNAME();
+	_Acquired : BOOL;
+	_Acquiring : BOOL;
+	_Releasing : BOOL;
+	_ReleaseProgress : UINT;
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[]]></ST>
+    </Implementation>
+    <Folder Name="Internal methods" Id="{8c23ba67-ee83-413c-b94a-1f55ab5252ad}" />
+    <Property Name="ClassName" Id="{7786eeca-4512-4cfb-bcd5-b9e169863e53}">
+      <Declaration><![CDATA[(*!
+<summary>Borrows the fixture type name.</summary>
+<description>
+Read-only storage valid while the fixture lives.
+</description>
+*)
+
+{attribute 'monitoring' := 'call'}
+PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{d02f21ef-9ca8-4378-8d38-8cbd1eebf4bb}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ClassName REF= _ClassName;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="Execute" Id="{1754ea46-b3bd-409b-85b9-07835c3639c1}">
+      <Declaration><![CDATA[(*!
+<summary>Advances one synthetic acquisition or release step.</summary>
+<description>
+Idle calls do nothing; all operations are bounded and perform no I/O.
+</description>
+*)
+METHOD Execute]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF _Acquiring THEN
+	_Acquired := TRUE;
+	_Acquiring := FALSE;
+ELSIF _Releasing THEN
+	_ReleaseProgress := _ReleaseProgress + 1;
+	IF _ReleaseProgress >= _ReleaseSteps THEN
+		_Acquired := FALSE;
+		_Releasing := FALSE;
+	END_IF
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="GetResource" Id="{43736e26-7196-40e1-9455-cadb39069ec9}">
+      <Declaration><![CDATA[(*!
+<summary>Returns this live fixture as the borrowed synthetic resource.</summary>
+<description>
+No real handle is created. The caller must not delete the returned object.
+</description>
+*)
+METHOD GetResource : TOF_Core.IObject]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[GetResource := THIS^;]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="NamespaceName" Id="{3c9f5fc1-495b-4240-863e-f2c083b24cf8}">
+      <Declaration><![CDATA[(*!
+<summary>Borrows the test library namespace.</summary>
+*)
+
+{attribute 'monitoring' := 'call'}
+PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{4577d80a-1115-42ea-a888-c338c605846c}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[NamespaceName REF= CurrentNamespace.Name;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="ResourceAcquired" Id="{07ef79e6-8e33-4f3f-96bb-ccbaa770fbc6}">
+      <Declaration><![CDATA[(*!
+<summary>Reports whether the synthetic resource is held.</summary>
+<description>
+Has no side effects and does not throw.
+</description>
+*)
+
+{attribute 'monitoring' := 'call'}
+PROPERTY ResourceAcquired : BOOL]]></Declaration>
+      <Get Name="Get" Id="{ea6ac594-b94e-4c92-b4f5-1b226b4c9bcc}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ResourceAcquired := _Acquired;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="SelfSize" Id="{0417d685-2ae3-4048-87c6-ee3c564ff270}">
+      <Declaration><![CDATA[(*!
+<summary>Reports the concrete fixture size.</summary>
+*)
+
+{attribute 'monitoring' := 'call'}
+PROPERTY SelfSize : ULINT]]></Declaration>
+      <Get Name="Get" Id="{876cfd53-2bbe-427e-a3c4-d370208b8741}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[SelfSize := XSIZEOF(THIS^);]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="SetChild" Id="{860691b1-452d-4651-8e8f-fd8460ed6dd0}" FolderPath="Internal methods\">
+      <Declaration><![CDATA[(*!
+<summary>Sets the child observed during resource release.</summary>
+<description>
+Call before the queue starts. The child is borrowed and must outlive the resource manager.
+</description>
+<param name="child">Child whose RUNNING state is observed during release.</param>
+*)
+METHOD INTERNAL SetChild
+VAR_INPUT
+	child : TOF_Tasks.ITask;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[THIS^.Child := child;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="SetThrowOnStartRelease" Id="{01b079c3-5180-4776-88bd-548796fd291e}" FolderPath="Internal methods\">
+      <Declaration><![CDATA[(*!
+<summary>Configures the resource's release failure injection.</summary>
+<description>
+Call before the queue starts. Changes only the failure setting; resource progress and observations are preserved.
+</description>
+<param name="throwOnStartRelease">Whether StartRelease raises the synthetic release-attempt error.</param>
+*)
+METHOD INTERNAL SetThrowOnStartRelease
+VAR_INPUT
+	throwOnStartRelease : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[THIS^.ThrowOnStartRelease := throwOnStartRelease;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="StartAcquire" Id="{b7a8d6be-c5a9-47a4-9209-6448343e8be2}">
+      <Declaration><![CDATA[(*!
+<summary>Requests synthetic acquisition completed by the next Execute.</summary>
+<description>
+Called once per acquire phase. Does nothing when already acquired.
+</description>
+*)
+METHOD StartAcquire]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF NOT _Acquired THEN
+	_Acquiring := TRUE;
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="StartRelease" Id="{1529eda6-d75b-4f72-9327-20cbddf1bb98}">
+      <Declaration><![CDATA[(*!
+<summary>Records release ordering and starts synthetic release.</summary>
+<description>
+Records EarlyRelease before optionally throwing. A thrown release deliberately leaves ResourceAcquired TRUE;
+this models a failed terminal attempt without holding any real resource.
+</description>
+*)
+METHOD StartRelease
+VAR
+	failure : TOF_Core.StandardException;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[ReleaseCalls := ReleaseCalls + 1;
+IF Child <> 0 AND_THEN Child.State.Running THEN
+	EarlyRelease := TRUE;
+END_IF
+
+IF ThrowOnStartRelease THEN
+	failure.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), "Parent release failure");
+END_IF
+
+_ReleaseProgress := 0;
+_Releasing := TRUE;]]></ST>
+      </Implementation>
+    </Method>
+  </POU>
+</TcPlcObject>

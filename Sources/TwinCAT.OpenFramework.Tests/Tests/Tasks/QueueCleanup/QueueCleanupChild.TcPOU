@@ -1,0 +1,362 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1" ProductVersion="3.1.4026.21">
+  <POU Name="QueueCleanupChild" Id="{1af53d06-db2a-49f0-bec1-528231fd28f0}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+SPDX-FileCopyrightText: © 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+SPDX-License-Identifier: MIT
+License: https://opensource.org/license/mit
+*)
+
+(*!
+<summary>Models a child whose Execute can throw while its lifecycle remains RUNNING.</summary>
+<description>
+Test-only implementation of ITask, independent of the base Task exception handler. One owner drives it.
+Configure inputs before Start; HoldCleanup may be cleared between calls to release the artificial hold.
+Cancellation needs three successful Execute steps; injected cleanup failures do not count as steps.
+Public outputs are observations only. Uses no hardware; exceptions are cleaned at the PLC task boundary.
+</description>
+*)
+FUNCTION_BLOCK QueueCleanupChild EXTENDS TOF_Core.Object IMPLEMENTS TOF_Tasks.ITask
+VAR_INPUT
+	//! <summary>Inject one exception on the first Execute of a run.</summary>
+	ThrowOnFirstExecute : BOOL := TRUE;
+	//! <summary>When ThrowOnFirstExecute is enabled, use an exception whose GetMessage throws another exception.</summary>
+	ThrowOnGetMessage : BOOL;
+	//! <summary>Number of cleanup Execute calls that throw before successful cleanup steps.</summary>
+	CleanupFailures : UINT;
+	//! <summary>Number of cancellation requests that throw before accepting a request.</summary>
+	CancelFailures : UINT;
+	//! <summary>Keep accepted cancellation pending until the test releases this hold.</summary>
+	HoldCleanup : BOOL;
+END_VAR
+VAR_OUTPUT
+	//! <summary>Successful cleanup steps since the last Reset; read-only to tests.</summary>
+	CompletedCleanupSteps : UINT;
+	//! <summary>Exceptions raised by Execute in this run, including the initial fault.</summary>
+	ExecuteFailuresRaised : UINT;
+	//! <summary>Exceptions raised before accepting Cancel in this run.</summary>
+	CancelFailuresRaised : UINT;
+END_VAR
+VAR CONSTANT
+	//! <summary>Successful Execute calls required to finish synthetic cancellation.</summary>
+	_CleanupSteps : UINT := 3;
+END_VAR
+VAR
+	_ClassName : STRING := __POUNAME();
+	_Name : WSTRING := "Queue cleanup child";
+	_State : TOF_Tasks.TASK_STATE;
+	_StateChanged : BOOL;
+	_Substate : TOF_Tasks.TASK_RUNNING_SUBSTATE := TOF_Tasks.TASK_RUNNING_SUBSTATE.PROCESSING;
+	_Reason : TOF_Tasks.TASK_STOP_REASON;
+	_Message : TOF_Core.ERROR_MESSAGE;
+	_StateView : TOF_Tasks.TaskState(_State, _StateChanged);
+	_SubstateView : TOF_Tasks.TaskRunningSubstate(_Substate);
+	_ReasonView : TOF_Tasks.TaskStopReason(_Reason, _Message);
+
+	_InitialExecuteExceptionRaised : BOOL;
+	_CancelRequested : BOOL;
+	_CleanupFailuresLeft : UINT;
+	_CancelFailuresLeft : UINT;
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[]]></ST>
+    </Implementation>
+    <Method Name="Cancel" Id="{3c6d1d9d-21a9-49cc-a4fb-cda923893f26}">
+      <Declaration><![CDATA[(*!
+<summary>Injects configured request failures, then accepts cooperative cancellation.</summary>
+<description>
+Injected failures occur before acceptance and leave RUNNING intact. Repeated accepted cancellation refuses.
+Completion still requires Execute; no cleanup is performed by this method.
+</description>
+<param name="refuseReason">Reason for refusal; meaningful on FALSE.</param>
+*)
+METHOD Cancel : BOOL
+VAR_OUTPUT
+	refuseReason : TOF_Core.ERROR_MESSAGE;
+END_VAR
+VAR
+	failure : TOF_Core.StandardException;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF _State <> TOF_Tasks.TASK_STATE.RUNNING OR_ELSE _CancelRequested THEN
+	refuseReason := "Fixture is not running or cancellation is already pending";
+	RETURN;
+END_IF
+
+IF _CancelFailuresLeft > 0 THEN
+	_CancelFailuresLeft := _CancelFailuresLeft - 1;
+	CancelFailuresRaised := CancelFailuresRaised + 1;
+	failure.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), "Cancel request failure");
+END_IF
+
+_CancelRequested := TRUE;
+_Reason := TOF_Tasks.TASK_STOP_REASON.EXTERNAL_CANCEL;
+_Message := "Child cancellation requested";
+Cancel := TRUE;]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="ClassName" Id="{e9675666-3234-4988-96c4-04fec8e8ffb6}">
+      <Declaration><![CDATA[(*!
+<summary>Borrows the fixture type name.</summary>
+<description>
+Read-only storage valid while the fixture lives.
+</description>
+*)
+
+{attribute 'monitoring' := 'call'}
+PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{c01764fc-15c1-4c5a-a402-0bd51f43bdbb}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ClassName REF= _ClassName;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="Execute" Id="{38d5c41a-1b39-4838-a26c-09113fcd977a}">
+      <Declaration><![CDATA[(*!
+<summary>Raises the initial fault or advances synthetic cancellation by one step.</summary>
+<description>
+An injected exception leaves RUNNING intact. Without ThrowOnFirstExecute, the first Execute completes normally.
+After a fault, ordinary execution waits for an accepted Cancel; cleanup may throw or remain held.
+</description>
+*)
+METHOD Execute
+VAR
+	failure : TOF_Core.StandardException;
+	exceptionWithThrowingGetMessage : ThrowingGetMessageException;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_StateChanged := FALSE;
+IF _State <> TOF_Tasks.TASK_STATE.RUNNING THEN
+	RETURN;
+END_IF
+
+IF ThrowOnFirstExecute AND_THEN NOT _InitialExecuteExceptionRaised THEN
+	_InitialExecuteExceptionRaised := TRUE;
+	ExecuteFailuresRaised := ExecuteFailuresRaised + 1;
+	IF ThrowOnGetMessage THEN
+		exceptionWithThrowingGetMessage.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), "First child failure");
+	ELSE
+		failure.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), "First child failure");
+	END_IF
+END_IF
+
+IF _CancelRequested THEN
+	IF _CleanupFailuresLeft > 0 THEN
+		_CleanupFailuresLeft := _CleanupFailuresLeft - 1;
+		ExecuteFailuresRaised := ExecuteFailuresRaised + 1;
+		failure.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), "Later cleanup failure");
+	END_IF
+
+	IF HoldCleanup THEN
+		RETURN;
+	END_IF
+
+	CompletedCleanupSteps := CompletedCleanupSteps + 1;
+	IF CompletedCleanupSteps < _CleanupSteps THEN
+		RETURN;
+	END_IF
+
+	_Reason := TOF_Tasks.TASK_STOP_REASON.EXTERNAL_CANCEL;
+	_Message := "Child cancellation completed";
+ELSIF ThrowOnFirstExecute THEN
+	RETURN;
+ELSE
+	_Reason := TOF_Tasks.TASK_STOP_REASON.WORK_DONE;
+	_Message := "";
+END_IF
+
+_State := TOF_Tasks.TASK_STATE.STOPPED;
+_StateChanged := TRUE;]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="FinalStopReason" Id="{a6283b64-fc98-4ab5-bead-e7382880a3e0}">
+      <Declaration><![CDATA[(*!
+<summary>Borrows the synthetic termination result.</summary>
+<description>
+The fixture has no separate release failure, so both result views share backing fields. Observe only.
+</description>
+*)
+
+{attribute 'monitoring' := 'call'}
+PROPERTY FinalStopReason : REFERENCE TO TOF_Tasks.TaskStopReason]]></Declaration>
+      <Get Name="Get" Id="{ff81c1c9-f7ed-48a8-9754-acd0b0a4e03d}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[FinalStopReason REF= _ReasonView;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="Name" Id="{841b95a1-058a-4207-9064-776ace0e87d0}">
+      <Declaration><![CDATA[(*!
+<summary>Borrows the fixture display name.</summary>
+<description>
+Read-only storage valid while the fixture lives.
+</description>
+*)
+
+{attribute 'monitoring' := 'call'}
+PROPERTY Name : REFERENCE TO WSTRING]]></Declaration>
+      <Get Name="Get" Id="{27e90c50-374a-4f0a-b205-2426048066eb}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[Name REF= _Name;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="NamespaceName" Id="{8a2e448f-7b19-4815-8f6c-9d61f32680ba}">
+      <Declaration><![CDATA[(*!
+<summary>Borrows the test library namespace.</summary>
+*)
+
+{attribute 'monitoring' := 'call'}
+PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{eb0e9628-4b56-4c13-a321-b113b6624cdb}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[NamespaceName REF= CurrentNamespace.Name;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="OriginalStopReason" Id="{d634d9d8-9f0d-494e-824e-9ed9bcfb3cf4}">
+      <Declaration><![CDATA[(*!
+<summary>Borrows the synthetic termination result.</summary>
+<description>
+The fixture has no separate release failure, so both result views share backing fields. Observe only.
+</description>
+*)
+
+{attribute 'monitoring' := 'call'}
+PROPERTY OriginalStopReason : REFERENCE TO TOF_Tasks.TaskStopReason]]></Declaration>
+      <Get Name="Get" Id="{00545fc2-72fd-4589-b7b9-c74e95b0067a}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[OriginalStopReason REF= _ReasonView;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="Reset" Id="{ecbd69a2-3e11-489d-8090-9c9d2f9cff95}">
+      <Declaration><![CDATA[(*!
+<summary>Clears a stopped fixture for reuse without changing its configuration.</summary>
+<description>
+READY is a successful no-op; RUNNING refuses. Clears observations, pending faults and result text.
+</description>
+<param name="refuseReason">Reason for refusal; meaningful on FALSE.</param>
+*)
+METHOD Reset : BOOL
+VAR_OUTPUT
+	refuseReason : TOF_Core.ERROR_MESSAGE;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF _State = TOF_Tasks.TASK_STATE.RUNNING THEN
+	refuseReason := "Fixture is still RUNNING";
+	RETURN;
+END_IF
+IF _State = TOF_Tasks.TASK_STATE.READY THEN
+	Reset := TRUE;
+	RETURN;
+END_IF
+
+_State := TOF_Tasks.TASK_STATE.READY;
+_StateChanged := TRUE;
+_Reason := TOF_Tasks.TASK_STOP_REASON.WORK_DONE;
+_Message := "";
+_InitialExecuteExceptionRaised := FALSE;
+_CancelRequested := FALSE;
+_CleanupFailuresLeft := 0;
+_CancelFailuresLeft := 0;
+CompletedCleanupSteps := 0;
+ExecuteFailuresRaised := 0;
+CancelFailuresRaised := 0;
+Reset := TRUE;]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="ResourceManager" Id="{c4927939-a7e8-4e83-a2a5-48ddf11aca2e}">
+      <Declaration><![CDATA[(*!
+<summary>Returns zero because the child has no managed resource.</summary>
+*)
+
+{attribute 'monitoring' := 'call'}
+PROPERTY ResourceManager : TOF_Core.IResourceManager]]></Declaration>
+      <Get Name="Get" Id="{55e5a317-a166-487d-99d0-98a46a34ae85}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="RunningSubstate" Id="{b1019c75-6854-4d8f-9ac6-50919513cbb8}">
+      <Declaration><![CDATA[(*!
+<summary>Borrows the synthetic processing phase.</summary>
+<description>
+Meaningful only while RUNNING. No real resource is acquired.
+</description>
+*)
+
+{attribute 'monitoring' := 'call'}
+PROPERTY RunningSubstate : REFERENCE TO TOF_Tasks.TaskRunningSubstate]]></Declaration>
+      <Get Name="Get" Id="{952aace7-dad1-426c-be1f-1b9696f52137}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[RunningSubstate REF= _SubstateView;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="SelfSize" Id="{39280b67-7b32-43c7-9730-749ac9361150}">
+      <Declaration><![CDATA[(*!
+<summary>Reports the concrete fixture size.</summary>
+*)
+
+{attribute 'monitoring' := 'call'}
+PROPERTY SelfSize : ULINT]]></Declaration>
+      <Get Name="Get" Id="{b1d89614-70b0-4eed-8f59-00050b4759ec}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[SelfSize := XSIZEOF(THIS^);]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="Start" Id="{09d0a6f5-4cd2-4efe-a6ae-f0a2ad54085a}">
+      <Declaration><![CDATA[(*!
+<summary>Starts a READY fixture and copies the fault-injection settings.</summary>
+<description>
+Does not execute work. A non-READY call refuses without changing state.
+</description>
+<param name="refuseReason">Reason for refusal; meaningful on FALSE.</param>
+*)
+METHOD Start : BOOL
+VAR_OUTPUT
+	refuseReason : TOF_Core.ERROR_MESSAGE;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF _State <> TOF_Tasks.TASK_STATE.READY THEN
+	refuseReason := "Fixture is not READY";
+	RETURN;
+END_IF
+
+_CleanupFailuresLeft := CleanupFailures;
+_CancelFailuresLeft := CancelFailures;
+_State := TOF_Tasks.TASK_STATE.RUNNING;
+_StateChanged := TRUE;
+Start := TRUE;]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="State" Id="{5250fead-6e6b-4c0a-af58-d763f6699532}">
+      <Declaration><![CDATA[(*!
+<summary>Borrows the live synthetic lifecycle state.</summary>
+<description>
+Observe only; the fixture must outlive this view.
+</description>
+*)
+
+{attribute 'monitoring' := 'call'}
+PROPERTY State : REFERENCE TO TOF_Tasks.TaskState]]></Declaration>
+      <Get Name="Get" Id="{c89c9c8c-172e-470a-8722-443092a4e7cf}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[State REF= _StateView;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+  </POU>
+</TcPlcObject>
