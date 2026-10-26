@@ -8,15 +8,18 @@ License: https://opensource.org/license/mit
 *)
 
 (*!
-<summary>Runs a reusable cooperative operation through acquisition, processing and release.</summary>
+<summary>Runs a reusable cooperative operation through acquisition, processing, stopping and release.</summary>
 <description>
 One owner drives the task through Start, cyclic Execute and Reset; no worker thread or PLC scheduler task is
 created. Keep callbacks short and avoid concurrent or recursive Execute. The resource manager is borrowed
-and must remain live and stable during a run. Cancellation waits through OnCancelling before release.
+and must remain live and stable during a run. All stop reasons wait through OnStopping before release.
+Normal work completion advances stopping in the same Execute, without waiting or repeating work.
+No callback may recursively drive this task, except Reset in OnAfterStop.
 Ordinary work and resource exceptions are converted into stop diagnostics where handled. If obtaining their
-messages fails, fixed fallback text preserves the intended failure transition; preparation and reset use
-the same fallback policy for refusal. This is not a universal no-throw boundary. The caller still provides
-exception cleanup and terminal allocation-failure checks at its PLC task boundary.
+messages fails, phase-specific fallback text preserves the intended failure transition; preparation and
+reset use the same fallback policy for refusal. The first stopping exception is submitted to the log;
+later stopping exceptions retry without repeated log attempts. This is not a universal no-throw boundary.
+The caller still provides exception cleanup and terminal allocation-failure checks at its PLC task boundary.
 </description>
 *)
 {attribute 'no_explicit_call' := 'do not call this function block directly'} 
@@ -33,7 +36,11 @@ VAR
 	_StateChanged : BOOL;	
 	{attribute 'hide'} 
 	_RunningSubstate : TASK_RUNNING_SUBSTATE;
+	{attribute 'hide'} 
 	_ResourceOperationStarted : BOOL;
+	//! <summary>Tracks whether a stopping exception has been submitted to the log in this run.</summary>
+	{attribute 'hide'}
+	_StoppingExceptionReportAttempted : BOOL;
 
 	{attribute 'hide'} 
 	_OriginalStopReason : TASK_STOP_REASON;
@@ -66,7 +73,8 @@ END_VAR]]></Declaration>
 <summary>Requests cooperative cancellation of a running task.</summary>
 <description>
 Accepted only while RUNNING, with no pending cancellation and before RESOURCE_RELEASING. Sets the
-cancellation flag and original reason before invoking OnCancelRequest once. TRUE means accepted, not
+cancellation flag and original reason and enters STOPPING before invoking OnCancelRequest once. A first
+Cancel during STOPPING replaces the original result with EXTERNAL_CANCEL. TRUE means accepted, not
 completed; continue Execute until STOPPED. Repeated or ineligible requests return FALSE with refuseReason.
 Callback exceptions are logged without withdrawing the request.
 </description>
@@ -83,13 +91,15 @@ END_VAR]]></Declaration>
 END_IF
 
 IF _CancelRequested OR_ELSE _RunningSubstate = TASK_RUNNING_SUBSTATE.RESOURCE_RELEASING THEN
-	refuseReason := "Task already stopping";
+	refuseReason := "Cancellation already requested or resource release has begun";
 	RETURN;
 END_IF
 
 _CancelRequested := TRUE;
 _OriginalStopReason := TASK_STOP_REASON.EXTERNAL_CANCEL;
 _OriginalStopReasonMessage := "Cancelled by external logic";
+
+setRunningSubstate(TASK_RUNNING_SUBSTATE.STOPPING);
 
 safeCallOnCancelRequest();
 
@@ -102,8 +112,9 @@ Cancel := TRUE;
 <summary>Advances the running task and clears its transition indicator.</summary>
 <description>
 Clears State.StateChanged on every call, including READY and STOPPED calls. While RUNNING, advances
-cancellation or the selected acquire/process/release phase without a blocking wait. Acquisition completion
-normally defers processing to the next Execute; cancellation readiness can enter release in the same call.
+acquisition, work or release without a blocking wait. A normal terminal work result also advances stopping
+once in the same call. A caught acquire/process exception defers stopping until the next Execute. Readiness
+selects release for a later Execute, or stops immediately without a resource.
 The owner determines call frequency and must keep calling during cleanup. No automatic scheduling or general
 callback reentrancy protection is provided.
 </description>
@@ -119,23 +130,33 @@ END_IF]]></ST>
     </Method>
     <Method Name="FB_init" Id="{4a40010f-36b0-4b8e-9bdb-42fc8f2b04c7}">
       <Declaration><![CDATA[(*!
-<summary>Initializes the task's diagnostic name.</summary>
+<summary>Sets the task's diagnostic name during initialization.</summary>
 <description>
-Captures GetDefaultName during construction; the name is not recomputed on Start or Reset. Construction does
-not start work or acquire resources. Metadata getters used by initialization must complete without
-exceptions.
+Copies a nonempty name into task-owned storage. An empty name uses Object.GetDefaultName instead;
+that fallback reads ClassName during base initialization, before descendant fields may be initialized.
+The resulting Name remains stable across Start and Reset. Does not start work or acquire resources.
 </description>
 <param name="bInitRetains">TRUE when retain variables are initialized.</param>
 <param name="bInCopyCode">TRUE when the instance is subsequently copied for online change.</param>
+<param name="name">Diagnostic name to copy, or empty to request the default name.</param>
 *)
 METHOD FB_init : BOOL
 VAR_INPUT	
 	bInitRetains	: BOOL;	
 	bInCopyCode	: BOOL;
+	name : WSTRING;
 END_VAR
 ]]></Declaration>
       <Implementation>
-        <ST><![CDATA[_Name := GetDefaultName();]]></ST>
+        <ST><![CDATA[IF name <> TOF_Core.WideStrings.Empty THEN
+	_Name := name;
+ELSE
+	_Name := GetDefaultName();
+	
+	IF _Name = TOF_Core.WideStrings.Empty THEN
+		_Name := "Task";
+	END_IF
+END_IF]]></ST>
       </Implementation>
     </Method>
     <Property Name="FinalStopReason" Id="{2700e19c-2cd2-4878-bd36-35fddbc83862}">
@@ -151,7 +172,6 @@ Reset restores the default reason and clears the message. This is a live view.
 *)
 
 {attribute 'monitoring' := 'call'}
-
 PROPERTY FINAL FinalStopReason : REFERENCE TO TaskStopReason]]></Declaration>
       <Get Name="Get" Id="{4683eaba-a5e9-4ae8-8977-247101cb64d5}">
         <Declaration><![CDATA[]]></Declaration>
@@ -225,176 +245,148 @@ END_CASE
     </Method>
     <Method Name="handleRunning" Id="{0c0b3c2d-2039-40cf-90c1-1bc48ceedfa2}" FolderPath="Service members\">
       <Declaration><![CDATA[(*!
-<summary>Advances cancellation or one selected execution phase.</summary>
+<summary>Advances work and permits immediate stopping after a normal terminal result.</summary>
 <description>
-Requires RUNNING and a stable resource-manager binding. Pending cancellation suppresses ordinary processing
-and acquisition until OnCancelling permits stopping. Each resource phase starts once and advances through
-manager.Execute. Release exceptions end the release attempt with final FAILURE while retaining the original
-reason. If obtaining a caught exception's message fails, retains fixed phase-specific diagnostics and
-continues the failure path. This does not roll back interrupted work or clear terminal allocation failure.
+Every terminal work result and acquire/process exception enters STOPPING. Normal results call OnStopping
+once immediately; exceptions leave its first call for the next Execute to avoid advancing a failed child
+twice in one call. OnStopping must complete before
+release or STOPPED; its exceptions keep STOPPING without replacing the original reason. The first
+stopping exception is submitted to the log; later ones retry without another log attempt. Release
+exceptions terminate the attempt with final FAILURE and no retry. A caught exception uses named,
+phase-specific fallback text if its message is empty or formatting fails; fixed phase text remains if
+fallback formatting also fails. Terminal allocation failure remains latched for the owner's fatal boundary.
+Callbacks must not recursively drive this task; OnAfterStop may Reset after finalization.
 </description>
 *)
 METHOD PRIVATE handleRunning
 VAR
-	readyToStop : BOOL;
-
+	readyToRelease : BOOL;
 	taskProcessingState : TASK_PROCESSING_STATE;
-
-	exceptionCode : __SYSTEM.ExceptionCode;	
+	exceptionCode : __SYSTEM.ExceptionCode;
 	exception : TOF_Core.IException;
+	phaseFailureMessage : WSTRING(40);
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[IF _CancelRequested THEN
-	safeCallOnCancelling(readyToStop => readyToStop);
-
-	IF NOT readyToStop THEN
-		RETURN;
-	END_IF
-
-	_CancelRequested := FALSE;
-	
-	safeCallOnBeforeStop();
-	
+        <ST><![CDATA[__TRY
 	CASE _RunningSubstate OF
-		TASK_RUNNING_SUBSTATE.RESOURCE_ACQUIRING:						
-			setRunningSubstate(TASK_RUNNING_SUBSTATE.RESOURCE_RELEASING);
-				
-		TASK_RUNNING_SUBSTATE.PROCESSING:
-			IF ReleaseResourceRequired THEN
-				setRunningSubstate(TASK_RUNNING_SUBSTATE.RESOURCE_RELEASING);
-			ELSE	
-				setStoppedState(_OriginalStopReason, _OriginalStopReasonMessage);
-				
-				safeCallOnAfterStop();
-				RETURN;
-			END_IF			
-	END_CASE
-END_IF
-	
-CASE _RunningSubstate OF
-	TASK_RUNNING_SUBSTATE.RESOURCE_ACQUIRING:
-		__TRY
+		TASK_RUNNING_SUBSTATE.RESOURCE_ACQUIRING:
 			IF NOT _ResourceOperationStarted THEN
 				_ResourceOperationStarted := TRUE;
-				resourceManager.StartAcquire();
+				
+				ResourceManager.StartAcquire();
 			END_IF
 
-			resourceManager.Execute();
+			ResourceManager.Execute();
 			
-			IF resourceManager.ResourceAcquired THEN
+			IF ResourceManager.ResourceAcquired THEN
 				setRunningSubstate(TASK_RUNNING_SUBSTATE.PROCESSING);
 			END_IF
-		__CATCH(exceptionCode)
-			_TemporaryErrorMessage := "Resource acquisition failed";
 
-			__TRY
-				exception := TOF_Core.ExceptionManager.GetLastException(exceptionCode, NamespaceName, __POUNAME(), __POSITION());
-				_TemporaryErrorMessage := exception.GetMessage();
-			__CATCH
-				// Keep the fallback text and any terminal allocation-failure latch.
-			__ENDTRY
-			
-			IF _OriginalStopReason = TASK_STOP_REASON.WORK_DONE THEN
-				_OriginalStopReason := TASK_STOP_REASON.FAILURE;
-				_OriginalStopReasonMessage := _TemporaryErrorMessage;				
-			END_IF
+		TASK_RUNNING_SUBSTATE.PROCESSING:
+			OnRunning(processingState => taskProcessingState, stopReasonMessage := _OriginalStopReasonMessage);
 
-			safeCallOnBeforeStop();
-					
-			IF ReleaseResourceRequired THEN				
-				setRunningSubstate(TASK_RUNNING_SUBSTATE.RESOURCE_RELEASING);
-			ELSE
-				setStoppedState(TASK_STOP_REASON.FAILURE, _TemporaryErrorMessage);
-				
-				safeCallOnAfterStop();
-			END_IF
-		__ENDTRY
-	
-	TASK_RUNNING_SUBSTATE.PROCESSING:
-		__TRY
-			OnRunning(processingState => taskProcessingState, _OriginalStopReasonMessage);
-	
 			IF taskProcessingState <> TASK_PROCESSING_STATE.BUSY THEN
 				_OriginalStopReason := GetStopReasonByProcessingState(taskProcessingState);
-				
-				safeCallOnBeforeStop();
-				
-				IF ReleaseResourceRequired THEN				
-					setRunningSubstate(TASK_RUNNING_SUBSTATE.RESOURCE_RELEASING);
-				ELSE
-					setStoppedState(_OriginalStopReason, _OriginalStopReasonMessage);
-	
-					safeCallOnAfterStop();
-				END_IF
+				setRunningSubstate(TASK_RUNNING_SUBSTATE.STOPPING);
 			END_IF
-		__CATCH(exceptionCode)
-			_TemporaryErrorMessage := "Task processing failed";
 
-			__TRY
-				exception := TOF_Core.ExceptionManager.GetLastException(exceptionCode, NamespaceName, __POUNAME(), __POSITION());
-				_TemporaryErrorMessage := exception.GetMessage();
-			__CATCH
-				// Keep the fallback text and any terminal allocation-failure latch.
-			__ENDTRY
-			
-			IF _OriginalStopReason = TASK_STOP_REASON.WORK_DONE THEN
-				_OriginalStopReason := TASK_STOP_REASON.FAILURE;
-				_OriginalStopReasonMessage := _TemporaryErrorMessage;				
+		TASK_RUNNING_SUBSTATE.RESOURCE_RELEASING:
+			IF NOT _ResourceOperationStarted THEN
+				_ResourceOperationStarted := TRUE;
+				
+				ResourceManager.StartRelease();
 			END_IF
-					
-			safeCallOnBeforeStop();
+
+			ResourceManager.Execute();
 			
+			IF NOT ResourceManager.ResourceAcquired THEN
+				setStoppedState(_OriginalStopReason, _OriginalStopReasonMessage);
+				safeCallOnAfterStop();
+			END_IF
+	END_CASE
+
+	IF _State = TASK_STATE.RUNNING AND_THEN _RunningSubstate = TASK_RUNNING_SUBSTATE.STOPPING THEN
+		OnStopping(readyToRelease => readyToRelease);
+
+		IF readyToRelease THEN
 			IF ReleaseResourceRequired THEN
 				setRunningSubstate(TASK_RUNNING_SUBSTATE.RESOURCE_RELEASING);
 			ELSE
-				setStoppedState(_OriginalStopReason, _OriginalStopReasonMessage);	
-
-				safeCallOnAfterStop();
-			END_IF
-		__ENDTRY
-	
-	TASK_RUNNING_SUBSTATE.RESOURCE_RELEASING:
-		__TRY
-			IF NOT _ResourceOperationStarted THEN
-				_ResourceOperationStarted := TRUE;
-				resourceManager.StartRelease();
-			END_IF
-
-			resourceManager.Execute();
-			
-			IF NOT resourceManager.ResourceAcquired THEN
 				setStoppedState(_OriginalStopReason, _OriginalStopReasonMessage);
-				
 				safeCallOnAfterStop();
-			END_IF				
-		__CATCH(exceptionCode)
-			_TemporaryErrorMessage := "Resource release failed";
+			END_IF
+		END_IF
+	END_IF
+__CATCH(exceptionCode)
+	IF _RunningSubstate = TASK_RUNNING_SUBSTATE.STOPPING THEN
+		IF _StoppingExceptionReportAttempted THEN
+			// Continue the interrupted hook on a later Execute without repeated logging.
+			RETURN;
+		END_IF
 
-			__TRY
-				exception := TOF_Core.ExceptionManager.GetLastException(exceptionCode, NamespaceName, __POUNAME(), __POSITION());
-				_TemporaryErrorMessage := exception.GetMessage();
-			__CATCH
-				// Keep the fallback text and any terminal allocation-failure latch.
-			__ENDTRY
-			
-					
+		_StoppingExceptionReportAttempted := TRUE;
+	END_IF
+
+	CASE _RunningSubstate OF
+		TASK_RUNNING_SUBSTATE.RESOURCE_ACQUIRING:
+			phaseFailureMessage := "resource acquisition failed";
+
+		TASK_RUNNING_SUBSTATE.PROCESSING:
+			phaseFailureMessage := "processing failed";
+
+		TASK_RUNNING_SUBSTATE.STOPPING:
+			phaseFailureMessage := "stopping failed";
+
+		TASK_RUNNING_SUBSTATE.RESOURCE_RELEASING:
+			phaseFailureMessage := "release failed";
+	END_CASE
+
+	_TemporaryErrorMessage := phaseFailureMessage;
+
+	__TRY
+		_TemporaryErrorMessage := TOF_Core.WideStrings.Concat255("Task '", Name, "' ", phaseFailureMessage);
+		exception := TOF_Core.ExceptionManager.GetLastException(exceptionCode, NamespaceName, __POUNAME(), __POSITION());
+		_TemporaryErrorMessage := exception.GetMessage();
+
+		IF _TemporaryErrorMessage = TOF_Core.WideStrings.Empty THEN
+			_TemporaryErrorMessage := phaseFailureMessage;
+			_TemporaryErrorMessage := TOF_Core.WideStrings.Concat255("Task '", Name, "' ", phaseFailureMessage);
+		END_IF
+	__CATCH
+		// Keep the named or fixed phase fallback and any terminal allocation-failure latch.
+	__ENDTRY
+
+	TOF_Core.LogManager.TryLogMessage(_TemporaryErrorMessage, TOF_Core.LOG_CATEGORY.ERROR, "Task", "Execute");
+
+	CASE _RunningSubstate OF
+		TASK_RUNNING_SUBSTATE.RESOURCE_RELEASING:
 			setStoppedState(TASK_STOP_REASON.FAILURE, _TemporaryErrorMessage);
-				
 			safeCallOnAfterStop();
-		__ENDTRY
-END_CASE	
-]]></ST>
+
+		TASK_RUNNING_SUBSTATE.STOPPING:
+			// Retry stopping later; never release after an interrupted hook.
+			RETURN;
+
+		ELSE
+			_OriginalStopReason := TASK_STOP_REASON.FAILURE;
+			_OriginalStopReasonMessage := _TemporaryErrorMessage;
+			
+			setRunningSubstate(TASK_RUNNING_SUBSTATE.STOPPING);
+	END_CASE
+__ENDTRY]]></ST>
       </Implementation>
     </Method>
     <Property Name="Name" Id="{4e451f29-f53d-4bcf-8f0a-083cf67f553b}">
       <Declaration><![CDATA[(*!
 <summary>Provides the task's diagnostic name.</summary>
 <description>
-Borrowed read-only reference initialized during construction from the class name and instance address. Valid
-only while the task lives; do not write through the reference. It is not a persistent identity or a
-configurable display-name setter.
+FB_init copies the supplied nonempty name, or stores Object.GetDefaultName for an empty name. The default
+depends on ClassName during base initialization and may lack descendant metadata. The value is stable across
+Start and Reset. The returned reference remains valid while the task lives; do not write through it.
+The name is diagnostic text, not a persistent identifier.
 </description>
 *)
+
 {attribute 'monitoring' := 'call'}
 PROPERTY FINAL Name : REFERENCE TO WSTRING]]></Declaration>
       <Get Name="Get" Id="{758bcc09-602f-41b4-b11f-e8268c4f3c3a}">
@@ -435,47 +427,12 @@ METHOD PROTECTED OnBeforeStart]]></Declaration>
         <ST><![CDATA[]]></ST>
       </Implementation>
     </Method>
-    <Method Name="OnBeforeStop" Id="{698786bc-ab3a-40d9-bc3c-8b44edd3a764}" FolderPath="Members to override\">
-      <Declaration><![CDATA[(*!
-<summary>Prepares termination before release or direct transition to STOPPED.</summary>
-<description>
-Called for completion, internal abort, failure or accepted cancellation. During cancellation, OnCancelling
-has already returned TRUE; perform asynchronous cancellation work there. This hook cannot postpone stopping.
-Callback exceptions are logged and do not change stop reasons. The base implementation does nothing.
-</description>
-*)
-METHOD PROTECTED OnBeforeStop
-]]></Declaration>
-      <Implementation>
-        <ST><![CDATA[]]></ST>
-      </Implementation>
-    </Method>
-    <Method Name="OnCancelling" Id="{2ad060bf-91d2-42fc-8f3b-934bf7b4d05f}" FolderPath="Members to override\">
-      <Declaration><![CDATA[(*!
-<summary>Advances pending cancellation before resource release.</summary>
-<description>
-Set readyToStop on every call. FALSE requires another Execute without ordinary OnRunning or acquisition;
-TRUE permits OnBeforeStop and release but does not mean STOPPED. The base returns TRUE immediately.
-Descendants with pending asynchronous work or acquisition must finish the required cancellation steps here
-before permitting release; the base does not drain a manager automatically. Callback exceptions are logged
-and treated as FALSE for that call.
-</description>
-<param name="readyToStop">TRUE only when cancellation-specific work no longer prevents release.</param>
-*)
-METHOD PROTECTED OnCancelling
-VAR_OUTPUT
-	readyToStop : BOOL;
-END_VAR]]></Declaration>
-      <Implementation>
-        <ST><![CDATA[readyToStop := TRUE;]]></ST>
-      </Implementation>
-    </Method>
     <Method Name="OnCancelRequest" Id="{ec05160b-b364-40ca-9992-6a0764b0e3eb}" FolderPath="Members to override\">
       <Declaration><![CDATA[(*!
 <summary>Initiates an accepted cancellation once.</summary>
 <description>
 Called synchronously by Cancel after its flag and original stop reason are set. Not called for refused or
-repeated requests. Initiate only short cancellation actions; Execute and OnCancelling advance completion.
+repeated requests. Initiate only short cancellation actions; Execute and OnStopping advance completion.
 Callback exceptions are logged without withdrawing the request. The base implementation does nothing.
 </description>
 *)
@@ -503,9 +460,9 @@ METHOD PROTECTED OnReset ]]></Declaration>
       <Declaration><![CDATA[(*!
 <summary>Advances one step of the operation after resource acquisition.</summary>
 <description>
-Called only in PROCESSING with no accepted cancellation pending. Return BUSY to continue, DONE to complete,
-ABORTED for internal abort or ERROR for failure. A terminal result begins stopping. The stop message is the
-task's live per-run buffer and is not cleared before every callback. Exceptions enter the task's failure and
+Called only in PROCESSING. Return BUSY to continue, DONE to complete,
+ABORTED for internal abort or ERROR for failure. A normal terminal result enters STOPPING and calls OnStopping once in the same Execute. The stop message is the task's live per-run buffer and is not cleared before every callback.
+Exceptions enter the task's failure and
 cleanup path; completed side effects are not rolled back. Keep execution bounded and do not block waiting
 for an asynchronous result.
 </description>
@@ -523,6 +480,30 @@ END_VAR]]></Declaration>
         <ST><![CDATA[]]></ST>
       </Implementation>
     </Method>
+    <Method Name="OnStopping" Id="{2ad060bf-91d2-42fc-8f3b-934bf7b4d05f}" FolderPath="Members to override\">
+      <Declaration><![CDATA[(*!
+<summary>Finishes active work before resource release for every stop reason.</summary>
+<description>
+Called in STOPPING after success, internal abort, failure or external cancellation. A normal terminal work
+result invokes this hook in the same Execute; a caught work/acquire exception defers it to the next call. Ordinary
+OnRunning and acquisition no longer execute. Set readyToRelease on every call; FALSE requires another
+Execute. Finish pending I/O and acquisition without starting new work. TRUE permits release on the next
+Execute, or immediate STOPPED when no resource is acquired. The base returns TRUE.
+An exception keeps STOPPING and retries on a later Execute without changing the original result. Only
+the first stopping exception is submitted to the log in a run; later ones are suppressed. Partial hook
+effects are not rolled back. Make interrupted progress resumable. No timeout or
+physical abort is implied. Descendants must preserve inherited stopping work and combine readiness.
+</description>
+<param name="readyToRelease">TRUE when active work no longer prevents release or termination.</param>
+*)
+METHOD PROTECTED OnStopping
+VAR_OUTPUT
+	readyToRelease : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[readyToRelease := TRUE;]]></ST>
+      </Implementation>
+    </Method>
     <Property Name="OriginalStopReason" Id="{584c09b9-cc15-4863-851e-295e1f3855a3}">
       <Declaration><![CDATA[(*!
 <summary>Reason recorded for stopping: completion, internal abort, cancellation or failure.</summary>
@@ -535,7 +516,6 @@ Reset restores the default reason and clears the message. This is a live view.
 *)
 
 {attribute 'monitoring' := 'call'}
-
 PROPERTY FINAL OriginalStopReason : REFERENCE TO TaskStopReason]]></Declaration>
       <Get Name="Get" Id="{f76dfe1f-2858-4323-89c5-fdbe686b4c10}">
         <Declaration><![CDATA[]]></Declaration>
@@ -600,14 +580,14 @@ END_IF]]></ST>
 <description>
 The base returns zero. Keep a nonzero manager alive and stable throughout the run; only the task drives its
 StartAcquire, StartRelease and Execute methods. Start skips acquisition when already acquired, but normal
-stopping still releases an acquired resource. During cancellation, descendants must complete pending
-acquisition as required by the manager before permitting release. Release exceptions terminate the attempt
-with final FAILURE and no automatic retry. ResourceManager and ResourceAcquired getters must not throw or
+stopping still releases an acquired resource. During OnStopping, descendants must complete pending
+acquisition as required by the manager before permitting release for any stop reason. Release exceptions
+terminate the attempt with final FAILURE and no automatic retry. ResourceManager and ResourceAcquired getters must not throw or
 have side effects.
 </description>
 *)
-{attribute 'monitoring' := 'call'}
 
+{attribute 'monitoring' := 'call'}
 PROPERTY ResourceManager : TOF_Core.IResourceManager]]></Declaration>
       <Get Name="Get" Id="{eb1a2806-2821-4891-9a94-be06e63069cb}">
         <Declaration><![CDATA[]]></Declaration>
@@ -688,60 +668,6 @@ __CATCH(exceptionCode)
 	__CATCH
 		// Keep the fallback text and any terminal allocation-failure latch.
 	__ENDTRY
-__ENDTRY]]></ST>
-      </Implementation>
-    </Method>
-    <Method Name="safeCallOnBeforeStop" Id="{793a8a6d-c6e3-4043-9860-ceb426a80e28}" FolderPath="Service members\">
-      <Declaration><![CDATA[(*!
-<summary>Invokes the pre-stop hook and attempts to log a callback exception.</summary>
-<description>
-Callback failure does not veto stopping or replace stop reasons. This wrapper does not wait for resources or
-child tasks. Exception transport requires cyclic task context.
-</description>
-*)
-METHOD PRIVATE safeCallOnBeforeStop
-VAR
-	exceptionCode : __SYSTEM.ExceptionCode;
-	exception : TOF_Core.IException;
-END_VAR]]></Declaration>
-      <Implementation>
-        <ST><![CDATA[__TRY
-	OnBeforeStop();
-__CATCH(exceptionCode)
-	exception := TOF_Core.ExceptionManager.GetLastException(exceptionCode, NamespaceName, __POUNAME(), __POSITION());
-
-	TOF_Core.LogManager.TryLogException(exception, TOF_Core.ERROR_SEVERITY.ERROR, TO_WSTRING(ClassName), TO_WSTRING(__POUNAME()));
-__ENDTRY]]></ST>
-      </Implementation>
-    </Method>
-    <Method Name="safeCallOnCancelling" Id="{3899c078-a9f5-451e-b1b5-dd53d6ba75fc}" FolderPath="Service members\">
-      <Declaration><![CDATA[(*!
-<summary>Invokes cancellation progress with a conservative readiness result.</summary>
-<description>
-Initializes readyToStop to FALSE, accepts the hook's result on normal return, and restores FALSE if the hook
-throws. Attempts to log that exception; another Execute is needed to retry cancellation progress.
-</description>
-<param name="readyToStop">Whether cancellation-specific work permits stopping.</param>
-*)
-METHOD PRIVATE safeCallOnCancelling
-VAR_OUTPUT
-	readyToStop : BOOL;
-END_VAR
-VAR
-	exceptionCode : __SYSTEM.ExceptionCode;
-	exception : TOF_Core.IException;
-END_VAR]]></Declaration>
-      <Implementation>
-        <ST><![CDATA[readyToStop := FALSE;
-
-__TRY
-	OnCancelling(readyToStop => readyToStop);
-__CATCH(exceptionCode)
-	readyToStop := FALSE;
-	
-	exception := TOF_Core.ExceptionManager.GetLastException(exceptionCode, NamespaceName, __POUNAME(), __POSITION());
-
-	TOF_Core.LogManager.TryLogException(exception, TOF_Core.ERROR_SEVERITY.ERROR, TO_WSTRING(ClassName), TO_WSTRING(__POUNAME()));
 __ENDTRY]]></ST>
       </Implementation>
     </Method>
@@ -851,16 +777,16 @@ _FinalStopReasonMessage := "";	]]></ST>
 <summary>Prepares the first execution phase and enters RUNNING.</summary>
 <description>
 Reads the stable resource manager before publishing RUNNING. Selects acquisition only for a nonzero manager
-without an acquired resource, otherwise PROCESSING. Clears stop diagnostics and the resource-operation
-marker and attempts transition logging. Does not invoke StartAcquire or OnRunning; Execute advances them.
+without an acquired resource, otherwise PROCESSING. Clears stop diagnostics, the resource-operation marker
+and the stopping-exception report marker; attempts transition logging. Does not invoke StartAcquire or
+OnRunning; Execute advances them.
 </description>
 *)
 METHOD PRIVATE FINAL setRunningState
 VAR
-	formattedLogMessage : WSTRING(255);
-
 	resourceManagerForStart : TOF_Core.IResourceManager;
-	initialRunningSubstate : TASK_RUNNING_SUBSTATE;
+
+	formattedLogMessage : WSTRING(255);
 END_VAR
 VAR CONSTANT
 	NEW_STATE : TASK_STATE := TASK_STATE.RUNNING;
@@ -869,14 +795,14 @@ END_VAR]]></Declaration>
         <ST><![CDATA[resourceManagerForStart := ResourceManager;
 
 IF resourceManagerForStart <> 0 AND_THEN NOT resourceManagerForStart.ResourceAcquired THEN
-	initialRunningSubstate := TASK_RUNNING_SUBSTATE.RESOURCE_ACQUIRING;
+	setRunningSubstate(TASK_RUNNING_SUBSTATE.RESOURCE_ACQUIRING);
 ELSE
-	initialRunningSubstate := TASK_RUNNING_SUBSTATE.PROCESSING;
+	setRunningSubstate(TASK_RUNNING_SUBSTATE.PROCESSING);
 END_IF
 
 IF _State <> NEW_STATE THEN
 	formattedLogMessage := TOF_Core.WideStrings.Concat255("Task '", Name, "' changed state from '", TO_WSTRING(_State), "' to '", TO_WSTRING(NEW_STATE), "'");
-
+ 
 	TOF_Core.LogManager.TryLogMessage(
 		formattedLogMessage,
 		TOF_Core.LOG_CATEGORY.INFORMATION,
@@ -886,8 +812,8 @@ IF _State <> NEW_STATE THEN
 	);
 END_IF
 
-_RunningSubstate := initialRunningSubstate;
 _ResourceOperationStarted := FALSE;
+_StoppingExceptionReportAttempted := FALSE;
 
 _OriginalStopReason := TASK_STOP_REASON.WORK_DONE;
 _OriginalStopReasonMessage := "";
@@ -905,7 +831,7 @@ END_IF]]></ST>
       <Declaration><![CDATA[(*!
 <summary>Selects a running phase and resets its one-time resource request marker.</summary>
 <description>
-Does not change the lifecycle state or StateChanged and does not invoke the resource manager.
+Does not format diagnostics, change the lifecycle state or StateChanged, or invoke the resource manager.
 </description>
 <param name="runningSubState">Phase to execute on the next applicable dispatch.</param>
 *)

@@ -1,0 +1,230 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1" ProductVersion="3.1.4026.21">
+  <POU Name="TaskStoppingResource" Id="{bc32d584-5f1f-4adf-b270-32dd155806b0}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+SPDX-FileCopyrightText: © 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+SPDX-License-Identifier: MIT
+License: https://opensource.org/license/mit
+*)
+
+(*!
+<summary>Provides delayed synthetic acquisition and release for Task stopping tests.</summary>
+<description>
+The scenario owns this manager and injects it into the task explicitly. Configure inputs before Start.
+Operations have no hardware effects. A release exception intentionally leaves the synthetic resource held.
+Observations are read-only to the scenario; terminal allocation state is never reset.
+</description>
+*)
+FUNCTION_BLOCK TaskStoppingResource EXTENDS TOF_Core.Object IMPLEMENTS TOF_Core.IResourceManager
+VAR_INPUT
+	//! <summary>Throw before acquisition is scheduled.</summary>
+	ThrowOnStartAcquire : BOOL;
+	//! <summary>Throw after the last acquisition step has marked the resource acquired.</summary>
+	ThrowAfterAcquire : BOOL;
+	//! <summary>Throw before release is scheduled, retaining the acquired resource.</summary>
+	ThrowOnStartRelease : BOOL;
+	//! <summary>Injected exceptions throw again when GetMessage is called.</summary>
+	ThrowOnGetMessage : BOOL;
+END_VAR
+VAR_OUTPUT
+	//! <summary>Total acquisition requests across runs.</summary>
+	AcquireCalls : UINT;
+	//! <summary>Total release requests across runs.</summary>
+	ReleaseCalls : UINT;
+	//! <summary>Completed steps in the current acquisition.</summary>
+	AcquireProgress : UINT;
+END_VAR
+VAR CONSTANT
+	//! <summary>Calls needed for a pending acquisition, allowing cancellation before its response.</summary>
+	_AcquireSteps : UINT := 3;
+	//! <summary>Calls needed after StartRelease to observe asynchronous completion.</summary>
+	_ReleaseSteps : UINT := 2;
+END_VAR
+VAR
+	_ClassName : STRING := __POUNAME();
+	_Acquired : BOOL;
+	_Acquiring : BOOL;
+	_Releasing : BOOL;
+	_ReleaseProgress : UINT;
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[]]></ST>
+    </Implementation>
+    <Folder Name="Service methods" Id="{cb2e2601-1fab-450c-93e0-25b52d8fa414}" />
+    <Property Name="ClassName" Id="{77412ac9-0bfe-435e-833d-c765ff25c225}">
+      <Declaration><![CDATA[(*!
+<summary>Borrows the concrete fixture name.</summary>
+<description>
+Read-only storage valid while the fixture lives.
+</description>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{023f6e75-0fb5-4e94-9b0b-b2d4e91dcdd2}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ClassName REF= _ClassName;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="Execute" Id="{4cf9df9e-f4cb-4ad7-be3e-c5c3e9682682}">
+      <Declaration><![CDATA[(*!
+<summary>Advances one pending synthetic operation.</summary>
+<description>
+No pending operation means no action. Acquisition failure may occur after ownership was obtained.
+</description>
+*)
+METHOD Execute]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF _Acquiring THEN
+	AcquireProgress := AcquireProgress + 1;
+	IF AcquireProgress >= _AcquireSteps THEN
+		_Acquiring := FALSE;
+		_Acquired := TRUE;
+		IF ThrowAfterAcquire THEN
+			raiseConfiguredFailure("Acquire failure");
+		END_IF
+	END_IF
+ELSIF _Releasing THEN
+	_ReleaseProgress := _ReleaseProgress + 1;
+	IF _ReleaseProgress >= _ReleaseSteps THEN
+		_Releasing := FALSE;
+		_Acquired := FALSE;
+	END_IF
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="FinishPendingAcquire" Id="{281fbd7a-0e8f-4a9b-bb80-83db7f131abc}" FolderPath="Service methods\">
+      <Declaration><![CDATA[(*!
+<summary>Drains a late acquisition response without starting a new request.</summary>
+<description>
+Used by the injected task during OnStopping. A late acquired resource remains available for normal release.
+</description>
+*)
+METHOD INTERNAL FinishPendingAcquire : BOOL]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF _Acquiring THEN
+	Execute();
+END_IF
+
+FinishPendingAcquire := NOT _Acquiring;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="GetResource" Id="{817447e8-4f8c-46a5-951d-dfad25609566}">
+      <Declaration><![CDATA[(*!
+<summary>Returns the borrowed manager as a synthetic resource.</summary>
+<description>
+The caller must not delete it.
+</description>
+*)
+METHOD GetResource : TOF_Core.IObject]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[GetResource := THIS^;]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="NamespaceName" Id="{d3d8c026-dd9e-488f-bca0-4af1f8dab693}">
+      <Declaration><![CDATA[(*!
+<summary>Borrows the test namespace.</summary>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{378f92c9-9c4d-41d8-9e89-30980962b838}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[NamespaceName REF= CurrentNamespace.Name;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="raiseConfiguredFailure" Id="{7c9ba618-ecbe-46c5-a6fd-5b701df8ef89}">
+      <Declaration><![CDATA[(*!
+<summary>Raises the configured synthetic exception.</summary>
+<description>
+Used only by test operations, never by FB lifecycle methods. The throwing formatter exercises diagnostic fallback.
+</description>
+<param name="message">Text copied into the injected exception.</param>
+*)
+METHOD PRIVATE raiseConfiguredFailure
+VAR_INPUT
+	message : WSTRING(255);
+END_VAR
+VAR
+	failure : TOF_Core.StandardException;
+	formattingFailure : ThrowingGetMessageException;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF ThrowOnGetMessage THEN
+	formattingFailure.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), message);
+ELSE
+	failure.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), message);
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="ResourceAcquired" Id="{7a735f58-5f9a-4c4b-ada5-70f6d92aec2c}">
+      <Declaration><![CDATA[(*!
+<summary>Reports synthetic resource ownership.</summary>
+<description>
+Side-effect-free and non-throwing.
+</description>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY ResourceAcquired : BOOL]]></Declaration>
+      <Get Name="Get" Id="{2cdb29da-1d7a-4031-ae3a-061a41cd9aa6}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ResourceAcquired := _Acquired;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="SelfSize" Id="{5cdf1056-cc1a-45be-b2be-d0580af580dd}">
+      <Declaration><![CDATA[(*!
+<summary>Reports the concrete fixture size.</summary>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY SelfSize : ULINT]]></Declaration>
+      <Get Name="Get" Id="{74f9c47a-f463-4b97-b9d8-d5fbd7c93d40}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[SelfSize := XSIZEOF(THIS^);]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="StartAcquire" Id="{33c5f634-9d63-423e-8608-f38410ecbea8}">
+      <Declaration><![CDATA[(*!
+<summary>Requests one delayed acquisition.</summary>
+<description>
+An injected early exception leaves no pending operation. An already acquired resource is retained.
+</description>
+*)
+METHOD StartAcquire]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[AcquireCalls := AcquireCalls + 1;
+IF ThrowOnStartAcquire THEN
+	raiseConfiguredFailure("Acquire failure");
+END_IF
+
+IF NOT _Acquired THEN
+	AcquireProgress := 0;
+	_Acquiring := TRUE;
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="StartRelease" Id="{5f66b414-8aff-4599-aa8e-cdcda4d1c51a}">
+      <Declaration><![CDATA[(*!
+<summary>Requests delayed release or throws the configured terminal failure.</summary>
+<description>
+The task must issue this once. A thrown request deliberately keeps ResourceAcquired TRUE.
+</description>
+*)
+METHOD StartRelease]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[ReleaseCalls := ReleaseCalls + 1;
+IF ThrowOnStartRelease THEN
+	raiseConfiguredFailure("Release failure");
+END_IF
+
+_ReleaseProgress := 0;
+_Releasing := TRUE;]]></ST>
+      </Implementation>
+    </Method>
+  </POU>
+</TcPlcObject>

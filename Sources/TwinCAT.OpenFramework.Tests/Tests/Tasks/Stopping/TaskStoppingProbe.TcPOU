@@ -1,0 +1,286 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1" ProductVersion="3.1.4026.21">
+  <POU Name="TaskStoppingProbe" Id="{4e5922b3-4fc0-4824-ba95-5762e94466c9}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+SPDX-FileCopyrightText: © 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+SPDX-License-Identifier: MIT
+License: https://opensource.org/license/mit
+*)
+
+(*!
+<summary>Exercises the production Task lifecycle with delayed, interruptible stopping.</summary>
+<description>
+The scenario owns and injects a TaskStoppingResource through SetResource before Start. The binding is
+borrowed and stable across runs. Inputs configure faults; ThrowOnEveryStopping may be cleared while RUNNING
+to resume cleanup. Observations are cumulative except cleanup progress, which OnReset clears. No physical I/O
+is performed.
+</description>
+*)
+FUNCTION_BLOCK TaskStoppingProbe EXTENDS TOF_Tasks.Task
+VAR_INPUT
+	//! <summary>Ordinary OnRunning result when no exception is injected.</summary>
+	ProcessingResult : TOF_Tasks.TASK_PROCESSING_STATE := TOF_Tasks.TASK_PROCESSING_STATE.DONE;
+	//! <summary>Throw from start preparation before RUNNING is entered.</summary>
+	ThrowOnBeforeStart : BOOL;
+	//! <summary>Throw when ordinary processing is called.</summary>
+	ThrowOnRunning : BOOL;
+	//! <summary>Throw once in stopping before advancing cleanup.</summary>
+	ThrowOnFirstStopping : BOOL;
+	//! <summary>Throw on every stopping call while enabled, before advancing cleanup.</summary>
+	ThrowOnEveryStopping : BOOL;
+	//! <summary>Throw from reset before descendant state is cleared.</summary>
+	ThrowOnReset : BOOL;
+	//! <summary>Injected exceptions throw again from GetMessage.</summary>
+	ThrowOnGetMessage : BOOL;
+	//! <summary>Throw a StandardException whose GetMessage result is empty.</summary>
+	ThrowWithEmptyMessage : BOOL;
+	//! <summary>Exercise the permitted Reset notification after termination.</summary>
+	ResetOnAfterStop : BOOL;
+END_VAR
+VAR_OUTPUT
+	//! <summary>Total ordinary processing calls across runs.</summary>
+	RunningCalls : UINT;
+	//! <summary>Total stopping-hook calls across runs, including interrupted calls.</summary>
+	StoppingCalls : UINT;
+	//! <summary>Successful stopping steps since the last Reset.</summary>
+	CompletedCleanupSteps : UINT;
+	//! <summary>Total notifications after STOPPED has been recorded.</summary>
+	AfterStopCalls : UINT;
+	//! <summary>Total accepted cancellation notifications.</summary>
+	CancelNotifications : UINT;
+END_VAR
+VAR CONSTANT
+	//! <summary>Successful cleanup steps required before release is safe.</summary>
+	_CleanupSteps : UINT := 2;
+END_VAR
+VAR
+	_ClassName : STRING := __POUNAME();
+	_Resource : REFERENCE TO TaskStoppingResource;
+	_StoppingExceptionRaised : BOOL;
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[]]></ST>
+    </Implementation>
+    <Folder Name="Overriden methods" Id="{58e70026-eeaf-4d30-88ef-971ac03e0916}" />
+    <Folder Name="Service methods" Id="{00187476-6411-4e2f-8536-12a37d7ec040}" />
+    <Property Name="ClassName" Id="{2c3e4e2a-7f6e-442a-ae42-79e6fbb82217}">
+      <Declaration><![CDATA[(*!
+<summary>Borrows the concrete fixture name.</summary>
+<description>
+Read-only storage valid while the fixture lives.
+</description>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{f5a6f232-e55c-4d3c-9948-0e2873d9665f}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ClassName REF= _ClassName;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="NamespaceName" Id="{d32ccf65-dbcc-455d-910f-9bcab73d5d17}">
+      <Declaration><![CDATA[(*!
+<summary>Borrows the test namespace.</summary>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{2517d35b-1677-487a-a4e0-d8c211d58e02}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[NamespaceName REF= CurrentNamespace.Name;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="OnAfterStop" Id="{3beb56c7-ded4-4afc-9026-79e0def1e6ee}" FolderPath="Overriden methods\">
+      <Declaration><![CDATA[(*!
+<summary>Counts finalization and optionally resets the stopped task.</summary>
+<description>
+Reset is invoked only after STOPPED and final diagnostics have been published.
+</description>
+*)
+METHOD PROTECTED OnAfterStop]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[AfterStopCalls := AfterStopCalls + 1;
+IF ResetOnAfterStop THEN
+	Reset();
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="OnBeforeStart" Id="{42f11eb6-f2bb-4dba-bbbe-d0bc202bfe7e}" FolderPath="Overriden methods\">
+      <Declaration><![CDATA[(*!
+<summary>Optionally refuses start through an injected exception.</summary>
+*)
+METHOD PROTECTED OnBeforeStart]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF ThrowOnBeforeStart THEN
+	raiseConfiguredFailure("Start failure");
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="OnCancelRequest" Id="{c87816ab-1306-44ac-8f29-45823512d900}" FolderPath="Overriden methods\">
+      <Declaration><![CDATA[(*!
+<summary>Counts accepted external cancellation notifications.</summary>
+*)
+METHOD PROTECTED OnCancelRequest]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[CancelNotifications := CancelNotifications + 1;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="OnReset" Id="{ded75715-8c86-4040-bced-7496d56004f2}" FolderPath="Overriden methods\">
+      <Declaration><![CDATA[(*!
+<summary>Clears per-run cleanup progress without resetting observations or the dependency.</summary>
+<description>
+An injected exception refuses Reset before changing descendant state.
+</description>
+*)
+METHOD PROTECTED OnReset]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF ThrowOnReset THEN
+	raiseConfiguredFailure("Reset failure");
+END_IF
+
+CompletedCleanupSteps := 0;
+_StoppingExceptionRaised := FALSE;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="OnRunning" Id="{9a2dcb9f-4f91-45be-8232-0869e1f5baf0}" FolderPath="Overriden methods\">
+      <Declaration><![CDATA[(*!
+<summary>Returns the configured work result or injects a processing exception.</summary>
+<description>
+One call records one unit of work; no resource operations are driven here.
+</description>
+<param name="processingState">Configured result on normal return.</param>
+<param name="stopReasonMessage">Receives diagnostic text for ERROR or ABORTED.</param>
+*)
+METHOD PROTECTED OnRunning
+VAR_OUTPUT
+	processingState : TOF_Tasks.TASK_PROCESSING_STATE;
+END_VAR
+VAR_IN_OUT
+	stopReasonMessage : TOF_Core.ERROR_MESSAGE;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[RunningCalls := RunningCalls + 1;
+IF ThrowOnRunning THEN
+	raiseConfiguredFailure("Work failure");
+END_IF
+
+processingState := ProcessingResult;
+IF processingState = TOF_Tasks.TASK_PROCESSING_STATE.ERROR
+	OR_ELSE processingState = TOF_Tasks.TASK_PROCESSING_STATE.ABORTED
+THEN
+	stopReasonMessage := "Work result";
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="OnStopping" Id="{a9ea76b2-4078-49f6-a27e-6ecea9963c7d}" FolderPath="Overriden methods\">
+      <Declaration><![CDATA[(*!
+<summary>Finishes late acquisition and two cleanup steps before allowing release.</summary>
+<description>
+The configured exception can interrupt one or every call before progress. A later call resumes without
+rerunning ordinary work once repeated injection is disabled.
+</description>
+<param name="readyToRelease">TRUE only after pending acquisition and cleanup have completed.</param>
+*)
+METHOD PROTECTED OnStopping
+VAR_OUTPUT
+	readyToRelease : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[StoppingCalls := StoppingCalls + 1;
+IF ThrowOnFirstStopping AND_THEN NOT _StoppingExceptionRaised THEN
+	_StoppingExceptionRaised := TRUE;
+	raiseConfiguredFailure("Stopping failure");
+END_IF
+
+IF ThrowOnEveryStopping THEN
+	raiseConfiguredFailure("Stopping failure");
+END_IF
+
+IF __ISVALIDREF(_Resource) AND_THEN NOT _Resource.FinishPendingAcquire() THEN
+	RETURN;
+END_IF
+
+CompletedCleanupSteps := CompletedCleanupSteps + 1;
+readyToRelease := CompletedCleanupSteps >= _CleanupSteps;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="raiseConfiguredFailure" Id="{76c8b4a3-202c-4375-897d-fe0c747ff965}" FolderPath="Service methods\">
+      <Declaration><![CDATA[(*!
+<summary>Raises the configured synthetic exception.</summary>
+<description>
+Used only by test operations, never by FB lifecycle methods. A throwing or empty formatter exercises
+diagnostic fallback.
+</description>
+<param name="message">Text copied into the injected exception.</param>
+*)
+METHOD PRIVATE raiseConfiguredFailure
+VAR_INPUT
+	message : WSTRING(255);
+END_VAR
+VAR
+	failure : TOF_Core.StandardException;
+	formattingFailure : ThrowingGetMessageException;
+	emptyMessage : TOF_Core.ERROR_MESSAGE;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF ThrowOnGetMessage THEN
+	formattingFailure.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), message);
+ELSIF ThrowWithEmptyMessage THEN
+	emptyMessage := TOF_Core.WideStrings.Empty;
+	failure.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), emptyMessage);
+ELSE
+	failure.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), message);
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="ResourceManager" Id="{69c0e752-f6a8-45f7-bb1f-89c64b06b3eb}">
+      <Declaration><![CDATA[(*!
+<summary>Returns the explicitly injected borrowed resource manager.</summary>
+<description>
+Zero before binding; getter has no side effects and does not throw.
+</description>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY ResourceManager : TOF_Core.IResourceManager]]></Declaration>
+      <Get Name="Get" Id="{366116c5-2b57-41a8-8abb-105c25397dc3}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[IF __ISVALIDREF(_Resource) THEN
+	ResourceManager := _Resource;
+END_IF]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="SelfSize" Id="{4526353b-c0db-4703-b1dc-9d9b39ec7e72}">
+      <Declaration><![CDATA[(*!
+<summary>Reports the concrete fixture size.</summary>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY SelfSize : ULINT]]></Declaration>
+      <Get Name="Get" Id="{145f273b-c5fb-428b-b735-54de013ffc5b}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[SelfSize := XSIZEOF(THIS^);]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="SetResource" Id="{6d4e1126-9421-46d6-b682-23a7a6067960}" FolderPath="Service methods\">
+      <Declaration><![CDATA[(*!
+<summary>Binds the manager owned by the scenario.</summary>
+<description>
+Call before Start and keep the referenced manager alive and unchanged throughout every run. Reset preserves the binding.
+</description>
+<param name="resource">Live synthetic manager owned directly by the scenario.</param>
+*)
+METHOD INTERNAL SetResource
+VAR_IN_OUT
+	resource : TaskStoppingResource;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_Resource REF= resource;]]></ST>
+      </Implementation>
+    </Method>
+  </POU>
+</TcPlcObject>

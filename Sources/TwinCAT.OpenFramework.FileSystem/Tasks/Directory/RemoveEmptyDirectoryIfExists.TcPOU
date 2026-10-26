@@ -10,7 +10,9 @@ License: https://opensource.org/license/mit
 {attribute 'no_explicit_call' := 'do not call this function block directly'} 
 (*!
 <summary>Removes an empty filesystem directory when it exists.</summary>
-<description>Diagnostic string inputs are borrowed only during the call; retained diagnostic text is copied into owned storage.</description>
+<description>Closes native enumeration before starting removal when a directory is found. Pending search and
+remove commands finish before stopping. Diagnostic string inputs are borrowed only during the call; retained
+diagnostic text is copied into owned storage.</description>
 *)
 FUNCTION_BLOCK RemoveEmptyDirectoryIfExists EXTENDS TOF_Tasks.Task IMPLEMENTS IFileSystemTask
 VAR
@@ -19,10 +21,16 @@ VAR
 
 	_DirectoryChecking : BOOL;
 
-    _EnumFindFile : Tc2_Utilities.FB_EnumFindFileEntry;	
+	_EnumFindFile : Tc2_Utilities.FB_EnumFindFileEntry;
+	//! <summary>Records whether a search command may still own native enumeration resources.</summary>
+	_EnumerationStarted : BOOL;
+	//! <summary>Prevents repeating the abort command while its completion is pending.</summary>
+	_EnumerationAbortIssued : BOOL;
+
     _RemoveDirectory : Tc2_System.FB_RemoveDir;
 	
-	_DirectoryExists : BOOL;
+	//! <summary>Latches a found directory for this run so removal cannot restart the search.</summary>
+	_DirectoryFound : BOOL;
 
 	{attribute 'hide'} 
 	_DirectoryPathNotSpecifiedException : TOF_Core.DataMemberNotSpecifiedException;
@@ -93,25 +101,88 @@ PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
         </Implementation>
       </Get>
     </Property>
-    <Method Name="OnBeforeStop" Id="{9698167e-1825-4c05-b9a5-4b8b95b26192}" FolderPath="Members to override\">
-      <Declaration><![CDATA[METHOD PROTECTED OnBeforeStop
-]]></Declaration>
+    <Method Name="advanceEnumerationClosure" Id="{14c9d349-957a-490c-9db0-cd53f4b50b67}">
+      <Declaration><![CDATA[(*!
+<summary>Completes an active directory search before deletion or task termination.</summary>
+<description>Deasserts bExecute while a search command is pending. After a nonterminal search result, issues one
+abort with a fresh rising edge and waits for its completion. bEOE and native errors close the enumeration
+without an explicit abort. FALSE means the caller must resume on a later Execute.</description>
+*)
+METHOD PRIVATE advanceEnumerationClosure : BOOL]]></Declaration>
       <Implementation>
-        <ST><![CDATA[_EnumFindFile(eCmd := Tc2_Utilities.E_EnumCmdType.eEnumCmd_Abort);
-_RemoveDirectory(bExecute := FALSE);]]></ST>
+        <ST><![CDATA[advanceEnumerationClosure := FALSE;
+
+IF NOT _EnumerationStarted THEN
+	advanceEnumerationClosure := TRUE;
+	RETURN;
+END_IF
+
+_EnumFindFile(bExecute := FALSE);
+
+IF _EnumFindFile.bBusy THEN
+	RETURN;
+END_IF
+
+IF _EnumFindFile.bEOE OR_ELSE _EnumFindFile.bError THEN
+	_EnumerationStarted := FALSE;
+	advanceEnumerationClosure := TRUE;
+	RETURN;
+END_IF
+
+IF NOT _EnumerationAbortIssued THEN
+	_EnumFindFile(bExecute := TRUE, eCmd := Tc2_Utilities.E_EnumCmdType.eEnumCmd_Abort);
+	_EnumerationAbortIssued := TRUE;
+	RETURN;
+END_IF
+
+_EnumerationStarted := FALSE;
+advanceEnumerationClosure := TRUE;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="OnStopping" Id="{9698167e-1825-4c05-b9a5-4b8b95b26192}" FolderPath="Members to override\">
+      <Declaration><![CDATA[(*!
+<summary>Advances directory stop actions before reporting termination.</summary>
+<description>
+Used for every stop reason. Finishes any search command and its required abort, then waits for pending remove
+I/O. A new remove request is never started here. Readiness reports native FB completion, not server rollback.
+</description>
+<param name="readyToRelease">TRUE when the directory FBs have finished their pending requests.</param>
+*)
+METHOD PROTECTED OnStopping
+VAR_OUTPUT
+	readyToRelease : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[readyToRelease := advanceEnumerationClosure();
+
+_RemoveDirectory(bExecute := FALSE);
+
+readyToRelease := readyToRelease AND_THEN NOT _RemoveDirectory.bBusy;]]></ST>
       </Implementation>
     </Method>
     <Method Name="OnReset" Id="{b9893c29-63cc-4e1a-8818-43b55eff8a9e}" FolderPath="Members to override\">
-      <Declaration><![CDATA[METHOD PROTECTED OnReset ]]></Declaration>
+      <Declaration><![CDATA[(*!
+<summary>Clears completed directory operations and per-run enumeration cleanup state.</summary>
+<description>Called only after stopping has completed; it does not abandon pending native I/O.</description>
+*)
+METHOD PROTECTED OnReset ]]></Declaration>
       <Implementation>
         <ST><![CDATA[_EnumFindFile(bExecute := FALSE);
-_RemoveDirectory(bExecute := FALSE);]]></ST>
+_RemoveDirectory(bExecute := FALSE);
+
+_DirectoryChecking := FALSE;
+_DirectoryFound := FALSE;
+_EnumerationStarted := FALSE;
+_EnumerationAbortIssued := FALSE;]]></ST>
       </Implementation>
     </Method>
     <Method Name="OnRunning" Id="{fddd3dfa-0b97-4445-a381-2f1fa1c8cd9b}" FolderPath="Members to override\">
       <Declaration><![CDATA[(*!
-<summary>Prepares diagnostic text locally before passing it to read-only logging or exception parameters.</summary>
-<description>Computed diagnostic strings are held in local buffers for the duration of the receiving call.</description>
+<summary>Checks for a directory and removes it only after closing the search.</summary>
+<description>On early discovery, the search abort must complete before the remove FB is started. A missing
+directory completes successfully. Computed diagnostics are held in local buffers for the receiving call.</description>
+<param name="processingState">BUSY while searching, closing the search or removing; DONE after completion.</param>
+<param name="stopReasonMessage">Not changed; exceptions provide directory failure diagnostics.</param>
 *)
 METHOD PROTECTED OnRunning
 VAR_OUTPUT
@@ -127,7 +198,8 @@ VAR
 	pathErrorMessage : WSTRING(255);
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[IF NOT _EnumFindFile.bExecute THEN 
+        <ST><![CDATA[IF NOT _DirectoryChecking AND_THEN NOT _EnumerationStarted AND_THEN NOT _DirectoryFound
+THEN
 	IF TOF_Core.Strings.IsNullOrWhiteSpace(_EnumFindFile.sPathName) THEN
 		_DirectoryPathNotSpecifiedException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), 'DirectoryPath');		
 	END_IF
@@ -143,6 +215,7 @@ END_VAR]]></Declaration>
 END_IF
 
 IF _DirectoryChecking THEN
+	_EnumerationStarted := TRUE;
 	_EnumFindFile(bExecute := TRUE);
 	
 	IF _EnumFindFile.bError THEN
@@ -158,12 +231,16 @@ IF _DirectoryChecking THEN
 		_DirectoryChecking := FALSE;
 		
 		IF NOT _EnumFindFile.bEOE THEN
-			_EnumFindFile(eCmd := Tc2_Utilities.E_EnumCmdType.eEnumCmd_Abort);
+			_DirectoryFound := TRUE;
 		ELSE
 			processingState := TOF_Tasks.TASK_PROCESSING_STATE.DONE;
 		END_IF
 	END_IF
 ELSE
+	IF NOT advanceEnumerationClosure() THEN
+		RETURN;
+	END_IF
+
 	_RemoveDirectory(bExecute := TRUE);
 	
 	IF _RemoveDirectory.bError THEN

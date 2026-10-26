@@ -10,7 +10,9 @@ License: https://opensource.org/license/mit
 {attribute 'no_explicit_call' := 'do not call this function block directly'} 
 (*!
 <summary>Creates a filesystem directory when it is absent.</summary>
-<description>Diagnostic string inputs are borrowed only during the call; retained diagnostic text is copied into owned storage.</description>
+<description>An existing directory completes after native enumeration has been closed. Pending search and
+create commands finish before stopping. Diagnostic string inputs are borrowed only during the call; retained
+diagnostic text is copied into owned storage.</description>
 *)
 FUNCTION_BLOCK CreateDirectoryIfNotExists EXTENDS TOF_Tasks.Task IMPLEMENTS IFileSystemTask
 VAR
@@ -19,7 +21,12 @@ VAR
 
 	_DirectoryChecking : BOOL;
 
-    _EnumFindFile : Tc2_Utilities.FB_EnumFindFileEntry;	
+	_EnumFindFile : Tc2_Utilities.FB_EnumFindFileEntry;
+	//! <summary>Records whether a search command may still own native enumeration resources.</summary>
+	_EnumerationStarted : BOOL;
+	//! <summary>Prevents repeating the abort command while its completion is pending.</summary>
+	_EnumerationAbortIssued : BOOL;
+
     _CreateDirectory : Tc2_System.FB_CreateDir;
 	
 	_DirectoryExists : BOOL;
@@ -93,25 +100,63 @@ PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
         </Implementation>
       </Get>
     </Property>
-    <Method Name="OnBeforeStop" Id="{8ce7764f-d460-43ce-8459-94d4022daa55}" FolderPath="Members to override\">
-      <Declaration><![CDATA[METHOD PROTECTED OnBeforeStop
-]]></Declaration>
+    <Method Name="OnStopping" Id="{8ce7764f-d460-43ce-8459-94d4022daa55}" FolderPath="Members to override\">
+      <Declaration><![CDATA[(*!
+<summary>Advances directory stop actions before reporting termination.</summary>
+<description>
+Used for every stop reason. Drains a pending search, then issues an abort with a rising bExecute edge if the
+search ended before bEOE without error. Waits for abort and any pending create operation before termination;
+no new ordinary create request starts.
+</description>
+<param name="readyToRelease">TRUE when the directory FBs have finished their pending requests.</param>
+*)
+METHOD PROTECTED OnStopping
+VAR_OUTPUT
+	readyToRelease : BOOL;
+END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[_EnumFindFile(eCmd := Tc2_Utilities.E_EnumCmdType.eEnumCmd_Abort);
-_CreateDirectory(bExecute := FALSE);]]></ST>
+        <ST><![CDATA[IF _EnumerationStarted THEN
+	_EnumFindFile(bExecute := FALSE);
+
+	IF NOT _EnumFindFile.bBusy THEN
+		IF _EnumFindFile.bEOE OR_ELSE _EnumFindFile.bError THEN
+			_EnumerationStarted := FALSE;
+		ELSIF NOT _EnumerationAbortIssued THEN
+			_EnumFindFile(bExecute := TRUE, eCmd := Tc2_Utilities.E_EnumCmdType.eEnumCmd_Abort);
+			_EnumerationAbortIssued := TRUE;
+		ELSE
+			_EnumerationStarted := FALSE;
+		END_IF
+	END_IF
+END_IF
+
+_CreateDirectory(bExecute := FALSE);
+
+readyToRelease := NOT _EnumerationStarted AND_THEN NOT _CreateDirectory.bBusy;]]></ST>
       </Implementation>
     </Method>
     <Method Name="OnReset" Id="{984acbb0-ac08-4c31-ae33-c2a4be092b2d}" FolderPath="Members to override\">
-      <Declaration><![CDATA[METHOD PROTECTED OnReset ]]></Declaration>
+      <Declaration><![CDATA[(*!
+<summary>Clears completed directory operations and per-run enumeration cleanup state.</summary>
+<description>Called only after stopping has completed; it does not abandon pending native I/O.</description>
+*)
+METHOD PROTECTED OnReset ]]></Declaration>
       <Implementation>
         <ST><![CDATA[_EnumFindFile(bExecute := FALSE);
-_CreateDirectory(bExecute := FALSE);]]></ST>
+_CreateDirectory(bExecute := FALSE);
+
+_DirectoryChecking := FALSE;
+_EnumerationStarted := FALSE;
+_EnumerationAbortIssued := FALSE;]]></ST>
       </Implementation>
     </Method>
     <Method Name="OnRunning" Id="{a3a8c06e-520b-42ce-91d6-56459af3271d}" FolderPath="Members to override\">
       <Declaration><![CDATA[(*!
-<summary>Prepares diagnostic text locally before passing it to read-only logging or exception parameters.</summary>
-<description>Computed diagnostic strings are held in local buffers for the duration of the receiving call.</description>
+<summary>Checks for a directory and creates it only if absent.</summary>
+<description>Early discovery leaves native search cleanup to OnStopping. A missing directory begins a create
+request after bEOE. Computed diagnostics are held in local buffers for the receiving call.</description>
+<param name="processingState">BUSY while searching or creating; DONE when no create is needed or creation ends.</param>
+<param name="stopReasonMessage">Not changed; exceptions provide directory failure diagnostics.</param>
 *)
 METHOD PROTECTED OnRunning
 VAR_OUTPUT
@@ -142,6 +187,7 @@ END_VAR]]></Declaration>
 END_IF
 
 IF _DirectoryChecking THEN
+	_EnumerationStarted := TRUE;
 	_EnumFindFile(bExecute := TRUE);
 	
 	IF _EnumFindFile.bError THEN
@@ -157,8 +203,6 @@ IF _DirectoryChecking THEN
 		_DirectoryChecking := FALSE;
 		
 		IF NOT _EnumFindFile.bEOE THEN
-			_EnumFindFile(eCmd := Tc2_Utilities.E_EnumCmdType.eEnumCmd_Abort);
-			
 			processingState := TOF_Tasks.TASK_PROCESSING_STATE.DONE;
 		END_IF
 	END_IF

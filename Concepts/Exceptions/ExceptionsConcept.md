@@ -23,6 +23,22 @@ Using `__TRY -> __CATCH -> __FINALLY -> __ENDTRY`, you can execute a block of co
 
 ## 2. Usage in OpenFramework
 
+### When to Use Exceptions
+
+OpenFramework provides exceptions for deliberate use: interrupt an operation and pass a failure to a handling boundary when the API contract does not represent that failure as an ordinary result. The availability of exception transport and logging is not a reason to use exceptions for every unsuccessful operation.
+
+Choose according to the contract, not how frequently an event occurs:
+
+* Represent supported outcomes through the API's result or state. Examples include an optional item being absent, an operation still waiting, or a `Try` method reporting failure. Do not create an exception just to catch it immediately and convert an expected outcome into a status.
+* Use an exception when the operation cannot meet its contract and that contract requires interruption and propagation. Invalid arguments and violated mandatory preconditions still require checks; their reporting follows the specific API contract.
+* Catch where there is a defined responsibility: recovery, resource cleanup, conversion to a result or diagnostic, propagation with context, or enforcement of a no-throw contract. Before continuing, establish the component's state and resource ownership after the interrupted operation. Catching alone does not restore them.
+
+When adding a throwing or catching path, explain why the ordinary result is insufficient or which handling responsibility requires the catch. Document failure conditions, how they are reported, and the resulting state next to the API declaration. Account for exception allocation and cleanup as well as the control-flow change.
+
+This is guidance for new and changed code, not a claim that all existing implementations already comply or authorization to rewrite existing contracts. Methods prefixed with `Try` must not let exceptions escape, including those from nested calls and callbacks; lifecycle methods must remain free of exception creation and raising. Terminal allocation failure remains terminal: a `Try` method reports failure while preserving the allocation flag, and `RaiseIfAllocationFailed` raises at the task boundary outside recoverable handlers. Execution must not continue into subsequent cycles after terminal OOM.
+
+### What the Framework Adds
+
 The standard mechanism only provides an error code (numeric), which is often insufficient.
 
 This framework extends the default behavior to include additional contextual information:

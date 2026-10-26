@@ -1,0 +1,1350 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="TaskStoppingTest" Id="{35924fa9-32a6-4851-a4db-03ede1e026de}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+SPDX-FileCopyrightText: © 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+SPDX-License-Identifier: MIT
+License: https://opensource.org/license/mit
+*)
+
+(*!
+<summary>Exercises unified Task stopping, resource ordering and diagnostic failures.</summary>
+<description>
+Each method owns an independent task and resource and advances a running task at most once per suite call.
+No physical I/O, manual exception cleanup or terminal OOM injection is performed. A budget reports stalls;
+it is a test limit, not permission for production code to abandon cleanup.
+</description>
+*)
+FUNCTION_BLOCK TaskStoppingTest EXTENDS TcUnit.FB_TestSuite
+VAR CONSTANT
+	//! <summary>Maximum calls per scenario, including delayed acquisition, cleanup and release.</summary>
+	_MaxScenarioCalls : UINT := 32;
+	//! <summary>Cancel immediately after observing the first of three acquisition steps.</summary>
+	_FirstAcquireStep : UINT := 1;
+	//! <summary>Observe the first notification even when it resets the task to READY.</summary>
+	_FirstFinalization : UINT := 1;
+	//! <summary>Consecutive stopping exceptions before the repeated-failure scenario allows cleanup.</summary>
+	_RepeatedStoppingFailures : UINT := 3;
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[NameBeforeStartAndAfterReset();
+SuccessWaitsForCleanup();
+ErrorWaitsForCleanup();
+AbortWaitsForCleanup();
+ExceptionWaitsForCleanup();
+FormattingFailureWaitsForCleanup();
+StoppingExceptionResumes();
+RepeatedStoppingExceptions();
+EmptyExceptionMessageUsesFallback();
+CancelDuringAcquire();
+CancelBeforeAcquire();
+AcquireFailureWithResource();
+AcquireFailureWithoutResource();
+ReleaseFailurePreservesOriginal();
+ResetFromAfterStop();
+ResetFormattingFailure();
+StartFormattingFailure();]]></ST>
+    </Implementation>
+    <Method Name="SuccessWaitsForCleanup" Id="{85efb432-4182-4b04-8fe5-395b56ea098c}">
+      <Declaration><![CDATA[(*!
+<summary>Normal completion waits for stopping and asynchronous release.</summary>
+<description>
+Runs once across PLC cycles with independent static fixtures and a bounded call budget.
+Unexpected exceptions fail the scenario. AutomationRunner supplies exception cleanup and the fatal OOM boundary.
+</description>
+*)
+METHOD SuccessWaitsForCleanup
+VAR
+	exceptionEscaped : BOOL;
+END_VAR
+VAR_INST
+	testFinished : BOOL;
+	initialized : BOOL;
+	calls : UINT;
+	task : TaskStoppingProbe("TaskStoppingProbe");
+	resource : TaskStoppingResource;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN
+	RETURN;
+END_IF
+
+TEST(__POUNAME());
+
+calls := calls + 1;
+IF calls > _MaxScenarioCalls THEN
+	AssertTrue(FALSE, 'Task stopping scenario exceeded its call budget');
+	testFinished := TRUE;
+	TEST_FINISHED();
+	RETURN;
+END_IF
+
+IF NOT initialized THEN
+	initialized := TRUE;
+	task.SetResource(resource);
+
+	IF NOT task.Start() THEN
+		AssertTrue(FALSE, 'Prepared task must accept Start');
+		testFinished := TRUE;
+		TEST_FINISHED();
+		RETURN;
+	END_IF
+END_IF
+
+__TRY
+	task.Execute();
+__CATCH
+	exceptionEscaped := TRUE;
+__ENDTRY
+
+IF exceptionEscaped THEN
+	AssertTrue(FALSE, 'Injected operation or formatting exception must not escape');
+	testFinished := TRUE;
+	TEST_FINISHED();
+	RETURN;
+END_IF
+
+IF task.State.Running AND_THEN task.RunningSubstate.Stopping THEN
+	AssertEquals_UINT(0, resource.ReleaseCalls, 'Release cannot begin while stopping is pending');
+END_IF
+
+IF task.State.Stopped THEN
+	AssertEquals_INT(TO_INT(TOF_Tasks.TASK_STOP_REASON.WORK_DONE), TO_INT(task.OriginalStopReason.Value), 'Original result must survive cleanup');
+	AssertEquals_INT(TO_INT(TOF_Tasks.TASK_STOP_REASON.WORK_DONE), TO_INT(task.FinalStopReason.Value), 'Final result must reflect release outcome');
+	AssertEquals_WSTRING("", task.OriginalStopReason.Message, 'Original message must be retained');
+	AssertFalse(resource.ResourceAcquired, 'Successful cleanup must leave the resource released');
+	AssertEquals_UINT(2, task.CompletedCleanupSteps, 'Both cleanup steps must complete before termination');
+	AssertEquals_UINT(1, task.RunningCalls, 'Ordinary work must not resume during stopping');
+	AssertEquals_UINT(1, resource.ReleaseCalls, 'Release must be requested only when needed and only once');
+	AssertEquals_UINT(1, task.AfterStopCalls, 'Final notification must occur exactly once');
+	testFinished := TRUE;
+	TEST_FINISHED();
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="ErrorWaitsForCleanup" Id="{040376f1-cf2b-4e77-a5e0-44073af62fa9}">
+      <Declaration><![CDATA[(*!
+<summary>An explicit ERROR result follows the same stopping path.</summary>
+<description>
+Runs once across PLC cycles with independent static fixtures and a bounded call budget.
+Unexpected exceptions fail the scenario. AutomationRunner supplies exception cleanup and the fatal OOM boundary.
+</description>
+*)
+METHOD ErrorWaitsForCleanup
+VAR
+	exceptionEscaped : BOOL;
+END_VAR
+VAR_INST
+	testFinished : BOOL;
+	initialized : BOOL;
+	calls : UINT;
+	task : TaskStoppingProbe("TaskStoppingProbe");
+	resource : TaskStoppingResource;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN
+	RETURN;
+END_IF
+
+TEST(__POUNAME());
+
+calls := calls + 1;
+IF calls > _MaxScenarioCalls THEN
+	AssertTrue(FALSE, 'Task stopping scenario exceeded its call budget');
+	testFinished := TRUE;
+	TEST_FINISHED();
+	RETURN;
+END_IF
+
+IF NOT initialized THEN
+	initialized := TRUE;
+	task.SetResource(resource);
+	task.ProcessingResult := TOF_Tasks.TASK_PROCESSING_STATE.ERROR;
+	IF NOT task.Start() THEN
+		AssertTrue(FALSE, 'Prepared task must accept Start');
+		testFinished := TRUE;
+		TEST_FINISHED();
+		RETURN;
+	END_IF
+END_IF
+
+__TRY
+	task.Execute();
+__CATCH
+	exceptionEscaped := TRUE;
+__ENDTRY
+
+IF exceptionEscaped THEN
+	AssertTrue(FALSE, 'Injected operation or formatting exception must not escape');
+	testFinished := TRUE;
+	TEST_FINISHED();
+	RETURN;
+END_IF
+
+IF task.State.Running AND_THEN task.RunningSubstate.Stopping THEN
+	AssertEquals_UINT(0, resource.ReleaseCalls, 'Release cannot begin while stopping is pending');
+END_IF
+
+IF task.State.Stopped THEN
+	AssertEquals_INT(TO_INT(TOF_Tasks.TASK_STOP_REASON.FAILURE), TO_INT(task.OriginalStopReason.Value), 'Original result must survive cleanup');
+	AssertEquals_INT(TO_INT(TOF_Tasks.TASK_STOP_REASON.FAILURE), TO_INT(task.FinalStopReason.Value), 'Final result must reflect release outcome');
+	AssertEquals_WSTRING("Work result", task.OriginalStopReason.Message, 'Original message must be retained');
+	AssertFalse(resource.ResourceAcquired, 'Successful cleanup must leave the resource released');
+	AssertEquals_UINT(2, task.CompletedCleanupSteps, 'Both cleanup steps must complete before termination');
+	AssertEquals_UINT(1, task.RunningCalls, 'Ordinary work must not resume during stopping');
+	AssertEquals_UINT(1, resource.ReleaseCalls, 'Release must be requested only when needed and only once');
+	AssertEquals_UINT(1, task.AfterStopCalls, 'Final notification must occur exactly once');
+	testFinished := TRUE;
+	TEST_FINISHED();
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="AbortWaitsForCleanup" Id="{551c3310-6ba1-496b-8960-0baa5d9292b9}">
+      <Declaration><![CDATA[(*!
+<summary>An internal abort waits for stopping before release.</summary>
+<description>
+Runs once across PLC cycles with independent static fixtures and a bounded call budget.
+Unexpected exceptions fail the scenario. AutomationRunner supplies exception cleanup and the fatal OOM boundary.
+</description>
+*)
+METHOD AbortWaitsForCleanup
+VAR
+	exceptionEscaped : BOOL;
+END_VAR
+VAR_INST
+	testFinished : BOOL;
+	initialized : BOOL;
+	calls : UINT;
+	task : TaskStoppingProbe("TaskStoppingProbe");
+	resource : TaskStoppingResource;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN
+	RETURN;
+END_IF
+
+TEST(__POUNAME());
+
+calls := calls + 1;
+IF calls > _MaxScenarioCalls THEN
+	AssertTrue(FALSE, 'Task stopping scenario exceeded its call budget');
+	testFinished := TRUE;
+	TEST_FINISHED();
+	RETURN;
+END_IF
+
+IF NOT initialized THEN
+	initialized := TRUE;
+	task.SetResource(resource);
+	task.ProcessingResult := TOF_Tasks.TASK_PROCESSING_STATE.ABORTED;
+	IF NOT task.Start() THEN
+		AssertTrue(FALSE, 'Prepared task must accept Start');
+		testFinished := TRUE;
+		TEST_FINISHED();
+		RETURN;
+	END_IF
+END_IF
+
+__TRY
+	task.Execute();
+__CATCH
+	exceptionEscaped := TRUE;
+__ENDTRY
+
+IF exceptionEscaped THEN
+	AssertTrue(FALSE, 'Injected operation or formatting exception must not escape');
+	testFinished := TRUE;
+	TEST_FINISHED();
+	RETURN;
+END_IF
+
+IF task.State.Running AND_THEN task.RunningSubstate.Stopping THEN
+	AssertEquals_UINT(0, resource.ReleaseCalls, 'Release cannot begin while stopping is pending');
+END_IF
+
+IF task.State.Stopped THEN
+	AssertEquals_INT(TO_INT(TOF_Tasks.TASK_STOP_REASON.INTERNAL_ABORT), TO_INT(task.OriginalStopReason.Value), 'Original result must survive cleanup');
+	AssertEquals_INT(TO_INT(TOF_Tasks.TASK_STOP_REASON.INTERNAL_ABORT), TO_INT(task.FinalStopReason.Value), 'Final result must reflect release outcome');
+	AssertEquals_WSTRING("Work result", task.OriginalStopReason.Message, 'Original message must be retained');
+	AssertFalse(resource.ResourceAcquired, 'Successful cleanup must leave the resource released');
+	AssertEquals_UINT(2, task.CompletedCleanupSteps, 'Both cleanup steps must complete before termination');
+	AssertEquals_UINT(1, task.RunningCalls, 'Ordinary work must not resume during stopping');
+	AssertEquals_UINT(1, resource.ReleaseCalls, 'Release must be requested only when needed and only once');
+	AssertEquals_UINT(1, task.AfterStopCalls, 'Final notification must occur exactly once');
+	testFinished := TRUE;
+	TEST_FINISHED();
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="ExceptionWaitsForCleanup" Id="{fb9f1c0e-42a1-48d3-894a-7ba3f519a707}">
+      <Declaration><![CDATA[(*!
+<summary>A thrown work exception is retained through delayed stopping.</summary>
+<description>
+Runs once across PLC cycles with independent static fixtures and a bounded call budget.
+Unexpected exceptions fail the scenario. AutomationRunner supplies exception cleanup and the fatal OOM boundary.
+</description>
+*)
+METHOD ExceptionWaitsForCleanup
+VAR
+	exceptionEscaped : BOOL;
+END_VAR
+VAR_INST
+	testFinished : BOOL;
+	initialized : BOOL;
+	calls : UINT;
+	task : TaskStoppingProbe("TaskStoppingProbe");
+	resource : TaskStoppingResource;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN
+	RETURN;
+END_IF
+
+TEST(__POUNAME());
+
+calls := calls + 1;
+IF calls > _MaxScenarioCalls THEN
+	AssertTrue(FALSE, 'Task stopping scenario exceeded its call budget');
+	testFinished := TRUE;
+	TEST_FINISHED();
+	RETURN;
+END_IF
+
+IF NOT initialized THEN
+	initialized := TRUE;
+	task.SetResource(resource);
+	task.ThrowOnRunning := TRUE;
+	IF NOT task.Start() THEN
+		AssertTrue(FALSE, 'Prepared task must accept Start');
+		testFinished := TRUE;
+		TEST_FINISHED();
+		RETURN;
+	END_IF
+END_IF
+
+__TRY
+	task.Execute();
+__CATCH
+	exceptionEscaped := TRUE;
+__ENDTRY
+
+IF exceptionEscaped THEN
+	AssertTrue(FALSE, 'Injected operation or formatting exception must not escape');
+	testFinished := TRUE;
+	TEST_FINISHED();
+	RETURN;
+END_IF
+
+IF task.State.Running AND_THEN task.RunningSubstate.Stopping THEN
+	AssertEquals_UINT(0, resource.ReleaseCalls, 'Release cannot begin while stopping is pending');
+END_IF
+
+IF task.State.Stopped THEN
+	AssertEquals_INT(TO_INT(TOF_Tasks.TASK_STOP_REASON.FAILURE), TO_INT(task.OriginalStopReason.Value), 'Original result must survive cleanup');
+	AssertEquals_INT(TO_INT(TOF_Tasks.TASK_STOP_REASON.FAILURE), TO_INT(task.FinalStopReason.Value), 'Final result must reflect release outcome');
+	AssertEquals_WSTRING("Work failure", task.OriginalStopReason.Message, 'Original message must be retained');
+	AssertFalse(resource.ResourceAcquired, 'Successful cleanup must leave the resource released');
+	AssertEquals_UINT(2, task.CompletedCleanupSteps, 'Both cleanup steps must complete before termination');
+	AssertEquals_UINT(1, task.RunningCalls, 'Ordinary work must not resume during stopping');
+	AssertEquals_UINT(1, resource.ReleaseCalls, 'Release must be requested only when needed and only once');
+	AssertEquals_UINT(1, task.AfterStopCalls, 'Final notification must occur exactly once');
+	testFinished := TRUE;
+	TEST_FINISHED();
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="FormattingFailureWaitsForCleanup" Id="{c66d5161-6bd6-4c01-839d-b11a0d66f396}">
+      <Declaration><![CDATA[(*!
+<summary>A throwing formatter cannot skip stopping or release.</summary>
+<description>
+Checks the complete phase-specific fallback including the public task Name; cleanup assertions remain independent.
+Runs once across PLC cycles with independent static fixtures and a bounded call budget.
+Unexpected exceptions fail the scenario. AutomationRunner supplies exception cleanup and the fatal OOM boundary.
+</description>
+*)
+METHOD FormattingFailureWaitsForCleanup
+VAR
+	exceptionEscaped : BOOL;
+END_VAR
+VAR_INST
+	testFinished : BOOL;
+	initialized : BOOL;
+	calls : UINT;
+	task : TaskStoppingProbe("TaskStoppingProbe");
+	resource : TaskStoppingResource;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN
+	RETURN;
+END_IF
+
+TEST(__POUNAME());
+
+calls := calls + 1;
+IF calls > _MaxScenarioCalls THEN
+	AssertTrue(FALSE, 'Task stopping scenario exceeded its call budget');
+	testFinished := TRUE;
+	TEST_FINISHED();
+	RETURN;
+END_IF
+
+IF NOT initialized THEN
+	initialized := TRUE;
+	task.SetResource(resource);
+	task.ThrowOnRunning := TRUE;
+	task.ThrowOnGetMessage := TRUE;
+	IF NOT task.Start() THEN
+		AssertTrue(FALSE, 'Prepared task must accept Start');
+		testFinished := TRUE;
+		TEST_FINISHED();
+		RETURN;
+	END_IF
+END_IF
+
+__TRY
+	task.Execute();
+__CATCH
+	exceptionEscaped := TRUE;
+__ENDTRY
+
+IF exceptionEscaped THEN
+	AssertTrue(FALSE, 'Injected operation or formatting exception must not escape');
+	testFinished := TRUE;
+	TEST_FINISHED();
+	RETURN;
+END_IF
+
+IF task.State.Running AND_THEN task.RunningSubstate.Stopping THEN
+	AssertEquals_UINT(0, resource.ReleaseCalls, 'Release cannot begin while stopping is pending');
+END_IF
+
+IF task.State.Stopped THEN
+	AssertEquals_INT(TO_INT(TOF_Tasks.TASK_STOP_REASON.FAILURE), TO_INT(task.OriginalStopReason.Value), 'Original result must survive cleanup');
+	AssertEquals_INT(TO_INT(TOF_Tasks.TASK_STOP_REASON.FAILURE), TO_INT(task.FinalStopReason.Value), 'Final result must reflect release outcome');
+	AssertEquals_WSTRING(TOF_Core.WideStrings.Concat255("Task '", task.Name, "' processing failed"), task.OriginalStopReason.Message, 'Original message must be retained');
+	AssertFalse(resource.ResourceAcquired, 'Successful cleanup must leave the resource released');
+	AssertEquals_UINT(2, task.CompletedCleanupSteps, 'Both cleanup steps must complete before termination');
+	AssertEquals_UINT(1, task.RunningCalls, 'Ordinary work must not resume during stopping');
+	AssertEquals_UINT(1, resource.ReleaseCalls, 'Release must be requested only when needed and only once');
+	AssertEquals_UINT(1, task.AfterStopCalls, 'Final notification must occur exactly once');
+	testFinished := TRUE;
+	TEST_FINISHED();
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="StoppingExceptionResumes" Id="{6b92843f-956b-4dcc-85a6-03cee86e99a8}">
+      <Declaration><![CDATA[(*!
+<summary>An interrupted stopping hook resumes and preserves the work result.</summary>
+<description>
+Runs once across PLC cycles with independent static fixtures and a bounded call budget.
+Unexpected exceptions fail the scenario. AutomationRunner supplies exception cleanup and the fatal OOM boundary.
+</description>
+*)
+METHOD StoppingExceptionResumes
+VAR
+	exceptionEscaped : BOOL;
+END_VAR
+VAR_INST
+	testFinished : BOOL;
+	initialized : BOOL;
+	calls : UINT;
+	task : TaskStoppingProbe("TaskStoppingProbe");
+	resource : TaskStoppingResource;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN
+	RETURN;
+END_IF
+
+TEST(__POUNAME());
+
+calls := calls + 1;
+IF calls > _MaxScenarioCalls THEN
+	AssertTrue(FALSE, 'Task stopping scenario exceeded its call budget');
+	testFinished := TRUE;
+	TEST_FINISHED();
+	RETURN;
+END_IF
+
+IF NOT initialized THEN
+	initialized := TRUE;
+	task.SetResource(resource);
+	task.ThrowOnRunning := TRUE;
+	task.ThrowOnFirstStopping := TRUE;
+	IF NOT task.Start() THEN
+		AssertTrue(FALSE, 'Prepared task must accept Start');
+		testFinished := TRUE;
+		TEST_FINISHED();
+		RETURN;
+	END_IF
+END_IF
+
+__TRY
+	task.Execute();
+__CATCH
+	exceptionEscaped := TRUE;
+__ENDTRY
+
+IF exceptionEscaped THEN
+	AssertTrue(FALSE, 'Injected operation or formatting exception must not escape');
+	testFinished := TRUE;
+	TEST_FINISHED();
+	RETURN;
+END_IF
+
+IF task.State.Running AND_THEN task.RunningSubstate.Stopping THEN
+	AssertEquals_UINT(0, resource.ReleaseCalls, 'Release cannot begin while stopping is pending');
+END_IF
+
+IF task.State.Stopped THEN
+	AssertEquals_INT(TO_INT(TOF_Tasks.TASK_STOP_REASON.FAILURE), TO_INT(task.OriginalStopReason.Value), 'Original result must survive cleanup');
+	AssertEquals_INT(TO_INT(TOF_Tasks.TASK_STOP_REASON.FAILURE), TO_INT(task.FinalStopReason.Value), 'Final result must reflect release outcome');
+	AssertEquals_WSTRING("Work failure", task.OriginalStopReason.Message, 'Original message must be retained');
+	AssertFalse(resource.ResourceAcquired, 'Successful cleanup must leave the resource released');
+	AssertEquals_UINT(2, task.CompletedCleanupSteps, 'Both cleanup steps must complete before termination');
+	AssertEquals_UINT(1, task.RunningCalls, 'Ordinary work must not resume during stopping');
+	AssertEquals_UINT(1, resource.ReleaseCalls, 'Release must be requested only when needed and only once');
+	AssertEquals_UINT(1, task.AfterStopCalls, 'Final notification must occur exactly once');
+	AssertEquals_UINT(3, task.StoppingCalls, 'Interrupted stopping must retry before two completed steps');
+	testFinished := TRUE;
+	TEST_FINISHED();
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="RepeatedStoppingExceptions" Id="{90b965b2-f36d-4970-bedc-91c6cc1a1ccc}">
+      <Declaration><![CDATA[(*!
+<summary>Repeated stopping exceptions keep cleanup pending without replacing a successful work result.</summary>
+<description>
+The fixture throws on three stopping calls, then resumes two cleanup steps and releases its resource.
+One Execute is issued per suite call. Log attempts are not asserted because LogManager counters are shared
+with other PLC tasks; the owner can observe them during runtime verification. An exception escaping Task
+fails the scenario.
+</description>
+*)
+METHOD RepeatedStoppingExceptions
+VAR
+	exceptionEscaped : BOOL;
+END_VAR
+VAR_INST
+	testFinished : BOOL;
+	initialized : BOOL;
+	calls : UINT;
+	task : TaskStoppingProbe("Repeated stopping task");
+	resource : TaskStoppingResource;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN
+	RETURN;
+END_IF
+
+TEST(__POUNAME());
+
+calls := calls + 1;
+IF calls > _MaxScenarioCalls THEN
+	AssertTrue(FALSE, 'Repeated stopping scenario exceeded its call budget');
+	testFinished := TRUE;
+	TEST_FINISHED();
+	RETURN;
+END_IF
+
+IF NOT initialized THEN
+	initialized := TRUE;
+	task.SetResource(resource);
+	task.ThrowOnEveryStopping := TRUE;
+	IF NOT task.Start() THEN
+		AssertTrue(FALSE, 'Prepared task must accept Start');
+		testFinished := TRUE;
+		TEST_FINISHED();
+		RETURN;
+	END_IF
+END_IF
+
+__TRY
+	task.Execute();
+__CATCH
+	exceptionEscaped := TRUE;
+__ENDTRY
+
+IF exceptionEscaped THEN
+	AssertTrue(FALSE, 'Repeated stopping exceptions must not escape');
+	testFinished := TRUE;
+	TEST_FINISHED();
+	RETURN;
+END_IF
+
+IF task.ThrowOnEveryStopping AND_THEN task.StoppingCalls >= _RepeatedStoppingFailures THEN
+	task.ThrowOnEveryStopping := FALSE;
+END_IF
+
+IF task.State.Running AND_THEN task.RunningSubstate.Stopping THEN
+	AssertEquals_UINT(0, resource.ReleaseCalls, 'Release cannot begin before stopping succeeds');
+	AssertEquals_INT(TO_INT(TOF_Tasks.TASK_STOP_REASON.WORK_DONE), TO_INT(task.OriginalStopReason.Value), 'Stopping exceptions must not replace the work result');
+END_IF
+
+IF task.State.Stopped THEN
+	AssertEquals_INT(TO_INT(TOF_Tasks.TASK_STOP_REASON.WORK_DONE), TO_INT(task.OriginalStopReason.Value), 'Original work result must be retained');
+	AssertEquals_INT(TO_INT(TOF_Tasks.TASK_STOP_REASON.WORK_DONE), TO_INT(task.FinalStopReason.Value), 'Final result must reflect successful release');
+	AssertEquals_UINT(1, task.RunningCalls, 'Ordinary work must run only once');
+	AssertEquals_UINT(5, task.StoppingCalls, 'Three interrupted calls and two cleanup steps must run');
+	AssertEquals_UINT(2, task.CompletedCleanupSteps, 'Both cleanup steps must finish');
+	AssertEquals_UINT(1, resource.ReleaseCalls, 'Release must start only once after cleanup');
+	AssertEquals_UINT(1, task.AfterStopCalls, 'Final notification must occur once');
+	testFinished := TRUE;
+	TEST_FINISHED();
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="EmptyExceptionMessageUsesFallback" Id="{4bd7a709-c3aa-4f2f-94df-42ff1221aef0}">
+      <Declaration><![CDATA[(*!
+<summary>Keeps named processing diagnostics when GetMessage returns empty text.</summary>
+<description>
+The resource-free fixture throws a StandardException with empty payload. Cleanup still completes after
+the caught processing exception. One Execute is issued per suite call with a bounded call budget;
+an exception escaping Task fails the scenario.
+</description>
+*)
+METHOD EmptyExceptionMessageUsesFallback
+VAR
+	exceptionEscaped : BOOL;
+END_VAR
+VAR_INST
+	testFinished : BOOL;
+	initialized : BOOL;
+	calls : UINT;
+	task : TaskStoppingProbe("Empty message task");
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN
+	RETURN;
+END_IF
+
+TEST(__POUNAME());
+
+calls := calls + 1;
+IF calls > _MaxScenarioCalls THEN
+	AssertTrue(FALSE, 'Empty-message scenario exceeded its call budget');
+	testFinished := TRUE;
+	TEST_FINISHED();
+	RETURN;
+END_IF
+
+IF NOT initialized THEN
+	initialized := TRUE;
+	task.ThrowOnRunning := TRUE;
+	task.ThrowWithEmptyMessage := TRUE;
+	IF NOT task.Start() THEN
+		AssertTrue(FALSE, 'Prepared task must accept Start');
+		testFinished := TRUE;
+		TEST_FINISHED();
+		RETURN;
+	END_IF
+END_IF
+
+__TRY
+	task.Execute();
+__CATCH
+	exceptionEscaped := TRUE;
+__ENDTRY
+
+IF exceptionEscaped THEN
+	AssertTrue(FALSE, 'Empty exception message must not escape');
+	testFinished := TRUE;
+	TEST_FINISHED();
+	RETURN;
+END_IF
+
+IF task.State.Stopped THEN
+	AssertEquals_INT(TO_INT(TOF_Tasks.TASK_STOP_REASON.FAILURE), TO_INT(task.OriginalStopReason.Value), 'Processing exception must set original FAILURE');
+	AssertEquals_INT(TO_INT(TOF_Tasks.TASK_STOP_REASON.FAILURE), TO_INT(task.FinalStopReason.Value), 'Resource-free failure must remain final FAILURE');
+	AssertEquals_WSTRING("Task 'Empty message task' processing failed", task.OriginalStopReason.Message, 'Empty GetMessage must retain the named fallback');
+	AssertEquals_WSTRING("Task 'Empty message task' processing failed", task.FinalStopReason.Message, 'Final result must retain the named fallback');
+	AssertEquals_UINT(1, task.RunningCalls, 'Ordinary work must not restart during cleanup');
+	AssertEquals_UINT(2, task.StoppingCalls, 'Cleanup must finish after two steps');
+	testFinished := TRUE;
+	TEST_FINISHED();
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="CancelDuringAcquire" Id="{47d68c5a-b1f2-44b6-9e6f-77587fa86256}">
+      <Declaration><![CDATA[(*!
+<summary>Cancellation drains a late acquisition before releasing its resource.</summary>
+<description>
+Runs once across PLC cycles with independent static fixtures and a bounded call budget.
+Unexpected exceptions fail the scenario. AutomationRunner supplies exception cleanup and the fatal OOM boundary.
+</description>
+*)
+METHOD CancelDuringAcquire
+VAR
+	exceptionEscaped : BOOL;
+END_VAR
+VAR_INST
+	testFinished : BOOL;
+	initialized : BOOL;
+	calls : UINT;
+	task : TaskStoppingProbe("TaskStoppingProbe");
+	resource : TaskStoppingResource;
+	cancelRequested : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN
+	RETURN;
+END_IF
+
+TEST(__POUNAME());
+
+calls := calls + 1;
+IF calls > _MaxScenarioCalls THEN
+	AssertTrue(FALSE, 'Task stopping scenario exceeded its call budget');
+	testFinished := TRUE;
+	TEST_FINISHED();
+	RETURN;
+END_IF
+
+IF NOT initialized THEN
+	initialized := TRUE;
+	task.SetResource(resource);
+
+	IF NOT task.Start() THEN
+		AssertTrue(FALSE, 'Prepared task must accept Start');
+		testFinished := TRUE;
+		TEST_FINISHED();
+		RETURN;
+	END_IF
+END_IF
+
+__TRY
+	task.Execute();
+__CATCH
+	exceptionEscaped := TRUE;
+__ENDTRY
+
+IF exceptionEscaped THEN
+	AssertTrue(FALSE, 'Injected operation or formatting exception must not escape');
+	testFinished := TRUE;
+	TEST_FINISHED();
+	RETURN;
+END_IF
+
+IF NOT cancelRequested AND_THEN resource.AcquireProgress = _FirstAcquireStep THEN
+	cancelRequested := TRUE;
+	AssertTrue(task.Cancel(), 'Cancel during pending acquisition must be accepted');
+	AssertFalse(resource.ResourceAcquired, 'Cancellation must precede the late acquire response');
+END_IF
+
+IF task.State.Running AND_THEN task.RunningSubstate.Stopping THEN
+	AssertEquals_UINT(0, resource.ReleaseCalls, 'Release cannot begin while stopping is pending');
+END_IF
+
+IF task.State.Stopped THEN
+	AssertEquals_INT(TO_INT(TOF_Tasks.TASK_STOP_REASON.EXTERNAL_CANCEL), TO_INT(task.OriginalStopReason.Value), 'Original result must survive cleanup');
+	AssertEquals_INT(TO_INT(TOF_Tasks.TASK_STOP_REASON.EXTERNAL_CANCEL), TO_INT(task.FinalStopReason.Value), 'Final result must reflect release outcome');
+	AssertEquals_WSTRING("Cancelled by external logic", task.OriginalStopReason.Message, 'Original message must be retained');
+	AssertFalse(resource.ResourceAcquired, 'Successful cleanup must leave the resource released');
+	AssertEquals_UINT(2, task.CompletedCleanupSteps, 'Both cleanup steps must complete before termination');
+	AssertEquals_UINT(0, task.RunningCalls, 'Ordinary work must not resume during stopping');
+	AssertEquals_UINT(1, resource.ReleaseCalls, 'Release must be requested only when needed and only once');
+	AssertEquals_UINT(1, task.AfterStopCalls, 'Final notification must occur exactly once');
+	AssertEquals_UINT(1, task.CancelNotifications, 'Accepted cancellation must notify once');
+	testFinished := TRUE;
+	TEST_FINISHED();
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="CancelBeforeAcquire" Id="{52029613-295b-4ee4-9859-4816e4fdd629}">
+      <Declaration><![CDATA[(*!
+<summary>Cancellation before Execute does not request or release an absent resource.</summary>
+<description>
+Runs once across PLC cycles with independent static fixtures and a bounded call budget.
+Unexpected exceptions fail the scenario. AutomationRunner supplies exception cleanup and the fatal OOM boundary.
+</description>
+*)
+METHOD CancelBeforeAcquire
+VAR
+	exceptionEscaped : BOOL;
+END_VAR
+VAR_INST
+	testFinished : BOOL;
+	initialized : BOOL;
+	calls : UINT;
+	task : TaskStoppingProbe("TaskStoppingProbe");
+	resource : TaskStoppingResource;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN
+	RETURN;
+END_IF
+
+TEST(__POUNAME());
+
+calls := calls + 1;
+IF calls > _MaxScenarioCalls THEN
+	AssertTrue(FALSE, 'Task stopping scenario exceeded its call budget');
+	testFinished := TRUE;
+	TEST_FINISHED();
+	RETURN;
+END_IF
+
+IF NOT initialized THEN
+	initialized := TRUE;
+	task.SetResource(resource);
+
+	IF NOT task.Start() THEN
+		AssertTrue(FALSE, 'Prepared task must accept Start');
+		testFinished := TRUE;
+		TEST_FINISHED();
+		RETURN;
+	END_IF
+	AssertTrue(task.Cancel(), 'Cancellation before acquisition must be accepted');
+END_IF
+
+__TRY
+	task.Execute();
+__CATCH
+	exceptionEscaped := TRUE;
+__ENDTRY
+
+IF exceptionEscaped THEN
+	AssertTrue(FALSE, 'Injected operation or formatting exception must not escape');
+	testFinished := TRUE;
+	TEST_FINISHED();
+	RETURN;
+END_IF
+
+IF task.State.Running AND_THEN task.RunningSubstate.Stopping THEN
+	AssertEquals_UINT(0, resource.ReleaseCalls, 'Release cannot begin while stopping is pending');
+END_IF
+
+IF task.State.Stopped THEN
+	AssertEquals_INT(TO_INT(TOF_Tasks.TASK_STOP_REASON.EXTERNAL_CANCEL), TO_INT(task.OriginalStopReason.Value), 'Original result must survive cleanup');
+	AssertEquals_INT(TO_INT(TOF_Tasks.TASK_STOP_REASON.EXTERNAL_CANCEL), TO_INT(task.FinalStopReason.Value), 'Final result must reflect release outcome');
+	AssertEquals_WSTRING("Cancelled by external logic", task.OriginalStopReason.Message, 'Original message must be retained');
+	AssertFalse(resource.ResourceAcquired, 'Successful cleanup must leave the resource released');
+	AssertEquals_UINT(2, task.CompletedCleanupSteps, 'Both cleanup steps must complete before termination');
+	AssertEquals_UINT(0, task.RunningCalls, 'Ordinary work must not resume during stopping');
+	AssertEquals_UINT(0, resource.ReleaseCalls, 'Release must be requested only when needed and only once');
+	AssertEquals_UINT(1, task.AfterStopCalls, 'Final notification must occur exactly once');
+	AssertEquals_UINT(1, task.CancelNotifications, 'Accepted cancellation must notify once');
+	AssertEquals_UINT(0, resource.AcquireCalls, 'No acquire may be started after cancellation');
+	testFinished := TRUE;
+	TEST_FINISHED();
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="AcquireFailureWithResource" Id="{485a7313-d3b1-4629-b9b1-c09af58a5198}">
+      <Declaration><![CDATA[(*!
+<summary>Failure after acquisition still waits for cleanup and releases the resource.</summary>
+<description>
+Checks the complete phase-specific fallback including the public task Name; cleanup assertions remain independent.
+Runs once across PLC cycles with independent static fixtures and a bounded call budget.
+Unexpected exceptions fail the scenario. AutomationRunner supplies exception cleanup and the fatal OOM boundary.
+</description>
+*)
+METHOD AcquireFailureWithResource
+VAR
+	exceptionEscaped : BOOL;
+END_VAR
+VAR_INST
+	testFinished : BOOL;
+	initialized : BOOL;
+	calls : UINT;
+	task : TaskStoppingProbe("TaskStoppingProbe");
+	resource : TaskStoppingResource;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN
+	RETURN;
+END_IF
+
+TEST(__POUNAME());
+
+calls := calls + 1;
+IF calls > _MaxScenarioCalls THEN
+	AssertTrue(FALSE, 'Task stopping scenario exceeded its call budget');
+	testFinished := TRUE;
+	TEST_FINISHED();
+	RETURN;
+END_IF
+
+IF NOT initialized THEN
+	initialized := TRUE;
+	task.SetResource(resource);
+	resource.ThrowAfterAcquire := TRUE;
+	resource.ThrowOnGetMessage := TRUE;
+	IF NOT task.Start() THEN
+		AssertTrue(FALSE, 'Prepared task must accept Start');
+		testFinished := TRUE;
+		TEST_FINISHED();
+		RETURN;
+	END_IF
+END_IF
+
+__TRY
+	task.Execute();
+__CATCH
+	exceptionEscaped := TRUE;
+__ENDTRY
+
+IF exceptionEscaped THEN
+	AssertTrue(FALSE, 'Injected operation or formatting exception must not escape');
+	testFinished := TRUE;
+	TEST_FINISHED();
+	RETURN;
+END_IF
+
+IF task.State.Running AND_THEN task.RunningSubstate.Stopping THEN
+	AssertEquals_UINT(0, resource.ReleaseCalls, 'Release cannot begin while stopping is pending');
+END_IF
+
+IF task.State.Stopped THEN
+	AssertEquals_INT(TO_INT(TOF_Tasks.TASK_STOP_REASON.FAILURE), TO_INT(task.OriginalStopReason.Value), 'Original result must survive cleanup');
+	AssertEquals_INT(TO_INT(TOF_Tasks.TASK_STOP_REASON.FAILURE), TO_INT(task.FinalStopReason.Value), 'Final result must reflect release outcome');
+	AssertEquals_WSTRING(TOF_Core.WideStrings.Concat255("Task '", task.Name, "' resource acquisition failed"), task.OriginalStopReason.Message, 'Original message must be retained');
+	AssertFalse(resource.ResourceAcquired, 'Successful cleanup must leave the resource released');
+	AssertEquals_UINT(2, task.CompletedCleanupSteps, 'Both cleanup steps must complete before termination');
+	AssertEquals_UINT(0, task.RunningCalls, 'Ordinary work must not resume during stopping');
+	AssertEquals_UINT(1, resource.ReleaseCalls, 'Release must be requested only when needed and only once');
+	AssertEquals_UINT(1, task.AfterStopCalls, 'Final notification must occur exactly once');
+	testFinished := TRUE;
+	TEST_FINISHED();
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="AcquireFailureWithoutResource" Id="{4cc09c90-4458-4c8e-800c-8bdf7692714e}">
+      <Declaration><![CDATA[(*!
+<summary>An early acquire failure follows stopping without requesting release.</summary>
+<description>
+Runs once across PLC cycles with independent static fixtures and a bounded call budget.
+Unexpected exceptions fail the scenario. AutomationRunner supplies exception cleanup and the fatal OOM boundary.
+</description>
+*)
+METHOD AcquireFailureWithoutResource
+VAR
+	exceptionEscaped : BOOL;
+END_VAR
+VAR_INST
+	testFinished : BOOL;
+	initialized : BOOL;
+	calls : UINT;
+	task : TaskStoppingProbe("TaskStoppingProbe");
+	resource : TaskStoppingResource;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN
+	RETURN;
+END_IF
+
+TEST(__POUNAME());
+
+calls := calls + 1;
+IF calls > _MaxScenarioCalls THEN
+	AssertTrue(FALSE, 'Task stopping scenario exceeded its call budget');
+	testFinished := TRUE;
+	TEST_FINISHED();
+	RETURN;
+END_IF
+
+IF NOT initialized THEN
+	initialized := TRUE;
+	task.SetResource(resource);
+	resource.ThrowOnStartAcquire := TRUE;
+	IF NOT task.Start() THEN
+		AssertTrue(FALSE, 'Prepared task must accept Start');
+		testFinished := TRUE;
+		TEST_FINISHED();
+		RETURN;
+	END_IF
+END_IF
+
+__TRY
+	task.Execute();
+__CATCH
+	exceptionEscaped := TRUE;
+__ENDTRY
+
+IF exceptionEscaped THEN
+	AssertTrue(FALSE, 'Injected operation or formatting exception must not escape');
+	testFinished := TRUE;
+	TEST_FINISHED();
+	RETURN;
+END_IF
+
+IF task.State.Running AND_THEN task.RunningSubstate.Stopping THEN
+	AssertEquals_UINT(0, resource.ReleaseCalls, 'Release cannot begin while stopping is pending');
+END_IF
+
+IF task.State.Stopped THEN
+	AssertEquals_INT(TO_INT(TOF_Tasks.TASK_STOP_REASON.FAILURE), TO_INT(task.OriginalStopReason.Value), 'Original result must survive cleanup');
+	AssertEquals_INT(TO_INT(TOF_Tasks.TASK_STOP_REASON.FAILURE), TO_INT(task.FinalStopReason.Value), 'Final result must reflect release outcome');
+	AssertEquals_WSTRING("Acquire failure", task.OriginalStopReason.Message, 'Original message must be retained');
+	AssertFalse(resource.ResourceAcquired, 'Successful cleanup must leave the resource released');
+	AssertEquals_UINT(2, task.CompletedCleanupSteps, 'Both cleanup steps must complete before termination');
+	AssertEquals_UINT(0, task.RunningCalls, 'Ordinary work must not resume during stopping');
+	AssertEquals_UINT(0, resource.ReleaseCalls, 'Release must be requested only when needed and only once');
+	AssertEquals_UINT(1, task.AfterStopCalls, 'Final notification must occur exactly once');
+	testFinished := TRUE;
+	TEST_FINISHED();
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="ReleaseFailurePreservesOriginal" Id="{4a107eff-15c4-47ff-a449-bdead5cca534}">
+      <Declaration><![CDATA[(*!
+<summary>A terminal release exception changes only the final result and is not retried.</summary>
+<description>
+Checks the complete phase-specific fallback including the public task Name; cleanup assertions remain independent.
+Runs once across PLC cycles with independent static fixtures and a bounded call budget.
+Unexpected exceptions fail the scenario. AutomationRunner supplies exception cleanup and the fatal OOM boundary.
+</description>
+*)
+METHOD ReleaseFailurePreservesOriginal
+VAR
+	exceptionEscaped : BOOL;
+END_VAR
+VAR_INST
+	testFinished : BOOL;
+	initialized : BOOL;
+	calls : UINT;
+	task : TaskStoppingProbe("TaskStoppingProbe");
+	resource : TaskStoppingResource;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN
+	RETURN;
+END_IF
+
+TEST(__POUNAME());
+
+calls := calls + 1;
+IF calls > _MaxScenarioCalls THEN
+	AssertTrue(FALSE, 'Task stopping scenario exceeded its call budget');
+	testFinished := TRUE;
+	TEST_FINISHED();
+	RETURN;
+END_IF
+
+IF NOT initialized THEN
+	initialized := TRUE;
+	task.SetResource(resource);
+	resource.ThrowOnStartRelease := TRUE;
+	resource.ThrowOnGetMessage := TRUE;
+	IF NOT task.Start() THEN
+		AssertTrue(FALSE, 'Prepared task must accept Start');
+		testFinished := TRUE;
+		TEST_FINISHED();
+		RETURN;
+	END_IF
+END_IF
+
+__TRY
+	task.Execute();
+__CATCH
+	exceptionEscaped := TRUE;
+__ENDTRY
+
+IF exceptionEscaped THEN
+	AssertTrue(FALSE, 'Injected operation or formatting exception must not escape');
+	testFinished := TRUE;
+	TEST_FINISHED();
+	RETURN;
+END_IF
+
+IF task.State.Running AND_THEN task.RunningSubstate.Stopping THEN
+	AssertEquals_UINT(0, resource.ReleaseCalls, 'Release cannot begin while stopping is pending');
+END_IF
+
+IF task.State.Stopped THEN
+	AssertEquals_INT(TO_INT(TOF_Tasks.TASK_STOP_REASON.WORK_DONE), TO_INT(task.OriginalStopReason.Value), 'Original result must survive cleanup');
+	AssertEquals_INT(TO_INT(TOF_Tasks.TASK_STOP_REASON.FAILURE), TO_INT(task.FinalStopReason.Value), 'Final result must reflect release outcome');
+	AssertEquals_WSTRING("", task.OriginalStopReason.Message, 'Original message must be retained');
+	AssertEquals_WSTRING(TOF_Core.WideStrings.Concat255("Task '", task.Name, "' release failed"), task.FinalStopReason.Message, 'Release formatter failure must use fallback');
+	AssertTrue(resource.ResourceAcquired, 'Terminal release failure does not prove deallocation');
+	task.Execute();
+	AssertEquals_UINT(2, task.CompletedCleanupSteps, 'Both cleanup steps must complete before termination');
+	AssertEquals_UINT(1, task.RunningCalls, 'Ordinary work must not resume during stopping');
+	AssertEquals_UINT(1, resource.ReleaseCalls, 'Release must be requested only when needed and only once');
+	AssertEquals_UINT(1, task.AfterStopCalls, 'Final notification must occur exactly once');
+	testFinished := TRUE;
+	TEST_FINISHED();
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="ResetFromAfterStop" Id="{ac5ff622-1713-48d5-861f-fd3b39a25af1}">
+      <Declaration><![CDATA[(*!
+<summary>Reset from final notification cannot cause more work in the same Execute.</summary>
+<description>
+Runs once across PLC cycles with independent static fixtures and a bounded call budget.
+Unexpected exceptions fail the scenario. AutomationRunner supplies exception cleanup and the fatal OOM boundary.
+</description>
+*)
+METHOD ResetFromAfterStop
+VAR
+	exceptionEscaped : BOOL;
+END_VAR
+VAR_INST
+	testFinished : BOOL;
+	initialized : BOOL;
+	calls : UINT;
+	task : TaskStoppingProbe("TaskStoppingProbe");
+	resource : TaskStoppingResource;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN
+	RETURN;
+END_IF
+
+TEST(__POUNAME());
+
+calls := calls + 1;
+IF calls > _MaxScenarioCalls THEN
+	AssertTrue(FALSE, 'Task stopping scenario exceeded its call budget');
+	testFinished := TRUE;
+	TEST_FINISHED();
+	RETURN;
+END_IF
+
+IF NOT initialized THEN
+	initialized := TRUE;
+	task.SetResource(resource);
+	task.ResetOnAfterStop := TRUE;
+	IF NOT task.Start() THEN
+		AssertTrue(FALSE, 'Prepared task must accept Start');
+		testFinished := TRUE;
+		TEST_FINISHED();
+		RETURN;
+	END_IF
+END_IF
+
+__TRY
+	task.Execute();
+__CATCH
+	exceptionEscaped := TRUE;
+__ENDTRY
+
+IF exceptionEscaped THEN
+	AssertTrue(FALSE, 'Injected operation or formatting exception must not escape');
+	testFinished := TRUE;
+	TEST_FINISHED();
+	RETURN;
+END_IF
+
+IF task.State.Running AND_THEN task.RunningSubstate.Stopping THEN
+	AssertEquals_UINT(0, resource.ReleaseCalls, 'Release cannot begin while stopping is pending');
+END_IF
+
+IF task.AfterStopCalls = _FirstFinalization THEN
+	AssertTrue(task.State.Ready, 'OnAfterStop Reset must leave READY');
+	AssertEquals_UINT(1, task.RunningCalls, 'Execute must not reenter work after notification Reset');
+	AssertEquals_UINT(1, resource.ReleaseCalls, 'Release must be requested only when needed and only once');
+	AssertEquals_UINT(1, task.AfterStopCalls, 'Final notification must occur exactly once');
+	testFinished := TRUE;
+	TEST_FINISHED();
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="ResetFormattingFailure" Id="{c9cad4d6-40af-4cf5-9fe0-a7a92e42d3a9}">
+      <Declaration><![CDATA[(*!
+<summary>A throwing reset formatter returns refusal and leaves the stopped task available.</summary>
+<description>
+Runs once across PLC cycles with independent static fixtures and a bounded call budget.
+Unexpected exceptions fail the scenario. AutomationRunner supplies exception cleanup and the fatal OOM boundary.
+</description>
+*)
+METHOD ResetFormattingFailure
+VAR
+	exceptionEscaped : BOOL;
+	refuseReason : TOF_Core.ERROR_MESSAGE;
+END_VAR
+VAR_INST
+	testFinished : BOOL;
+	initialized : BOOL;
+	calls : UINT;
+	task : TaskStoppingProbe("TaskStoppingProbe");
+	resource : TaskStoppingResource;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN
+	RETURN;
+END_IF
+
+TEST(__POUNAME());
+
+calls := calls + 1;
+IF calls > _MaxScenarioCalls THEN
+	AssertTrue(FALSE, 'Task stopping scenario exceeded its call budget');
+	testFinished := TRUE;
+	TEST_FINISHED();
+	RETURN;
+END_IF
+
+IF NOT initialized THEN
+	initialized := TRUE;
+	task.SetResource(resource);
+
+	IF NOT task.Start() THEN
+		AssertTrue(FALSE, 'Prepared task must accept Start');
+		testFinished := TRUE;
+		TEST_FINISHED();
+		RETURN;
+	END_IF
+END_IF
+
+__TRY
+	task.Execute();
+__CATCH
+	exceptionEscaped := TRUE;
+__ENDTRY
+
+IF exceptionEscaped THEN
+	AssertTrue(FALSE, 'Injected operation or formatting exception must not escape');
+	testFinished := TRUE;
+	TEST_FINISHED();
+	RETURN;
+END_IF
+
+IF task.State.Running AND_THEN task.RunningSubstate.Stopping THEN
+	AssertEquals_UINT(0, resource.ReleaseCalls, 'Release cannot begin while stopping is pending');
+END_IF
+
+IF task.State.Stopped THEN
+	AssertEquals_INT(TO_INT(TOF_Tasks.TASK_STOP_REASON.WORK_DONE), TO_INT(task.OriginalStopReason.Value), 'Original result must survive cleanup');
+	AssertEquals_INT(TO_INT(TOF_Tasks.TASK_STOP_REASON.WORK_DONE), TO_INT(task.FinalStopReason.Value), 'Final result must reflect release outcome');
+	AssertEquals_WSTRING("", task.OriginalStopReason.Message, 'Original message must be retained');
+	AssertFalse(resource.ResourceAcquired, 'Successful cleanup must leave the resource released');
+	AssertEquals_UINT(2, task.CompletedCleanupSteps, 'Both cleanup steps must complete before termination');
+	AssertEquals_UINT(1, task.RunningCalls, 'Ordinary work must not resume during stopping');
+	AssertEquals_UINT(1, resource.ReleaseCalls, 'Release must be requested only when needed and only once');
+	AssertEquals_UINT(1, task.AfterStopCalls, 'Final notification must occur exactly once');
+	task.ThrowOnReset := TRUE;
+	task.ThrowOnGetMessage := TRUE;
+	__TRY
+		AssertFalse(task.Reset(refuseReason => refuseReason), 'Reset hook failure must refuse reset');
+	__CATCH
+		exceptionEscaped := TRUE;
+	__ENDTRY
+	AssertFalse(exceptionEscaped, 'Reset formatter failure must not escape');
+	AssertTrue(task.State.Stopped, 'Refused reset must preserve STOPPED');
+	AssertEquals_WSTRING("Task reset failed", refuseReason, 'Reset must use fixed fallback text');
+	task.ThrowOnReset := FALSE;
+	AssertTrue(task.Reset(), 'Reset must succeed after removing the injected refusal');
+	AssertTrue(task.State.Ready, 'Successful reset must prepare reuse');
+	testFinished := TRUE;
+	TEST_FINISHED();
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="StartFormattingFailure" Id="{8a15c26a-6ab4-4a49-9586-5175c7882d75}">
+      <Declaration><![CDATA[(*!
+<summary>Contains a formatter failure while refusing Start.</summary>
+<description>
+Runs once without I/O. Refusal leaves READY and performs no resource acquisition.
+</description>
+*)
+METHOD StartFormattingFailure
+VAR
+	refuseReason : TOF_Core.ERROR_MESSAGE;
+	exceptionEscaped : BOOL;
+END_VAR
+VAR_INST
+	testFinished : BOOL;
+	task : TaskStoppingProbe("TaskStoppingProbe");
+	resource : TaskStoppingResource;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN
+	RETURN;
+END_IF
+
+TEST(__POUNAME());
+task.SetResource(resource);
+task.ThrowOnBeforeStart := TRUE;
+task.ThrowOnGetMessage := TRUE;
+
+__TRY
+	AssertFalse(task.Start(refuseReason => refuseReason), 'Start hook failure must refuse start');
+__CATCH
+	exceptionEscaped := TRUE;
+__ENDTRY
+
+AssertFalse(exceptionEscaped, 'Start formatter failure must not escape');
+AssertTrue(task.State.Ready, 'Refused start must leave READY');
+AssertEquals_UINT(0, resource.AcquireCalls, 'Refused start must not acquire');
+AssertEquals_WSTRING("Task start preparation failed", refuseReason, 'Start must use fixed fallback text');
+testFinished := TRUE;
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="NameBeforeStartAndAfterReset" Id="{f7ca49df-e82e-4d4c-833a-8975c6459a6f}">
+      <Declaration><![CDATA[(*!
+<summary>Checks a supplied task name before Start and its borrowed storage across the lifecycle.</summary>
+<description>
+The name is passed during TaskStoppingProbe initialization. One Execute per suite call completes the
+resource-free task; Reset must preserve the name and the previously borrowed reference. No hardware is used.
+</description>
+*)
+METHOD NameBeforeStartAndAfterReset
+VAR
+	exceptionEscaped : BOOL;
+END_VAR
+VAR_INST
+	testFinished : BOOL;
+	initialized : BOOL;
+	calls : UINT;
+	task : TaskStoppingProbe("Named stopping probe");
+	initialName : WSTRING;
+	borrowedName : REFERENCE TO WSTRING;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN
+	RETURN;
+END_IF
+
+TEST(__POUNAME());
+
+calls := calls + 1;
+IF calls > _MaxScenarioCalls THEN
+	AssertTrue(FALSE, 'Task name scenario exceeded its call budget');
+	testFinished := TRUE;
+	TEST_FINISHED();
+	RETURN;
+END_IF
+
+IF NOT initialized THEN
+	initialized := TRUE;
+	borrowedName REF= task.Name;
+	initialName := borrowedName;
+	AssertEquals_WSTRING("Named stopping probe", initialName, 'Name before Start must equal the supplied name');
+	AssertEquals_WSTRING(initialName, task.Name, 'Repeated reads must preserve the name');
+	AssertTrue(task.State.Ready, 'Reading Name must not start the task');
+
+	IF NOT task.Start() THEN
+		AssertTrue(FALSE, 'Prepared task must accept Start');
+		testFinished := TRUE;
+		TEST_FINISHED();
+		RETURN;
+	END_IF
+END_IF
+
+__TRY
+	task.Execute();
+__CATCH
+	exceptionEscaped := TRUE;
+__ENDTRY
+
+IF exceptionEscaped THEN
+	AssertTrue(FALSE, 'Normal task execution must not throw');
+	testFinished := TRUE;
+	TEST_FINISHED();
+	RETURN;
+END_IF
+
+AssertEquals_WSTRING(initialName, task.Name, 'Lifecycle progress must preserve the name');
+IF task.State.Stopped THEN
+	AssertTrue(task.Reset(), 'Completed task must accept Reset');
+	AssertEquals_WSTRING(initialName, task.Name, 'Name must remain complete after Reset');
+	AssertEquals_WSTRING(initialName, borrowedName, 'Previously borrowed name must remain valid after Reset');
+	testFinished := TRUE;
+	TEST_FINISHED();
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+  </POU>
+</TcPlcObject>

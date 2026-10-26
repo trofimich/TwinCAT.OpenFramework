@@ -1,0 +1,327 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="TimerTimingTest" Id="{cc18764d-0f40-410a-877f-f52214fe7822}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+SPDX-FileCopyrightText: © 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+SPDX-License-Identifier: MIT
+License: https://opensource.org/license/mit
+*)
+
+(*!
+<summary>Checks Timer pulse timing, zero intervals and same-cycle restart.</summary>
+<description>
+Each scenario owns its timer and uses one explicit Execute per cyclic test call. Tests observe internal
+TON.Q through Elapsed and require Triggered in the same call. No hardware or manual exception cleanup is
+used. AutomationRunner retains responsibility for the terminal allocation boundary.
+</description>
+*)
+FUNCTION_BLOCK TimerTimingTest EXTENDS TcUnit.FB_TestSuite
+VAR CONSTANT
+	//! <summary>Positive interval used to exercise completion over cyclic calls.</summary>
+	_PositiveInterval : TIME := T#30MS;
+	//! <summary>Long initial interval keeps the active-restart scenario away from natural expiry.</summary>
+	_ActiveInterval : TIME := T#1H;
+	//! <summary>Time budget for three positive runs and their cyclic observations.</summary>
+	_Deadline : TIME := T#10S;
+	//! <summary>Repeated completions reveal stale pulse or restart state.</summary>
+	_RunCount : UINT := 3;
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[PositiveIntervalSameCallRestart();
+ZeroIntervalSameCallRestart();
+RestartWhileRunning();]]></ST>
+    </Implementation>
+    <Method Name="PositiveIntervalSameCallRestart" Id="{719ab949-d5b6-417d-b2f6-42192af5a334}">
+      <Declaration><![CDATA[(*!
+<summary>Checks immediate completion pulses and same-cycle restart for positive intervals.</summary>
+<description>
+One explicit Execute per cyclic test call. Elapsed observes the internal TON.Q directly; a pulse must be
+visible in that same call. Three runs restart immediately, then a later idle Execute must clear the pulse.
+The deadline reports lack of progress; no fixed PLC period or exact wall-clock completion is assumed.
+</description>
+*)
+METHOD PositiveIntervalSameCallRestart
+VAR
+	exceptionEscaped : BOOL;
+	restartAccepted : BOOL;
+END_VAR
+VAR_INST
+	testFinished : BOOL;
+	initialized : BOOL;
+	awaitingPulseClear : BOOL;
+	completedRuns : UINT;
+	timer : TOF_Timers.Timer("timer");
+	deadline : Tc2_Standard.TON;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN
+	RETURN;
+END_IF
+
+TEST(__POUNAME());
+deadline(IN := TRUE, PT := _Deadline);
+IF deadline.Q THEN
+	AssertTrue(FALSE, 'Timer scenario exceeded its deadline');
+	testFinished := TRUE;
+	TEST_FINISHED();
+	RETURN;
+END_IF
+
+IF NOT initialized THEN
+	initialized := TRUE;
+	timer.Interval := _PositiveInterval;
+	IF NOT timer.Start() THEN
+		AssertTrue(FALSE, 'Prepared timer must accept Start');
+		testFinished := TRUE;
+		TEST_FINISHED();
+		RETURN;
+	END_IF
+	AssertFalse(timer.Triggered, 'Start must not expose a completion pulse');
+END_IF
+
+__TRY
+	timer.Execute();
+__CATCH
+	exceptionEscaped := TRUE;
+__ENDTRY
+
+IF exceptionEscaped THEN
+	AssertTrue(FALSE, 'Timer Execute must not throw in normal operation');
+	testFinished := TRUE;
+	TEST_FINISHED();
+	RETURN;
+END_IF
+
+IF awaitingPulseClear THEN
+	AssertFalse(timer.Triggered, 'Next cyclic Execute must clear the pulse');
+	AssertTrue(timer.Elapsed, 'TON.Q must remain TRUE until Reset');
+	AssertTrue(timer.State.Stopped, 'Idle Execute must not restart the timer');
+	testFinished := TRUE;
+	TEST_FINISHED();
+	RETURN;
+END_IF
+
+AssertEquals_BOOL(timer.Elapsed, timer.Triggered, 'Triggered must match the newly observed TON.Q without an extra cycle');
+IF timer.Elapsed <> timer.Triggered THEN
+	testFinished := TRUE;
+	TEST_FINISHED();
+	RETURN;
+END_IF
+
+IF timer.Triggered THEN
+	AssertTrue(timer.Triggered, 'Repeated getter reads must preserve the pulse');
+	AssertTrue(timer.State.Stopped, 'Timer must already be STOPPED on the completion call');
+	AssertTrue(timer.FinalStopReason.WorkDone, 'Natural timer completion must report WORK_DONE');
+	completedRuns := completedRuns + 1;
+
+	IF completedRuns >= _RunCount THEN
+		awaitingPulseClear := TRUE;
+	ELSE
+		__TRY
+			restartAccepted := timer.Restart();
+		__CATCH
+			exceptionEscaped := TRUE;
+		__ENDTRY
+		AssertFalse(exceptionEscaped, 'Restart on the completion cycle must not throw');
+		AssertTrue(restartAccepted, 'Restart must succeed in the completion cycle');
+		IF exceptionEscaped OR_ELSE NOT restartAccepted THEN
+			testFinished := TRUE;
+			TEST_FINISHED();
+			RETURN;
+		END_IF
+
+		AssertTrue(timer.State.Running, 'Restart must begin a new run immediately');
+		AssertFalse(timer.Elapsed, 'Restart must reset the old TON.Q');
+		AssertFalse(timer.Triggered, 'Restart must clear the consumed pulse');
+	END_IF
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="ZeroIntervalSameCallRestart" Id="{f892a727-25bf-4f7d-b098-fc8089a5c1a5}">
+      <Declaration><![CDATA[(*!
+<summary>Checks immediate completion pulses and same-cycle restart for zero intervals.</summary>
+<description>
+One explicit Execute per cyclic test call. Elapsed observes the internal TON.Q directly; a pulse must be
+visible in that same call. Three runs restart immediately, then a later idle Execute must clear the pulse.
+The deadline reports lack of progress; no fixed PLC period or exact wall-clock completion is assumed.
+</description>
+*)
+METHOD ZeroIntervalSameCallRestart
+VAR
+	exceptionEscaped : BOOL;
+	restartAccepted : BOOL;
+END_VAR
+VAR_INST
+	testFinished : BOOL;
+	initialized : BOOL;
+	awaitingPulseClear : BOOL;
+	completedRuns : UINT;
+	timer : TOF_Timers.Timer("timer");
+	deadline : Tc2_Standard.TON;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN
+	RETURN;
+END_IF
+
+TEST(__POUNAME());
+deadline(IN := TRUE, PT := _Deadline);
+IF deadline.Q THEN
+	AssertTrue(FALSE, 'Timer scenario exceeded its deadline');
+	testFinished := TRUE;
+	TEST_FINISHED();
+	RETURN;
+END_IF
+
+IF NOT initialized THEN
+	initialized := TRUE;
+	timer.Interval := TOF_Core.Times.MIN_VALUE;
+	IF NOT timer.Start() THEN
+		AssertTrue(FALSE, 'Prepared timer must accept Start');
+		testFinished := TRUE;
+		TEST_FINISHED();
+		RETURN;
+	END_IF
+	AssertFalse(timer.Triggered, 'Start must not expose a completion pulse');
+END_IF
+
+__TRY
+	timer.Execute();
+__CATCH
+	exceptionEscaped := TRUE;
+__ENDTRY
+
+IF exceptionEscaped THEN
+	AssertTrue(FALSE, 'Timer Execute must not throw in normal operation');
+	testFinished := TRUE;
+	TEST_FINISHED();
+	RETURN;
+END_IF
+
+IF awaitingPulseClear THEN
+	AssertFalse(timer.Triggered, 'Next cyclic Execute must clear the pulse');
+	AssertTrue(timer.Elapsed, 'TON.Q must remain TRUE until Reset');
+	AssertTrue(timer.State.Stopped, 'Idle Execute must not restart the timer');
+	testFinished := TRUE;
+	TEST_FINISHED();
+	RETURN;
+END_IF
+
+AssertTrue(timer.Elapsed, 'Zero interval must set TON.Q on its first Execute');
+IF NOT timer.Elapsed THEN
+	testFinished := TRUE;
+	TEST_FINISHED();
+	RETURN;
+END_IF
+
+AssertEquals_BOOL(timer.Elapsed, timer.Triggered, 'Triggered must match the newly observed TON.Q without an extra cycle');
+IF timer.Elapsed <> timer.Triggered THEN
+	testFinished := TRUE;
+	TEST_FINISHED();
+	RETURN;
+END_IF
+
+IF timer.Triggered THEN
+	AssertTrue(timer.Triggered, 'Repeated getter reads must preserve the pulse');
+	AssertTrue(timer.State.Stopped, 'Timer must already be STOPPED on the completion call');
+	AssertTrue(timer.FinalStopReason.WorkDone, 'Natural timer completion must report WORK_DONE');
+	completedRuns := completedRuns + 1;
+
+	IF completedRuns >= _RunCount THEN
+		awaitingPulseClear := TRUE;
+	ELSE
+		__TRY
+			restartAccepted := timer.Restart();
+		__CATCH
+			exceptionEscaped := TRUE;
+		__ENDTRY
+		AssertFalse(exceptionEscaped, 'Restart on the completion cycle must not throw');
+		AssertTrue(restartAccepted, 'Restart must succeed in the completion cycle');
+		IF exceptionEscaped OR_ELSE NOT restartAccepted THEN
+			testFinished := TRUE;
+			TEST_FINISHED();
+			RETURN;
+		END_IF
+
+		AssertTrue(timer.State.Running, 'Restart must begin a new run immediately');
+		AssertFalse(timer.Elapsed, 'Restart must reset the old TON.Q');
+		AssertFalse(timer.Triggered, 'Restart must clear the consumed pulse');
+	END_IF
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="RestartWhileRunning" Id="{e00d69db-3bf2-4190-bace-c6104bd6f378}">
+      <Declaration><![CDATA[(*!
+<summary>Restarts an active timer with zero interval in the same PLC cycle.</summary>
+<description>
+A long initial interval keeps the first run active. SetIntervalAndRestart must return RUNNING immediately,
+with no stale pulse; the next single cyclic Execute must complete the zero interval. The existing restart
+implementation may internally Execute cancellation once; it does not wait for another PLC cycle.
+</description>
+*)
+METHOD RestartWhileRunning
+VAR
+	exceptionEscaped : BOOL;
+	restartAccepted : BOOL;
+END_VAR
+VAR_INST
+	testFinished : BOOL;
+	initialized : BOOL;
+	timer : TOF_Timers.Timer("timer");
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN
+	RETURN;
+END_IF
+
+TEST(__POUNAME());
+
+IF NOT initialized THEN
+	initialized := TRUE;
+	timer.Interval := _ActiveInterval;
+	IF NOT timer.Start() THEN
+		AssertTrue(FALSE, 'Prepared timer must accept Start');
+		testFinished := TRUE;
+		TEST_FINISHED();
+		RETURN;
+	END_IF
+
+	__TRY
+		timer.Execute();
+		AssertTrue(timer.State.Running, 'Long interval must still be running before restart');
+		restartAccepted := timer.SetIntervalAndRestart(TOF_Core.Times.MIN_VALUE);
+	__CATCH
+		exceptionEscaped := TRUE;
+	__ENDTRY
+
+	AssertFalse(exceptionEscaped, 'Active restart must not throw');
+	AssertTrue(restartAccepted, 'Active restart must complete in the same cycle');
+	IF exceptionEscaped OR_ELSE NOT restartAccepted THEN
+		testFinished := TRUE;
+		TEST_FINISHED();
+		RETURN;
+	END_IF
+
+	AssertTrue(timer.State.Running, 'New zero interval must already be started');
+	AssertFalse(timer.Elapsed, 'Zero interval first evaluates TON in Execute');
+	AssertFalse(timer.Triggered, 'Restart itself must not retain a pulse');
+	RETURN;
+END_IF
+
+__TRY
+	timer.Execute();
+__CATCH
+	exceptionEscaped := TRUE;
+__ENDTRY
+
+AssertFalse(exceptionEscaped, 'First Execute of the restarted timer must not throw');
+AssertTrue(timer.Elapsed, 'Zero interval must immediately set TON.Q');
+AssertTrue(timer.Triggered, 'Restarted zero interval must trigger without another cycle');
+AssertTrue(timer.State.Stopped, 'Restarted timer must complete in that same Execute');
+AssertTrue(timer.FinalStopReason.WorkDone, 'Restarted timer must complete normally');
+testFinished := TRUE;
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+  </POU>
+</TcPlcObject>

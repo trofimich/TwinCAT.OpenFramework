@@ -14,9 +14,9 @@ One owner drives the queue and the lifecycles of its queued children. Children m
 enqueued and unique in this queue; callers must not independently drive them while queued. Only one child is
 active at a time. The dynamic list owns its storage but not child objects. Successful children are removed;
 unsuccessful current and waiting entries remain until cleared or reset. Empty queues keep running unless
-StopWhenNoPendingTasks is TRUE. Accepted cancellation advances the current child's cleanup without starting
-waiting children. An exception during child processing retains its first message, requests child cancellation
-and waits for completion before reporting FAILURE. An accepted external Cancel during that wait retains the
+StopWhenNoPendingTasks is TRUE. All stop reasons advance the current child's cleanup without starting
+waiting children. The base Task records a processing exception and enters STOPPING; OnStopping requests
+child cancellation and waits for completion before parent release. An accepted external Cancel during that wait retains the
 base Task cancellation result; the first failure is submitted to the log. No cleanup timeout is imposed.
 Descendants overriding queue hooks must preserve the inherited queue operations.
 </description>
@@ -32,13 +32,6 @@ VAR
 	
 	{attribute 'hide'} 
 	_StopWhenNoPendingTasks : BOOL;
-
-	//! <summary>Suppresses ordinary queue processing until the failed child's cleanup completes.</summary>
-	{attribute 'hide'}
-	_ChildFailurePending : BOOL;
-	//! <summary>Retains the first failure text across cycles without retaining an exception object.</summary>
-	{attribute 'hide'}
-	_ChildFailureMessage : TOF_Core.ERROR_MESSAGE;
 END_VAR]]></Declaration>
     <Implementation>
       <ST><![CDATA[]]></ST>
@@ -126,42 +119,39 @@ IF NOT __QUERYINTERFACE(taskInterface, getTaskByIndex) THEN
 END_IF]]></ST>
       </Implementation>
     </Method>
-    <Method Name="OnBeforeStop" Id="{4199b25e-a4f1-42bb-8e93-032ee175a88d}" FolderPath="Overriden members\">
+    <Method Name="OnStopping" Id="{535bd2ee-e5c8-4b16-a824-27dc49f7d538}" FolderPath="Overriden members\">
       <Declaration><![CDATA[(*!
-<summary>Requests cancellation if the current child is still running.</summary>
+<summary>Cancels and advances the current child before any parent termination.</summary>
 <description>
-This hook does not wait for child completion. OnCancelling waits during accepted queue cancellation;
-OnRunning waits after a child-processing exception. Preserve this action when extending the hook.
+Called by the common STOPPING phase after any result or exception. Never starts waiting children. Requests
+Cancel while the child is RUNNING, then advances it once. A Cancel exception is contained so Execute still
+gets a chance to progress; readiness remains FALSE for that call. Execute exceptions reach the base stopping
+handler, which retains the original result and retries. Refusal of Cancel does not imply completion.
+No child is removed or reset here. Additional descendant cleanup must combine readiness with this result.
 </description>
+<param name="readyToRelease">TRUE when no child is RUNNING and this stopping step completed normally.</param>
 *)
-METHOD PROTECTED OnBeforeStop]]></Declaration>
-      <Implementation>
-        <ST><![CDATA[IF _CurrentTask <> 0 AND_THEN _CurrentTask.State.Running THEN
-	_CurrentTask.Cancel();
-END_IF]]></ST>
-      </Implementation>
-    </Method>
-    <Method Name="OnCancelling" Id="{535bd2ee-e5c8-4b16-a824-27dc49f7d538}" FolderPath="Overriden members\">
-      <Declaration><![CDATA[(*!
-<summary>Advances the active child during accepted queue cancellation.</summary>
-<description>
-Does not start waiting tasks. Executes the current child while it remains RUNNING and permits parent
-stopping once no current child is RUNNING. Does not remove or reset the child or replace the parent's
-cancellation reason with the child result, including when Cancel was accepted during pending failure cleanup.
-Descendants waiting for additional resources must combine their readiness with this result.
-</description>
-<param name="readyToStop">TRUE when no current child remains RUNNING.</param>
-*)
-METHOD PROTECTED OnCancelling
+METHOD PROTECTED OnStopping
 VAR_OUTPUT
-	readyToStop : BOOL;
+	readyToRelease : BOOL;
+END_VAR
+VAR
+	cancelCallFailed : BOOL;
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[IF _CurrentTask <> 0 AND_THEN _CurrentTask.State.Running THEN
+	__TRY
+		_CurrentTask.Cancel();
+	__CATCH
+		// Advance the child even if its cancellation request was interrupted.
+		cancelCallFailed := TRUE;
+	__ENDTRY
+
 	_CurrentTask.Execute();
 END_IF
 
-readyToStop := _CurrentTask = 0 OR_ELSE NOT _CurrentTask.State.Running;]]></ST>
+readyToRelease := NOT cancelCallFailed
+	AND_THEN (_CurrentTask = 0 OR_ELSE NOT _CurrentTask.State.Running);]]></ST>
       </Implementation>
     </Method>
     <Method Name="OnCancelRequest" Id="{86d21a87-30df-4ecc-9666-f132ccbf24fc}" FolderPath="Overriden members\">
@@ -169,7 +159,7 @@ readyToStop := _CurrentTask = 0 OR_ELSE NOT _CurrentTask.State.Running;]]></ST>
 <summary>Forwards an accepted queue cancellation to its running child.</summary>
 <description>
 Called once by the task's Cancel path. Does not wait or inspect the child's refusal message; a child already
-stopping can refuse another cancellation request. OnCancelling advances completion. Preserve forwarding when
+stopping can refuse another cancellation request. OnStopping advances completion. Preserve forwarding when
 overriding this hook.
 </description>
 *)
@@ -185,127 +175,65 @@ END_IF]]></ST>
 <summary>Clears a stopped queue for reuse.</summary>
 <description>
 Releases list storage and drops current and waiting references without resetting or deleting children. Their
-owner prepares them before re-enqueueing. Clears the pending failure flag and retained message. READY Reset
+owner prepares them before re-enqueueing. Base Reset clears stop diagnostics. READY Reset
 does not invoke this hook; use ClearWaitingTasks to empty a READY queue. Descendants must preserve this step.
 </description>
 *)
 METHOD PROTECTED OnReset]]></Declaration>
       <Implementation>
         <ST><![CDATA[_SubTasks.Clear();
-_CurrentTask := 0;
-
-_ChildFailurePending := FALSE;
-_ChildFailureMessage := "";]]></ST>
+_CurrentTask := 0;]]></ST>
       </Implementation>
     </Method>
     <Method Name="OnRunning" Id="{caddc2fa-80a1-43cf-b16f-1400efcc8f23}" FolderPath="Overriden members\">
       <Declaration><![CDATA[(*!
-<summary>Starts or advances at most one current child per call.</summary>
+<summary>Starts or advances at most one current child per processing call.</summary>
 <description>
 An existing current child receives one Execute. Otherwise the first waiting child is selected and started;
-newly started work is normally advanced by a later call. Start refusal or an unexpected READY current yields
-ERROR. A successful stopped child is removed; other completed results are mapped from FinalStopReason and
-its message. Empty queues yield DONE only when StopWhenNoPendingTasks is TRUE. Removing the last successful
-child leaves BUSY for this call, so empty completion is observed on a subsequent call.
-An exception retains the first failure message and submits it to the log once. If formatting fails or yields
-empty text, uses a fixed diagnostic. While failure is pending, advances only the current child and requests
-Cancel on each call while it remains RUNNING. Repeated Execute or Cancel exceptions do not replace the first
-message or permit early parent stopping. Reports ERROR on a later call once no current child is RUNNING;
-does not remove that entry. Cleanup has no timeout. An accepted external queue Cancel switches to
-OnCancelling and preserves the base cancellation result. Terminal allocation failure still requires the
-owner's fatal boundary; these handlers do not clear its latch or authorize another cycle after terminal OOM.
+newly started work is advanced by a later call. Start refusal or an unexpected READY current yields ERROR.
+A successful stopped child is removed; other results are mapped from FinalStopReason and its message.
+An empty queue yields DONE only when StopWhenNoPendingTasks is TRUE. Removing the last successful child
+leaves BUSY until the next call. Exceptions propagate to the base Task failure handler, which records and
+logs diagnostics and enters STOPPING. OnStopping waits for child cleanup before parent release.
 </description>
 <param name="processingState">Queue progress; defaults to BUSY while waiting or advancing a child.</param>
-<param name="stopReasonMessage">Receives child refusal, unsuccessful completion or retained failure text.</param>
+<param name="stopReasonMessage">Receives child refusal or unsuccessful completion diagnostics.</param>
 *)
-METHOD PROTECTED OnRunning 
+METHOD PROTECTED OnRunning
 VAR_OUTPUT
 	processingState : TASK_PROCESSING_STATE;
 END_VAR
 VAR_IN_OUT
 	stopReasonMessage : TOF_Core.ERROR_MESSAGE;
-END_VAR
-VAR
-	childCallFailed : BOOL;
-	exceptionCode : __SYSTEM.ExceptionCode;
-	exception : TOF_Core.IException;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[__TRY
-	IF _ChildFailurePending THEN
-		IF _CurrentTask <> 0 AND_THEN _CurrentTask.State.Running THEN
-			_CurrentTask.Execute();
-		END_IF
+        <ST><![CDATA[IF _CurrentTask <> 0 THEN
+	_CurrentTask.Execute();
+ELSIF _SubTasks.Length > TOF_Core.SignedInt32.ZERO THEN
+	_CurrentTask := getTaskByIndex(0);
 
-		IF _CurrentTask = 0 OR_ELSE NOT _CurrentTask.State.Running THEN
-			processingState := TASK_PROCESSING_STATE.ERROR;
-			stopReasonMessage := _ChildFailureMessage;
-		END_IF
-	ELSE
-		IF _CurrentTask <> 0 THEN
-			_CurrentTask.Execute();
-		ELSE
-			IF _SubTasks.Length > 0 THEN
-				_CurrentTask := getTaskByIndex(0);
-
-				IF NOT _CurrentTask.Start(refuseReason => stopReasonMessage) THEN
-					processingState := TASK_PROCESSING_STATE.ERROR;
-					RETURN;
-				END_IF
-			ELSIF _StopWhenNoPendingTasks THEN
-				processingState := TASK_PROCESSING_STATE.DONE;
-			END_IF
-		END_IF
-
-		IF _CurrentTask <> 0 THEN
-			CASE _CurrentTask.State.Value OF
-				TASK_STATE.READY:
-					processingState := TASK_PROCESSING_STATE.ERROR;
-					stopReasonMessage := "Current task returned to READY before completion";
-
-				TASK_STATE.STOPPED:
-					IF _CurrentTask.FinalStopReason.WorkDone THEN
-						removeCurrentTask();
-					ELSE
-						processingState := GetProcessingStateByStopReason(_CurrentTask.FinalStopReason.Value);
-						stopReasonMessage := _CurrentTask.FinalStopReason.Message;
-					END_IF
-			END_CASE
-		END_IF
+	IF NOT _CurrentTask.Start(refuseReason => stopReasonMessage) THEN
+		processingState := TASK_PROCESSING_STATE.ERROR;
+		RETURN;
 	END_IF
-__CATCH(exceptionCode)
-	childCallFailed := TRUE;
-	processingState := TASK_PROCESSING_STATE.BUSY;
-__ENDTRY
-
-IF childCallFailed AND_THEN NOT _ChildFailurePending THEN
-	_ChildFailurePending := TRUE;
-	_ChildFailureMessage := "Child task execution failed";
-
-	// A formatter failure must not bypass the child's pending cleanup.
-	__TRY
-		exception := TOF_Core.ExceptionManager.GetLastException(exceptionCode, NamespaceName, __POUNAME(), __POSITION());
-		_ChildFailureMessage := exception.GetMessage();
-	__CATCH
-		// Keep the fallback text and any terminal allocation-failure latch.
-	__ENDTRY
-
-	IF _ChildFailureMessage = TOF_Core.WideStrings.Empty THEN
-		_ChildFailureMessage := "Child task execution failed";
-	END_IF
-
-	TOF_Core.LogManager.TryLogMessage(_ChildFailureMessage, TOF_Core.LOG_CATEGORY.ERROR, "TaskQueue", "OnRunning");
+ELSIF _StopWhenNoPendingTasks THEN
+	processingState := TASK_PROCESSING_STATE.DONE;
 END_IF
 
-IF _ChildFailurePending THEN
-	// Retry a failed request without replacing the first failure or abandoning Execute.
-	__TRY
-		IF _CurrentTask <> 0 AND_THEN _CurrentTask.State.Running THEN
-			_CurrentTask.Cancel();
-		END_IF
-	__CATCH
-		// The child remains owned by this lifecycle and is advanced on the next call.
-	__ENDTRY
+IF _CurrentTask <> 0 THEN
+	CASE _CurrentTask.State.Value OF
+		TASK_STATE.READY:
+			processingState := TASK_PROCESSING_STATE.ERROR;
+			stopReasonMessage := "Current task returned to READY before completion";
+
+		TASK_STATE.STOPPED:
+			IF _CurrentTask.FinalStopReason.WorkDone THEN
+				removeCurrentTask();
+			ELSE
+				processingState := GetProcessingStateByStopReason(_CurrentTask.FinalStopReason.Value);
+				stopReasonMessage := _CurrentTask.FinalStopReason.Message;
+			END_IF
+	END_CASE
 END_IF]]></ST>
       </Implementation>
     </Method>

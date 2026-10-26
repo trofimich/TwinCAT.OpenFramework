@@ -9,10 +9,13 @@ License: https://opensource.org/license/mit
 
 (*!
 <summary>The wrapper around Tc2_Standard.TON</summary>
+<description>A cyclic Execute that observes TON.Q completes the ordinary timer and exposes Triggered in the same call.
+Positive intervals are anchored by Start. Zero intervals first evaluate TON in Execute and trigger immediately.
+Keep calling Execute once per cycle to clear the completion pulse. Restart after completion can reset and
+start a new interval in the same cycle. Descendants with asynchronous stopping must define their own timing.</description>
 *)
 
 {attribute 'no_explicit_call' := 'do not call this function block directly'} 
-
 FUNCTION_BLOCK Timer EXTENDS TOF_Tasks.Task IMPLEMENTS ITimer
 VAR
 	{attribute 'hide'} 
@@ -86,13 +89,13 @@ PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
       <Declaration><![CDATA[(*!
 <summary>Anchor the positive interval to Start, without waiting for Execute.</summary>
 <description>
-A zero interval keeps the existing completion-without-trigger behavior.
+Zero does not call TON here; its first Execute evaluates TON and completes without an additional cycle.
 </description>
 *)
 
 METHOD PROTECTED OnBeforeStart]]></Declaration>
       <Implementation>
-        <ST><![CDATA[IF _Timer.PT > T#0S THEN
+        <ST><![CDATA[IF _Timer.PT > TOF_Core.Times.MIN_VALUE THEN
 	_Timer(IN := TRUE);
 END_IF]]></ST>
       </Implementation>
@@ -104,7 +107,14 @@ END_IF]]></ST>
       </Implementation>
     </Method>
     <Method Name="OnRunning" Id="{7ef78b76-773d-489d-bd9b-3058c24424bd}" FolderPath="Overriden\">
-      <Declaration><![CDATA[METHOD PROTECTED OnRunning
+      <Declaration><![CDATA[(*!
+<summary>Evaluates TON once and reports completion as soon as Q is TRUE.</summary>
+<description>Includes a zero interval. The base Task immediately advances synchronous stopping, so the ordinary
+Timer reaches STOPPED and Triggered in the same Execute. Does not restart or reset TON.</description>
+<param name="processingState">DONE when TON.Q is TRUE; otherwise the default BUSY.</param>
+<param name="stopReasonMessage">No diagnostic message is added by normal timing.</param>
+*)
+METHOD PROTECTED OnRunning
 VAR_OUTPUT
 	processingState : TOF_Tasks.TASK_PROCESSING_STATE;
 END_VAR
@@ -112,13 +122,9 @@ VAR_IN_OUT
 	stopReasonMessage : TOF_Core.ERROR_MESSAGE;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[IF _Timer.PT > T#0S THEN
-	_Timer(IN := TRUE);
-	
-	IF _timer.Q THEN
-		processingState := TOF_Tasks.TASK_PROCESSING_STATE.DONE;
-	END_IF
-ELSE
+        <ST><![CDATA[_Timer(IN := TRUE);
+
+IF _Timer.Q THEN
 	processingState := TOF_Tasks.TASK_PROCESSING_STATE.DONE;
 END_IF]]></ST>
       </Implementation>
@@ -202,7 +208,9 @@ SetIntervalAndRestart := Start();]]></ST>
     </Method>
     <Property Name="Triggered" Id="{a5955db5-1801-4da6-8fb4-f5bd42f9b8a4}">
       <Declaration><![CDATA[(*!
-<summary>True after successful timer completion, until the next Execute call.</summary>
+<summary>Reports successful timer completion in the Execute that observes TON.Q.</summary>
+<description>Read after Execute. Remains TRUE until the next Execute, Reset or successful restart.
+Repeated reads have no side effects. The ordinary Timer needs no additional stopping cycle.</description>
 *)
 
 {attribute 'monitoring' := 'call'}

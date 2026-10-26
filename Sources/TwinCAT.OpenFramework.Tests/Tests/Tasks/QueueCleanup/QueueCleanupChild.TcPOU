@@ -10,7 +10,11 @@ License: https://opensource.org/license/mit
 (*!
 <summary>Models a child whose Execute can throw while its lifecycle remains RUNNING.</summary>
 <description>
-Test-only implementation of ITask, independent of the base Task exception handler. One owner drives it.
+Test-only implementation of ITask, independent of the base Task exception handler. It deliberately lets
+Execute and Cancel exceptions reach the parent queue while remaining RUNNING. Deriving from Task would
+contain these faults inside the child and would not exercise the queue's handling of a throwing ITask.
+Use Task descendants for ordinary lifecycle tests; this fixture models the interface failure boundary.
+One owner drives it.
 Configure inputs before Start; HoldCleanup may be cleared between calls to release the artificial hold.
 Cancellation needs three successful Execute steps; injected cleanup failures do not count as steps.
 Public outputs are observations only. Uses no hardware; exceptions are cleaned at the PLC task boundary.
@@ -43,7 +47,7 @@ VAR CONSTANT
 END_VAR
 VAR
 	_ClassName : STRING := __POUNAME();
-	_Name : WSTRING := "Queue cleanup child";
+	_Name : WSTRING := TO_WSTRING(__POUNAME());
 	_State : TOF_Tasks.TASK_STATE;
 	_StateChanged : BOOL;
 	_Substate : TOF_Tasks.TASK_RUNNING_SUBSTATE := TOF_Tasks.TASK_RUNNING_SUBSTATE.PROCESSING;
@@ -66,7 +70,7 @@ END_VAR]]></Declaration>
 <summary>Injects configured request failures, then accepts cooperative cancellation.</summary>
 <description>
 Injected failures occur before acceptance and leave RUNNING intact. Repeated accepted cancellation refuses.
-Completion still requires Execute; no cleanup is performed by this method.
+Acceptance selects STOPPING. Completion still requires Execute; no cleanup is performed by this method.
 </description>
 <param name="refuseReason">Reason for refusal; meaningful on FALSE.</param>
 *)
@@ -90,6 +94,7 @@ IF _CancelFailuresLeft > 0 THEN
 END_IF
 
 _CancelRequested := TRUE;
+_Substate := TOF_Tasks.TASK_RUNNING_SUBSTATE.STOPPING;
 _Reason := TOF_Tasks.TASK_STOP_REASON.EXTERNAL_CANCEL;
 _Message := "Child cancellation requested";
 Cancel := TRUE;]]></ST>
@@ -239,7 +244,8 @@ PROPERTY OriginalStopReason : REFERENCE TO TOF_Tasks.TaskStopReason]]></Declarat
       <Declaration><![CDATA[(*!
 <summary>Clears a stopped fixture for reuse without changing its configuration.</summary>
 <description>
-READY is a successful no-op; RUNNING refuses. Clears observations, pending faults and result text.
+READY is a successful no-op; RUNNING refuses. Clears observations, pending faults and result text,
+and restores the initial PROCESSING substate for reuse.
 </description>
 <param name="refuseReason">Reason for refusal; meaningful on FALSE.</param>
 *)
@@ -258,6 +264,7 @@ IF _State = TOF_Tasks.TASK_STATE.READY THEN
 END_IF
 
 _State := TOF_Tasks.TASK_STATE.READY;
+_Substate := TOF_Tasks.TASK_RUNNING_SUBSTATE.PROCESSING;
 _StateChanged := TRUE;
 _Reason := TOF_Tasks.TASK_STOP_REASON.WORK_DONE;
 _Message := "";

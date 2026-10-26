@@ -10,14 +10,19 @@ License: https://opensource.org/license/mit
 {attribute 'no_explicit_call' := 'do not call this function block directly'} 
 (*!
 <summary>Checks whether a filesystem directory exists through cyclic task execution.</summary>
-<description>Diagnostic string inputs are borrowed only during the call; retained diagnostic text is copied into owned storage.</description>
+<description>Stopping closes an unfinished native enumeration before reporting completion. Diagnostic string
+inputs are borrowed only during the call; retained diagnostic text is copied into owned storage.</description>
 *)
 FUNCTION_BLOCK CheckDirectoryExists EXTENDS TOF_Tasks.Task IMPLEMENTS IFileSystemTask
 VAR
 	{attribute 'hide'} 
 	_ClassName : STRING := __POUNAME();
 
-    _EnumFindFile : Tc2_Utilities.FB_EnumFindFileEntry;	
+	_EnumFindFile : Tc2_Utilities.FB_EnumFindFileEntry;
+	//! <summary>Records whether a search command may still own native enumeration resources.</summary>
+	_EnumerationStarted : BOOL;
+	//! <summary>Prevents repeating the abort command while its completion is pending.</summary>
+	_EnumerationAbortIssued : BOOL;
 	
 	_DirectoryExists : BOOL;
 	
@@ -97,24 +102,61 @@ PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
         </Implementation>
       </Get>
     </Property>
-    <Method Name="OnBeforeStop" Id="{3f5e6d21-6c7f-4e76-a89e-10f3fb296d85}" FolderPath="Members to override\">
-      <Declaration><![CDATA[METHOD PROTECTED OnBeforeStop]]></Declaration>
+    <Method Name="OnStopping" Id="{3f5e6d21-6c7f-4e76-a89e-10f3fb296d85}" FolderPath="Members to override\">
+      <Declaration><![CDATA[(*!
+<summary>Advances directory stop actions before reporting termination.</summary>
+<description>
+Used for every stop reason. Drains a pending search before deciding whether its native enumeration must be
+aborted. An unfinished search receives one abort command with a rising bExecute edge; readiness waits for
+that command to complete. End-of-enumeration and search errors need no explicit abort. No new search starts.
+</description>
+<param name="readyToRelease">TRUE when the directory FBs have finished their pending requests.</param>
+*)
+METHOD PROTECTED OnStopping
+VAR_OUTPUT
+	readyToRelease : BOOL;
+END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[_EnumFindFile(eCmd := Tc2_Utilities.E_EnumCmdType.eEnumCmd_Abort);]]></ST>
+        <ST><![CDATA[IF _EnumerationStarted THEN
+	_EnumFindFile(bExecute := FALSE);
+
+	IF NOT _EnumFindFile.bBusy THEN
+		IF _EnumFindFile.bEOE OR_ELSE _EnumFindFile.bError THEN
+			_EnumerationStarted := FALSE;
+		ELSIF NOT _EnumerationAbortIssued THEN
+			_EnumFindFile(bExecute := TRUE, eCmd := Tc2_Utilities.E_EnumCmdType.eEnumCmd_Abort);
+			_EnumerationAbortIssued := TRUE;
+		ELSE
+			_EnumerationStarted := FALSE;
+		END_IF
+	END_IF
+END_IF
+
+readyToRelease := NOT _EnumerationStarted;]]></ST>
       </Implementation>
     </Method>
     <Method Name="OnReset" Id="{fe840260-57c7-49f3-acb3-979b08331a03}" FolderPath="Members to override\">
-      <Declaration><![CDATA[METHOD PROTECTED OnReset ]]></Declaration>
+      <Declaration><![CDATA[(*!
+<summary>Clears the completed search and its per-run cleanup state for reuse.</summary>
+<description>Called only after stopping has completed; it does not abandon a pending enumeration command.</description>
+*)
+METHOD PROTECTED OnReset ]]></Declaration>
       <Implementation>
         <ST><![CDATA[_EnumFindFile(bExecute := FALSE);
 
+_EnumerationStarted := FALSE;
+_EnumerationAbortIssued := FALSE;
 _DirectoryExists := FALSE;]]></ST>
       </Implementation>
     </Method>
     <Method Name="OnRunning" Id="{a2b5ac80-a25f-47e6-8333-9adc249a4985}" FolderPath="Members to override\">
       <Declaration><![CDATA[(*!
-<summary>Prepares diagnostic text locally before passing it to read-only logging or exception parameters.</summary>
-<description>Computed diagnostic strings are held in local buffers for the duration of the receiving call.</description>
+<summary>Checks one directory search and reports whether an entry exists.</summary>
+<description>Starts the search once, then advances it until an entry, end-of-enumeration or error is reported.
+Early completion leaves native enumeration cleanup to OnStopping. Computed diagnostics are held in local
+buffers for the duration of the receiving call.</description>
+<param name="processingState">DONE after a completed search; BUSY while the command is pending.</param>
+<param name="stopReasonMessage">Not changed; exceptions provide search failure diagnostics.</param>
 *)
 METHOD PROTECTED OnRunning
 VAR_OUTPUT
@@ -143,6 +185,7 @@ END_VAR]]></Declaration>
 	_EnumFindFile.eCmd := Tc2_Utilities.E_EnumCmdType.eEnumCmd_First;
 END_IF
 
+_EnumerationStarted := TRUE;
 _EnumFindFile(bExecute := TRUE);
 
 IF _EnumFindFile.bError THEN
@@ -156,8 +199,6 @@ IF _EnumFindFile.bError THEN
 	_FindDirectoryException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), formattedExceptionMessage, errorCode := _EnumFindFile.nErrId);
 ELSIF NOT _EnumFindFile.bBusy THEN	
 	IF NOT _EnumFindFile.bEOE THEN
-		_EnumFindFile(eCmd := Tc2_Utilities.E_EnumCmdType.eEnumCmd_Abort);
-
 		_DirectoryExists := TRUE;		
 	END_IF
 
