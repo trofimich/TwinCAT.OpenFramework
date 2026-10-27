@@ -1,0 +1,244 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="EventLoggerMessage" Id="{a049b4cd-7b52-406f-8338-e90284bad315}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+SPDX-FileCopyrightText: © 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+SPDX-License-Identifier: MIT
+License: https://opensource.org/license/mit
+*)
+
+(*!
+<summary>Creates and sends a TwinCAT event message.</summary>
+<description>
+Creates the underlying EventLogger instance on the first successful creation attempt and retains it for
+subsequent sends. A concrete descendant supplies EventEntry, concrete ClassName and NamespaceName, and its
+public send methods using InternalSend or InternalTrySend. JSON inputs are borrowed only for each call.
+Application method calls and property access belong to one owner task per instance, including configuration
+and descendant send methods. Calls must not overlap or reenter the same instance through overridden
+properties or callbacks. Use a separate instance for another task. The instance provides no lock or
+runtime ownership check; InternalTrySend does not make an ownership violation safe or guarantee FALSE.
+Keep the JSON input stable throughout the send. Shared payloads and state used by descendants require
+separate synchronization or owner-task copies; separate message instances do not protect that data.
+FB_exit requests release without creating framework exceptions or logging release errors.
+Configure source information before sending; later changes are not guaranteed to propagate to an existing native message.
+The caller provides cyclic-task exception cleanup and calls RaiseIfAllocationFailed at the cyclic-task
+boundary outside Try and recoverable handlers.
+Ownership examples and future shared-service guidance: Guides/JsonAndEventLoggerOwnership.md in the repository.
+</description>
+*)
+FUNCTION_BLOCK ABSTRACT EventLoggerMessage EXTENDS Object
+VAR
+	{attribute 'OPC.UA.DA':='0'}
+	_Created : BOOL;
+	{attribute 'OPC.UA.DA':='0'}
+	_MessageSourceInfo : Tc3_EventLogger.FB_TcSourceInfo;
+	{attribute 'OPC.UA.DA':='0'}
+    _Message : Tc3_EventLogger.FB_TcMessage; 	
+END_VAR
+]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[]]></ST>
+    </Implementation>
+    <Folder Name="Internal methods" Id="{264a5dfc-c0e9-4ee3-9c5a-ef08bf6b43b8}" />
+    <Property Name="EventEntry" Id="{cfcb6588-c083-46cd-b12c-abc528a37865}">
+      <Declaration><![CDATA[(*!
+<summary>Supplies the event definition used when creating the native message.</summary>
+<description>The send paths read this property on each creation attempt until CreateEx succeeds.
+Subsequent sends reuse that native message without reading EventEntry again. Changing the value returned
+by an override does not recreate an already created message.</description>
+*)
+PROPERTY ABSTRACT EventEntry : TcEventEntry]]></Declaration>
+      <Get Name="Get" Id="{fe0676bf-7c24-4ac3-b1f7-ff4fcb4d223b}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="FB_exit" Id="{fb14e8bb-ba80-45fa-b23b-2e223e444ab0}">
+      <Declaration><![CDATA[(*!
+<summary>Releases the EventLogger instance if it was created.</summary>
+<description>Calls FB_TcMessage.Release once. Its HRESULT is ignored during destruction; failure is not converted into a framework exception and successful release is not guaranteed.</description>
+<param name="bInCopyCode">Indicates destruction of the old instance during online change.</param>
+*)
+
+METHOD FB_exit : BOOL
+VAR_INPUT
+	bInCopyCode : BOOL; 
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF _Created THEN
+	_Message.Release();
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="Guid" Id="{2979405f-07bb-4273-937e-0edbddf12e16}">
+      <Declaration><![CDATA[(*!
+<summary>Gets or sets the GUID in the native source information passed to CreateEx.</summary>
+<description>Reads and writes the stored source information. Assignment does not recreate an existing
+message. Propagation of later source changes to an already created native message is not guaranteed by this adapter.</description>
+*)
+PROPERTY Guid : Global.GUID]]></Declaration>
+      <Get Name="Get" Id="{584a4ad9-f9f8-4e4a-83c1-b5a48219883f}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[Guid := _MessageSourceInfo.guid;]]></ST>
+        </Implementation>
+      </Get>
+      <Set Name="Set" Id="{533b5c6f-c4f6-464a-896d-fe2fa476c69d}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[_MessageSourceInfo.guid := Guid;]]></ST>
+        </Implementation>
+      </Set>
+    </Property>
+    <Property Name="Id" Id="{305927a7-3e1a-4faa-a795-1d2ccc9101c4}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+(*!
+<summary>Gets or sets the source identifier in the native source information passed to CreateEx.</summary>
+<description>This is the source ID, not EventEntry's event ID. Assignment updates stored source information
+without recreating an existing message; propagation of later changes is not guaranteed by this adapter.</description>
+*)
+PROPERTY Id : UDINT]]></Declaration>
+      <Get Name="Get" Id="{9ec56888-18b1-4a71-9256-e4d480b5c8a5}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[Id := _MessageSourceInfo.nId;]]></ST>
+        </Implementation>
+      </Get>
+      <Set Name="Set" Id="{dbf68360-35a6-457d-8981-d14dc1ec0734}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[_MessageSourceInfo.nId := Id;]]></ST>
+        </Implementation>
+      </Set>
+    </Property>
+    <Method Name="InternalSend" Id="{16c00278-1a4a-4566-95d3-2ecdf953b918}" FolderPath="Internal methods\">
+      <Declaration><![CDATA[(*!
+<summary>Creates the native event message when needed, sets its JSON payload and sends it.</summary>
+<description>
+Requires S_OK from CreateEx, SetJsonAttribute and Send. A reported failure raises a framework exception
+because this method has no failure result; native or overridden-property exceptions propagate.
+After successful CreateEx the instance is retained even if setting the payload or sending fails.
+A later call sets its payload again before sending; prior effects are not rolled back and there is no automatic retry.
+Borrows the JSON for the call. The caller provides cyclic-task exception cleanup and the terminal allocation-failure boundary.
+Overrides must preserve failure reporting and the lifetime of the borrowed input.
+</description>
+<param name="jsonData">JSON payload supplied to the native event message.</param>
+*)
+METHOD PROTECTED InternalSend
+VAR_IN_OUT CONSTANT
+	jsonData : STRING(1000);
+END_VAR
+VAR
+	formattedExceptionMessage : WSTRING(255);
+
+	result : HRESULT;
+	standardException : StandardException;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF NOT _Created THEN
+	result := _Message.CreateEx(EventEntry, _MessageSourceInfo);
+ 
+	IF result <> Tc3_Module.S_OK THEN
+		formattedExceptionMessage := WideStrings.Concat255("Message ", TO_WSTRING(ClassName), ": FB_TcMessage.CreateEx failed with HRESULT = ", TO_WSTRING(result));
+
+		standardException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), formattedExceptionMessage);
+	ELSE
+		_Created := TRUE;
+	END_IF
+END_IF
+
+result := _Message.SetJsonAttribute(jsonData);
+
+IF result <> Tc3_Module.S_OK THEN
+	formattedExceptionMessage := WideStrings.Concat255("Message ", TO_WSTRING(ClassName), ": FB_TcMessage.SetJsonAttribute failed with HRESULT = ", TO_WSTRING(result));
+
+	standardException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), formattedExceptionMessage);
+END_IF
+
+result := _Message.Send(0); 
+
+IF result <> Tc3_Module.S_OK THEN
+	formattedExceptionMessage := WideStrings.Concat255("Message ", TO_WSTRING(ClassName), ": FB_TcMessage.Send failed with HRESULT = ", TO_WSTRING(result));
+
+	standardException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), formattedExceptionMessage);
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="InternalTrySend" Id="{68dfd72a-c658-43e1-a5a1-47120aca443e}" FolderPath="Internal methods\">
+      <Declaration><![CDATA[(*!
+<summary>Attempts to create and send an EventLogger message with JSON data.</summary>
+<description>Returns TRUE when Send returns S_OK. HRESULT failures and caught exceptions return FALSE without further logging. A successfully created instance is retained even if a later step fails; FALSE does not roll back earlier EventLogger operations. Any existing terminal allocation failure remains latched.</description>
+<param name="jsonData">JSON text borrowed for this call.</param>
+*)
+METHOD PROTECTED InternalTrySend : BOOL
+VAR_IN_OUT CONSTANT
+	jsonData : STRING(1000);
+END_VAR
+VAR
+	result : HRESULT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[__TRY
+	IF NOT _Created THEN
+		result := _Message.CreateEx(EventEntry, _MessageSourceInfo);
+	 
+		IF result <> Tc3_Module.S_OK THEN
+			RETURN;
+		ELSE
+			_Created := TRUE;
+		END_IF
+	END_IF
+
+	result := _Message.SetJsonAttribute(jsonData);
+
+	IF result <> Tc3_Module.S_OK THEN
+		RETURN;
+	END_IF
+
+	result := _Message.Send(0); 
+
+	IF result <> Tc3_Module.S_OK THEN
+		RETURN;
+	END_IF
+
+	InternalTrySend := TRUE;
+__CATCH
+	InternalTrySend := FALSE;
+__ENDTRY]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="SelfSize" Id="{d575efeb-47c0-44df-a18b-e52efa8b4a78}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+PROPERTY SelfSize : ULINT]]></Declaration>
+      <Get Name="Get" Id="{c32c2159-782c-45d9-893e-8391511bcab2}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[SelfSize := XSIZEOF(THIS^);]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="SourceName" Id="{24b229d3-7d5e-4881-bb69-0b00c4345619}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+(*!
+<summary>Gets or sets the source name in the native source information passed to CreateEx.</summary>
+<description>Assignment copies the name into stored source information without recreating an existing
+message; propagation of later changes to an already created message is not guaranteed by this adapter.</description>
+*)
+PROPERTY SourceName : STRING(255)]]></Declaration>
+      <Get Name="Get" Id="{f6ecdcd4-6ec8-49c1-a1f0-131098d6372e}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[SourceName := _MessageSourceInfo.sName;]]></ST>
+        </Implementation>
+      </Get>
+      <Set Name="Set" Id="{fa88b1b1-0d00-4c47-85d8-56e6d9f3293d}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[_MessageSourceInfo.sName := SourceName;]]></ST>
+        </Implementation>
+      </Set>
+    </Property>
+  </POU>
+</TcPlcObject>

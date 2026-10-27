@@ -18,13 +18,17 @@ VAR
 	_ToYPosition : LREAL;
 	
 	_PositionChangeTimer : TOF_Timers.Timer("PositionChangeTimer");
+	//! <summary>Time left before the next position step, captured when suspension begins.</summary>
+	_RemainingPositionChangeTime : TIME;
 END_VAR
 VAR CONSTANT
+	//! <summary>Delay before the first position step and between subsequent steps; suspended time is excluded.</summary>
 	POSITION_CHANGE_TIMER_INTERVAL : TIME := T#10MS;
 END_VAR]]></Declaration>
     <Implementation>
       <ST><![CDATA[]]></ST>
     </Implementation>
+    <Folder Name="Overriden methods" Id="{7fdac448-b90e-4952-a44c-a57d67c7342e}" />
     <Property Name="ClassName" Id="{a66a843c-b1e9-49fb-b1bd-eb30c1a59478}">
       <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
 PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
@@ -56,8 +60,22 @@ PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
         </Implementation>
       </Get>
     </Property>
-    <Method Name="OnRunning" Id="{531b20aa-04ec-447d-8df6-e631e6e7a6ba}">
-      <Declaration><![CDATA[METHOD PROTECTED OnRunning : TOF_Workflow.ACTIVITY_RUNNING_STATE
+    <Method Name="OnRunning" Id="{531b20aa-04ec-447d-8df6-e631e6e7a6ba}" FolderPath="Overriden methods\">
+      <Declaration><![CDATA[(*!
+<summary>Moves each coordinate by one unit after each position-change interval.</summary>
+<description>
+A fresh run restarts the timer with the full interval; resuming restarts it with the remaining time
+captured by OnStopping, excluding suspended time. After a resumed step, subsequent steps use the full
+interval again. An elapsed interval advances at most one step per call; missed intervals are not replayed.
+A refused timer restart returns WORK_HALTED with a diagnostic, preserving any coordinate changes already
+made. Variable lookup and conversion exceptions propagate to the activity's failure handling.
+The activity owner drives these callbacks sequentially; they do not drive the activity recursively.
+</description>
+<param name="startRunning">Begins a fresh run, including reuse after an earlier run.</param>
+<param name="startResuming">Resumes the remaining interval saved during suspension.</param>
+<param name="haltReason">Describes a refused timer restart when WORK_HALTED is returned.</param>
+*)
+METHOD PROTECTED OnRunning : TOF_Workflow.ACTIVITY_RUNNING_STATE
 VAR_INPUT
 	startRunning : BOOL;
 	startResuming : BOOL;
@@ -76,11 +94,15 @@ VAR
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[IF startRunning THEN
-	_PositionChangeTimer.Interval := POSITION_CHANGE_TIMER_INTERVAL;
-	_PositionChangeTimer.Start();
+	IF NOT _PositionChangeTimer.SetIntervalAndRestart(POSITION_CHANGE_TIMER_INTERVAL) THEN
+		haltReason := "Could not start the position-change timer";
+		OnRunning := TOF_Workflow.ACTIVITY_RUNNING_STATE.WORK_HALTED;
+	END_IF
 ELSIF startResuming THEN
-	_PositionChangeTimer.Interval := POSITION_CHANGE_TIMER_INTERVAL - _PositionChangeTimer.ElapsedTime;
-	_PositionChangeTimer.Start();
+	IF NOT _PositionChangeTimer.SetIntervalAndRestart(_RemainingPositionChangeTime) THEN
+		haltReason := "Could not resume the position-change timer";
+		OnRunning := TOF_Workflow.ACTIVITY_RUNNING_STATE.WORK_HALTED;
+	END_IF
 ELSE
 	_PositionChangeTimer.Execute();
 
@@ -117,7 +139,10 @@ ELSE
 		END_IF
 		
 		IF currentXPosition <> _ToXPosition OR_ELSE currentYPosition <> _ToYPosition THEN
-			_PositionChangeTimer.Start();
+			IF NOT _PositionChangeTimer.SetIntervalAndRestart(POSITION_CHANGE_TIMER_INTERVAL) THEN
+				haltReason := "Could not restart the position-change timer";
+				OnRunning := TOF_Workflow.ACTIVITY_RUNNING_STATE.WORK_HALTED;
+			END_IF
 		ELSE		
 			OnRunning := TOF_Workflow.ACTIVITY_RUNNING_STATE.WORK_COMPLETED;
 		END_IF
@@ -125,8 +150,21 @@ ELSE
 END_IF]]></ST>
       </Implementation>
     </Method>
-    <Method Name="OnStopping" Id="{9d74ecb1-a096-400b-ae1c-aa5003999773}">
-      <Declaration><![CDATA[METHOD PROTECTED OnStopping : TOF_Workflow.ACTIVITY_STOPPING_STATE
+    <Method Name="OnStopping" Id="{9d74ecb1-a096-400b-ae1c-aa5003999773}" FolderPath="Overriden methods\">
+      <Declaration><![CDATA[(*!
+<summary>Stops the position-change timer and preserves the remaining interval on suspension.</summary>
+<description>
+On the first suspension call, updates the timer and saves its remaining interval before cancellation.
+If the interval has elapsed, saves zero so the first Execute after resume can perform the pending step.
+No coordinates change here. Cancels an active timer and advances stopping; WORK_STOPPED is returned
+only after it is no longer running. Further stopping calls preserve the saved remaining time.
+Exceptions propagate to the activity's failure handling; captured time and timer effects are not rolled back.
+</description>
+<param name="startCancelling">Marks the initial cancellation request; cancellation does not save a resume interval.</param>
+<param name="startSuspending">Marks the initial suspension request and captures the remaining interval once.</param>
+<param name="haltReason">No halt diagnostic is produced by ordinary timer stopping.</param>
+*)
+METHOD PROTECTED OnStopping : TOF_Workflow.ACTIVITY_STOPPING_STATE
 VAR_INPUT
 	startCancelling : BOOL;
 	startSuspending : BOOL;
@@ -135,7 +173,24 @@ VAR_OUTPUT
 	haltReason : WSTRING(255);
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[OnStopping := TOF_Workflow.ACTIVITY_STOPPING_STATE.WORK_STOPPED;]]></ST>
+        <ST><![CDATA[IF startSuspending THEN
+	_PositionChangeTimer.Execute();
+
+	IF _PositionChangeTimer.ElapsedTime < _PositionChangeTimer.Interval THEN
+		_RemainingPositionChangeTime := _PositionChangeTimer.Interval - _PositionChangeTimer.ElapsedTime;
+	ELSE
+		_RemainingPositionChangeTime := TOF_Core.Times.MIN_VALUE;
+	END_IF
+END_IF
+
+IF _PositionChangeTimer.State.Running THEN
+	_PositionChangeTimer.Cancel();
+	_PositionChangeTimer.Execute();
+END_IF
+
+IF NOT _PositionChangeTimer.State.Running THEN
+	OnStopping := TOF_Workflow.ACTIVITY_STOPPING_STATE.WORK_STOPPED;
+END_IF]]></ST>
       </Implementation>
     </Method>
     <Property Name="SelfSize" Id="{26396f5b-789d-4f77-902f-bac2f3ab39b8}">

@@ -1,4 +1,4 @@
-<?xml version="1.0" encoding="utf-8"?>
+﻿<?xml version="1.0" encoding="utf-8"?>
 <TcPlcObject Version="1.1.0.1">
   <POU Name="QueuedLogger" Id="{b2c6c979-01fa-442b-855a-08f1c69ad0aa}" SpecialFunc="None">
     <Declaration><![CDATA[(*
@@ -37,37 +37,12 @@ END_VAR]]></Declaration>
 <summary>Provides the queued logger ClassName.</summary>
 <description>Borrowed read-only class name, unchanged for the instance lifetime.</description>
 *)
+{attribute 'monitoring' := 'call'}
 PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
       <Get Name="Get" Id="{47c4d366-ef9b-46f6-973f-a50ac03601e9}">
         <Declaration><![CDATA[]]></Declaration>
         <Implementation>
           <ST><![CDATA[ClassName REF= _ClassName;]]></ST>
-        </Implementation>
-      </Get>
-    </Property>
-    <Property Name="NamespaceName" Id="{e4c570a2-4e96-49f0-a27c-676afc330870}">
-      <Declaration><![CDATA[(*!
-<summary>Provides the queued logger NamespaceName.</summary>
-<description>Borrowed read-only library namespace.</description>
-*)
-PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
-      <Get Name="Get" Id="{fdab0a59-862f-4095-ad24-46853b03c6c5}">
-        <Declaration><![CDATA[]]></Declaration>
-        <Implementation>
-          <ST><![CDATA[NamespaceName REF= CurrentNamespace.Name;]]></ST>
-        </Implementation>
-      </Get>
-    </Property>
-    <Property Name="SelfSize" Id="{ff022a1b-f97c-47dc-8883-4a7825e259a0}">
-      <Declaration><![CDATA[(*!
-<summary>Provides the queued logger SelfSize.</summary>
-<description>Size of this concrete instance, including its fixed queue storage.</description>
-*)
-PROPERTY SelfSize : ULINT]]></Declaration>
-      <Get Name="Get" Id="{7409f164-cfa1-4153-872d-92608066cdb6}">
-        <Declaration><![CDATA[]]></Declaration>
-        <Implementation>
-          <ST><![CDATA[SelfSize := XSIZEOF(THIS^);]]></ST>
         </Implementation>
       </Get>
     </Property>
@@ -109,135 +84,6 @@ IF _OwnerTaskIndex = 0 THEN
 END_IF
 
 _QueueLock.Leave();]]></ST>
-      </Implementation>
-    </Method>
-    <Method Name="TryLogMessage" Id="{d1cab8b8-026e-4345-b782-1bb6899ce79b}">
-      <Declaration><![CDATA[(*!
-<summary>Copies one message and its optional number into the bounded queue.</summary>
-<description>Borrows inputs only for this call; the caller must keep them stable while copied. Returns FALSE before configuration, at capacity, on lock failure or on a caught exception. Commits the entry only after copying its contents. Does not call the backend or allocate text storage.</description>
-<param name="category">Category copied into the queued record.</param>
-<param name="message">Text copied into owned queue storage.</param>
-<param name="messageNumber">Optional borrowed number copied by value.</param>
-*)
-METHOD TryLogMessage : BOOL
-VAR_INPUT
-	category : TOF_Core.LOG_CATEGORY;
-END_VAR
-VAR_IN_OUT CONSTANT
-	message : TOF_Core.ERROR_MESSAGE;
-END_VAR
-VAR_INPUT
-	messageNumber : REFERENCE TO ULINT := 0;
-END_VAR
-VAR
-	lockHeld : BOOL;
-END_VAR]]></Declaration>
-      <Implementation>
-        <ST><![CDATA[__TRY
-	IF NOT _QueueLock.Enter() THEN
-		RETURN;
-	END_IF
-
-	lockHeld := TRUE;
-
-	IF _OwnerTaskIndex <> 0 AND_THEN _Count < Parameters.QUEUED_LOGGER_CAPACITY THEN
-		_Queue[_WriteIndex].Message := message;
-		_Queue[_WriteIndex].Category := category;
-		_Queue[_WriteIndex].HasMessageNumber := __ISVALIDREF(messageNumber);
-
-		IF _Queue[_WriteIndex].HasMessageNumber THEN
-			_Queue[_WriteIndex].MessageNumber := messageNumber;
-		END_IF
-
-		_WriteIndex := _WriteIndex + 1;
-
-		IF _WriteIndex >= Parameters.QUEUED_LOGGER_CAPACITY THEN
-			_WriteIndex := 0;
-		END_IF
-
-		_Count := _Count + 1;
-		TryLogMessage := TRUE;
-	END_IF
-
-	_QueueLock.Leave();
-	lockHeld := FALSE;
-__CATCH
-	IF lockHeld THEN
-		_QueueLock.Leave();
-	END_IF
-
-	TryLogMessage := FALSE;
-__ENDTRY]]></ST>
-      </Implementation>
-    </Method>
-    <Method Name="TryLogError" Id="{f7511d49-baae-40f0-a9e5-84c752870033}">
-      <Declaration><![CDATA[(*!
-<summary>Formats a borrowed error in the sending task and queues its text.</summary>
-<description>Copies source and local timestamp into the text using ERROR.ToString. Retains no reference to ERROR. Returns FALSE for an invalid reference, failed admission or caught formatting exception. Does not clear terminal allocation state.</description>
-<param name="error">Live error formatted during this call.</param>
-<param name="messageNumber">Optional number copied with the formatted message.</param>
-*)
-METHOD TryLogError : BOOL
-VAR_INPUT
-	error : REFERENCE TO TOF_Core.ERROR;
-	messageNumber : REFERENCE TO ULINT := 0;
-END_VAR
-VAR
-	message : TOF_Core.ERROR_MESSAGE;
-END_VAR]]></Declaration>
-      <Implementation>
-        <ST><![CDATA[__TRY
-	IF NOT __ISVALIDREF(error) THEN
-		RETURN;
-	END_IF
-
-	message := error.ToString(TOF_Core.ERROR_SOURCE_DISPLAY_MODE.TOP_AND_ROOT, TOF_Core.TIMESTAMP_DISPLAY_MODE.LOCAL);
-	TryLogError := TryLogMessage(SEL(error.Severity = TOF_Core.ERROR_SEVERITY.CRITICAL, TOF_Core.LOG_CATEGORY.ERROR, TOF_Core.LOG_CATEGORY.CRITICAL_ERROR), message, messageNumber);
-__CATCH
-	TryLogError := FALSE;
-__ENDTRY]]></ST>
-      </Implementation>
-    </Method>
-    <Method Name="TryLogException" Id="{7110670c-336b-4b80-aa5f-381540f0d63f}">
-      <Declaration><![CDATA[(*!
-<summary>Queues text snapshots of a live exception or its aggregate causes.</summary>
-<description>Formats source and local timestamp before task cleanup. Aggregate causes are visited in stored order and share the supplied optional request number. Stops on the first failure; already accepted records remain queued and FALSE may mean partial admission. Concurrent callers may interleave aggregate entries. Empty aggregates are formatted as ordinary exceptions. Input graphs must be valid and acyclic. No exception reference or clone is retained; terminal allocation state is preserved.</description>
-<param name="exception">Live, acyclic exception graph borrowed for formatting.</param>
-<param name="severity">Severity used to choose the queued category.</param>
-<param name="messageNumber">Optional request number copied to each accepted cause record.</param>
-*)
-METHOD TryLogException : BOOL
-VAR_INPUT
-	exception : TOF_Core.IReadOnlyException;
-	severity : TOF_Core.ERROR_SEVERITY;
-	messageNumber : REFERENCE TO ULINT := 0;
-END_VAR
-VAR
-	message : TOF_Core.ERROR_MESSAGE;
-	aggregateException : TOF_Core.IAggregateException;
-	i : DINT;
-END_VAR]]></Declaration>
-      <Implementation>
-        <ST><![CDATA[__TRY
-	IF exception = 0 THEN
-		RETURN;
-	END_IF
-
-	IF __QUERYINTERFACE(exception, aggregateException) AND_THEN aggregateException.InnerExceptionCount > 0 THEN
-		FOR i := 0 TO TO_DINT(aggregateException.InnerExceptionCount) - 1 DO
-			IF NOT THIS^.TryLogException(aggregateException.GetInnerException(i), severity, messageNumber) THEN
-				RETURN;
-			END_IF
-		END_FOR
-
-		TryLogException := TRUE;
-	ELSE
-		message := exception.GetMessage(TRUE, TOF_Core.TIMESTAMP_DISPLAY_MODE.LOCAL);
-		TryLogException := TryLogMessage(SEL(severity = TOF_Core.ERROR_SEVERITY.CRITICAL, TOF_Core.LOG_CATEGORY.ERROR, TOF_Core.LOG_CATEGORY.CRITICAL_ERROR), message, messageNumber);
-	END_IF
-__CATCH
-	TryLogException := FALSE;
-__ENDTRY]]></ST>
       </Implementation>
     </Method>
     <Method Name="Execute" Id="{e5b8db30-d739-411c-a177-18119bf27053}">
@@ -322,6 +168,7 @@ __ENDTRY]]></ST>
 <summary>Counts dequeued records whose single delivery attempt returned FALSE or raised an exception.</summary>
 <description>Read from the owner task, or with application-level synchronization against Execute. Updated only by owner-task Execute. Starts at zero and saturates at UnsignedInt64.MAX_VALUE; no reset is provided. Excludes enqueue rejection and backend Execute errors. A failed attempt may have produced partial output; successful acceptance does not guarantee durable storage.</description>
 *)
+{attribute 'monitoring' := 'call'}
 PROPERTY FailedDeliveryCount : ULINT]]></Declaration>
       <Get Name="Get" Id="{8260c53f-34a5-4e62-a6c6-1d7beb8b45e3}">
         <Declaration><![CDATA[]]></Declaration>
@@ -330,11 +177,26 @@ PROPERTY FailedDeliveryCount : ULINT]]></Declaration>
         </Implementation>
       </Get>
     </Property>
+    <Property Name="NamespaceName" Id="{e4c570a2-4e96-49f0-a27c-676afc330870}">
+      <Declaration><![CDATA[(*!
+<summary>Provides the queued logger NamespaceName.</summary>
+<description>Borrowed read-only library namespace.</description>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{fdab0a59-862f-4095-ad24-46853b03c6c5}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[NamespaceName REF= CurrentNamespace.Name;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
     <Property Name="PendingMessageCount" Id="{f7763125-25b8-4f4e-b66b-d42b753b0d4c}">
       <Declaration><![CDATA[(*!
 <summary>Returns a synchronized snapshot of the number of records waiting in the queue.</summary>
 <description>Returns -1 if the queue lock cannot be acquired; zero means no queued records at the snapshot instant. Lock contention may block. Excludes the record currently being forwarded and any work buffered by the backend. Concurrent producers may change the count immediately after reading. For draining, stop producers and read from the owner task after Execute returns. Zero does not guarantee successful delivery, completed file I/O or a closed file. This property does not flush or stop either logger.</description>
 *)
+{attribute 'monitoring' := 'call'}
 PROPERTY PendingMessageCount : DINT]]></Declaration>
       <Get Name="Get" Id="{000da11a-6da2-401b-874a-fe95f1876214}">
         <Declaration><![CDATA[]]></Declaration>
@@ -348,5 +210,148 @@ END_IF]]></ST>
         </Implementation>
       </Get>
     </Property>
+    <Property Name="SelfSize" Id="{ff022a1b-f97c-47dc-8883-4a7825e259a0}">
+      <Declaration><![CDATA[(*!
+<summary>Provides the queued logger SelfSize.</summary>
+<description>Size of this concrete instance, including its fixed queue storage.</description>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY SelfSize : ULINT]]></Declaration>
+      <Get Name="Get" Id="{7409f164-cfa1-4153-872d-92608066cdb6}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[SelfSize := XSIZEOF(THIS^);]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="TryLogError" Id="{f7511d49-baae-40f0-a9e5-84c752870033}">
+      <Declaration><![CDATA[(*!
+<summary>Formats a borrowed error in the sending task and queues its text.</summary>
+<description>Copies source and local timestamp into the text using ERROR.ToString. Retains no reference to ERROR. Returns FALSE for an invalid reference, failed admission or caught formatting exception. Does not clear terminal allocation state.</description>
+<param name="error">Live error formatted during this call.</param>
+<param name="messageNumber">Optional number copied with the formatted message.</param>
+*)
+METHOD TryLogError : BOOL
+VAR_INPUT
+	error : REFERENCE TO TOF_Core.ERROR;
+	messageNumber : REFERENCE TO ULINT := 0;
+END_VAR
+VAR
+	message : TOF_Core.ERROR_MESSAGE;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[__TRY
+	IF NOT __ISVALIDREF(error) THEN
+		RETURN;
+	END_IF
+
+	message := error.ToString(TOF_Core.ERROR_SOURCE_DISPLAY_MODE.TOP_AND_ROOT, TOF_Core.TIMESTAMP_DISPLAY_MODE.LOCAL);
+	TryLogError := TryLogMessage(SEL(error.Severity = TOF_Core.ERROR_SEVERITY.CRITICAL, TOF_Core.LOG_CATEGORY.ERROR, TOF_Core.LOG_CATEGORY.CRITICAL_ERROR), message, messageNumber);
+__CATCH
+	TryLogError := FALSE;
+__ENDTRY]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="TryLogException" Id="{7110670c-336b-4b80-aa5f-381540f0d63f}">
+      <Declaration><![CDATA[(*!
+<summary>Queues text snapshots of a live exception or its aggregate causes.</summary>
+<description>Formats source and local timestamp before task cleanup. Aggregate causes are visited in stored order and share the supplied optional request number. Stops on the first failure; already accepted records remain queued and FALSE may mean partial admission. Concurrent callers may interleave aggregate entries. Empty aggregates are formatted as ordinary exceptions. Input graphs must be valid and acyclic. No exception reference or clone is retained; terminal allocation state is preserved.</description>
+<param name="exception">Live, acyclic exception graph borrowed for formatting.</param>
+<param name="severity">Severity used to choose the queued category.</param>
+<param name="messageNumber">Optional request number copied to each accepted cause record.</param>
+*)
+METHOD TryLogException : BOOL
+VAR_INPUT
+	exception : TOF_Core.IReadOnlyException;
+	severity : TOF_Core.ERROR_SEVERITY;
+	messageNumber : REFERENCE TO ULINT := 0;
+END_VAR
+VAR
+	message : TOF_Core.ERROR_MESSAGE;
+	aggregateException : TOF_Core.IAggregateException;
+	i : DINT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[__TRY
+	IF exception = 0 THEN
+		RETURN;
+	END_IF
+
+	IF __QUERYINTERFACE(exception, aggregateException) AND_THEN aggregateException.InnerExceptionCount > 0 THEN
+		FOR i := 0 TO TO_DINT(aggregateException.InnerExceptionCount) - 1 DO
+			IF NOT THIS^.TryLogException(aggregateException.GetInnerException(i), severity, messageNumber) THEN
+				RETURN;
+			END_IF
+		END_FOR
+
+		TryLogException := TRUE;
+	ELSE
+		message := exception.GetMessage(TRUE, TOF_Core.TIMESTAMP_DISPLAY_MODE.LOCAL);
+		TryLogException := TryLogMessage(SEL(severity = TOF_Core.ERROR_SEVERITY.CRITICAL, TOF_Core.LOG_CATEGORY.ERROR, TOF_Core.LOG_CATEGORY.CRITICAL_ERROR), message, messageNumber);
+	END_IF
+__CATCH
+	TryLogException := FALSE;
+__ENDTRY]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="TryLogMessage" Id="{d1cab8b8-026e-4345-b782-1bb6899ce79b}">
+      <Declaration><![CDATA[(*!
+<summary>Copies one message and its optional number into the bounded queue.</summary>
+<description>Borrows inputs only for this call; the caller must keep them stable while copied. Returns FALSE before configuration, at capacity, on lock failure or on a caught exception. Commits the entry only after copying its contents. Does not call the backend or allocate text storage.</description>
+<param name="category">Category copied into the queued record.</param>
+<param name="message">Text copied into owned queue storage.</param>
+<param name="messageNumber">Optional borrowed number copied by value.</param>
+*)
+METHOD TryLogMessage : BOOL
+VAR_INPUT
+	category : TOF_Core.LOG_CATEGORY;
+END_VAR
+VAR_IN_OUT CONSTANT
+	message : TOF_Core.ERROR_MESSAGE;
+END_VAR
+VAR_INPUT
+	messageNumber : REFERENCE TO ULINT := 0;
+END_VAR
+VAR
+	lockHeld : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[__TRY
+	IF NOT _QueueLock.Enter() THEN
+		RETURN;
+	END_IF
+
+	lockHeld := TRUE;
+
+	IF _OwnerTaskIndex <> 0 AND_THEN _Count < Parameters.QUEUED_LOGGER_CAPACITY THEN
+		_Queue[_WriteIndex].Message := message;
+		_Queue[_WriteIndex].Category := category;
+		_Queue[_WriteIndex].HasMessageNumber := __ISVALIDREF(messageNumber);
+
+		IF _Queue[_WriteIndex].HasMessageNumber THEN
+			_Queue[_WriteIndex].MessageNumber := messageNumber;
+		END_IF
+
+		_WriteIndex := _WriteIndex + 1;
+
+		IF _WriteIndex >= Parameters.QUEUED_LOGGER_CAPACITY THEN
+			_WriteIndex := 0;
+		END_IF
+
+		_Count := _Count + 1;
+		TryLogMessage := TRUE;
+	END_IF
+
+	_QueueLock.Leave();
+	lockHeld := FALSE;
+__CATCH
+	IF lockHeld THEN
+		_QueueLock.Leave();
+	END_IF
+
+	TryLogMessage := FALSE;
+__ENDTRY]]></ST>
+      </Implementation>
+    </Method>
   </POU>
 </TcPlcObject>

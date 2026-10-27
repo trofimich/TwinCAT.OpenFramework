@@ -1,1 +1,0 @@
-AutomaticJsonSerializer used something like reflection, so source or target structure instance should not be dynamically created

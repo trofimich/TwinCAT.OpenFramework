@@ -10,7 +10,24 @@ License: https://opensource.org/license/mit
 {attribute 'no_explicit_call' := 'Direct call is not allowed'} 
 (*!
 <summary>Serializes PLC values to JSON and restores values from JSON.</summary>
-<description>Diagnostic string inputs are borrowed only during the call; retained diagnostic text is copied into owned storage. Try methods contain exceptions and return FALSE without rolling back output or callback side effects.</description>
+<description>
+Supports live PLC structures with native type information; dynamically created structures are not supported.
+Application method calls and property access belong to one owner task per instance. Instances are not
+thread-safe and do not support reentry: a callback must not call methods or access properties of the
+serializer whose operation is still active, directly or indirectly. Use a separate instance and separate
+buffers for another task or nested conversion. Ownership is a caller precondition, not a runtime check or lock; Try does not
+make an ownership violation safe or guarantee its detection as FALSE.
+Keep source data stable and destination storage exclusive for the entire call, including callbacks.
+Separate serializer instances do not synchronize shared application data. Stateful extenders require
+their own ownership discipline; sharing an extender must not introduce concurrent state access.
+Borrows input, output and optional callbacks for each call. Throwing methods report invalid arguments and
+native failures through framework exceptions. Try methods return FALSE directly for rejected arguments or
+reported native failures and contain exceptions from native calls or callbacks; partial effects are not rolled back.
+Try methods use the shared native conversion helpers, not overrides of the throwing methods or their protected helpers.
+The caller provides cyclic-task exception cleanup and RaiseIfAllocationFailed at the task boundary, outside Try
+and recoverable handlers. Try methods do not clear terminal allocation state.
+Ownership examples and future shared-service guidance: Guides/JsonAndEventLoggerOwnership.md in the repository.
+</description>
 *)
 FUNCTION_BLOCK AutomaticJsonSerializer EXTENDS TOF_Core.Object
 VAR
@@ -36,12 +53,27 @@ PROPERTY ClassName : REFERENCE TO STRING
       </Get>
     </Property>
     <Method Name="CreateJsonFromStructure" Id="{defd30bb-3636-4b3d-a29d-4ee5f3966212}">
-      <Declaration><![CDATA[METHOD CreateJsonFromStructure
+      <Declaration><![CDATA[(*!
+<summary>Serializes a PLC structure into caller-owned JSON storage.</summary>
+<description>
+Uses native symbol lookup for the source type; dynamically created structures are not supported.
+Borrows source, destination and optional extender for the call. The destination must be writable
+and have at least JSON_DOCUMENT capacity. Invalid source arguments and reported native failures
+raise framework exceptions; extender exceptions propagate. Output and callback effects are not
+rolled back on failure. Exception transport and cleanup require the caller's cyclic-task boundary.
+CopyDocument returning zero or a nonzero HRESULT raises an exception; jsonSize is not usable on failure.
+</description>
+<param name="sourceStructure">Live PLC structure with type information available to native symbol lookup.</param>
+<param name="extender">Optional callback invoked before and after writing the structure value; zero skips both calls.</param>
+<param name="targetJson">Writable output storage with at least 25000 bytes of text capacity plus the terminator.</param>
+<param name="jsonSize">Byte count reported by CopyDocument, including the terminator on a successful copy; use only after normal completion.</param>
+*)
+METHOD CreateJsonFromStructure
 VAR_INPUT
 	sourceStructure : ANY;
 	extender : IJsonExtender := 0;
 END_VAR
-VAR_IN_OUT CONSTANT
+VAR_IN_OUT
     targetJson : TOF_Core.JSON_DOCUMENT;
 END_VAR
 VAR_OUTPUT
@@ -53,15 +85,27 @@ END_VAR]]></Declaration>
     </Method>
     <Method Name="CreateJsonFromStructureByVarInfo" Id="{d6f652b9-17a4-4ec4-936c-676a73e01a2d}">
       <Declaration><![CDATA[(*!
-<summary>Prepares diagnostic text locally before passing it to read-only logging or exception parameters.</summary>
-<description>Computed diagnostic strings are held in local buffers for the duration of the receiving call.</description>
+<summary>Serializes a PLC structure described by VAR_INFO into caller-owned JSON storage.</summary>
+<description>
+The descriptor must identify a live structure with matching type, address and byte-aligned size.
+Dynamically created structures are not supported. Borrows source, destination and optional extender
+for the call. The destination must be writable and have at least JSON_DOCUMENT capacity.
+Invalid source arguments and reported native failures raise framework exceptions; extender exceptions
+propagate. Output and callback effects are not rolled back on failure. Exception transport and cleanup
+require the caller's cyclic-task boundary.
+CopyDocument returning zero or a nonzero HRESULT raises an exception; jsonSize is not usable on failure.
+</description>
+<param name="sourceStructureVarInfo">Descriptor whose TypeName, ByteAddress and BitSize describe the source structure.</param>
+<param name="extender">Optional callback invoked before and after writing the structure value; zero skips both calls.</param>
+<param name="targetJson">Writable output storage with at least 25000 bytes of text capacity plus the terminator.</param>
+<param name="jsonSize">Byte count reported by CopyDocument, including the terminator on a successful copy; use only after normal completion.</param>
 *)
 METHOD CreateJsonFromStructureByVarInfo
 VAR_INPUT
 	sourceStructureVarInfo : __SYSTEM.VAR_INFO;
 	extender : IJsonExtender := 0;
 END_VAR
-VAR_IN_OUT CONSTANT
+VAR_IN_OUT
     targetJson : TOF_Core.JSON_DOCUMENT;
 END_VAR
 VAR_OUTPUT
@@ -85,33 +129,25 @@ IF sourceStructureVarInfo.TypeClass <> __SYSTEM.TYPE_CLASS.TYPE_USERDEF THEN
 	argumentTypeNotSupportedException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), 'sourceStructureVarInfo', sourceStructureVarInfo.TypeClass);
 END_IF
 
-_JsonSaxWriter.ResetDocument();
-
-IF extender <> 0 THEN
-	extender.ExtendAtStart(_JsonSaxWriter);
-END_IF
-
-IF NOT _JsonDataTypeWriter.AddJsonValueFromSymbol(_JsonSaxWriter, sourceStructureVarInfo.TypeName, TO_UDINT(sourceStructureVarInfo.BitSize / 8), sourceStructureVarInfo.ByteAddress, hrErrorCode => errorCode) THEN
-	formattedExceptionMessage := TOF_Core.WideStrings.Concat255("Can't generate JSON representation from the symbol of type '", TO_WSTRING(sourceStructureVarInfo.TypeName), "'");
-
-	standardException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), formattedExceptionMessage, TO_UDINT(errorCode));
-END_IF
-
-IF extender <> 0 THEN
-	extender.ExtendAtFinish(_JsonSaxWriter);
-END_IF
-
-jsonSize := _JsonSaxWriter.CopyDocument(targetJson, SIZEOF(targetJson), hrErrorCode => errorCode);
-
-IF errorCode <> 0 THEN
-	formattedExceptionMessage := TOF_Core.WideStrings.Concat255("Can't fill JSON from the symbol of type '", TO_WSTRING(sourceStructureVarInfo.TypeName), "'");
-
+IF NOT writeStructureJson(sourceStructureVarInfo.TypeName, sourceStructureVarInfo.ByteAddress, TO_UDINT(sourceStructureVarInfo.BitSize / 8), extender, targetJson,
+	jsonSize => jsonSize, errorCode => errorCode, errorMessage => formattedExceptionMessage)
+THEN
 	standardException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), formattedExceptionMessage, TO_UDINT(errorCode));
 END_IF]]></ST>
       </Implementation>
     </Method>
     <Property Name="DecimalPlaces" Id="{856a998f-c63b-4bfb-be2d-ebc0ce7cf745}">
       <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+(*!
+<summary>Gets or sets the native writer's maximum number of fractional decimal places.</summary>
+<description>
+The native writer determines which DINT values it supports; this property does not clamp the value.
+The setter requires a zero HRESULT from SetMaxDecimalPlaces. A nonzero HRESULT raises a framework
+exception because assignment has no failure result. The native error code is retained in the exception.
+No rollback of the native setting is guaranteed on failure; the getter reads the writer's current setting.
+The caller handles the exception and provides cyclic-task exception cleanup and the terminal allocation-failure boundary.
+</description>
+*)
 PROPERTY DecimalPlaces : DINT]]></Declaration>
       <Get Name="Get" Id="{94eff383-c1b9-45b7-8cbb-da0c6c3a2aac}">
         <Declaration><![CDATA[]]></Declaration>
@@ -120,14 +156,36 @@ PROPERTY DecimalPlaces : DINT]]></Declaration>
         </Implementation>
       </Get>
       <Set Name="Set" Id="{e5e3c1bb-4425-43f2-a416-2b4fee3a3ddc}">
-        <Declaration><![CDATA[]]></Declaration>
+        <Declaration><![CDATA[VAR
+	standardException : TOF_Core.StandardException;
+	errorCode : HRESULT;
+END_VAR]]></Declaration>
         <Implementation>
-          <ST><![CDATA[_JsonSaxWriter.SetMaxDecimalPlaces(DecimalPlaces);]]></ST>
+          <ST><![CDATA[errorCode := _JsonSaxWriter.SetMaxDecimalPlaces(DecimalPlaces);
+
+IF errorCode <> TOF_Core.SignedInt32.ZERO THEN
+	standardException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), "Can't set JSON writer decimal places", TO_UDINT(errorCode));
+END_IF]]></ST>
         </Implementation>
       </Set>
     </Property>
     <Method Name="FillStructureByVarInfoFromJson" Id="{3b0559f7-3cc9-4407-b03c-9992acf72583}">
-      <Declaration><![CDATA[METHOD FillStructureByVarInfoFromJson
+      <Declaration><![CDATA[(*!
+<summary>Populates a PLC structure from JSON using the type supplied by VAR_INFO.</summary>
+<description>
+TypeName, ByteAddress and the byte-aligned BitSize must describe the same live, writable structure.
+Uses the supplied TypeName directly, avoiding ambiguous address-based type lookup for single-field
+structures. The type must be available to the native JSON converter; support for dynamically created
+structures is not implied. Borrows the JSON and destination for this call. A zero address, an unsupported
+type class or a reported native conversion failure raises a framework exception. Conversion requires both
+a TRUE SetSymbolFromJson result and a zero HRESULT. Destination fields may already
+have changed on failure; writes are not rolled back. The caller provides cyclic-task exception cleanup
+and the terminal allocation-failure boundary.
+</description>
+<param name="json">JSON text to read without modification.</param>
+<param name="targetStructureVarInfo">Consistent descriptor of the destination structure, including its explicit TypeName.</param>
+*)
+METHOD FillStructureByVarInfoFromJson
 VAR_IN_OUT CONSTANT
 	json : TOF_Core.JSON_DOCUMENT;	
 END_VAR
@@ -139,7 +197,6 @@ VAR
 	argumentTypeNotSupportedException : TOF_Core.ArgumentTypeNotSupportedException;
 	standardException : TOF_Core.StandardException;
 	
-	structureTypeName : STRING;	 
 	errorCode : HRESULT;
 END_VAR]]></Declaration>
       <Implementation>
@@ -151,21 +208,26 @@ IF targetStructureVarInfo.TypeClass <> __SYSTEM.TYPE_CLASS.TYPE_USERDEF THEN
 	argumentTypeNotSupportedException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), 'targetStructureVarInfo', targetStructureVarInfo.TypeClass);
 END_IF
 
-structureTypeName := _JsonDataTypeWriter.GetDatatypeNameByAddress(TO_UDINT(targetStructureVarInfo.BitSize / 8), targetStructureVarInfo.ByteAddress, hrErrorCode => errorCode);
-
-IF errorCode <> 0 THEN
-	standardException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), "Can't get structure type of the target structure", TO_UDINT(errorCode));
-END_IF
-
-_JsonDataTypeWriter.SetSymbolFromJson(json, structureTypeName, TO_UDINT(targetStructureVarInfo.BitSize / 8), targetStructureVarInfo.ByteAddress, hrErrorCode => errorCode);
-
-IF errorCode <> 0 THEN
+IF NOT readStructureJson(json, targetStructureVarInfo.TypeName, targetStructureVarInfo.ByteAddress, TO_UDINT(targetStructureVarInfo.BitSize / 8), errorCode => errorCode)
+THEN
 	standardException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), "Can't fill target structure by specified json document", TO_UDINT(errorCode));
 END_IF]]></ST>
       </Implementation>
     </Method>
     <Method Name="FillStructureFromJson" Id="{b53042c3-1eea-4151-a973-f56939241dea}">
-      <Declaration><![CDATA[METHOD FillStructureFromJson
+      <Declaration><![CDATA[(*!
+<summary>Populates a PLC structure from JSON using native address-based type lookup.</summary>
+<description>
+Borrows the JSON and a live, writable structure for the call; dynamically created structures are not supported.
+Native type lookup has limitations for single-field structures. Invalid arguments, reported lookup failures,
+a FALSE SetSymbolFromJson result or a nonzero conversion HRESULT raise framework exceptions.
+Destination fields may already have changed on failure; writes are not rolled back.
+The caller provides cyclic-task exception cleanup and the terminal allocation-failure boundary.
+</description>
+<param name="json">JSON text to read without modification.</param>
+<param name="targetStructure">Live destination structure with type information available to native symbol lookup.</param>
+*)
+METHOD FillStructureFromJson
 VAR_IN_OUT CONSTANT
 	json : TOF_Core.JSON_DOCUMENT;	
 END_VAR
@@ -178,15 +240,29 @@ END_VAR]]></Declaration>
     </Method>
     <Method Name="InternalCreateJsonFromStructure" Id="{828ddc06-4e4b-4f22-bd8f-3234f73fd728}" FolderPath="Service memebers\">
       <Declaration><![CDATA[(*!
-<summary>Prepares diagnostic text locally before passing it to read-only logging or exception parameters.</summary>
-<description>Computed diagnostic strings are held in local buffers for the duration of the receiving call.</description>
+<summary>Serializes a structure using its ANY descriptor and native symbol lookup.</summary>
+<description>
+The descriptor must identify a live structure with matching address and size; dynamically created
+structures are not supported. Native address lookup has limitations for single-field structures.
+Borrows source, destination and optional extender for the call. The destination must be writable
+and have at least JSON_DOCUMENT capacity. Invalid source arguments and reported native failures
+raise framework exceptions; extender exceptions propagate. Output and callback effects are not
+rolled back on failure. Overrides must preserve destination capacity and borrowing requirements.
+This protected hook serves the throwing ANY API; TryCreateJsonFromStructure does not dispatch through it.
+Exception transport and cleanup require the caller's cyclic-task boundary.
+CopyDocument returning zero or a nonzero HRESULT raises an exception; jsonSize is not usable on failure.
+</description>
+<param name="sourceStructure">ANY descriptor for the source structure.</param>
+<param name="extender">Optional callback invoked before and after writing the structure value; zero skips both calls.</param>
+<param name="targetJson">Writable output storage with at least 25000 bytes of text capacity plus the terminator.</param>
+<param name="jsonSize">Byte count reported by CopyDocument, including the terminator on a successful copy; use only after normal completion.</param>
 *)
 METHOD PROTECTED InternalCreateJsonFromStructure
 VAR_INPUT
 	sourceStructure : __SYSTEM.AnyType;
 	extender : IJsonExtender := 0;
 END_VAR
-VAR_IN_OUT CONSTANT
+VAR_IN_OUT
     targetJson : TOF_Core.JSON_DOCUMENT;
 END_VAR
 VAR_OUTPUT
@@ -211,39 +287,35 @@ IF sourceStructure.TypeClass <> __SYSTEM.TYPE_CLASS.TYPE_USERDEF THEN
 	argumentTypeNotSupportedException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), 'sourceStructure', sourceStructure.TypeClass);
 END_IF
 
-_JsonSaxWriter.ResetDocument();
-
 structureTypeName := _JsonDataTypeWriter.GetDatatypeNameByAddress(TO_UDINT(sourceStructure.diSize), sourceStructure.pValue, hrErrorCode => errorCode);
 
-IF errorCode <> 0 THEN
+IF errorCode <> TOF_Core.SignedInt32.ZERO THEN
 	standardException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), "Can't get structure type of the source structure", TO_UDINT(errorCode));
 END_IF
 
-IF extender <> 0 THEN
-	extender.ExtendAtStart(_JsonSaxWriter);
-END_IF
-
-IF NOT _JsonDataTypeWriter.AddJsonValueFromSymbol(_JsonSaxWriter, structureTypeName, TO_UDINT(sourceStructure.diSize), sourceStructure.pValue, hrErrorCode => errorCode) THEN
-	formattedExceptionMessage := TOF_Core.WideStrings.Concat255("Can't generate JSON representation from the symbol of type '", TO_WSTRING(structureTypeName), "'");
-
-	standardException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), formattedExceptionMessage, TO_UDINT(errorCode));
-END_IF
-
-IF extender <> 0 THEN
-	extender.ExtendAtFinish(_JsonSaxWriter);
-END_IF
-
-jsonSize := _JsonSaxWriter.CopyDocument(targetJson, SIZEOF(targetJson), hrErrorCode => errorCode);
-
-IF errorCode <> 0 THEN
-	formattedExceptionMessage := TOF_Core.WideStrings.Concat255("Can't fill JSON from the symbol of type '", TO_WSTRING(structureTypeName), "'");
-
+IF NOT writeStructureJson(structureTypeName, sourceStructure.pValue, TO_UDINT(sourceStructure.diSize), extender, targetJson,
+	jsonSize => jsonSize, errorCode => errorCode, errorMessage => formattedExceptionMessage)
+THEN
 	standardException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), formattedExceptionMessage, TO_UDINT(errorCode));
 END_IF]]></ST>
       </Implementation>
     </Method>
     <Method Name="InternalFillStructureFromJson" Id="{cd668581-fbff-4bb3-b0d3-914c47132fdf}" FolderPath="Service memebers\">
-      <Declaration><![CDATA[METHOD PROTECTED InternalFillStructureFromJson
+      <Declaration><![CDATA[(*!
+<summary>Deserializes JSON into the structure identified by an ANY descriptor.</summary>
+<description>
+The descriptor must identify a live, writable structure with matching address and size; dynamically created
+structures are not supported. Native address-based type lookup has limitations for single-field structures.
+Borrows the JSON and destination for the call. Invalid arguments, reported lookup failures, a FALSE
+SetSymbolFromJson result or a nonzero conversion HRESULT raise framework exceptions. Partial destination
+writes are not rolled back. Overrides must preserve borrowing and failure reporting requirements.
+This protected hook serves the throwing ANY API; TryFillStructureFromJson does not dispatch through it.
+The caller provides cyclic-task exception cleanup and the terminal allocation-failure boundary.
+</description>
+<param name="json">JSON text to read without modification.</param>
+<param name="targetStructure">ANY descriptor for the live destination structure.</param>
+*)
+METHOD PROTECTED InternalFillStructureFromJson
 VAR_IN_OUT CONSTANT
 	json : TOF_Core.JSON_DOCUMENT;	
 END_VAR
@@ -269,15 +341,114 @@ END_IF
 
 structureTypeName := _JsonDataTypeWriter.GetDatatypeNameByAddress(TO_UDINT(targetStructure.diSize), targetStructure.pValue, hrErrorCode => errorCode);
 
-IF errorCode <> 0 THEN
+IF errorCode <> TOF_Core.SignedInt32.ZERO THEN
 	standardException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), "Can't get structure type of the target structure", TO_UDINT(errorCode));
 END_IF
 
-_JsonDataTypeWriter.SetSymbolFromJson(json, structureTypeName, TO_UDINT(targetStructure.diSize), targetStructure.pValue, hrErrorCode => errorCode);
-
-IF errorCode <> 0 THEN
+IF NOT readStructureJson(json, structureTypeName, targetStructure.pValue, TO_UDINT(targetStructure.diSize), errorCode => errorCode)
+THEN
 	standardException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), "Can't fill target structure by specified json document", TO_UDINT(errorCode));
 END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="writeStructureJson" Id="{b6245462-dfce-45a0-a956-f50e59e6d73a}" FolderPath="Service memebers\">
+      <Declaration><![CDATA[(*!
+<summary>Writes a validated structure and optional extensions to caller-owned JSON storage.</summary>
+<description>
+Callers validate the structure descriptor before entry. Borrows all arguments for this call and resets the
+writer before invoking callbacks. Returns FALSE for reported native failures without creating exceptions;
+native or callback exceptions propagate to the throwing caller or the public Try boundary.
+No output, writer or callback effects are rolled back. Each later write resets the writer again.
+On FALSE, errorMessage describes the failed native step and errorCode retains its HRESULT without substitution.
+</description>
+<param name="structureTypeName">Native type name matching the live source structure.</param>
+<param name="structureAddress">Address of the validated source structure.</param>
+<param name="structureSize">Source structure size in bytes.</param>
+<param name="extender">Optional callbacks around the structure value.</param>
+<param name="targetJson">Writable storage with JSON_DOCUMENT capacity, including its terminator.</param>
+<param name="jsonSize">Copied byte count including the terminator; meaningful only on TRUE.</param>
+<param name="errorCode">Native HRESULT of the failed step on FALSE.</param>
+<param name="errorMessage">Diagnostic for the failed step on FALSE.</param>
+*)
+METHOD PRIVATE writeStructureJson : BOOL
+VAR_IN_OUT CONSTANT
+	structureTypeName : STRING;
+END_VAR
+VAR_INPUT
+	structureAddress : PVOID;
+	structureSize : UDINT;
+	extender : IJsonExtender;
+END_VAR
+VAR_IN_OUT
+	targetJson : TOF_Core.JSON_DOCUMENT;
+END_VAR
+VAR_OUTPUT
+	jsonSize : UDINT;
+	errorCode : HRESULT;
+	errorMessage : WSTRING(255);
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_JsonSaxWriter.ResetDocument();
+
+IF extender <> 0 THEN
+	extender.ExtendAtStart(_JsonSaxWriter);
+END_IF
+
+IF NOT _JsonDataTypeWriter.AddJsonValueFromSymbol(_JsonSaxWriter, structureTypeName, structureSize, structureAddress, hrErrorCode => errorCode)
+	OR_ELSE errorCode <> TOF_Core.SignedInt32.ZERO
+THEN
+	errorMessage := TOF_Core.WideStrings.Concat255("Can't generate JSON representation from the symbol of type '", TO_WSTRING(structureTypeName), "'");
+	RETURN;
+END_IF
+
+IF extender <> 0 THEN
+	extender.ExtendAtFinish(_JsonSaxWriter);
+END_IF
+
+jsonSize := _JsonSaxWriter.CopyDocument(targetJson, SIZEOF(targetJson), hrErrorCode => errorCode);
+
+IF jsonSize = TOF_Core.UnsignedInt32.MIN_VALUE OR_ELSE errorCode <> TOF_Core.SignedInt32.ZERO THEN
+	errorMessage := TOF_Core.WideStrings.Concat255("Can't fill JSON from the symbol of type '", TO_WSTRING(structureTypeName), "'");
+	RETURN;
+END_IF
+
+writeStructureJson := TRUE;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="readStructureJson" Id="{e9710e74-d168-4bec-aecb-ed84a0f769b4}" FolderPath="Service memebers\">
+      <Declaration><![CDATA[(*!
+<summary>Reads JSON into a validated structure and reports the native conversion result.</summary>
+<description>
+Callers validate the descriptor before entry. Borrows the JSON, type name and destination for this call.
+Returns FALSE for a native FALSE result or nonzero HRESULT without creating exceptions. Native exceptions
+propagate to the throwing caller or the public Try boundary. Partial destination writes are not rolled back.
+</description>
+<param name="json">JSON text to read without modification.</param>
+<param name="structureTypeName">Native type name matching the destination structure.</param>
+<param name="structureAddress">Address of the validated writable destination.</param>
+<param name="structureSize">Destination structure size in bytes.</param>
+<param name="errorCode">Native conversion HRESULT, interpreted together with the BOOL result.</param>
+*)
+METHOD PRIVATE readStructureJson : BOOL
+VAR_IN_OUT CONSTANT
+	json : TOF_Core.JSON_DOCUMENT;
+	structureTypeName : STRING;
+END_VAR
+VAR_INPUT
+	structureAddress : PVOID;
+	structureSize : UDINT;
+END_VAR
+VAR_OUTPUT
+	errorCode : HRESULT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF NOT _JsonDataTypeWriter.SetSymbolFromJson(json, structureTypeName, structureSize, structureAddress, hrErrorCode => errorCode)
+	OR_ELSE errorCode <> TOF_Core.SignedInt32.ZERO
+THEN
+	RETURN;
+END_IF
+
+readStructureJson := TRUE;]]></ST>
       </Implementation>
     </Method>
     <Property Name="NamespaceName" Id="{7371ecef-1936-4268-af0d-813ed5877183}">
@@ -300,40 +471,51 @@ PROPERTY SelfSize : ULINT]]></Declaration>
         </Implementation>
       </Get>
     </Property>
-    <Method Name="SetFormatOptions" Id="{c6cdde79-cf05-4b34-97ff-f0f4810b70ea}">
-      <Declaration><![CDATA[METHOD PRIVATE SetFormatOptions
-VAR_INPUT
-	decimalPlaces : BYTE := 10;
-	formatOptions : EJsonPrettyFormatOptions := EJsonPrettyFormatOptions.eFormatSingleLineArray;
-	identChar : SINT := 9;
-	identCharCount : BYTE := 1;
-END_VAR]]></Declaration>
-      <Implementation>
-        <ST><![CDATA[_JsonSaxWriter.SetMaxDecimalPlaces(decimalPlaces);]]></ST>
-      </Implementation>
-    </Method>
     <Method Name="TryCreateJsonFromStructure" Id="{35373f3b-1087-4a79-950c-0b141211bf99}">
       <Declaration><![CDATA[{attribute 'TcRpcEnable':='1'}
 (*!
 <summary>Attempts to serialize a PLC structure to JSON.</summary>
-<description>Returns FALSE on exceptions from serialization or extender callbacks. Use the JSON output and jsonSize only on TRUE; partial target writes and extender side effects are not rolled back. Caller supplies live source and writable destination storage. Does not propagate exceptions or clear terminal allocation state.</description>
+<description>
+Returns FALSE directly for a null address, an unsupported type class or a reported native failure, including
+a zero CopyDocument result, without creating a framework exception. Contains native and callback exceptions.
+Uses the shared conversion helper rather than the protected throwing hook. Use JSON and jsonSize only on TRUE;
+partial writes and callback effects are not rolled back. A subsequent conversion resets the writer before callbacks.
+Borrows live source and writable destination storage. Does not clear terminal allocation state; the caller
+provides exception cleanup and RaiseIfAllocationFailed at the task boundary outside Try and recoverable handlers.
+</description>
+<param name="sourceStructure">Live PLC structure supported by native symbol lookup; dynamically created structures are not supported.</param>
+<param name="extender">Optional callback invoked before and after writing the structure value; borrowed for the call.</param>
+<param name="targetJson">Writable output storage with at least 25000 bytes of text capacity plus the terminator; borrowed for the call.</param>
+<param name="jsonSize">Byte count reported by CopyDocument, including the terminator on a successful copy; use only on TRUE.</param>
 *)
 METHOD TryCreateJsonFromStructure : BOOL
 VAR_INPUT
 	sourceStructure : ANY;
 	extender : IJsonExtender := 0;
 END_VAR
-VAR_IN_OUT CONSTANT
+VAR_IN_OUT
     targetJson : TOF_Core.JSON_DOCUMENT;
 END_VAR
 VAR_OUTPUT
 	jsonSize : UDINT; 
+END_VAR
+VAR
+	structureTypeName : STRING;
+	errorCode : HRESULT;
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[__TRY
-	InternalCreateJsonFromStructure(sourceStructure, extender, targetJson, jsonSize => jsonSize);
+	IF sourceStructure.pValue = 0 OR_ELSE sourceStructure.TypeClass <> __SYSTEM.TYPE_CLASS.TYPE_USERDEF THEN
+		RETURN;
+	END_IF
 
-	TryCreateJsonFromStructure := TRUE;
+	structureTypeName := _JsonDataTypeWriter.GetDatatypeNameByAddress(TO_UDINT(sourceStructure.diSize), sourceStructure.pValue, hrErrorCode => errorCode);
+
+	IF errorCode <> TOF_Core.SignedInt32.ZERO THEN
+		RETURN;
+	END_IF
+
+	TryCreateJsonFromStructure := writeStructureJson(structureTypeName, sourceStructure.pValue, TO_UDINT(sourceStructure.diSize), extender, targetJson, jsonSize => jsonSize);
 __CATCH
 	TryCreateJsonFromStructure := FALSE;
 __ENDTRY]]></ST>
@@ -342,14 +524,25 @@ __ENDTRY]]></ST>
     <Method Name="TryCreateJsonFromStructureByVarInfo" Id="{486e285a-fcfe-44f3-9023-743f121d8975}">
       <Declaration><![CDATA[(*!
 <summary>Attempts to serialize a PLC structure to JSON.</summary>
-<description>Returns FALSE on exceptions from serialization or extender callbacks. Use the JSON output and jsonSize only on TRUE; partial target writes and extender side effects are not rolled back. Caller supplies live source and writable destination storage. Does not propagate exceptions or clear terminal allocation state.</description>
+<description>
+Returns FALSE directly for a null address, an unsupported type class or a reported native failure, including
+a zero CopyDocument result, without creating a framework exception. Contains native and callback exceptions.
+Uses the shared conversion helper rather than the throwing ByVarInfo method. Use JSON and jsonSize only on TRUE;
+partial writes and callback effects are not rolled back. A subsequent conversion resets the writer before callbacks.
+Borrows live source and writable destination storage. Does not clear terminal allocation state; the caller
+provides exception cleanup and RaiseIfAllocationFailed at the task boundary outside Try and recoverable handlers.
+</description>
+<param name="sourceStructureVarInfo">Descriptor with matching TypeName, ByteAddress and byte-aligned BitSize for a live structure; dynamically created structures are not supported.</param>
+<param name="extender">Optional callback invoked before and after writing the structure value; borrowed for the call.</param>
+<param name="targetJson">Writable output storage with at least 25000 bytes of text capacity plus the terminator; borrowed for the call.</param>
+<param name="jsonSize">Byte count reported by CopyDocument, including the terminator on a successful copy; use only on TRUE.</param>
 *)
 METHOD TryCreateJsonFromStructureByVarInfo : BOOL
 VAR_INPUT
 	sourceStructureVarInfo : __SYSTEM.VAR_INFO;
 	extender : IJsonExtender := 0;
 END_VAR
-VAR_IN_OUT CONSTANT
+VAR_IN_OUT
     targetJson : TOF_Core.JSON_DOCUMENT;
 END_VAR
 VAR_OUTPUT
@@ -357,9 +550,11 @@ VAR_OUTPUT
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[__TRY
-	CreateJsonFromStructureByVarInfo(sourceStructureVarInfo, extender, targetJson, jsonSize => jsonSize);
-	
-	TryCreateJsonFromStructureByVarInfo := TRUE;
+	IF sourceStructureVarInfo.ByteAddress = 0 OR_ELSE sourceStructureVarInfo.TypeClass <> __SYSTEM.TYPE_CLASS.TYPE_USERDEF THEN
+		RETURN;
+	END_IF
+
+	TryCreateJsonFromStructureByVarInfo := writeStructureJson(sourceStructureVarInfo.TypeName, sourceStructureVarInfo.ByteAddress, TO_UDINT(sourceStructureVarInfo.BitSize / 8), extender, targetJson, jsonSize => jsonSize);
 __CATCH
 	TryCreateJsonFromStructureByVarInfo := FALSE;
 __ENDTRY]]></ST>
@@ -367,8 +562,18 @@ __ENDTRY]]></ST>
     </Method>
     <Method Name="TryFillStructureByVarInfoFromJson" Id="{25972cd3-eceb-4afa-aeb2-ef7585c39b37}">
       <Declaration><![CDATA[(*!
-<summary>Attempts to populate a PLC structure from JSON.</summary>
-<description>Returns FALSE on deserialization exceptions. Destination fields may already have changed; partial writes are not rolled back. Caller supplies live source and writable destination storage. Does not propagate exceptions or clear terminal allocation state.</description>
+<summary>Attempts to populate a PLC structure from JSON using the type supplied by VAR_INFO.</summary>
+<description>
+Uses the supplied TypeName directly without address-based type lookup. TypeName, ByteAddress and byte-aligned
+BitSize must describe the same live, writable structure, with its type available to the native converter.
+Returns FALSE directly for a null address, an unsupported type class, a FALSE native conversion result or a
+nonzero HRESULT, without creating a framework exception. Contains native exceptions. Uses the shared conversion
+helper rather than the throwing ByVarInfo method. Partial destination writes are not rolled back.
+Borrows the JSON and destination for this call. Does not clear terminal allocation state; the caller provides
+exception cleanup and RaiseIfAllocationFailed at the task boundary outside Try and recoverable handlers.
+</description>
+<param name="json">JSON text to read without modification.</param>
+<param name="targetStructureVarInfo">Consistent descriptor of the destination structure, including its explicit TypeName.</param>
 *)
 METHOD TryFillStructureByVarInfoFromJson : BOOL
 VAR_IN_OUT CONSTANT
@@ -379,9 +584,11 @@ VAR_INPUT
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[__TRY
-	FillStructureByVarInfoFromJson(json, targetStructureVarInfo);
-	
-	TryFillStructureByVarInfoFromJson := TRUE;
+	IF targetStructureVarInfo.ByteAddress = 0 OR_ELSE targetStructureVarInfo.TypeClass <> __SYSTEM.TYPE_CLASS.TYPE_USERDEF THEN
+		RETURN;
+	END_IF
+
+	TryFillStructureByVarInfoFromJson := readStructureJson(json, targetStructureVarInfo.TypeName, targetStructureVarInfo.ByteAddress, TO_UDINT(targetStructureVarInfo.BitSize / 8));
 __CATCH
 	TryFillStructureByVarInfoFromJson := FALSE;
 __ENDTRY]]></ST>
@@ -390,7 +597,17 @@ __ENDTRY]]></ST>
     <Method Name="TryFillStructureFromJson" Id="{b5b62249-7ff4-4c95-ba2a-e43e9757d053}">
       <Declaration><![CDATA[(*!
 <summary>Attempts to populate a PLC structure from JSON.</summary>
-<description>Returns FALSE on deserialization exceptions. Destination fields may already have changed; partial writes are not rolled back. Caller supplies live source and writable destination storage. Does not propagate exceptions or clear terminal allocation state.</description>
+<description>
+Uses native address-based type lookup, with its limitations for single-field structures; dynamically created
+structures are not supported. Returns FALSE directly for a null address, an unsupported type class, a reported
+lookup failure, a FALSE native conversion result or a nonzero conversion HRESULT, without creating a framework
+exception. Contains native exceptions. Uses the shared conversion helper rather than the protected throwing hook.
+Partial destination writes are not rolled back. Borrows JSON and live, writable destination storage for this call.
+Does not clear terminal allocation state; the caller provides exception cleanup and RaiseIfAllocationFailed
+at the task boundary outside Try and recoverable handlers.
+</description>
+<param name="json">JSON text to read without modification.</param>
+<param name="targetStructure">Live destination structure with type information available to native symbol lookup.</param>
 *)
 METHOD TryFillStructureFromJson : BOOL
 VAR_IN_OUT CONSTANT
@@ -398,12 +615,24 @@ VAR_IN_OUT CONSTANT
 END_VAR
 VAR_INPUT
 	targetStructure : ANY;
+END_VAR
+VAR
+	structureTypeName : STRING;
+	errorCode : HRESULT;
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[__TRY
-	InternalFillStructureFromJson(json, targetStructure);
-	
-	TryFillStructureFromJson := TRUE;
+	IF targetStructure.pValue = 0 OR_ELSE targetStructure.TypeClass <> __SYSTEM.TYPE_CLASS.TYPE_USERDEF THEN
+		RETURN;
+	END_IF
+
+	structureTypeName := _JsonDataTypeWriter.GetDatatypeNameByAddress(TO_UDINT(targetStructure.diSize), targetStructure.pValue, hrErrorCode => errorCode);
+
+	IF errorCode <> TOF_Core.SignedInt32.ZERO THEN
+		RETURN;
+	END_IF
+
+	TryFillStructureFromJson := readStructureJson(json, structureTypeName, targetStructure.pValue, TO_UDINT(targetStructure.diSize));
 __CATCH
 	TryFillStructureFromJson := FALSE;
 __ENDTRY]]></ST>

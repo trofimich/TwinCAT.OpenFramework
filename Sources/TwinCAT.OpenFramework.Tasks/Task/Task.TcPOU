@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <TcPlcObject Version="1.1.0.1">
   <POU Name="Task" Id="{4f3cf4ac-1772-4e42-a725-ba88b4bb1e14}" SpecialFunc="None">
     <Declaration><![CDATA[(*
@@ -27,11 +27,12 @@ FUNCTION_BLOCK ABSTRACT Task EXTENDS TOF_Core.Object IMPLEMENTS ITask
 VAR
 	{attribute 'hide'} 
 	_Name : WSTRING;
+	//! <summary>TRUE once an explicit name is stored or first access successfully caches the default.</summary>
+	{attribute 'hide'} 
+	_NameInitialized : BOOL;
 	
 	{attribute 'hide'} 
 	_State : TASK_STATE;	
-	{attribute 'hide'} 
-	_CancelRequested : BOOL;
 	{attribute 'hide'} 
 	_StateChanged : BOOL;	
 	{attribute 'hide'} 
@@ -72,8 +73,8 @@ END_VAR]]></Declaration>
       <Declaration><![CDATA[(*!
 <summary>Requests cooperative cancellation of a running task.</summary>
 <description>
-Accepted only while RUNNING, with no pending cancellation and before RESOURCE_RELEASING. Sets the
-cancellation flag and original reason and enters STOPPING before invoking OnCancelRequest once. A first
+Accepted only while RUNNING, with no pending cancellation and before RESOURCE_RELEASING. Records
+EXTERNAL_CANCEL as the original reason and enters STOPPING before invoking OnCancelRequest once. A first
 Cancel during STOPPING replaces the original result with EXTERNAL_CANCEL. TRUE means accepted, not
 completed; continue Execute until STOPPED. Repeated or ineligible requests return FALSE with refuseReason.
 Callback exceptions are logged without withdrawing the request.
@@ -90,12 +91,13 @@ END_VAR]]></Declaration>
 	RETURN;
 END_IF
 
-IF _CancelRequested OR_ELSE _RunningSubstate = TASK_RUNNING_SUBSTATE.RESOURCE_RELEASING THEN
+IF _OriginalStopReason = TASK_STOP_REASON.EXTERNAL_CANCEL
+	OR_ELSE _RunningSubstate = TASK_RUNNING_SUBSTATE.RESOURCE_RELEASING
+THEN
 	refuseReason := "Cancellation already requested or resource release has begun";
 	RETURN;
 END_IF
 
-_CancelRequested := TRUE;
 _OriginalStopReason := TASK_STOP_REASON.EXTERNAL_CANCEL;
 _OriginalStopReasonMessage := "Cancelled by external logic";
 
@@ -130,11 +132,11 @@ END_IF]]></ST>
     </Method>
     <Method Name="FB_init" Id="{4a40010f-36b0-4b8e-9bdb-42fc8f2b04c7}">
       <Declaration><![CDATA[(*!
-<summary>Sets the task's diagnostic name during initialization.</summary>
+<summary>Stores an explicit diagnostic name and defers default-name creation.</summary>
 <description>
-Copies a nonempty name into task-owned storage. An empty name uses Object.GetDefaultName instead;
-that fallback reads ClassName during base initialization, before descendant fields may be initialized.
-The resulting Name remains stable across Start and Reset. Does not start work or acquire resources.
+Copies a nonempty name into task-owned storage and marks it initialized. With an empty name, the
+initially FALSE marker leaves default-name creation to the first Name read after construction.
+Does not read overridden metadata, start work or acquire resources. Start and Reset preserve the name.
 </description>
 <param name="bInitRetains">TRUE when retain variables are initialized.</param>
 <param name="bInCopyCode">TRUE when the instance is subsequently copied for online change.</param>
@@ -150,12 +152,7 @@ END_VAR
       <Implementation>
         <ST><![CDATA[IF name <> TOF_Core.WideStrings.Empty THEN
 	_Name := name;
-ELSE
-	_Name := GetDefaultName();
-	
-	IF _Name = TOF_Core.WideStrings.Empty THEN
-		_Name := "Task";
-	END_IF
+	_NameInitialized := TRUE;
 END_IF]]></ST>
       </Implementation>
     </Method>
@@ -380,10 +377,14 @@ __ENDTRY]]></ST>
       <Declaration><![CDATA[(*!
 <summary>Provides the task's diagnostic name.</summary>
 <description>
-FB_init copies the supplied nonempty name, or stores Object.GetDefaultName for an empty name. The default
-depends on ClassName during base initialization and may lack descendant metadata. The value is stable across
-Start and Reset. The returned reference remains valid while the task lives; do not write through it.
-The name is diagnostic text, not a persistent identifier.
+FB_init copies a nonempty supplied name. For an empty name, the first read caches Object.GetDefaultName,
+including ClassName and the instance address. First access to a default name must occur after the
+most-derived FB has completed initialization, from the task's owner. The getter does not detect construction
+completion or synchronize callers. ClassName overrides must not recursively read Name.
+If metadata access fails, the exception propagates and initialization remains pending for a later read.
+Successful initialization happens once; later reads do not recompute metadata. Start and Reset preserve
+the name and its storage. The returned reference remains valid while the task lives; do not write through it.
+The name is diagnostic text, not a persistent identifier; later ClassName changes do not rename the task.
 </description>
 *)
 
@@ -392,7 +393,12 @@ PROPERTY FINAL Name : REFERENCE TO WSTRING]]></Declaration>
       <Get Name="Get" Id="{758bcc09-602f-41b4-b11f-e8268c4f3c3a}">
         <Declaration><![CDATA[]]></Declaration>
         <Implementation>
-          <ST><![CDATA[Name REF= _Name;]]></ST>
+          <ST><![CDATA[IF NOT _NameInitialized THEN
+	_Name := GetDefaultName();
+	_NameInitialized := TRUE;
+END_IF
+
+Name REF= _Name;]]></ST>
         </Implementation>
       </Get>
     </Property>
@@ -431,7 +437,7 @@ METHOD PROTECTED OnBeforeStart]]></Declaration>
       <Declaration><![CDATA[(*!
 <summary>Initiates an accepted cancellation once.</summary>
 <description>
-Called synchronously by Cancel after its flag and original stop reason are set. Not called for refused or
+Called synchronously by Cancel after the original stop reason is set to EXTERNAL_CANCEL. Not called for refused or
 repeated requests. Initiate only short cancellation actions; Execute and OnStopping advance completion.
 Callback exceptions are logged without withdrawing the request. The base implementation does nothing.
 </description>
@@ -675,7 +681,7 @@ __ENDTRY]]></ST>
       <Declaration><![CDATA[(*!
 <summary>Invokes the cancellation notification and attempts to log a callback exception.</summary>
 <description>
-The cancellation request has already been accepted; callback failure does not undo its flag or reason.
+The cancellation request has already been accepted; callback failure does not undo the recorded reason.
 Exception transport requires cyclic task context.
 </description>
 *)
@@ -734,7 +740,7 @@ __ENDTRY]]></ST>
 <summary>Enters READY and clears per-run task state.</summary>
 <description>
 Used after successful reset preparation. Attempts transition logging, sets StateChanged when the lifecycle
-state changes, clears cancellation and resource-operation markers, and resets both stop reasons and
+state changes, clears the resource-operation marker, and resets both stop reasons and
 messages. Does not release resources or invoke reset hooks.
 </description>
 *)
@@ -761,7 +767,6 @@ END_VAR]]></Declaration>
 	_StateChanged := TRUE;	
 END_IF 
 
-_CancelRequested := FALSE;
 _RunningSubstate := TASK_RUNNING_SUBSTATE.PROCESSING;
 _ResourceOperationStarted := FALSE;
 

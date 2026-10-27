@@ -1,0 +1,145 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="Exceptions" Id="{97f4b3e0-ac8b-4146-ad38-496be02ca0ca}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+SPDX-FileCopyrightText: © 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+SPDX-License-Identifier: MIT
+License: https://opensource.org/license/mit
+*)
+
+(*!
+<summary>Provides exception graph validation, formatting constants and bounded message copying.</summary>
+<description>Formatted messages retain their prefix up to ERROR_MESSAGE capacity. Oversized messages end with an ellipsis; copying does not allocate or raise a size-overflow exception.</description>
+*)
+PROGRAM Exceptions
+VAR_OUTPUT CONSTANT
+	UNSPECIFIED_POU : WSTRING(17) := "<unspecified POU>";
+	MESSAGE_NUMBER_PREFIX : WSTRING(1) := "#";
+	MESSAGE_NUMBER_SUFFIX : WSTRING(2) := ": ";
+	TIME_PREFIX : WSTRING(4) := " at ";
+	SOURCE_PREFIX : WSTRING(4) := " in ";
+	ERROR_CODE_PREFIX : WSTRING(13) := ", error code ";	
+	SOURCE_POSITION_PREFIX : WSTRING(1) := " ";	
+	INNER_MESSAGE_PREFIX : WSTRING(4) := " -> ";
+	AGGREGATE_EXCEPTION_SUFFIX : WSTRING(25) := " aggregated exceptions";
+	UNSPECIFIED_SOURCE : STRING(13) := '<unspecified>';
+	LOG_CATEGORY_PREFIXES : ARRAY [LOG_CATEGORY.DEBUG..LOG_CATEGORY.CRITICAL_ERROR] OF STRING(1) := ['D', 'I', 'W', 'E', 'C'];
+END_VAR
+VAR
+	{attribute 'hide'} 
+	_ClassName : STRING := __POUNAME();
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[]]></ST>
+    </Implementation>
+    <Method Name="CanAttachInnerException" Id="{c2dc47b7-0bd3-4e6f-a372-f31f3ce592fe}">
+      <Declaration><![CDATA[(*!
+<summary>Checks whether attaching an inner cause would create a path back to its owner.</summary>
+<description>The input graph must already be acyclic, including graphs supplied by custom implementations. Traverses IGeneralException and IAggregateException edges without heap allocation or mutation. Returns FALSE when the owner occurs anywhere in the graph. Shared causes in separate branches are allowed. References must be live and graph getters stable during traversal. Other implementations are treated as leaves. Custom cloning must preserve the graph structure. Stack usage grows with graph depth; this is not a lifetime probe.</description>
+<param name="owner">Live destination whose identity must not occur in the supplied graph.</param>
+<param name="innerException">Borrowed graph root; null is accepted.</param>
+*)
+METHOD INTERNAL CanAttachInnerException : BOOL
+VAR_INPUT
+	ownerException : IException;
+	innerException : IReadOnlyException;
+END_VAR
+VAR
+	generalException : IGeneralException;
+	aggregateException : IAggregateException;
+	i : DINT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF innerException = 0 THEN
+	CanAttachInnerException := TRUE;
+	RETURN;
+END_IF
+
+IF innerException.SelfAddress = ownerException.SelfAddress THEN
+	RETURN;
+END_IF
+
+IF __QUERYINTERFACE(innerException, generalException) THEN
+	IF NOT Exceptions.CanAttachInnerException(ownerException, generalException.InnerException) THEN
+		RETURN;
+	END_IF
+END_IF
+
+IF __QUERYINTERFACE(innerException, aggregateException) THEN
+	FOR i := 0 TO TO_DINT(aggregateException.InnerExceptionCount) - 1 DO
+		IF NOT Exceptions.CanAttachInnerException(ownerException, aggregateException.GetInnerException(i)) THEN
+			RETURN;
+		END_IF
+	END_FOR
+END_IF
+
+CanAttachInnerException := TRUE;]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="ClassName" Id="{e0586beb-07ba-48ea-bac1-88a29f17e5ee}">
+      <Declaration><![CDATA[(*!
+<summary>Provides the diagnostic type name without copying its storage.</summary>
+<description>Borrowed read-only reference. Do not modify the referenced name; keep the owning instance alive while using the reference.</description>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{68cf71ce-7ef5-417a-bbb6-49ce56a5dd66}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ClassName REF= _ClassName;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="CopyMessage" Id="{8e99f26c-601c-4a4b-8bfc-e4f41645e283}">
+      <Declaration><![CDATA[(*!
+<summary>Copies a built exception message, marking truncation with an ellipsis.</summary>
+<description>Preserves the full text when it fits ERROR_MESSAGE. Otherwise keeps the leading characters and reserves the last character for U+2026. Does not modify the builder, allocate memory or raise a size-overflow exception. Building the source text may still fail independently.</description>
+<param name="builder">Live builder borrowed for reading during this call.</param>
+*)
+
+METHOD INTERNAL CopyMessage : ERROR_MESSAGE
+VAR_IN_OUT CONSTANT
+	builder : WideStringBuilder;
+END_VAR
+VAR
+	message : POINTER TO WORD;
+	capacity : UDINT;
+	length : UDINT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[message := ADR(CopyMessage);
+capacity := TO_UDINT(SIZEOF(CopyMessage) / SIZEOF(WORD)) - 1;
+length := builder.StringLength;
+
+IF length > capacity THEN
+	length := capacity - 1;
+END_IF
+
+IF length > 0 THEN
+	Tc2_System.MEMCPY(message, builder.StringAddress, length * SIZEOF(WORD));
+END_IF
+
+IF builder.StringLength > capacity THEN
+	message[length] := WideStrings.ELLIPSIS;
+	length := length + 1;
+END_IF
+
+message[length] := 0;]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="NamespaceName" Id="{2f75ad23-beef-4f23-a4f1-f33f8c29a149}">
+      <Declaration><![CDATA[(*!
+<summary>Provides the library namespace used in diagnostics.</summary>
+<description>Borrowed read-only reference to the compiler-initialized library namespace; no ownership transfer.</description>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{836eaa4a-1e7f-4752-8f3a-583e81e3f648}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[NamespaceName REF= CurrentNamespace.Name;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+  </POU>
+</TcPlcObject>
