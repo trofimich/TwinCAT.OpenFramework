@@ -12,7 +12,7 @@ License: https://opensource.org/license/mit
 <summary>Removes an empty filesystem directory when it exists.</summary>
 <description>Closes native enumeration before starting removal when a directory is found. Pending search and
 remove commands finish before stopping. Diagnostic string inputs are borrowed only during the call; retained
-diagnostic text is copied into owned storage.</description>
+diagnostic text is copied into owned storage. A found file produces FAILURE without starting remove I/O; stopping closes the enumeration before task completion.</description>
 *)
 FUNCTION_BLOCK RemoveEmptyDirectoryIfExists EXTENDS TOF_Tasks.Task IMPLEMENTS IFileSystemTask
 VAR
@@ -181,9 +181,9 @@ _EnumerationAbortIssued := FALSE;]]></ST>
 <summary>Checks for a directory and removes it only after closing the search.</summary>
 <description>On early discovery, the search abort must complete before the remove FB is started. A missing
 directory completes successfully. Computed diagnostics are held in local buffers for the receiving call.
-The local diagnostic builder is released after copying its message and before raising the operation exception.</description>
-<param name="processingState">BUSY while searching, closing the search or removing; DONE after completion.</param>
-<param name="stopReasonMessage">Not changed; exceptions provide directory failure diagnostics.</param>
+A found file returns ERROR with a diagnostic message and leaves enumeration cleanup to OnStopping; no remove request starts. The local diagnostic builder is released after copying its message and before raising the operation exception.</description>
+<param name="processingState">BUSY while searching, closing the search or removing; DONE after completion; ERROR when the path refers to a file.</param>
+<param name="stopReasonMessage">Receives diagnostics when the path refers to a file; native failures use exceptions.</param>
 *)
 METHOD PROTECTED OnRunning
 VAR_OUTPUT
@@ -235,7 +235,12 @@ IF _DirectoryChecking THEN
 		_DirectoryChecking := FALSE;
 		
 		IF NOT _EnumFindFile.bEOE THEN
-			_DirectoryFound := TRUE;
+			IF _EnumFindFile.stFindFile.fileAttributes.bDirectory THEN
+				_DirectoryFound := TRUE;
+			ELSE
+				stopReasonMessage := TOF_Core.WideStrings.Concat255("Directory path refers to a file: ", TO_WSTRING(_EnumFindFile.sPathName));
+				processingState := TOF_Tasks.TASK_PROCESSING_STATE.ERROR;
+			END_IF
 		ELSE
 			processingState := TOF_Tasks.TASK_PROCESSING_STATE.DONE;
 		END_IF
