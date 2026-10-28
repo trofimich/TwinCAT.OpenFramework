@@ -7,14 +7,40 @@ SPDX-License-Identifier: MIT
 License: https://opensource.org/license/mit
 *)
 
+(*!
+<summary>Runs borrowed file-content tasks sequentially using one managed file resource.</summary>
+<description>Use one owner task; do not drive children independently while queued. The manager owns its embedded
+resource objects, not the children. Keep each child alive until removed; keep this manager alive while any
+child or caller uses a borrowed resource reference. Queue removal does not clear a child's binding.
+Configure FilePath, ModeFlags, PathType, AmsNetId and Timeout before Start and keep them unchanged until STOPPED.
+Advance Execute through stopping and release. A completed best-effort close attempt does not prove physical
+close success. An exposed handle is not an acquisition guard and must not be retained across release.
+Reset from STOPPED clears queue entries and FilePath; it does not reset children. Reset in READY is a no-op.
+A removed STOPPED child can Reset to clear its binding; a removed READY child must explicitly clear or replace
+its binding before the old owner is destroyed. Do not mutate borrowed resource data or close its handle directly.
+Before online change, stop producers from enqueueing or starting new work. For a running manager, set
+StopWhenNoPendingTasks to TRUE to finish queued work, or request Cancel if abandoning waiting work is
+acceptable. Continue cyclic Execute until STOPPED, including child completion and resource release.
+An idle running manager may still hold an open file. Online change with a retained handle or pending native
+operation is unsupported; there is no automatic guard or active-handle handoff. Cleanup errors require
+resolution before treating the application as prepared; STOPPED alone does not prove physical release.</description>
+*)
 {attribute 'no_explicit_call' := 'Direct call is not allowed'} 
 FUNCTION_BLOCK FileContentManager EXTENDS TOF_Tasks.TaskQueue
+VAR CONSTANT
+	//! <summary>Unassigned file-content task interface used to reject a missing Enqueue argument.</summary>
+	_NullFileContentTask : IFileContentTask := 0;
+END_VAR
 VAR
 	{attribute 'hide'} 
 	_ClassName : STRING := __POUNAME();
 	
 	{attribute 'hide'} 
 	_FileHandleResourceManager : FileHandleResourceManager;
+
+	//! <summary>Instance-owned template for a missing Enqueue argument; avoids a method-local exception object.</summary>
+	{attribute 'hide'}
+	_FileContentTaskNotSpecifiedException : TOF_Core.ArgumentNotSpecifiedException;
 END_VAR]]></Declaration>
     <Implementation>
       <ST><![CDATA[]]></ST>
@@ -47,7 +73,11 @@ PROPERTY AmsNetId : Tc2_System.T_AmsNetID]]></Declaration>
       </Set>
     </Property>
     <Property Name="ClassName" Id="{7dde5df2-bee6-469e-a34d-e38f282681a9}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Provides the concrete type name used in diagnostics.</summary>
+<description>Borrowed read-only instance storage; keep the object alive while using the reference.</description>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY ClassName : REFERENCE TO STRING
 ]]></Declaration>
       <Get Name="Get" Id="{d478f9e9-291b-4ed2-a175-f912be663022}">
@@ -58,28 +88,38 @@ PROPERTY ClassName : REFERENCE TO STRING
       </Get>
     </Property>
     <Method Name="Enqueue" Id="{6d338e28-e90a-4f1d-be55-6a823f742ef9}">
-      <Declaration><![CDATA[METHOD Enqueue
+      <Declaration><![CDATA[(*!
+<summary>Binds a prepared file-content task to this manager and appends it to the queue.</summary>
+<description>The child is borrowed, not cloned or owned. It must be READY, alive, unique in this queue and
+absent from every other queue. Do not drive or rebind it independently while queued. Successful return
+means the child was appended; execution starts later through the queue. Null raises ArgumentNotSpecifiedException
+in the caller; this is not a Task FAILURE result. Binding occurs before queue insertion, so an exception
+does not guarantee restoration of the previous binding. A custom SetFileHandleResource may also have partial
+effects before throwing. Terminal allocation failure must reach the owner's fatal task boundary.
+Remove a child from its previous queue before rebinding. Removing entries does not clear their bindings.
+Reset this manager before filling it for reuse from STOPPED; its Reset clears entries, not child state.</description>
+<param name="fileHandleTask">Live, unqueued READY task whose execution is delegated to this queue.</param>
+*)
+METHOD Enqueue
 VAR_INPUT
-	fileHandleTask : IFileContentTask; 
-END_VAR
-VAR
-	resourceObject : TOF_Core.IObject;
-	fileHandleResurce : POINTER TO FileHandleResource;
+	fileHandleTask : IFileContentTask;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[IF fileHandleTask <> 0 THEN
-	resourceObject := _FileHandleResourceManager.GetResource();
-	
-	IF __QUERYPOINTER(resourceObject, fileHandleResurce) THEN
-		fileHandleTask.SetFileHandleResource(fileHandleResurce^);
-		
-		EnqueueTask(fileHandleTask);		
-	END_IF
-END_IF]]></ST>
+        <ST><![CDATA[IF fileHandleTask = _NullFileContentTask THEN
+	(* A missing required argument cannot be reported as successful enqueue; the caller handles the exception. *)
+	_FileContentTaskNotSpecifiedException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), 'fileHandleTask');
+END_IF
+
+fileHandleTask.SetFileHandleResource(_FileHandleResourceManager.FileHandleResource);
+EnqueueTask(fileHandleTask);]]></ST>
       </Implementation>
     </Method>
     <Property Name="FileHandle" Id="{d400f36f-4560-4321-9301-560723b5321c}" FolderPath="Outputs\">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Exposes the native handle associated with this manager.</summary>
+<description>This observation does not check acquisition or physical close success. Do not close it independently or reuse a saved value after release; file-content tasks use the manager-owned resource.</description>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY FINAL FileHandle : UINT]]></Declaration>
       <Get Name="Get" Id="{af4ff15c-e163-44de-a875-054227fd820a}">
         <Declaration><![CDATA[]]></Declaration>
@@ -90,6 +130,12 @@ PROPERTY FINAL FileHandle : UINT]]></Declaration>
     </Property>
     <Property Name="FilePath" Id="{f39c82db-1dee-4ac8-b085-ad0d066c8468}" FolderPath="Inputs\">
       <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+(*!
+<summary>Provides the path of the file to acquire on the configured target.</summary>
+<description>Set before Start and keep unchanged until STOPPED. The setter copies the text; the native open
+service resolves it with PathType. It must refer to the target's local filesystem, not a network share.
+Reset from STOPPED clears the path. Path assignment does not open or validate an existing file.</description>
+*)
 PROPERTY FilePath : Tc2_System.T_MaxString]]></Declaration>
       <Get Name="Get" Id="{c797c652-63c0-4561-b531-110a18c85ac4}">
         <Declaration><![CDATA[]]></Declaration>
@@ -106,7 +152,13 @@ PROPERTY FilePath : Tc2_System.T_MaxString]]></Declaration>
     </Property>
     <Property Name="ModeFlags" Id="{eab34e5a-e16f-430d-90f0-029e4eb57eb1}" FolderPath="Inputs\">
       <Declaration><![CDATA[(*!
-<summary>use Tc2_System.Global_Variables.FOPEN_MODEXXX</summary>
+<summary>Selects native file access and text or binary mode.</summary>
+<description>Configure before Start and keep unchanged until STOPPED. Choose exactly one of FOPEN_MODEREAD,
+FOPEN_MODEWRITE or FOPEN_MODEAPPEND, optionally combine FOPEN_MODEPLUS, and explicitly choose one of
+FOPEN_MODETEXT or FOPEN_MODEBINARY. Use Tc2_System constants with OR; incompatible choices are rejected
+by the native open operation, not validated by this property. WRITE creates or truncates, READ requires an
+existing file, and APPEND writes at the end. Omitting text/binary leaves the choice to the native environment.
+Reset preserves these flags.</description>
 *)
 
 {attribute 'monitoring' := 'call'}
@@ -126,7 +178,11 @@ PROPERTY ModeFlags : DWORD]]></Declaration>
       </Set>
     </Property>
     <Property Name="NamespaceName" Id="{7b18bdc5-244f-4cb6-a69d-ff82980ef6e3}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Provides the library namespace used in diagnostics.</summary>
+<description>Returns borrowed read-only namespace storage; do not modify the referenced string.</description>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
       <Get Name="Get" Id="{d8cd630c-d3f9-42c5-ba22-d2cd3c67dc04}">
         <Declaration><![CDATA[]]></Declaration>
@@ -157,7 +213,13 @@ END_IF]]></ST>
       </Implementation>
     </Method>
     <Method Name="OnReset" Id="{1acc0a62-c3a8-4414-bfbb-7dc3dc036945}" FolderPath="Overriden members\">
-      <Declaration><![CDATA[METHOD PROTECTED OnReset ]]></Declaration>
+      <Declaration><![CDATA[(*!
+<summary>Clears queued references and the configured file path on Reset from STOPPED.</summary>
+<description>Preserves the inherited queue reset without resetting or deleting children or clearing their
+resource bindings. Other manager configuration remains unchanged. READY Reset does not invoke this hook.
+Overrides must preserve both queue reset and path clearing.</description>
+*)
+METHOD PROTECTED OnReset ]]></Declaration>
       <Implementation>
         <ST><![CDATA[SUPER^.OnReset();
 
@@ -166,6 +228,11 @@ FilePath := '';]]></ST>
     </Method>
     <Property Name="PathType" Id="{cbd2448b-000c-4456-acbb-370bcc431295}" FolderPath="Inputs\">
       <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+(*!
+<summary>Selects the native target path context used when opening FilePath.</summary>
+<description>Configure before Start and keep unchanged until STOPPED. Passed to the native open service;
+it is not a path-validity result. Reset preserves it.</description>
+*)
 PROPERTY PathType : Tc2_System.E_OpenPath]]></Declaration>
       <Get Name="Get" Id="{4fd9cd50-b095-453b-aa33-3b46437fbccc}">
         <Declaration><![CDATA[]]></Declaration>
@@ -181,7 +248,11 @@ PROPERTY PathType : Tc2_System.E_OpenPath]]></Declaration>
       </Set>
     </Property>
     <Property Name="ResourceManager" Id="{adb82134-36e0-452b-abeb-a0acb3733da6}">
-      <Declaration><![CDATA[PROPERTY ResourceManager : TOF_Core.IResourceManager]]></Declaration>
+      <Declaration><![CDATA[(*!
+<summary>Exposes the file-resource manager borrowed by this task queue.</summary>
+<description>Keep this FileContentManager alive while using the interface. Use it for resource observations; do not independently request acquisition or release, execute it, or delete it while the queue owns its lifecycle.</description>
+*)
+PROPERTY ResourceManager : TOF_Core.IResourceManager]]></Declaration>
       <Get Name="Get" Id="{4bf105e6-40ee-4ebc-b949-d3bac16988f3}">
         <Declaration><![CDATA[]]></Declaration>
         <Implementation>
@@ -190,7 +261,10 @@ PROPERTY PathType : Tc2_System.E_OpenPath]]></Declaration>
       </Get>
     </Property>
     <Property Name="SelfSize" Id="{aa575a10-da54-44bb-a1d2-ac20af742a7b}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Reports the size of this concrete instance in bytes.</summary>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY SelfSize : ULINT]]></Declaration>
       <Get Name="Get" Id="{46726470-3c47-4383-bc77-fbfb39b4cbc0}">
         <Declaration><![CDATA[]]></Declaration>
@@ -201,6 +275,11 @@ PROPERTY SelfSize : ULINT]]></Declaration>
     </Property>
     <Property Name="Timeout" Id="{8b8e24f2-ac37-4ffd-b14b-41645bab1c20}" FolderPath="Inputs\">
       <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+(*!
+<summary>Sets the native timeout for acquiring and releasing this manager's file.</summary>
+<description>Configure before Start and keep unchanged until STOPPED. Children have their own operation
+timeouts; this value is not a deadline for the whole queue or its stopping phase. Reset preserves it.</description>
+*)
 PROPERTY Timeout : TIME]]></Declaration>
       <Get Name="Get" Id="{4943b545-4a96-4943-8f75-27394e4b849b}">
         <Declaration><![CDATA[]]></Declaration>

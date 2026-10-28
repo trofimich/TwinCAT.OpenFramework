@@ -1,12 +1,31 @@
 ﻿<?xml version="1.0" encoding="utf-8"?>
 <TcPlcObject Version="1.1.0.1">
   <POU Name="PathHelper" Id="{0dca2365-65a2-482c-a73e-d706575b93b9}" SpecialFunc="None">
-    <Declaration><![CDATA[PROGRAM PathHelper]]></Declaration>
+    <Declaration><![CDATA[(*!
+<summary>Provides lexical checks for directory and file path strings.</summary>
+<description>These checks perform no filesystem I/O, normalization or access checks. Passing does not
+certify acceptance by a native service or target filesystem. The current filter is not a complete Windows,
+UNC or platform-specific path validator; it does not validate reserved names or dot components.
+Callers must separately satisfy the path requirements of the actual operation and target.</description>
+*)
+PROGRAM PathHelper]]></Declaration>
     <Implementation>
       <ST><![CDATA[]]></ST>
     </Implementation>
     <Method Name="IsValidDirectoryPath" Id="{74a38896-f3ee-456c-865c-7f0b909dbd4e}">
-      <Declaration><![CDATA[METHOD IsValidDirectoryPath : BOOL
+      <Declaration><![CDATA[(*!
+<summary>Checks the lexical form of a directory path without accessing the filesystem.</summary>
+<description>Rejects an empty path, bytes below ASCII space, characters from the current forbidden set
+and repeated slash/backslash separators beyond the leading pair. A colon is accepted only immediately
+after an ASCII drive letter and before a separator. Relative paths and a trailing separator are not
+rejected solely for being relative or trailing. Leading separator pairs are permitted lexically, but
+UNC server/share structure is not checked and native network-path support is not implied.
+Reserved names, dot components and trailing dots/spaces are not validated. TRUE means only that this
+filter passed; errorMessage is meaningful on FALSE. Input is borrowed only for the call.</description>
+<param name="directoryPath">Directory path to inspect without modifying or retaining it.</param>
+<param name="errorMessage">Reason for the first rejected condition.</param>
+*)
+METHOD IsValidDirectoryPath : BOOL
 VAR_IN_OUT CONSTANT
 	directoryPath : Tc2_System.T_MaxString;
 END_VAR
@@ -17,6 +36,8 @@ VAR
     i, j : UDINT;
     stringLength : UDINT;
     character : BYTE;
+    (* Current lexical exclusions, not an OS-wide list. Caret is an existing library restriction;
+       the drive-letter exception below handles the only accepted colon position. *)
     invalidChars : STRING(8) := '<>"|?*^:';
 END_VAR]]></Declaration>
       <Implementation>
@@ -68,7 +89,19 @@ IsValidDirectoryPath := TRUE;]]></ST>
       </Implementation>
     </Method>
     <Method Name="IsValidFilePath" Id="{c79d4e63-0f05-42ae-918f-7c9d81a28bdc}">
-      <Declaration><![CDATA[METHOD IsValidFilePath : BOOL
+      <Declaration><![CDATA[(*!
+<summary>Checks the lexical form of a file path and rejects a trailing separator.</summary>
+<description>Borrows the path only for this call. Returns FALSE with errorMessage for an empty path,
+a forbidden character, repeated separators beyond the leading pair, or a final slash or backslash.
+A drive-letter colon is allowed only before a slash or backslash. TRUE means the lexical checks passed;
+it does not establish file existence, access rights or acceptance by the target filesystem.
+No filesystem I/O is performed. Relative paths are not rejected solely for being relative. Leading separator
+pairs do not establish a valid UNC path; reserved names, dot components and trailing dots/spaces are not
+validated. errorMessage is meaningful only when FALSE is returned.</description>
+<param name="filePath">File path to inspect without modifying or retaining it.</param>
+<param name="errorMessage">Receives the reason for the first rejected condition.</param>
+*)
+METHOD IsValidFilePath : BOOL
 VAR_IN_OUT CONSTANT
 	filePath : Tc2_System.T_MaxString;
 END_VAR
@@ -79,6 +112,8 @@ VAR
     i, j : UDINT;
     stringLength : UDINT;
     character : BYTE;
+    (* Current lexical exclusions, not an OS-wide list. Caret is an existing library restriction;
+       the drive-letter exception below handles the only accepted colon position. *)
     invalidChars : STRING(8) := '<>"|?*^:';
 END_VAR]]></Declaration>
       <Implementation>
@@ -126,7 +161,7 @@ FOR i := 0 TO stringLength - 1 DO
 	END_IF
 	
 	// slash can't be the last char of the file path
-	IF i = stringLength AND_THEN (character = Tc2_System.F_ToASC('\') OR_ELSE character = Tc2_System.F_ToASC('/')) THEN
+	IF i = stringLength - 1 AND_THEN (character = Tc2_System.F_ToASC('\') OR_ELSE character = Tc2_System.F_ToASC('/')) THEN
 		errorMessage := "Slash at the end of the path";	
 		RETURN;
 	END_IF

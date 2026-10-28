@@ -1,5 +1,5 @@
-<?xml version="1.0" encoding="utf-8"?>
-<TcPlcObject Version="1.1.0.1">
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1" ProductVersion="3.1.4026.21">
   <POU Name="ObjectLifetimeTest" Id="{fd3e4307-69aa-4ebb-9fda-16de60cd1902}" SpecialFunc="None">
     <Declaration><![CDATA[(*
 SPDX-FileCopyrightText: © 2026 Oleksandr Tiutyk <trofimich@gmail.com>
@@ -14,6 +14,53 @@ DeleteThroughIObject();
 GetInstanceAddress();
 RefuseStaticObjectRelease();]]></ST>
     </Implementation>
+    <Method Name="DeleteThroughIObject" Id="{a91708c6-1023-4b4f-9905-b8c3c7f7ff17}">
+      <Declaration><![CDATA[METHOD DeleteThroughIObject
+VAR
+	probe : POINTER TO ObjectExitProbe;
+	instance : TOF_Core.IObject;
+	exitCount : UDINT;
+	released : BOOL;
+END_VAR
+VAR_INST
+	testFinished : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN
+	RETURN;
+END_IF
+
+TEST(__POUNAME());
+
+probe := __NEW(ObjectExitProbe);
+
+IF probe = 0 THEN
+	AssertEquals_BOOL(TRUE, FALSE, 'Probe allocation failed');
+ELSE
+	probe^.ObserveExit(exitCount);
+	instance := probe^;
+	AssertEquals_BOOL(TRUE, TOF_Core.Memory.GetAddressFromInterface(instance) = probe, 'Dynamic interface must resolve to the complete instance address');
+	released := TOF_Core.Memory.TryReleaseDynamicObject(instance);
+
+	AssertEquals_BOOL(TRUE, released, 'Dynamic object release was refused');
+	IF released THEN
+		// The typed pointer is now a dangling alias; never delete or dereference it.
+		probe := 0;
+		AssertEquals_BOOL(TRUE, instance = 0, 'Release must clear the passed interface');
+		AssertEquals_UDINT(1, exitCount, 'Release through IObject must call the concrete FB_exit once');
+		AssertEquals_BOOL(FALSE, TOF_Core.Memory.TryReleaseDynamicObject(instance), 'Repeated release must be a no-op');
+		AssertEquals_UDINT(1, exitCount, 'Repeated release must not call FB_exit again');
+	ELSE
+		// Refused release leaves the instance alive; clean up through its exact type.
+		__DELETE(probe);
+		instance := 0;
+	END_IF
+END_IF
+
+testFinished := TRUE;
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
     <Method Name="DeleteTypedPointer" Id="{f354db45-429e-4325-b3eb-404aceb1acd4}">
       <Declaration><![CDATA[METHOD DeleteTypedPointer
 VAR
@@ -38,52 +85,6 @@ ELSE
 	__DELETE(probe);
 
 	AssertEquals_UDINT(1, exitCount, 'Typed deletion must call the concrete FB_exit once');
-END_IF
-
-testFinished := TRUE;
-TEST_FINISHED();]]></ST>
-      </Implementation>
-    </Method>
-    <Method Name="DeleteThroughIObject" Id="{a91708c6-1023-4b4f-9905-b8c3c7f7ff17}">
-      <Declaration><![CDATA[METHOD DeleteThroughIObject
-VAR
-	probe : POINTER TO ObjectExitProbe;
-	instance : TOF_Core.IObject;
-	exitCount : UDINT;
-	released : BOOL;
-END_VAR
-VAR_INST
-	testFinished : BOOL;
-END_VAR]]></Declaration>
-      <Implementation>
-        <ST><![CDATA[IF testFinished THEN
-	RETURN;
-END_IF
-
-TEST(__POUNAME());
-
-probe := __NEW(ObjectExitProbe);
-IF probe = 0 THEN
-	AssertEquals_BOOL(TRUE, FALSE, 'Probe allocation failed');
-ELSE
-	probe^.ObserveExit(exitCount);
-	instance := probe^;
-	AssertEquals_BOOL(TRUE, TOF_Core.Memory.GetAddressFromInterface(instance) = probe, 'Dynamic interface must resolve to the complete instance address');
-	released := TOF_Core.Memory.TryReleaseDynamicObject(instance);
-
-	AssertEquals_BOOL(TRUE, released, 'Dynamic object release was refused');
-	IF released THEN
-		// The typed pointer is now a dangling alias; never delete or dereference it.
-		probe := 0;
-		AssertEquals_BOOL(TRUE, instance = 0, 'Release must clear the passed interface');
-		AssertEquals_UDINT(1, exitCount, 'Release through IObject must call the concrete FB_exit once');
-		AssertEquals_BOOL(FALSE, TOF_Core.Memory.TryReleaseDynamicObject(instance), 'Repeated release must be a no-op');
-		AssertEquals_UDINT(1, exitCount, 'Repeated release must not call FB_exit again');
-	ELSE
-		// Refused release leaves the instance alive; clean up through its exact type.
-		__DELETE(probe);
-		instance := 0;
-	END_IF
 END_IF
 
 testFinished := TRUE;

@@ -13,7 +13,7 @@ License: https://opensource.org/license/mit
 StartAcquire and StartRelease request one operation; Execute advances it until completion.
 Configure before acquisition and keep configuration unchanged until release completes.
 Do not overlap requests. FinishPendingAcquire drains a pending open during stopping.
-Close errors are logged and finish the cleanup attempt. Normal release must be advanced through Execute before destruction. FB_exit only makes a final best-effort close request and does not wait for or verify its completion.
+Close errors are logged and finish the cleanup attempt. Normal release must be advanced through Execute before destruction. FB_exit only makes a final best-effort close request and does not wait for or verify its completion. Before online change, the owner must finish pending acquisition and release through cyclic execution. No pending native operation or retained open handle may cross online change; this precondition is not enforced automatically.
 </description>
 *)
 
@@ -39,7 +39,11 @@ END_VAR]]></Declaration>
     <Folder Name="Internal methods" Id="{6577756f-627e-4f88-8d2b-366f1cad24e3}" />
     <Folder Name="Outputs" Id="{1801966b-7c3d-4b3c-94f0-65a057cde663}" />
     <Property Name="AmsNetId" Id="{58ba6341-e7aa-43c3-a872-d3eb4b8261f4}" FolderPath="Inputs\">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Selects the ADS target for the native filesystem operation.</summary>
+<description>Shared by open and close. Configure before acquisition and keep unchanged through completed release; assignment does not submit I/O.</description>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY AmsNetId : Tc2_System.T_AmsNetID]]></Declaration>
       <Get Name="Get" Id="{b1951ee2-f8d0-49e2-83e5-41b7bedd997b}">
         <Declaration><![CDATA[]]></Declaration>
@@ -56,7 +60,11 @@ _FileClose.sNetId := AmsNetId;]]></ST>
       </Set>
     </Property>
     <Property Name="ClassName" Id="{cc79ca29-ba9e-49d4-b09a-938a015d18e8}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Provides the concrete type name used in diagnostics.</summary>
+<description>Borrowed read-only instance storage; keep the object alive while using the reference.</description>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY ClassName : REFERENCE TO STRING
 ]]></Declaration>
       <Get Name="Get" Id="{b72512a6-29f2-482c-8ad3-73e1bab73efc}">
@@ -124,6 +132,10 @@ END_IF]]></ST>
     <Method Name="executeRelease" Id="{a4a50be3-0dfc-44f6-bb5a-f1a98beada52}">
       <Declaration><![CDATA[(*!
 <summary>Advances best-effort file closing; close errors are logged and the cleanup attempt is completed.</summary>
+<description>After native completion, clears the acquired/releasing flags even on close failure.
+The error message includes the native nErrId as a decimal code before the file path.
+Logging does not retry close or convert the close error to a new exception. Completed cleanup bookkeeping
+does not prove physical handle closure; logging delivery depends on the configured logger.</description>
 *)
 METHOD PRIVATE executeRelease
 VAR	
@@ -148,7 +160,9 @@ IF NOT _FileClose.bBusy THEN
 
 	IF _FileClose.bError THEN
 		messageBuilder
-			.AppendString("Error while closing file '")
+			.AppendString("Error while closing file (native error code ")
+			.AppendString255(TO_WSTRING(_FileClose.nErrId))
+			.AppendString("): '")
 			.Append(_FileOpen.sPathName)
 			.AppendString("'")
 			.AssignToString(message);
@@ -172,7 +186,7 @@ END_IF
 
 (*!
 <summary>Makes a final best-effort close request for a still-acquired file handle.</summary>
-<description>Does not wait for bBusy to clear or inspect the close result. Callers must complete normal release through cyclic Execute before destroying this manager; this fallback does not guarantee that the file has closed. Does not create framework exceptions or format diagnostics.</description>
+<description>Does not wait for bBusy to clear or inspect the close result. Callers must complete normal release through cyclic Execute before destroying this manager; this fallback does not guarantee that the file has closed. Does not create framework exceptions or format diagnostics. The same fallback runs when bInCopyCode is TRUE; this method implements no handoff of an active handle to a copied instance. Before online change, callers must finish normal release and resolve any cleanup error. Under that precondition this fallback has no acquired handle to close. It cannot prepare an active manager for online change or guarantee uninterrupted file I/O.</description>
 *)
 METHOD FB_exit : BOOL
 VAR_INPUT
@@ -188,7 +202,11 @@ END_IF]]></ST>
       </Implementation>
     </Method>
     <Property Name="FileHandle" Id="{2896eaf9-a80f-404e-94b8-8123c510f09c}" FolderPath="Outputs\">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Provides the native handle associated with the file resource.</summary>
+<description>Use only during the current acquisition; the value alone is not an acquisition guard. Do not close it independently or retain it across release.</description>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY FINAL FileHandle : UINT]]></Declaration>
       <Get Name="Get" Id="{6df95589-41ea-4b94-84cc-212d2dd51c8f}">
         <Declaration><![CDATA[]]></Declaration>
@@ -198,7 +216,11 @@ PROPERTY FINAL FileHandle : UINT]]></Declaration>
       </Get>
     </Property>
     <Property Name="FilePath" Id="{e7da9441-fbfb-4fa6-a4d8-72325b7739cf}" FolderPath="Inputs\">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Provides the configured path for the file operation.</summary>
+<description>Configure before acquisition and keep unchanged through release. Assignment copies the path without opening a file; StartAcquire rejects a missing path.</description>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY FilePath : Tc2_System.T_MaxString]]></Declaration>
       <Get Name="Get" Id="{0f59a514-2049-4c57-9a08-ebeb32943655}">
         <Declaration><![CDATA[]]></Declaration>
@@ -239,6 +261,21 @@ IF FinishPendingAcquire THEN
 END_IF]]></ST>
       </Implementation>
     </Method>
+    <Property Name="FileHandleResource" Id="{6e403d76-5580-4e7f-aced-4b132e2a3937}">
+      <Declaration><![CDATA[(*!
+<summary>Provides the manager-owned typed resource for binding file-content tasks.</summary>
+<description>The reference is valid only while this manager is alive. Obtaining it does not acquire or open
+a file. It remains a borrowed view across release and reacquisition; use its handle only during the current
+acquisition. Do not delete the resource or modify its borrowed path. No ownership is transferred.</description>
+*)
+PROPERTY FileHandleResource : REFERENCE TO FileHandleResource]]></Declaration>
+      <Get Name="Get" Id="{99b2d18c-cc24-47e6-b5ff-4c54bc9a4675}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[FileHandleResource REF= _FileHandleResource;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
     <Method Name="GetResource" Id="{da34d722-f49b-4fa9-bce2-28d0fd1bb9f9}">
       <Declaration><![CDATA[(*!
 <summary>Returns a borrowed resource object owned by this manager.</summary>
@@ -257,7 +294,8 @@ METHOD GetResource : TOF_Core.IObject]]></Declaration>
     </Method>
     <Property Name="ModeFlags" Id="{d8877c23-9995-4a58-9d03-9d10857af478}" FolderPath="Inputs\">
       <Declaration><![CDATA[(*!
-<summary>use Tc2_System.Global_Variables.FOPEN_MODEXXX</summary>
+<summary>Selects native file access and text or binary flags.</summary>
+<description>Use the valid Tc2_System FOPEN_MODE combinations documented by FileContentManager.ModeFlags. Configure before acquisition and keep unchanged through release; native opening reports incompatible flags.</description>
 *)
 
 {attribute 'monitoring' := 'call'}
@@ -277,7 +315,11 @@ PROPERTY ModeFlags : DWORD]]></Declaration>
       </Set>
     </Property>
     <Property Name="NamespaceName" Id="{27fd42e0-b5de-433d-a7c7-62172f1098aa}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Provides the library namespace used in diagnostics.</summary>
+<description>Returns borrowed read-only namespace storage; do not modify the referenced string.</description>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
       <Get Name="Get" Id="{415be913-5fd9-4560-9a47-04b1e4a47a7d}">
         <Declaration><![CDATA[]]></Declaration>
@@ -287,7 +329,11 @@ PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
       </Get>
     </Property>
     <Property Name="PathType" Id="{0498697c-dcd7-4ba7-a720-017e4bbbaf68}" FolderPath="Inputs\">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Selects the native path context for the filesystem request.</summary>
+<description>Passed to native file opening. Configure before acquisition and keep unchanged through release; the setter does not validate or open a path.</description>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY PathType : Tc2_System.E_OpenPath]]></Declaration>
       <Get Name="Get" Id="{10200069-c008-4ef3-ab5c-d58c7df21bcd}">
         <Declaration><![CDATA[]]></Declaration>
@@ -303,7 +349,11 @@ PROPERTY PathType : Tc2_System.E_OpenPath]]></Declaration>
       </Set>
     </Property>
     <Property Name="ResourceAcquired" Id="{976b6166-7716-4306-abdc-0df2c42fb7a2}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Reports whether this manager currently retains an acquired handle.</summary>
+<description>FALSE also occurs before acquisition completes and after a failed best-effort close attempt. This bookkeeping flag is not proof that the native service physically released a resource.</description>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY ResourceAcquired : BOOL]]></Declaration>
       <Get Name="Get" Id="{3890982e-702d-45cd-afaa-5dec8d04c8fa}">
         <Declaration><![CDATA[]]></Declaration>
@@ -313,7 +363,10 @@ PROPERTY ResourceAcquired : BOOL]]></Declaration>
       </Get>
     </Property>
     <Property Name="SelfSize" Id="{1462f709-fe1e-4e8c-b9f5-e539de887f05}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Reports the size of this concrete instance in bytes.</summary>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY SelfSize : ULINT]]></Declaration>
       <Get Name="Get" Id="{9d7145ea-ca1b-4e2a-8ba0-84e101203bf1}">
         <Declaration><![CDATA[]]></Declaration>
@@ -379,7 +432,11 @@ END_IF]]></ST>
       </Implementation>
     </Method>
     <Property Name="Timeout" Id="{55f19980-de6f-45fb-885f-84e42279fbe8}" FolderPath="Inputs\">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Configures the timeout passed to native operation requests.</summary>
+<description>Shared by native open and close. Configure before acquisition and keep unchanged through release. It is not an overall resource-lifecycle deadline.</description>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY Timeout : TIME]]></Declaration>
       <Get Name="Get" Id="{ac33da2e-1fca-4ee3-9451-0faaba6eb7f2}">
         <Declaration><![CDATA[]]></Declaration>

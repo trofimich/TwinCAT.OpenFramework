@@ -8,12 +8,27 @@ License: https://opensource.org/license/mit
 *)
 
 {attribute 'no_explicit_call' := 'do not call this function block directly'} 
+(*!
+<summary>Reads bounded text from the acquired file using FB_FileGets.</summary>
+<description>The native operation requires a file opened in text mode. It stops at a line feed (included),
+EOF or the native string capacity; a result is not necessarily a complete logical line. No encoding
+conversion is added by this wrapper. The owner keeps the resource acquired until stopping completes.
+Configure Timeout before Start. Missing binding or native errors use the Task failure and cleanup path;
+cancellation waits for submitted I/O without restoring the file position.
+ReadString and IsEndOfFile expose native results only after STOPPED with WORK_DONE.
+Copy text before Reset or reuse; the returned reference is borrowed and read-only.
+Reset clears the resource binding and request state while retaining Timeout.</description>
+*)
 FUNCTION_BLOCK ReadString255FromFile EXTENDS FileContentTask
 VAR
 	{attribute 'hide'} 
 	_ClassName : STRING := __POUNAME();
 
     _GetString : Tc2_System.FB_FileGets;
+
+	//! <summary>Instance-owned empty result returned when no successful string-read result is available.</summary>
+	{attribute 'hide'}
+	_EmptyReadString : STRING(255);
 
 	{attribute 'hide'} 
 	_FileHandleNotSpecifiedException :	TOF_Core.DataMemberNotSpecifiedException;
@@ -27,7 +42,11 @@ END_VAR]]></Declaration>
     <Folder Name="Outputs" Id="{2687a2c0-e9b8-457a-ae22-2bcf0282bb20}" />
     <Folder Name="Overriden methods" Id="{96d59493-d580-4bfe-a861-cbc805002cd8}" />
     <Property Name="AmsNetId" Id="{5e86071a-fff2-4b64-a947-f0a543716178}" FolderPath="Inputs\">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Exposes the native operation target copied from the bound file resource.</summary>
+<description>The resource target overwrites a separately assigned value before native submission. Configure the resource owner to select a target; do not change this value while the task is running.</description>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY AmsNetId : Tc2_System.T_AmsNetID]]></Declaration>
       <Get Name="Get" Id="{b15be1d2-9c4b-4434-9063-d8ac5259abd3}">
         <Declaration><![CDATA[]]></Declaration>
@@ -43,7 +62,11 @@ PROPERTY AmsNetId : Tc2_System.T_AmsNetID]]></Declaration>
       </Set>
     </Property>
     <Property Name="ClassName" Id="{7db10db2-2251-4c75-abf2-e0ab39a53210}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Provides the concrete type name used in diagnostics.</summary>
+<description>Borrowed read-only instance storage; keep the object alive while using the reference.</description>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY ClassName : REFERENCE TO STRING
 ]]></Declaration>
       <Get Name="Get" Id="{e58d1024-beee-429e-b557-0d7757a4d79d}">
@@ -54,17 +77,33 @@ PROPERTY ClassName : REFERENCE TO STRING
       </Get>
     </Property>
     <Property Name="IsEndOfFile" Id="{8254aeb4-f13d-4573-a1ea-162850c1f69f}" FolderPath="Outputs\">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Reports the native EOF indicator from a successfully completed string read.</summary>
+<description>Returns the native result only while State.Stopped and FinalStopReason.WorkDone are both TRUE.
+In every other state, including READY, RUNNING, failure and cancellation, returns the initial value of the
+property type. This default is not a success indicator; inspect the task state and final reason.
+FALSE outside successful completion does not establish that more data is available.
+The getter does not modify native outputs or buffers. Copy a successful result before Reset or reuse.</description>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY IsEndOfFile : BOOL]]></Declaration>
       <Get Name="Get" Id="{fbbf2700-ea5b-4762-927e-5fb47cf3d6a2}">
         <Declaration><![CDATA[]]></Declaration>
         <Implementation>
-          <ST><![CDATA[IsEndOfFile := _GetString.bEOF;]]></ST>
+          <ST><![CDATA[IF NOT State.Stopped OR_ELSE NOT FinalStopReason.WorkDone THEN
+	RETURN;
+END_IF
+
+IsEndOfFile := _GetString.bEOF;]]></ST>
         </Implementation>
       </Get>
     </Property>
     <Property Name="NamespaceName" Id="{2ce03114-3e67-4060-910f-233c205421ff}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Provides the library namespace used in diagnostics.</summary>
+<description>Returns borrowed read-only namespace storage; do not modify the referenced string.</description>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
       <Get Name="Get" Id="{e52144d3-746b-411b-a7b7-3c88d8c0964d}">
         <Declaration><![CDATA[]]></Declaration>
@@ -96,7 +135,11 @@ readyToRelease := NOT _GetString.bBusy;]]></ST>
       </Implementation>
     </Method>
     <Method Name="OnReset" Id="{bc6c6478-9f6a-4ea4-898a-1f8c1e054c6a}" FolderPath="Overriden methods\">
-      <Declaration><![CDATA[METHOD PROTECTED OnReset ]]></Declaration>
+      <Declaration><![CDATA[(*!
+<summary>Resets the native request edge after the task has stopped.</summary>
+<description>Also preserves the inherited resource-binding cleanup. Configured inputs remain available for reuse; borrowed buffers are not freed or cleared. Pending I/O must finish during stopping before this hook runs.</description>
+*)
+METHOD PROTECTED OnReset ]]></Declaration>
       <Implementation>
         <ST><![CDATA[SUPER^.OnReset();
 
@@ -154,17 +197,34 @@ END_IF]]></ST>
       </Implementation>
     </Method>
     <Property Name="ReadString" Id="{f8733a64-16f5-476a-82ad-78b6e24f3bd4}" FolderPath="Outputs\">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Provides a borrowed string result after successful completion, or an empty string otherwise.</summary>
+<description>When State.Stopped and FinalStopReason.WorkDone are both TRUE, returns a reference to the
+native line buffer. Otherwise returns a reference to this task's separate empty buffer, not an invalid reference.
+An empty string is not a success indicator. Neither branch clears the native line or rolls back file effects.
+Both references are borrowed: keep this task alive, do not write through them, and copy the text before
+Reset or reuse. A previously obtained reference is not invalidated or redirected when task state changes;
+read the property again to apply the state guard.</description>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY ReadString : REFERENCE TO STRING(255)]]></Declaration>
       <Get Name="Get" Id="{05ef70dc-2260-47d3-9819-29ec37241546}">
         <Declaration><![CDATA[]]></Declaration>
         <Implementation>
-          <ST><![CDATA[ReadString REF= _GetString.sLine;]]></ST>
+          <ST><![CDATA[IF NOT State.Stopped OR_ELSE NOT FinalStopReason.WorkDone THEN
+	ReadString REF= _EmptyReadString;
+	RETURN;
+END_IF
+
+ReadString REF= _GetString.sLine;]]></ST>
         </Implementation>
       </Get>
     </Property>
     <Property Name="SelfSize" Id="{b94ca5b5-3068-42a3-b5ce-f53c3e8592e5}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Reports the size of this concrete instance in bytes.</summary>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY SelfSize : ULINT]]></Declaration>
       <Get Name="Get" Id="{6d795d92-8577-4e44-ae40-a2e62dfb657c}">
         <Declaration><![CDATA[]]></Declaration>
@@ -174,7 +234,11 @@ PROPERTY SelfSize : ULINT]]></Declaration>
       </Get>
     </Property>
     <Property Name="Timeout" Id="{7b65e75a-a7ec-4557-8eea-79c1b55dcfc5}" FolderPath="Inputs\">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Configures the timeout passed to native operation requests.</summary>
+<description>Set before Start and keep unchanged until STOPPED. Reset preserves this value. It is not an overall task deadline or a guarantee of resource release after a timeout.</description>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY Timeout : TIME]]></Declaration>
       <Get Name="Get" Id="{d8b1c199-2e75-444e-b5ff-d4f407358de6}">
         <Declaration><![CDATA[]]></Declaration>
@@ -190,7 +254,11 @@ PROPERTY Timeout : TIME]]></Declaration>
       </Set>
     </Property>
     <Property Name="FileOperationInProgress" Id="{586635bd-fab0-4bb9-8eac-64dcda3a3b61}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Reports whether the underlying native file operation is busy.</summary>
+<description>Observes native I/O, including work drained during stopping. FALSE is not a task-success result and does not independently permit the resource owner to close or destroy the file.</description>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY FileOperationInProgress : BOOL]]></Declaration>
       <Get Name="Get" Id="{56b50421-e01f-4edd-96ed-956b25478f1d}">
         <Declaration><![CDATA[]]></Declaration>

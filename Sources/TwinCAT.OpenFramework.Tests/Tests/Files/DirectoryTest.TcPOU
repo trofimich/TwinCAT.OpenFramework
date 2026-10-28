@@ -7,9 +7,26 @@ SPDX-License-Identifier: MIT
 License: https://opensource.org/license/mit
 *)
 
+(*!
+<summary>Exercises directory operations in independently owned scenario directories.</summary>
+<description>C:\OpenFrameworkTests must exist on the local target and be reserved exclusively for this suite.
+Run one instance from one cyclic task; do not modify the root externally during a run. The root is never removed.
+Existing scenario directories fail preparation and are not adopted or deleted. Ownership is established only
+after ordinary CreateDirectory completes with WORK_DONE. Failed or cancelled creation may leave a directory
+with unknown ownership for manual inspection. Keep invoking the suite after a failed test for cleanup.
+Test completion does not prove cleanup completion or physical resource release.</description>
+*)
 FUNCTION_BLOCK DirectoryTest EXTENDS TcUnit.FB_TestSuite
+VAR CONSTANT
+	//! <summary>Existing, exclusively reserved parent directory; never removed by this suite.</summary>
+	_TestRoot : STRING(255) := 'C:\OpenFrameworkTests';
+	//! <summary>Timeout for each native directory task; not a bound on total cleanup time.</summary>
+	_NativeTimeout : TIME := T#2S;
+	//! <summary>Elapsed time allowed for a scenario before cancellation and a failed test result.</summary>
+	_ScenarioDeadline : TIME := T#10S;
+END_VAR
 VAR
-	{attribute 'hide'} 
+	{attribute 'hide'}
 	_ClassName : STRING := __POUNAME();
 END_VAR]]></Declaration>
     <Implementation>
@@ -19,149 +36,479 @@ CheckInvalidDirectory();
 CreateDirectoryIfNotExistsThenRemoveItIfExists();]]></ST>
     </Implementation>
     <Method Name="CheckInvalidDirectory" Id="{5b90f0a8-63c9-4de6-954b-71a101a6f473}">
-      <Declaration><![CDATA[METHOD CheckInvalidDirectory
-VAR CONSTANT
-	PATH : STRING(255) := 'W:\abcde12345';
-END_VAR
-VAR
-	exceptionCode : __SYSTEM.ExceptionCode;
-
-	caughtException : TOF_Core.IException;
-	
-	errorMessage : TOF_Core.ERROR_MESSAGE;
-END_VAR
+      <Declaration><![CDATA[(*!
+<summary>Checks an absent child of a directory created by this scenario.</summary>
+<description>Requires the suite's reserved root and exclusive access. Ordinary creation rejects an existing test directory
+without adopting or deleting it. Only confirmed creation grants ownership; failed or cancelled creation may leave an
+unowned path for manual inspection. Each native task uses the suite timeout; the scenario has a total deadline.
+Start/Reset refusal, unexpected results, timeout and exceptions fail the test once. On failure, subsequent
+suite cycles cancel and drain the active task before attempting nonrecursive cleanup of known owned paths.
+Cleanup failures are retained in cleanupMessage for inspection; cleanupAttemptsFinished means attempts ended, not
+that all paths or native resources were released. No forced cleanup deadline is imposed.
+Successful completion includes checking that the test directory is absent.</description>
+*)
+METHOD CheckInvalidDirectory
 VAR_INST
 	testFinished : BOOL;
-	
 	initialized : BOOL;
-	
-	checkInvalidDirectoryExists : TOF_FileSystem.CheckDirectoryExists("checkInvalidDirectoryExists");	
+	operationStarted : BOOL;
+	step : DIRECTORY_TEST_STEP := DIRECTORY_TEST_STEP.CREATE_DIRECTORY;
+	ownsScenarioDirectory : BOOL;
+	cleanupAttemptsFinished : BOOL;
+
+	scenarioDirectoryPath : STRING(255);
+	childPath : STRING(255);
+	failureMessage : STRING(255);
+	//! <summary>Retained cleanup diagnostic; inspect with scenarioDirectoryPath after a failed test.</summary>
+	cleanupMessage : STRING(255);
+	scenarioDeadline : Tc2_Standard.TON;
+
+	checkDirectory : TOF_FileSystem.CheckDirectoryExists("checkDirectory");
+	createDirectory : TOF_FileSystem.CreateDirectory("createDirectory");
+	removeDirectory : TOF_FileSystem.RemoveEmptyDirectory("removeDirectory");
+	removeScenarioDirectoryDuringCleanup : TOF_FileSystem.RemoveEmptyDirectoryIfExists("removeScenarioDirectoryDuringCleanup");
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[IF testFinished THEN 
-	RETURN; 
-END_IF 
-
-TEST(__POUNAME());
-
-IF NOT initialized THEN
-	initialized := TRUE;
-
-	checkInvalidDirectoryExists.DirectoryPath := PATH;
-
-	checkInvalidDirectoryExists.Start();
+        <ST><![CDATA[IF testFinished AND_THEN cleanupAttemptsFinished THEN
+	RETURN;
 END_IF
 
-checkInvalidDirectoryExists.Execute();
+IF NOT testFinished THEN
+	TEST(__POUNAME());
+	scenarioDeadline(IN := TRUE, PT := _ScenarioDeadline);
+END_IF
 
-IF checkInvalidDirectoryExists.State.Stopped AND_THEN checkInvalidDirectoryExists.FinalStopReason.WorkDone THEN
-	IF checkInvalidDirectoryExists.DirectoryExists THEN
-		AssertTrue(FALSE, TOF_Core.Strings.Concat255('Found not existing directory "', PATH, '"'));			
+(* Unexpected control or diagnostic exceptions fail the test and retain tasks for drain.
+   A cleanup exception leaves cleanup pending for subsequent cycles; no resource is force-released. *)
+__TRY
+	IF testFinished THEN
+		IF createDirectory.State.Running THEN
+			createDirectory.Cancel();
+			createDirectory.Execute();
+			RETURN;
+		END_IF
+
+		IF checkDirectory.State.Running THEN
+			checkDirectory.Cancel();
+			checkDirectory.Execute();
+			RETURN;
+		END_IF
+
+		IF removeDirectory.State.Running THEN
+			removeDirectory.Cancel();
+			removeDirectory.Execute();
+			RETURN;
+		END_IF
+
+		IF ownsScenarioDirectory AND_THEN NOT removeScenarioDirectoryDuringCleanup.State.Stopped THEN
+			IF removeScenarioDirectoryDuringCleanup.State.Ready THEN
+				IF NOT removeScenarioDirectoryDuringCleanup.Start() THEN
+					cleanupMessage := 'Test directory cleanup Start refused; inspect the scenario directory';
+					cleanupAttemptsFinished := TRUE;
+					RETURN;
+				END_IF
+			END_IF
+
+			removeScenarioDirectoryDuringCleanup.Execute();
+			IF NOT removeScenarioDirectoryDuringCleanup.State.Stopped THEN
+				RETURN;
+			END_IF
+
+			IF removeScenarioDirectoryDuringCleanup.FinalStopReason.WorkDone THEN
+				ownsScenarioDirectory := FALSE;
+			ELSE
+				cleanupMessage := 'Test directory cleanup failed; inspect the scenario directory';
+			END_IF
+		END_IF
+
+		cleanupAttemptsFinished := TRUE;
+		RETURN;
 	END_IF
-	
-	testFinished := TRUE; 
-	TEST_FINISHED();
+
+	IF NOT initialized THEN
+		scenarioDirectoryPath := TOF_Core.Strings.Concat255(_TestRoot, '\DirectoryTest_Missing');
+		childPath := TOF_Core.Strings.Concat255(scenarioDirectoryPath, '\Child');
+		checkDirectory.Timeout := _NativeTimeout;
+		createDirectory.Timeout := _NativeTimeout;
+		removeDirectory.Timeout := _NativeTimeout;
+		removeScenarioDirectoryDuringCleanup.Timeout := _NativeTimeout;
+		checkDirectory.PathType := Tc2_System.E_OpenPath.PATH_GENERIC;
+		createDirectory.PathType := Tc2_System.E_OpenPath.PATH_GENERIC;
+		removeDirectory.PathType := Tc2_System.E_OpenPath.PATH_GENERIC;
+		removeScenarioDirectoryDuringCleanup.PathType := Tc2_System.E_OpenPath.PATH_GENERIC;
+		removeScenarioDirectoryDuringCleanup.DirectoryPath := scenarioDirectoryPath;
+
+		initialized := TRUE;
+	END_IF
+
+	IF scenarioDeadline.Q THEN
+		failureMessage := 'Scenario exceeded its 10-second deadline; creation may have an unknown result';
+	ELSE
+		CASE step OF
+			DIRECTORY_TEST_STEP.CREATE_DIRECTORY:
+				IF NOT operationStarted THEN
+					createDirectory.DirectoryPath := scenarioDirectoryPath;
+					IF NOT createDirectory.Start() THEN
+						failureMessage := 'createDirectory: Start refused';
+					ELSE
+						operationStarted := TRUE;
+					END_IF
+				END_IF
+
+				IF operationStarted THEN
+					createDirectory.Execute();
+					IF createDirectory.State.Stopped THEN
+						IF createDirectory.FinalStopReason.WorkDone THEN
+							ownsScenarioDirectory := TRUE;
+							step := DIRECTORY_TEST_STEP.CHECK_CHILD_DIRECTORY_ABSENT;
+						ELSE
+							failureMessage := TOF_Core.Strings.Concat255('createDirectory: ', TO_STRING(createDirectory.FinalStopReason.Message));
+						END_IF
+
+						operationStarted := FALSE;
+					END_IF
+				END_IF
+
+			DIRECTORY_TEST_STEP.CHECK_CHILD_DIRECTORY_ABSENT:
+				IF NOT operationStarted THEN
+					checkDirectory.DirectoryPath := childPath;
+					IF NOT checkDirectory.Reset() THEN
+						failureMessage := 'checkDirectory: Reset refused';
+					ELSIF NOT checkDirectory.Start() THEN
+						failureMessage := 'checkDirectory: Start refused';
+					ELSE
+						operationStarted := TRUE;
+					END_IF
+				END_IF
+
+				IF operationStarted THEN
+					checkDirectory.Execute();
+					IF checkDirectory.State.Stopped THEN
+						IF checkDirectory.FinalStopReason.WorkDone THEN
+							IF checkDirectory.DirectoryExists THEN
+								failureMessage := 'Expected directory to be absent';
+							ELSE
+								step := DIRECTORY_TEST_STEP.REMOVE_DIRECTORY;
+							END_IF
+						ELSE
+							failureMessage := TOF_Core.Strings.Concat255('checkDirectory: ', TO_STRING(checkDirectory.FinalStopReason.Message));
+						END_IF
+
+						operationStarted := FALSE;
+					END_IF
+				END_IF
+
+			DIRECTORY_TEST_STEP.REMOVE_DIRECTORY:
+				IF NOT operationStarted THEN
+					removeDirectory.DirectoryPath := scenarioDirectoryPath;
+					IF NOT removeDirectory.Start() THEN
+						failureMessage := 'removeDirectory: Start refused';
+					ELSE
+						operationStarted := TRUE;
+					END_IF
+				END_IF
+
+				IF operationStarted THEN
+					removeDirectory.Execute();
+					IF removeDirectory.State.Stopped THEN
+						IF removeDirectory.FinalStopReason.WorkDone THEN
+							ownsScenarioDirectory := FALSE;
+							step := DIRECTORY_TEST_STEP.CHECK_DIRECTORY_ABSENT;
+						ELSE
+							failureMessage := TOF_Core.Strings.Concat255('removeDirectory: ', TO_STRING(removeDirectory.FinalStopReason.Message));
+						END_IF
+
+						operationStarted := FALSE;
+					END_IF
+				END_IF
+
+			DIRECTORY_TEST_STEP.CHECK_DIRECTORY_ABSENT:
+				IF NOT operationStarted THEN
+					checkDirectory.DirectoryPath := scenarioDirectoryPath;
+					IF NOT checkDirectory.Reset() THEN
+						failureMessage := 'checkDirectory: Reset refused';
+					ELSIF NOT checkDirectory.Start() THEN
+						failureMessage := 'checkDirectory: Start refused';
+					ELSE
+						operationStarted := TRUE;
+					END_IF
+				END_IF
+
+				IF operationStarted THEN
+					checkDirectory.Execute();
+					IF checkDirectory.State.Stopped THEN
+						IF checkDirectory.FinalStopReason.WorkDone THEN
+							IF checkDirectory.DirectoryExists THEN
+								failureMessage := 'Expected directory to be absent';
+							ELSE
+								step := DIRECTORY_TEST_STEP.COMPLETED;
+							END_IF
+						ELSE
+							failureMessage := TOF_Core.Strings.Concat255('checkDirectory: ', TO_STRING(checkDirectory.FinalStopReason.Message));
+						END_IF
+
+						operationStarted := FALSE;
+					END_IF
+				END_IF
+		END_CASE
+	END_IF
+__CATCH
+	IF testFinished THEN
+		cleanupMessage := 'Exception during cleanup; subsequent suite cycles will continue cleanup';
+	ELSE
+		failureMessage := 'Exception interrupted the scenario; creation may have an unknown result';
+	END_IF
+__ENDTRY
+
+IF NOT testFinished THEN
+	IF failureMessage <> TOF_Core.Strings.Empty THEN
+		AssertTrue(FALSE, TOF_Core.Strings.Concat255(scenarioDirectoryPath, ' step ', TO_STRING(step), ': ', failureMessage));
+		testFinished := TRUE;
+		TEST_FINISHED();
+	ELSIF step = DIRECTORY_TEST_STEP.COMPLETED THEN
+		AssertTrue(TRUE, 'All directory operations and existence checks completed successfully');
+		cleanupAttemptsFinished := TRUE;
+		testFinished := TRUE;
+		TEST_FINISHED();
+	END_IF
 END_IF]]></ST>
       </Implementation>
     </Method>
     <Method Name="CheckThenCreateThenRemoveDirectory" Id="{5bc73480-957c-4dd7-ad6d-100d5d15a788}">
-      <Declaration><![CDATA[METHOD CheckThenCreateThenRemoveDirectory
-VAR CONSTANT
-	PATH : STRING(255) := 'C:\TestTwinCatDirectory1';
-END_VAR
-VAR
-	exceptionCode : __SYSTEM.ExceptionCode;
-
-	caughtException : TOF_Core.IException;
-	
-	errorMessage : TOF_Core.ERROR_MESSAGE;
-END_VAR
+      <Declaration><![CDATA[(*!
+<summary>Creates a directory, verifies its presence, removes it and verifies its absence.</summary>
+<description>Requires the suite's reserved root and exclusive access. Ordinary creation rejects an existing test directory
+without adopting or deleting it. Only confirmed creation grants ownership; failed or cancelled creation may leave an
+unowned path for manual inspection. Each native task uses the suite timeout; the scenario has a total deadline.
+Start/Reset refusal, unexpected results, timeout and exceptions fail the test once. On failure, subsequent
+suite cycles cancel and drain the active task before attempting nonrecursive cleanup of known owned paths.
+Cleanup failures are retained in cleanupMessage for inspection; cleanupAttemptsFinished means attempts ended, not
+that all paths or native resources were released. No forced cleanup deadline is imposed.
+Successful completion includes checking that the test directory is absent.</description>
+*)
+METHOD CheckThenCreateThenRemoveDirectory
 VAR_INST
 	testFinished : BOOL;
-	
-	stage : BYTE;
+	initialized : BOOL;
+	operationStarted : BOOL;
+	step : DIRECTORY_TEST_STEP := DIRECTORY_TEST_STEP.CREATE_DIRECTORY;
+	ownsScenarioDirectory : BOOL;
+	cleanupAttemptsFinished : BOOL;
 
-	checkDirectoryExists : TOF_FileSystem.CheckDirectoryExists("checkDirectoryExists");	
+	scenarioDirectoryPath : STRING(255);
+	failureMessage : STRING(255);
+	//! <summary>Retained cleanup diagnostic; inspect with scenarioDirectoryPath after a failed test.</summary>
+	cleanupMessage : STRING(255);
+	scenarioDeadline : Tc2_Standard.TON;
+
+	checkDirectory : TOF_FileSystem.CheckDirectoryExists("checkDirectory");
 	createDirectory : TOF_FileSystem.CreateDirectory("createDirectory");
 	removeDirectory : TOF_FileSystem.RemoveEmptyDirectory("removeDirectory");
+	removeScenarioDirectoryDuringCleanup : TOF_FileSystem.RemoveEmptyDirectoryIfExists("removeScenarioDirectoryDuringCleanup");
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[IF testFinished THEN 
-	RETURN; 
-END_IF 
+        <ST><![CDATA[IF testFinished AND_THEN cleanupAttemptsFinished THEN
+	RETURN;
+END_IF
 
-TEST(__POUNAME());
+IF NOT testFinished THEN
+	TEST(__POUNAME());
+	scenarioDeadline(IN := TRUE, PT := _ScenarioDeadline);
+END_IF
 
-//__TRY
-	CASE stage OF
-		0:
-			checkDirectoryExists.DirectoryPath := PATH;			
-			createDirectory.DirectoryPath := PATH;
-			removeDirectory.DirectoryPath := PATH;
-		
-			checkDirectoryExists.Start();
+(* Unexpected control or diagnostic exceptions fail the test and retain tasks for drain.
+   A cleanup exception leaves cleanup pending for subsequent cycles; no resource is force-released. *)
+__TRY
+	IF testFinished THEN
+		IF createDirectory.State.Running THEN
+			createDirectory.Cancel();
+			createDirectory.Execute();
+			RETURN;
+		END_IF
 
-			stage := 1;
-						
-		1:
-			checkDirectoryExists.Execute();
+		IF checkDirectory.State.Running THEN
+			checkDirectory.Cancel();
+			checkDirectory.Execute();
+			RETURN;
+		END_IF
 
-			IF checkDirectoryExists.State.Stopped THEN
-				IF checkDirectoryExists.FinalStopReason.WorkDone THEN
-					IF checkDirectoryExists.DirectoryExists THEN
-						testFinished := TRUE; 
-						TEST_FINISHED();
-					ELSE
-						createDirectory.Start();						
+		IF removeDirectory.State.Running THEN
+			removeDirectory.Cancel();
+			removeDirectory.Execute();
+			RETURN;
+		END_IF
 
-						stage := 2;
-					END_IF
-				ELSE
-					AssertTrue(FALSE, 'CheckDirectoryExists wrong result');
-					
-					testFinished := TRUE; 
-					TEST_FINISHED();
-				END_IF			
-			END_IF
-						
-		2:			
-			createDirectory.Execute();		
-
-			IF createDirectory.State.Stopped THEN
-				IF checkDirectoryExists.FinalStopReason.WorkDone THEN
-					removeDirectory.Start();					
-
-					stage := 3;
-				ELSE
-					AssertTrue(FALSE, 'CreateDirectory error');
-					
-					testFinished := TRUE; 
-					TEST_FINISHED();
-				END_IF				
-			END_IF
-			
-		3:
-			removeDirectory.Execute();		
-
-			IF removeDirectory.State.Stopped THEN
-				IF NOT removeDirectory.FinalStopReason.WorkDone THEN;
-					AssertTrue(FALSE, 'DeleteDirectory error');
+		IF ownsScenarioDirectory AND_THEN NOT removeScenarioDirectoryDuringCleanup.State.Stopped THEN
+			IF removeScenarioDirectoryDuringCleanup.State.Ready THEN
+				IF NOT removeScenarioDirectoryDuringCleanup.Start() THEN
+					cleanupMessage := 'Test directory cleanup Start refused; inspect the scenario directory';
+					cleanupAttemptsFinished := TRUE;
+					RETURN;
 				END_IF
-								
-				testFinished := TRUE; 
-				TEST_FINISHED();								
 			END_IF
-	END_CASE
-(*__CATCH(exceptionCode)
-	caughtException := TOF_Core.ExceptionManager.GetLastException(exceptionCode, NamespaceName, __POUNAME(), __POSITION());
-	
-	errorMessage := caughtException.GetMessage();
-	
-	AssertTrue(FALSE, WSTRING_TO_STRING(errorMessage));
-	
-	testFinished := TRUE; 
-	TEST_FINISHED();	
-__ENDTRY*)]]></ST>
+
+			removeScenarioDirectoryDuringCleanup.Execute();
+			IF NOT removeScenarioDirectoryDuringCleanup.State.Stopped THEN
+				RETURN;
+			END_IF
+
+			IF removeScenarioDirectoryDuringCleanup.FinalStopReason.WorkDone THEN
+				ownsScenarioDirectory := FALSE;
+			ELSE
+				cleanupMessage := 'Test directory cleanup failed; inspect the scenario directory';
+			END_IF
+		END_IF
+
+		cleanupAttemptsFinished := TRUE;
+		RETURN;
+	END_IF
+
+	IF NOT initialized THEN
+		scenarioDirectoryPath := TOF_Core.Strings.Concat255(_TestRoot, '\DirectoryTest_CreateRemove');
+		checkDirectory.Timeout := _NativeTimeout;
+		createDirectory.Timeout := _NativeTimeout;
+		removeDirectory.Timeout := _NativeTimeout;
+		removeScenarioDirectoryDuringCleanup.Timeout := _NativeTimeout;
+		checkDirectory.PathType := Tc2_System.E_OpenPath.PATH_GENERIC;
+		createDirectory.PathType := Tc2_System.E_OpenPath.PATH_GENERIC;
+		removeDirectory.PathType := Tc2_System.E_OpenPath.PATH_GENERIC;
+		removeScenarioDirectoryDuringCleanup.PathType := Tc2_System.E_OpenPath.PATH_GENERIC;
+		removeScenarioDirectoryDuringCleanup.DirectoryPath := scenarioDirectoryPath;
+
+		initialized := TRUE;
+	END_IF
+
+	IF scenarioDeadline.Q THEN
+		failureMessage := 'Scenario exceeded its 10-second deadline; creation may have an unknown result';
+	ELSE
+		CASE step OF
+			DIRECTORY_TEST_STEP.CREATE_DIRECTORY:
+				IF NOT operationStarted THEN
+					createDirectory.DirectoryPath := scenarioDirectoryPath;
+					IF NOT createDirectory.Start() THEN
+						failureMessage := 'createDirectory: Start refused';
+					ELSE
+						operationStarted := TRUE;
+					END_IF
+				END_IF
+
+				IF operationStarted THEN
+					createDirectory.Execute();
+					IF createDirectory.State.Stopped THEN
+						IF createDirectory.FinalStopReason.WorkDone THEN
+							ownsScenarioDirectory := TRUE;
+							step := DIRECTORY_TEST_STEP.CHECK_DIRECTORY_PRESENT;
+						ELSE
+							failureMessage := TOF_Core.Strings.Concat255('createDirectory: ', TO_STRING(createDirectory.FinalStopReason.Message));
+						END_IF
+
+						operationStarted := FALSE;
+					END_IF
+				END_IF
+
+			DIRECTORY_TEST_STEP.CHECK_DIRECTORY_PRESENT:
+				IF NOT operationStarted THEN
+					checkDirectory.DirectoryPath := scenarioDirectoryPath;
+					IF NOT checkDirectory.Reset() THEN
+						failureMessage := 'checkDirectory: Reset refused';
+					ELSIF NOT checkDirectory.Start() THEN
+						failureMessage := 'checkDirectory: Start refused';
+					ELSE
+						operationStarted := TRUE;
+					END_IF
+				END_IF
+
+				IF operationStarted THEN
+					checkDirectory.Execute();
+					IF checkDirectory.State.Stopped THEN
+						IF checkDirectory.FinalStopReason.WorkDone THEN
+							IF NOT checkDirectory.DirectoryExists THEN
+								failureMessage := 'Expected directory to exist';
+							ELSE
+								step := DIRECTORY_TEST_STEP.REMOVE_DIRECTORY;
+							END_IF
+						ELSE
+							failureMessage := TOF_Core.Strings.Concat255('checkDirectory: ', TO_STRING(checkDirectory.FinalStopReason.Message));
+						END_IF
+
+						operationStarted := FALSE;
+					END_IF
+				END_IF
+
+			DIRECTORY_TEST_STEP.REMOVE_DIRECTORY:
+				IF NOT operationStarted THEN
+					removeDirectory.DirectoryPath := scenarioDirectoryPath;
+					IF NOT removeDirectory.Start() THEN
+						failureMessage := 'removeDirectory: Start refused';
+					ELSE
+						operationStarted := TRUE;
+					END_IF
+				END_IF
+
+				IF operationStarted THEN
+					removeDirectory.Execute();
+					IF removeDirectory.State.Stopped THEN
+						IF removeDirectory.FinalStopReason.WorkDone THEN
+							ownsScenarioDirectory := FALSE;
+							step := DIRECTORY_TEST_STEP.CHECK_DIRECTORY_ABSENT;
+						ELSE
+							failureMessage := TOF_Core.Strings.Concat255('removeDirectory: ', TO_STRING(removeDirectory.FinalStopReason.Message));
+						END_IF
+
+						operationStarted := FALSE;
+					END_IF
+				END_IF
+
+			DIRECTORY_TEST_STEP.CHECK_DIRECTORY_ABSENT:
+				IF NOT operationStarted THEN
+					checkDirectory.DirectoryPath := scenarioDirectoryPath;
+					IF NOT checkDirectory.Reset() THEN
+						failureMessage := 'checkDirectory: Reset refused';
+					ELSIF NOT checkDirectory.Start() THEN
+						failureMessage := 'checkDirectory: Start refused';
+					ELSE
+						operationStarted := TRUE;
+					END_IF
+				END_IF
+
+				IF operationStarted THEN
+					checkDirectory.Execute();
+					IF checkDirectory.State.Stopped THEN
+						IF checkDirectory.FinalStopReason.WorkDone THEN
+							IF checkDirectory.DirectoryExists THEN
+								failureMessage := 'Expected directory to be absent';
+							ELSE
+								step := DIRECTORY_TEST_STEP.COMPLETED;
+							END_IF
+						ELSE
+							failureMessage := TOF_Core.Strings.Concat255('checkDirectory: ', TO_STRING(checkDirectory.FinalStopReason.Message));
+						END_IF
+
+						operationStarted := FALSE;
+					END_IF
+				END_IF
+		END_CASE
+	END_IF
+__CATCH
+	IF testFinished THEN
+		cleanupMessage := 'Exception during cleanup; subsequent suite cycles will continue cleanup';
+	ELSE
+		failureMessage := 'Exception interrupted the scenario; creation may have an unknown result';
+	END_IF
+__ENDTRY
+
+IF NOT testFinished THEN
+	IF failureMessage <> TOF_Core.Strings.Empty THEN
+		AssertTrue(FALSE, TOF_Core.Strings.Concat255(scenarioDirectoryPath, ' step ', TO_STRING(step), ': ', failureMessage));
+		testFinished := TRUE;
+		TEST_FINISHED();
+	ELSIF step = DIRECTORY_TEST_STEP.COMPLETED THEN
+		AssertTrue(TRUE, 'All directory operations and existence checks completed successfully');
+		cleanupAttemptsFinished := TRUE;
+		testFinished := TRUE;
+		TEST_FINISHED();
+	END_IF
+END_IF]]></ST>
       </Implementation>
     </Method>
     <Property Name="ClassName" Id="{b781c019-1c1b-484b-acec-96a5874d1a6b}">
@@ -175,80 +522,477 @@ PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
       </Get>
     </Property>
     <Method Name="CreateDirectoryIfNotExistsThenRemoveItIfExists" Id="{f932d0fc-d998-4f22-9038-acfe40a25bc1}">
-      <Declaration><![CDATA[METHOD CreateDirectoryIfNotExistsThenRemoveItIfExists
-VAR CONSTANT
-	PATH : STRING(255) := 'C:\TestTwinCatDirectory2';
-END_VAR
-VAR
-	exceptionCode : __SYSTEM.ExceptionCode;
-
-	caughtException : TOF_Core.IException;
-	
-	errorMessage : TOF_Core.ERROR_MESSAGE;
-END_VAR
+      <Declaration><![CDATA[(*!
+<summary>Checks repeated conditional create and remove operations inside an owned test directory.</summary>
+<description>Requires the suite's reserved root and exclusive access. Ordinary creation rejects an existing test directory
+without adopting or deleting it. Only confirmed creation grants ownership; failed or cancelled creation may leave an
+unowned path for manual inspection. Each native task uses the suite timeout; the scenario has a total deadline.
+Start/Reset refusal, unexpected results, timeout and exceptions fail the test once. On failure, subsequent
+suite cycles cancel and drain the active task before attempting nonrecursive cleanup of known owned paths.
+Cleanup failures are retained in cleanupMessage for inspection; cleanupAttemptsFinished means attempts ended, not
+that all paths or native resources were released. No forced cleanup deadline is imposed.
+Successful completion includes checking that the test directory is absent.</description>
+*)
+METHOD CreateDirectoryIfNotExistsThenRemoveItIfExists
 VAR_INST
 	testFinished : BOOL;
-	
-	stage : BYTE;
-	
-	createDirectoryIfNotExists : TOF_FileSystem.CreateDirectoryIfNotExists("createDirectoryIfNotExists");	
-	removeDirectoryIfExists : TOF_FileSystem.RemoveEmptyDirectoryIfExists("removeDirectoryIfExists");	
+	initialized : BOOL;
+	operationStarted : BOOL;
+	step : DIRECTORY_TEST_STEP := DIRECTORY_TEST_STEP.CREATE_DIRECTORY;
+	ownsScenarioDirectory : BOOL;
+	cleanupAttemptsFinished : BOOL;
+
+	scenarioDirectoryPath : STRING(255);
+	childPath : STRING(255);
+	failureMessage : STRING(255);
+	//! <summary>Retained cleanup diagnostic; inspect with scenarioDirectoryPath after a failed test.</summary>
+	cleanupMessage : STRING(255);
+	scenarioDeadline : Tc2_Standard.TON;
+
+	checkDirectory : TOF_FileSystem.CheckDirectoryExists("checkDirectory");
+	createDirectory : TOF_FileSystem.CreateDirectory("createDirectory");
+	removeDirectory : TOF_FileSystem.RemoveEmptyDirectory("removeDirectory");
+	removeScenarioDirectoryDuringCleanup : TOF_FileSystem.RemoveEmptyDirectoryIfExists("removeScenarioDirectoryDuringCleanup");
+
+	ownsChildDirectory : BOOL;
+	createIfAbsent : TOF_FileSystem.CreateDirectoryIfNotExists("createIfAbsent");
+	removeIfPresent : TOF_FileSystem.RemoveEmptyDirectoryIfExists("removeIfPresent");
+	removeChildDirectoryDuringCleanup : TOF_FileSystem.RemoveEmptyDirectoryIfExists("removeChildDirectoryDuringCleanup");
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[IF testFinished THEN 
-	RETURN; 
-END_IF 
+        <ST><![CDATA[IF testFinished AND_THEN cleanupAttemptsFinished THEN
+	RETURN;
+END_IF
 
-TEST(__POUNAME());
+IF NOT testFinished THEN
+	TEST(__POUNAME());
+	scenarioDeadline(IN := TRUE, PT := _ScenarioDeadline);
+END_IF
 
+(* Unexpected control or diagnostic exceptions fail the test and retain tasks for drain.
+   A cleanup exception leaves cleanup pending for subsequent cycles; no resource is force-released. *)
 __TRY
-	CASE stage OF
-		0:		
-			createDirectoryIfNotExists.DirectoryPath := PATH;
-			removeDirectoryIfExists.DirectoryPath := PATH;
-			
-			createDirectoryIfNotExists.Start();
-			
-			stage := 1;
-		
-		1:
-			createDirectoryIfNotExists.Execute();		
+	IF testFinished THEN
+		IF createDirectory.State.Running THEN
+			createDirectory.Cancel();
+			createDirectory.Execute();
+			RETURN;
+		END_IF
 
-			IF createDirectoryIfNotExists.State.Stopped THEN
-				IF createDirectoryIfNotExists.FinalStopReason.WorkDone THEN;
-					removeDirectoryIfExists.Start();
-					
-					stage := 2;
-				ELSE
-					AssertTrue(FALSE, 'CreateDirectoryIfExists error');
-					
-					testFinished := TRUE; 
-					TEST_FINISHED();
+		IF createIfAbsent.State.Running THEN
+			createIfAbsent.Cancel();
+			createIfAbsent.Execute();
+			RETURN;
+		END_IF
+
+		IF checkDirectory.State.Running THEN
+			checkDirectory.Cancel();
+			checkDirectory.Execute();
+			RETURN;
+		END_IF
+
+		IF removeIfPresent.State.Running THEN
+			removeIfPresent.Cancel();
+			removeIfPresent.Execute();
+			RETURN;
+		END_IF
+
+		IF removeDirectory.State.Running THEN
+			removeDirectory.Cancel();
+			removeDirectory.Execute();
+			RETURN;
+		END_IF
+
+		IF ownsChildDirectory AND_THEN NOT removeChildDirectoryDuringCleanup.State.Stopped THEN
+			IF removeChildDirectoryDuringCleanup.State.Ready THEN
+				IF NOT removeChildDirectoryDuringCleanup.Start() THEN
+					cleanupMessage := 'Child cleanup Start refused; inspect the scenario directory';
+					cleanupAttemptsFinished := TRUE;
+					RETURN;
 				END_IF
 			END_IF
-		
-		2:
-			removeDirectoryIfExists.Execute();		
 
-			IF removeDirectoryIfExists.State.Stopped THEN
-				IF NOT removeDirectoryIfExists.FinalStopReason.WorkDone THEN;
-					AssertTrue(FALSE, 'RemoveEmptyDirectoryIfExists error');
-				END_IF
-					
-				testFinished := TRUE; 
-				TEST_FINISHED();
+			removeChildDirectoryDuringCleanup.Execute();
+			IF NOT removeChildDirectoryDuringCleanup.State.Stopped THEN
+				RETURN;
 			END_IF
-	END_CASE	
-__CATCH(exceptionCode)
-	caughtException := TOF_Core.ExceptionManager.GetLastException(exceptionCode, NamespaceName, __POUNAME(), __POSITION());
-	
-	errorMessage := caughtException.GetMessage();
-	
-	AssertTrue(FALSE, WSTRING_TO_STRING(errorMessage));
-	
-	testFinished := TRUE; 
-	TEST_FINISHED();	
-__ENDTRY]]></ST>
+
+			IF removeChildDirectoryDuringCleanup.FinalStopReason.WorkDone THEN
+				ownsChildDirectory := FALSE;
+			ELSE
+				cleanupMessage := 'Child cleanup failed; inspect the scenario directory';
+			END_IF
+		END_IF
+
+		IF ownsScenarioDirectory AND_THEN NOT removeScenarioDirectoryDuringCleanup.State.Stopped THEN
+			IF removeScenarioDirectoryDuringCleanup.State.Ready THEN
+				IF NOT removeScenarioDirectoryDuringCleanup.Start() THEN
+					cleanupMessage := 'Test directory cleanup Start refused; inspect the scenario directory';
+					cleanupAttemptsFinished := TRUE;
+					RETURN;
+				END_IF
+			END_IF
+
+			removeScenarioDirectoryDuringCleanup.Execute();
+			IF NOT removeScenarioDirectoryDuringCleanup.State.Stopped THEN
+				RETURN;
+			END_IF
+
+			IF removeScenarioDirectoryDuringCleanup.FinalStopReason.WorkDone THEN
+				ownsScenarioDirectory := FALSE;
+			ELSE
+				cleanupMessage := 'Test directory cleanup failed; inspect the scenario directory';
+			END_IF
+		END_IF
+
+		cleanupAttemptsFinished := TRUE;
+		RETURN;
+	END_IF
+
+	IF NOT initialized THEN
+		scenarioDirectoryPath := TOF_Core.Strings.Concat255(_TestRoot, '\DirectoryTest_IfExists');
+		childPath := TOF_Core.Strings.Concat255(scenarioDirectoryPath, '\Child');
+		checkDirectory.Timeout := _NativeTimeout;
+		createDirectory.Timeout := _NativeTimeout;
+		removeDirectory.Timeout := _NativeTimeout;
+		removeScenarioDirectoryDuringCleanup.Timeout := _NativeTimeout;
+		checkDirectory.PathType := Tc2_System.E_OpenPath.PATH_GENERIC;
+		createDirectory.PathType := Tc2_System.E_OpenPath.PATH_GENERIC;
+		removeDirectory.PathType := Tc2_System.E_OpenPath.PATH_GENERIC;
+		removeScenarioDirectoryDuringCleanup.PathType := Tc2_System.E_OpenPath.PATH_GENERIC;
+		removeScenarioDirectoryDuringCleanup.DirectoryPath := scenarioDirectoryPath;
+
+		createIfAbsent.Timeout := _NativeTimeout;
+		removeIfPresent.Timeout := _NativeTimeout;
+		removeChildDirectoryDuringCleanup.Timeout := _NativeTimeout;
+		createIfAbsent.PathType := Tc2_System.E_OpenPath.PATH_GENERIC;
+		removeIfPresent.PathType := Tc2_System.E_OpenPath.PATH_GENERIC;
+		removeChildDirectoryDuringCleanup.PathType := Tc2_System.E_OpenPath.PATH_GENERIC;
+		removeChildDirectoryDuringCleanup.DirectoryPath := childPath;
+
+		initialized := TRUE;
+	END_IF
+
+	IF scenarioDeadline.Q THEN
+		failureMessage := 'Scenario exceeded its 10-second deadline; creation may have an unknown result';
+	ELSE
+		CASE step OF
+			DIRECTORY_TEST_STEP.CREATE_DIRECTORY:
+				IF NOT operationStarted THEN
+					createDirectory.DirectoryPath := scenarioDirectoryPath;
+					IF NOT createDirectory.Start() THEN
+						failureMessage := 'createDirectory: Start refused';
+					ELSE
+						operationStarted := TRUE;
+					END_IF
+				END_IF
+
+				IF operationStarted THEN
+					createDirectory.Execute();
+					IF createDirectory.State.Stopped THEN
+						IF createDirectory.FinalStopReason.WorkDone THEN
+							ownsScenarioDirectory := TRUE;
+							step := DIRECTORY_TEST_STEP.CREATE_CHILD_DIRECTORY;
+						ELSE
+							failureMessage := TOF_Core.Strings.Concat255('createDirectory: ', TO_STRING(createDirectory.FinalStopReason.Message));
+						END_IF
+
+						operationStarted := FALSE;
+					END_IF
+				END_IF
+
+			DIRECTORY_TEST_STEP.CREATE_CHILD_DIRECTORY:
+				IF NOT operationStarted THEN
+					createIfAbsent.DirectoryPath := childPath;
+					IF NOT createIfAbsent.Reset() THEN
+						failureMessage := 'createIfAbsent: Reset refused';
+					ELSIF NOT createIfAbsent.Start() THEN
+						failureMessage := 'createIfAbsent: Start refused';
+					ELSE
+						operationStarted := TRUE;
+					END_IF
+				END_IF
+
+				IF operationStarted THEN
+					createIfAbsent.Execute();
+					IF createIfAbsent.State.Stopped THEN
+						IF createIfAbsent.FinalStopReason.WorkDone THEN
+							ownsChildDirectory := TRUE;
+							step := DIRECTORY_TEST_STEP.CHECK_CHILD_DIRECTORY_PRESENT;
+						ELSE
+							failureMessage := TOF_Core.Strings.Concat255('createIfAbsent: ', TO_STRING(createIfAbsent.FinalStopReason.Message));
+						END_IF
+
+						operationStarted := FALSE;
+					END_IF
+				END_IF
+
+			DIRECTORY_TEST_STEP.CHECK_CHILD_DIRECTORY_PRESENT:
+				IF NOT operationStarted THEN
+					checkDirectory.DirectoryPath := childPath;
+					IF NOT checkDirectory.Reset() THEN
+						failureMessage := 'checkDirectory: Reset refused';
+					ELSIF NOT checkDirectory.Start() THEN
+						failureMessage := 'checkDirectory: Start refused';
+					ELSE
+						operationStarted := TRUE;
+					END_IF
+				END_IF
+
+				IF operationStarted THEN
+					checkDirectory.Execute();
+					IF checkDirectory.State.Stopped THEN
+						IF checkDirectory.FinalStopReason.WorkDone THEN
+							IF NOT checkDirectory.DirectoryExists THEN
+								failureMessage := 'Expected directory to exist';
+							ELSE
+								step := DIRECTORY_TEST_STEP.CREATE_CHILD_DIRECTORY_AGAIN;
+							END_IF
+						ELSE
+							failureMessage := TOF_Core.Strings.Concat255('checkDirectory: ', TO_STRING(checkDirectory.FinalStopReason.Message));
+						END_IF
+
+						operationStarted := FALSE;
+					END_IF
+				END_IF
+
+			DIRECTORY_TEST_STEP.CREATE_CHILD_DIRECTORY_AGAIN:
+				IF NOT operationStarted THEN
+					createIfAbsent.DirectoryPath := childPath;
+					IF NOT createIfAbsent.Reset() THEN
+						failureMessage := 'createIfAbsent: Reset refused';
+					ELSIF NOT createIfAbsent.Start() THEN
+						failureMessage := 'createIfAbsent: Start refused';
+					ELSE
+						operationStarted := TRUE;
+					END_IF
+				END_IF
+
+				IF operationStarted THEN
+					createIfAbsent.Execute();
+					IF createIfAbsent.State.Stopped THEN
+						IF createIfAbsent.FinalStopReason.WorkDone THEN
+							step := DIRECTORY_TEST_STEP.CHECK_CHILD_DIRECTORY_PRESENT_AGAIN;
+						ELSE
+							failureMessage := TOF_Core.Strings.Concat255('createIfAbsent: ', TO_STRING(createIfAbsent.FinalStopReason.Message));
+						END_IF
+
+						operationStarted := FALSE;
+					END_IF
+				END_IF
+
+			DIRECTORY_TEST_STEP.CHECK_CHILD_DIRECTORY_PRESENT_AGAIN:
+				IF NOT operationStarted THEN
+					checkDirectory.DirectoryPath := childPath;
+					IF NOT checkDirectory.Reset() THEN
+						failureMessage := 'checkDirectory: Reset refused';
+					ELSIF NOT checkDirectory.Start() THEN
+						failureMessage := 'checkDirectory: Start refused';
+					ELSE
+						operationStarted := TRUE;
+					END_IF
+				END_IF
+
+				IF operationStarted THEN
+					checkDirectory.Execute();
+					IF checkDirectory.State.Stopped THEN
+						IF checkDirectory.FinalStopReason.WorkDone THEN
+							IF NOT checkDirectory.DirectoryExists THEN
+								failureMessage := 'Expected directory to exist';
+							ELSE
+								step := DIRECTORY_TEST_STEP.REMOVE_CHILD_DIRECTORY;
+							END_IF
+						ELSE
+							failureMessage := TOF_Core.Strings.Concat255('checkDirectory: ', TO_STRING(checkDirectory.FinalStopReason.Message));
+						END_IF
+
+						operationStarted := FALSE;
+					END_IF
+				END_IF
+
+			DIRECTORY_TEST_STEP.REMOVE_CHILD_DIRECTORY:
+				IF NOT operationStarted THEN
+					removeIfPresent.DirectoryPath := childPath;
+					IF NOT removeIfPresent.Reset() THEN
+						failureMessage := 'removeIfPresent: Reset refused';
+					ELSIF NOT removeIfPresent.Start() THEN
+						failureMessage := 'removeIfPresent: Start refused';
+					ELSE
+						operationStarted := TRUE;
+					END_IF
+				END_IF
+
+				IF operationStarted THEN
+					removeIfPresent.Execute();
+					IF removeIfPresent.State.Stopped THEN
+						IF removeIfPresent.FinalStopReason.WorkDone THEN
+							ownsChildDirectory := FALSE;
+							step := DIRECTORY_TEST_STEP.CHECK_CHILD_DIRECTORY_ABSENT;
+						ELSE
+							failureMessage := TOF_Core.Strings.Concat255('removeIfPresent: ', TO_STRING(removeIfPresent.FinalStopReason.Message));
+						END_IF
+
+						operationStarted := FALSE;
+					END_IF
+				END_IF
+
+			DIRECTORY_TEST_STEP.CHECK_CHILD_DIRECTORY_ABSENT:
+				IF NOT operationStarted THEN
+					checkDirectory.DirectoryPath := childPath;
+					IF NOT checkDirectory.Reset() THEN
+						failureMessage := 'checkDirectory: Reset refused';
+					ELSIF NOT checkDirectory.Start() THEN
+						failureMessage := 'checkDirectory: Start refused';
+					ELSE
+						operationStarted := TRUE;
+					END_IF
+				END_IF
+
+				IF operationStarted THEN
+					checkDirectory.Execute();
+					IF checkDirectory.State.Stopped THEN
+						IF checkDirectory.FinalStopReason.WorkDone THEN
+							IF checkDirectory.DirectoryExists THEN
+								failureMessage := 'Expected directory to be absent';
+							ELSE
+								step := DIRECTORY_TEST_STEP.REMOVE_CHILD_DIRECTORY_AGAIN;
+							END_IF
+						ELSE
+							failureMessage := TOF_Core.Strings.Concat255('checkDirectory: ', TO_STRING(checkDirectory.FinalStopReason.Message));
+						END_IF
+
+						operationStarted := FALSE;
+					END_IF
+				END_IF
+
+			DIRECTORY_TEST_STEP.REMOVE_CHILD_DIRECTORY_AGAIN:
+				IF NOT operationStarted THEN
+					removeIfPresent.DirectoryPath := childPath;
+					IF NOT removeIfPresent.Reset() THEN
+						failureMessage := 'removeIfPresent: Reset refused';
+					ELSIF NOT removeIfPresent.Start() THEN
+						failureMessage := 'removeIfPresent: Start refused';
+					ELSE
+						operationStarted := TRUE;
+					END_IF
+				END_IF
+
+				IF operationStarted THEN
+					removeIfPresent.Execute();
+					IF removeIfPresent.State.Stopped THEN
+						IF removeIfPresent.FinalStopReason.WorkDone THEN
+							step := DIRECTORY_TEST_STEP.CHECK_CHILD_DIRECTORY_ABSENT_AGAIN;
+						ELSE
+							failureMessage := TOF_Core.Strings.Concat255('removeIfPresent: ', TO_STRING(removeIfPresent.FinalStopReason.Message));
+						END_IF
+
+						operationStarted := FALSE;
+					END_IF
+				END_IF
+
+			DIRECTORY_TEST_STEP.CHECK_CHILD_DIRECTORY_ABSENT_AGAIN:
+				IF NOT operationStarted THEN
+					checkDirectory.DirectoryPath := childPath;
+					IF NOT checkDirectory.Reset() THEN
+						failureMessage := 'checkDirectory: Reset refused';
+					ELSIF NOT checkDirectory.Start() THEN
+						failureMessage := 'checkDirectory: Start refused';
+					ELSE
+						operationStarted := TRUE;
+					END_IF
+				END_IF
+
+				IF operationStarted THEN
+					checkDirectory.Execute();
+					IF checkDirectory.State.Stopped THEN
+						IF checkDirectory.FinalStopReason.WorkDone THEN
+							IF checkDirectory.DirectoryExists THEN
+								failureMessage := 'Expected directory to be absent';
+							ELSE
+								step := DIRECTORY_TEST_STEP.REMOVE_DIRECTORY;
+							END_IF
+						ELSE
+							failureMessage := TOF_Core.Strings.Concat255('checkDirectory: ', TO_STRING(checkDirectory.FinalStopReason.Message));
+						END_IF
+
+						operationStarted := FALSE;
+					END_IF
+				END_IF
+
+			DIRECTORY_TEST_STEP.REMOVE_DIRECTORY:
+				IF NOT operationStarted THEN
+					removeDirectory.DirectoryPath := scenarioDirectoryPath;
+					IF NOT removeDirectory.Start() THEN
+						failureMessage := 'removeDirectory: Start refused';
+					ELSE
+						operationStarted := TRUE;
+					END_IF
+				END_IF
+
+				IF operationStarted THEN
+					removeDirectory.Execute();
+					IF removeDirectory.State.Stopped THEN
+						IF removeDirectory.FinalStopReason.WorkDone THEN
+							ownsScenarioDirectory := FALSE;
+							step := DIRECTORY_TEST_STEP.CHECK_DIRECTORY_ABSENT;
+						ELSE
+							failureMessage := TOF_Core.Strings.Concat255('removeDirectory: ', TO_STRING(removeDirectory.FinalStopReason.Message));
+						END_IF
+
+						operationStarted := FALSE;
+					END_IF
+				END_IF
+
+			DIRECTORY_TEST_STEP.CHECK_DIRECTORY_ABSENT:
+				IF NOT operationStarted THEN
+					checkDirectory.DirectoryPath := scenarioDirectoryPath;
+					IF NOT checkDirectory.Reset() THEN
+						failureMessage := 'checkDirectory: Reset refused';
+					ELSIF NOT checkDirectory.Start() THEN
+						failureMessage := 'checkDirectory: Start refused';
+					ELSE
+						operationStarted := TRUE;
+					END_IF
+				END_IF
+
+				IF operationStarted THEN
+					checkDirectory.Execute();
+					IF checkDirectory.State.Stopped THEN
+						IF checkDirectory.FinalStopReason.WorkDone THEN
+							IF checkDirectory.DirectoryExists THEN
+								failureMessage := 'Expected directory to be absent';
+							ELSE
+								step := DIRECTORY_TEST_STEP.COMPLETED;
+							END_IF
+						ELSE
+							failureMessage := TOF_Core.Strings.Concat255('checkDirectory: ', TO_STRING(checkDirectory.FinalStopReason.Message));
+						END_IF
+
+						operationStarted := FALSE;
+					END_IF
+				END_IF
+		END_CASE
+	END_IF
+__CATCH
+	IF testFinished THEN
+		cleanupMessage := 'Exception during cleanup; subsequent suite cycles will continue cleanup';
+	ELSE
+		failureMessage := 'Exception interrupted the scenario; creation may have an unknown result';
+	END_IF
+__ENDTRY
+
+IF NOT testFinished THEN
+	IF failureMessage <> TOF_Core.Strings.Empty THEN
+		AssertTrue(FALSE, TOF_Core.Strings.Concat255(scenarioDirectoryPath, ' step ', TO_STRING(step), ': ', failureMessage));
+		testFinished := TRUE;
+		TEST_FINISHED();
+	ELSIF step = DIRECTORY_TEST_STEP.COMPLETED THEN
+		AssertTrue(TRUE, 'All directory operations and existence checks completed successfully');
+		cleanupAttemptsFinished := TRUE;
+		testFinished := TRUE;
+		TEST_FINISHED();
+	END_IF
+END_IF]]></ST>
       </Implementation>
     </Method>
     <Property Name="NamespaceName" Id="{84d1f26a-3563-43b2-b392-59a3c3ab34fd}">

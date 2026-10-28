@@ -10,7 +10,17 @@ License: https://opensource.org/license/mit
 {attribute 'no_explicit_call' := 'do not call this function block directly'} 
 (*!
 <summary>Loads file contents through cyclic task execution.</summary>
-<description>Diagnostic string inputs are borrowed only during the call; retained diagnostic text is copied into owned storage.</description>
+<description>The native FB_FileLoad opens the file in binary mode, reads the requested byte count and closes it.
+Its documented path support is the addressed target's local filesystem, not a network-share path.
+Use one owner task. Configure FilePath, AmsNetId, TargetBuffer, TargetBufferSize and Timeout before Start
+and keep them unchanged until STOPPED. The caller supplies live writable memory of at least TargetBufferSize
+bytes and retains it through stopping after failure or cancellation. Do not access that memory concurrently
+with the operation. Missing path, null buffer and zero size are rejected during execution; capacity and
+pointer lifetime cannot be verified by this wrapper. Native errors use Task failure handling.
+Continue Execute until STOPPED. Cancellation drains pending work without restoring buffer contents.
+WORK_DONE means the native request completed without an error; this wrapper does not compare the returned
+byte count with file size or promise a complete snapshot of a concurrently modified file.
+LoadedBytesCount exposes the result only after STOPPED and WORK_DONE. Reset preserves configuration.</description>
 *)
 FUNCTION_BLOCK LoadFile EXTENDS TOF_Tasks.Task IMPLEMENTS IFileSystemTask
 VAR
@@ -31,7 +41,11 @@ END_VAR]]></Declaration>
     <Folder Name="Members to override" Id="{6ce189b7-b717-41ff-9d6c-3f28fa29db0f}" />
     <Folder Name="Outputs" Id="{b1a24ae9-9d25-4f51-a8dd-c308ec8de3dd}" />
     <Property Name="AmsNetId" Id="{af068792-c8f4-4f1a-a44a-adda9d288f6d}" FolderPath="Inputs\">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Selects the ADS target for the native filesystem operation.</summary>
+<description>Configure before Start and keep unchanged until STOPPED; the setter stores configuration without submitting I/O.</description>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY AmsNetId : Tc2_System.T_AmsNetID]]></Declaration>
       <Get Name="Get" Id="{868a196a-7436-448f-9a7e-6fd1d69498cf}">
         <Declaration><![CDATA[]]></Declaration>
@@ -47,7 +61,11 @@ PROPERTY AmsNetId : Tc2_System.T_AmsNetID]]></Declaration>
       </Set>
     </Property>
     <Property Name="ClassName" Id="{96970123-0d8d-47e6-83f1-a38f9bb70154}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Provides the concrete type name used in diagnostics.</summary>
+<description>Borrowed read-only instance storage; keep the object alive while using the reference.</description>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY ClassName : REFERENCE TO STRING
 ]]></Declaration>
       <Get Name="Get" Id="{c4ee9f16-700c-4449-bcc0-45c65b7ac32a}">
@@ -58,7 +76,11 @@ PROPERTY ClassName : REFERENCE TO STRING
       </Get>
     </Property>
     <Property Name="FilePath" Id="{df0a29d4-2663-49ed-9a38-1172e5e4cc52}" FolderPath="Inputs\">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Provides the configured path for the file operation.</summary>
+<description>The setter copies text without performing I/O. Configure before Start and keep unchanged until STOPPED; Reset preserves it. The native service determines whether the path is usable.</description>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY FilePath : Tc2_System.T_MaxString]]></Declaration>
       <Get Name="Get" Id="{1fad573b-82ff-449a-86bd-730b2a3e7f22}">
         <Declaration><![CDATA[]]></Declaration>
@@ -74,17 +96,33 @@ PROPERTY FilePath : Tc2_System.T_MaxString]]></Declaration>
       </Set>
     </Property>
     <Property Name="LoadedBytesCount" Id="{54d91487-d011-40f7-9d29-569f0b2da1c8}" FolderPath="Outputs\">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Reports the byte count from a successfully completed load.</summary>
+<description>Returns the native result only while State.Stopped and FinalStopReason.WorkDone are both TRUE.
+In every other state, including READY, RUNNING, failure and cancellation, returns the initial value of the
+property type. This default is not a success indicator; inspect the task state and final reason.
+Zero outside successful completion does not mean the target buffer was unchanged.
+The getter does not modify native outputs or buffers. Copy a successful result before Reset or reuse.</description>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY LoadedBytesCount : UDINT]]></Declaration>
       <Get Name="Get" Id="{f1c7a567-7f12-4f86-9023-1a9d28698d04}">
         <Declaration><![CDATA[]]></Declaration>
         <Implementation>
-          <ST><![CDATA[LoadedBytesCount := _LoadFile.cbRead;]]></ST>
+          <ST><![CDATA[IF NOT State.Stopped OR_ELSE NOT FinalStopReason.WorkDone THEN
+	RETURN;
+END_IF
+
+LoadedBytesCount := _LoadFile.cbRead;]]></ST>
         </Implementation>
       </Get>
     </Property>
     <Property Name="NamespaceName" Id="{a88dba22-63c9-49ea-8020-f00da78e287e}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Provides the library namespace used in diagnostics.</summary>
+<description>Returns borrowed read-only namespace storage; do not modify the referenced string.</description>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
       <Get Name="Get" Id="{3f934858-f9ad-49d7-b681-cddd5e0528f3}">
         <Declaration><![CDATA[]]></Declaration>
@@ -115,16 +153,23 @@ readyToRelease := NOT _LoadFile.bBusy;]]></ST>
       </Implementation>
     </Method>
     <Method Name="OnReset" Id="{5681e281-0f75-465c-88ec-d9a447202e30}" FolderPath="Members to override\">
-      <Declaration><![CDATA[METHOD PROTECTED OnReset ]]></Declaration>
+      <Declaration><![CDATA[(*!
+<summary>Resets the native request edge after the task has stopped.</summary>
+<description>Preserves configured inputs and does not undo completed filesystem effects. Pending I/O must finish during stopping before this hook runs.</description>
+*)
+METHOD PROTECTED OnReset ]]></Declaration>
       <Implementation>
         <ST><![CDATA[_LoadFile(bExecute := FALSE);]]></ST>
       </Implementation>
     </Method>
     <Method Name="OnRunning" Id="{03e4a860-0585-482d-b55c-424c8666832b}" FolderPath="Members to override\">
       <Declaration><![CDATA[(*!
-<summary>Prepares diagnostic text locally before passing it to read-only logging or exception parameters.</summary>
-<description>Computed diagnostic strings are held in local buffers for the duration of the receiving call.
-The local diagnostic builder is released after copying its message and before raising the operation exception.</description>
+<summary>Submits and advances a native file load into caller-owned memory.</summary>
+<description>Validates required configuration before submitting the request. Native errors raise an exception
+for the base Task failure/stopping path; the local diagnostic builder is released before that Throw.
+Normal completion reports DONE only after the native block is no longer busy. No rollback is performed.</description>
+<param name="processingState">BUSY while pending; DONE after native completion without an error.</param>
+<param name="stopReasonMessage">Not changed here; failures are passed through exceptions.</param>
 *)
 METHOD PROTECTED OnRunning
 VAR_OUTPUT
@@ -176,7 +221,10 @@ END_IF]]></ST>
       </Implementation>
     </Method>
     <Property Name="SelfSize" Id="{a442a130-81b3-4e43-b979-44693957f557}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Reports the size of this concrete instance in bytes.</summary>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY SelfSize : ULINT]]></Declaration>
       <Get Name="Get" Id="{bdc789ba-8674-416a-98ce-60346ba17014}">
         <Declaration><![CDATA[]]></Declaration>
@@ -186,7 +234,13 @@ PROPERTY SelfSize : ULINT]]></Declaration>
       </Get>
     </Property>
     <Property Name="TargetBuffer" Id="{9dd63f9e-2d64-461f-a3f5-07ac6784c88a}" FolderPath="Inputs\">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Specifies the caller-owned writable buffer for loading file bytes.</summary>
+<description>Provide at least TargetBufferSize bytes and retain the buffer until STOPPED, including after
+cancellation or failure. Null is rejected during execution. The wrapper cannot validate actual capacity or
+lifetime. Do not access the buffer concurrently. Failure does not restore previous contents.</description>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY TargetBuffer : POINTER TO BYTE]]></Declaration>
       <Get Name="Get" Id="{2a072640-ef4c-41ce-8e43-473c69610ee4}">
         <Declaration><![CDATA[]]></Declaration>
@@ -202,7 +256,14 @@ PROPERTY TargetBuffer : POINTER TO BYTE]]></Declaration>
       </Set>
     </Property>
     <Property Name="TargetBufferSize" Id="{c19ac729-8465-479e-a11f-bb4a5d725ea5}" FolderPath="Inputs\">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Specifies the positive number of bytes requested from the file.</summary>
+<description>Passed to native cbReadLen. Must not exceed the caller-owned TargetBuffer capacity.
+Zero is rejected during execution. Keep this value unchanged from Start through STOPPED.
+LoadedBytesCount reports the actual count only after successful completion; this setting does not
+assert that the entire file fits in the buffer.</description>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY TargetBufferSize : UDINT]]></Declaration>
       <Get Name="Get" Id="{a1b09fc4-82e3-4916-a73f-f250bd341d13}">
         <Declaration><![CDATA[]]></Declaration>
@@ -218,7 +279,11 @@ PROPERTY TargetBufferSize : UDINT]]></Declaration>
       </Set>
     </Property>
     <Property Name="Timeout" Id="{2e18453b-9571-436c-b47d-3e985ed694df}" FolderPath="Inputs\">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Configures the timeout passed to native operation requests.</summary>
+<description>Set before Start and keep unchanged until STOPPED. Reset preserves this value. It is not an overall task deadline or a guarantee of resource release after a timeout.</description>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY Timeout : TIME]]></Declaration>
       <Get Name="Get" Id="{efd36739-8d02-40db-be47-4114d401c9d1}">
         <Declaration><![CDATA[]]></Declaration>

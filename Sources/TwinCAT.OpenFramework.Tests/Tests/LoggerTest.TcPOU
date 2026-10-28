@@ -9,7 +9,7 @@ License: https://opensource.org/license/mit
 
 (*!
 <summary>Exercises text-file and EventLogger diagnostic output.</summary>
-<description>The file logger scenario submits messages and advances Execute, using Busy to observe pending work. It reports logger failure separately; this suite does not establish persistent storage durability.</description>
+<description>The file logger scenario submits messages, requests Stop and advances Execute until STOPPED, using Busy to observe pending work. It reports logger failure separately; this suite does not establish persistent storage durability.</description>
 *)
 FUNCTION_BLOCK LoggerTest EXTENDS TcUnit.FB_TestSuite
 VAR
@@ -83,7 +83,7 @@ TEST_FINISHED();				]]></ST>
     <Method Name="CreateTextFileLogs" Id="{4ba118cc-c436-438e-ab87-19b721b67152}">
       <Declaration><![CDATA[(*!
 <summary>Submits sample messages and waits for file logger work to finish.</summary>
-<description>Advances the logger cyclically. Reports FAILED as a test failure; the successful path waits for Busy to become FALSE after the existing cycle threshold. This does not check file contents or failure cleanup completion.</description>
+<description>Advances the logger cyclically. Reports FAILED once as a test failure and finishes the test, then continues Execute on subsequent suite cycles while the failed logger remains Busy. The suite must keep running for asynchronous cleanup to progress; test completion does not certify cleanup completion, and no cleanup deadline is enforced. After submitting its messages, the successful path requests Stop and waits for STOPPED, then checks that Busy is FALSE and new messages are rejected. This does not check file contents, physical close success or restart.</description>
 *)
 METHOD CreateTextFileLogs
 VAR 
@@ -95,9 +95,16 @@ VAR_INST
 	logMessageNumber : ULINT;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[IF testFinished THEN 
-	RETURN; 
-END_IF 
+        <ST><![CDATA[IF testFinished THEN
+	(* FAILED starts asynchronous cleanup; keep advancing it after reporting the test result. *)
+	IF _SimpleTextFileLogger.State = TOF_Loggers.SIMPLE_TEXT_FILE_LOGGER_STATE.FAILED
+		AND_THEN _SimpleTextFileLogger.Busy
+	THEN
+		_SimpleTextFileLogger.Execute();
+	END_IF
+
+	RETURN;
+END_IF
 
 TEST(__POUNAME());
 
@@ -106,7 +113,9 @@ logMessageNumber := logMessageNumber + 1;
 IF logMessageNumber < 50 THEN
 	logMessage := TOF_Core.WideStrings.Concat255("This is log message #", TO_WSTRING(logMessageNumber));	
 	
-	_SimpleTextFileLogger.TryLogMessage(TOF_Core.LOG_CATEGORY.INFORMATION, logMessage, logMessageNumber);
+	AssertTrue(_SimpleTextFileLogger.TryLogMessage(TOF_Core.LOG_CATEGORY.INFORMATION, logMessage, logMessageNumber), 'File logger rejected a message before Stop');
+ELSIF logMessageNumber = 50 THEN
+	AssertTrue(_SimpleTextFileLogger.Stop(), 'File logger refused normal stopping');
 END_IF
 
 _SimpleTextFileLogger.Execute();
@@ -116,7 +125,9 @@ IF _SimpleTextFileLogger.State = TOF_Loggers.SIMPLE_TEXT_FILE_LOGGER_STATE.FAILE
 
 	testFinished := TRUE; 
 	TEST_FINISHED();					
-ELSIF logMessageNumber > 500 AND_THEN NOT _SimpleTextFileLogger.Busy THEN
+ELSIF _SimpleTextFileLogger.State = TOF_Loggers.SIMPLE_TEXT_FILE_LOGGER_STATE.STOPPED THEN
+	AssertFalse(_SimpleTextFileLogger.Busy, 'Stopped file logger remains busy');
+	AssertFalse(_SimpleTextFileLogger.TryLogMessage(TOF_Core.LOG_CATEGORY.INFORMATION, logMessage), 'Stopped file logger accepted a message');
 	testFinished := TRUE; 
 	TEST_FINISHED();				
 END_IF]]></ST>

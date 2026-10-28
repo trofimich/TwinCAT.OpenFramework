@@ -12,7 +12,11 @@ License: https://opensource.org/license/mit
 <summary>Removes an empty filesystem directory when it exists.</summary>
 <description>Closes native enumeration before starting removal when a directory is found. Pending search and
 remove commands finish before stopping. Diagnostic string inputs are borrowed only during the call; retained
-diagnostic text is copied into owned storage. A found file produces FAILURE without starting remove I/O; stopping closes the enumeration before task completion.</description>
+diagnostic text is copied into owned storage. A found file produces FAILURE without starting remove I/O; stopping closes the enumeration before task completion.
+The existence check and subsequent filesystem change are separate, non-atomic operations. Another actor may
+change the same path between them. Native errors from the subsequent create/remove are reported as failure;
+this wrapper does not retry or reinterpret them as a successful race. Coordinate access externally when
+other tasks or processes can modify the same path. Cancellation does not roll back completed filesystem effects.</description>
 *)
 FUNCTION_BLOCK RemoveEmptyDirectoryIfExists EXTENDS TOF_Tasks.Task IMPLEMENTS IFileSystemTask
 VAR
@@ -47,7 +51,11 @@ END_VAR]]></Declaration>
     <Folder Name="Inputs" Id="{d200b53b-8744-4aec-a14f-974a3034cb08}" />
     <Folder Name="Members to override" Id="{cc1622b5-e5a9-4d21-bf84-f83314a6ce15}" />
     <Property Name="AmsNetId" Id="{33231476-36a5-497a-ad7e-750d17c5c35d}" FolderPath="Inputs\">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Selects the ADS target for the native filesystem operation.</summary>
+<description>Configure before Start and keep unchanged until STOPPED; the setter stores configuration without submitting I/O.</description>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY AmsNetId : Tc2_System.T_AmsNetID]]></Declaration>
       <Get Name="Get" Id="{1978e639-b3c0-4847-b3ac-848b3950a1fd}">
         <Declaration><![CDATA[]]></Declaration>
@@ -64,7 +72,11 @@ _EnumFindFile.sNetId := AmsNetId;]]></ST>
       </Set>
     </Property>
     <Property Name="ClassName" Id="{da884c8d-da0e-4446-94de-815bc91103e8}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Provides the concrete type name used in diagnostics.</summary>
+<description>Borrowed read-only instance storage; keep the object alive while using the reference.</description>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY ClassName : REFERENCE TO STRING
 ]]></Declaration>
       <Get Name="Get" Id="{a8949b15-b2e5-4f29-9b77-c837795d25ac}">
@@ -75,7 +87,11 @@ PROPERTY ClassName : REFERENCE TO STRING
       </Get>
     </Property>
     <Property Name="DirectoryPath" Id="{75ef4a85-8d55-4cbe-9c46-42cf48e4c999}" FolderPath="Inputs\">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Provides the copied directory path used by the operation and its existence check.</summary>
+<description>Configure before Start and keep unchanged until STOPPED. PathHelper applies its limited lexical filter before native submission. Assignment does not perform I/O; Reset preserves the path.</description>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY DirectoryPath : Tc2_System.T_MaxString]]></Declaration>
       <Get Name="Get" Id="{84eab205-7aae-495a-a1ac-ded926a76e89}">
         <Declaration><![CDATA[]]></Declaration>
@@ -92,7 +108,11 @@ _EnumFindFile.sPathName := DirectoryPath;]]></ST>
       </Set>
     </Property>
     <Property Name="NamespaceName" Id="{1b6339d2-f773-4d94-add3-a19851648e80}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Provides the library namespace used in diagnostics.</summary>
+<description>Returns borrowed read-only namespace storage; do not modify the referenced string.</description>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
       <Get Name="Get" Id="{15650b30-2ff4-4bfa-979a-51fa51cc7f4b}">
         <Declaration><![CDATA[]]></Declaration>
@@ -106,9 +126,15 @@ PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
 <summary>Completes an active directory search before deletion or task termination.</summary>
 <description>Deasserts bExecute while a search command is pending. After a nonterminal search result, issues one
 abort with a fresh rising edge and waits for its completion. bEOE and native errors close the enumeration
-without an explicit abort. FALSE means the caller must resume on a later Execute.</description>
+without an explicit abort. FALSE means the caller must resume on a later Execute.
+An abort error is logged once with its native code and path, without retrying abort or replacing the task
+stop reason. Readiness means this cleanup attempt ended, not that server resources were proven released.
+The log attempt is made after clearing pending enumeration state; logger failure does not restart cleanup.</description>
 *)
-METHOD PRIVATE advanceEnumerationClosure : BOOL]]></Declaration>
+METHOD PRIVATE advanceEnumerationClosure : BOOL
+VAR
+	enumerationAbortMessage : WSTRING(255);
+END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[advanceEnumerationClosure := FALSE;
 
@@ -125,6 +151,12 @@ END_IF
 
 IF _EnumFindFile.bEOE OR_ELSE _EnumFindFile.bError THEN
 	_EnumerationStarted := FALSE;
+
+	(* End this attempt before reporting its error so logging cannot cause repeated aborts. *)
+	IF _EnumerationAbortIssued AND_THEN _EnumFindFile.bError THEN
+		enumerationAbortMessage := TOF_Core.WideStrings.Concat255("Directory enumeration abort failed (native error code ", TO_WSTRING(_EnumFindFile.nErrId), "): ", TO_WSTRING(_EnumFindFile.sPathName));
+		TOF_Core.LogManager.TryLogMessage(enumerationAbortMessage, TOF_Core.LOG_CATEGORY.ERROR, TO_WSTRING(__POUNAME()));
+	END_IF
 	advanceEnumerationClosure := TRUE;
 	RETURN;
 END_IF
@@ -273,7 +305,11 @@ END_IF]]></ST>
       </Implementation>
     </Method>
     <Property Name="PathType" Id="{65f2912c-9f8e-4c59-b92c-158be7c27bb4}" FolderPath="Inputs\">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Selects the native path context for the filesystem request.</summary>
+<description>Configure before Start and keep unchanged until STOPPED. It is passed to the native operation, not used as a path-validity result. Reset preserves it.</description>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY PathType : Tc2_System.E_OpenPath]]></Declaration>
       <Get Name="Get" Id="{1a295761-0b23-44cd-9cf6-5ec2217f5cae}">
         <Declaration><![CDATA[]]></Declaration>
@@ -290,7 +326,10 @@ _EnumFindFile.ePath := PathType;]]></ST>
       </Set>
     </Property>
     <Property Name="SelfSize" Id="{2768e2fa-09ff-4db7-b70d-5cb5c0bddabf}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Reports the size of this concrete instance in bytes.</summary>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY SelfSize : ULINT]]></Declaration>
       <Get Name="Get" Id="{1f8367d6-45d3-49e2-9b48-087efc8bea5d}">
         <Declaration><![CDATA[]]></Declaration>
@@ -300,7 +339,11 @@ PROPERTY SelfSize : ULINT]]></Declaration>
       </Get>
     </Property>
     <Property Name="Timeout" Id="{0696c8bc-2d71-49e6-bb59-5942bbc070bf}" FolderPath="Inputs\">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Configures the timeout passed to native operation requests.</summary>
+<description>Set before Start and keep unchanged until STOPPED. Reset preserves this value. It is not an overall task deadline or a guarantee of resource release after a timeout.</description>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY Timeout : TIME]]></Declaration>
       <Get Name="Get" Id="{c549910c-0d19-4d37-b063-22fc7a6b6263}">
         <Declaration><![CDATA[]]></Declaration>

@@ -193,6 +193,10 @@ END_IF]]></ST>
     <Method Name="WriteToFileOpenedForReading" Id="{83158742-6402-4a1f-a1b4-e5b3a39a5218}">
       <Declaration><![CDATA[//!<param name="TEST_FILE_PATH">Reserved test file: created or overwritten during preparation.</param>
 
+(*!
+<summary>Names preparation and write-failure checks for a file opened for reading.</summary>
+<description>Creates a reserved file, reopens it for reading, then checks write failure and queue cleanup. The file is overwritten during preparation. Timeout and post-test cleanup remain part of the method.</description>
+*)
 METHOD WriteToFileOpenedForReading
 VAR CONSTANT
 	
@@ -200,7 +204,7 @@ VAR CONSTANT
 END_VAR
 VAR_INST
 	testFinished : BOOL;
-	stage : BYTE;
+	step : READ_ONLY_FILE_TEST_STEP;
 
 	createFileManager : TOF_FileSystem.FileContentManager("createFileManager");
 	fileContentManager : TOF_FileSystem.FileContentManager("fileContentManager");
@@ -227,8 +231,8 @@ TEST(__POUNAME());
 
 testTimeout(IN := TRUE, PT := T#15S);
 
-CASE stage OF
-	0:
+CASE step OF
+	READ_ONLY_FILE_TEST_STEP.CREATE_FILE:
 		// Create an empty file and finish closing it before the actual test.
 		createFileManager.FilePath := TEST_FILE_PATH;
 		createFileManager.ModeFlags := Tc2_System.Global_Variables.FOPEN_MODEWRITE OR Tc2_System.Global_Variables.FOPEN_MODETEXT;
@@ -237,7 +241,7 @@ CASE stage OF
 		createFileManager.StopWhenNoPendingTasks := TRUE;
 
 		IF createFileManager.Start() THEN
-			stage := 1;
+			step := READ_ONLY_FILE_TEST_STEP.OPEN_FILE_FOR_READING;
 		ELSE
 			AssertTrue(FALSE, 'File preparation manager must accept Start');
 
@@ -245,7 +249,7 @@ CASE stage OF
 			TEST_FINISHED();
 		END_IF
 
-	1:
+	READ_ONLY_FILE_TEST_STEP.OPEN_FILE_FOR_READING:
 		createFileManager.Execute();
 
 		IF createFileManager.State.Stopped THEN
@@ -270,7 +274,7 @@ CASE stage OF
 			fileContentManager.Enqueue(readStringFromFile);
 
 			IF fileContentManager.Start() THEN
-				stage := 2;
+				step := READ_ONLY_FILE_TEST_STEP.CHECK_WRITE_FAILURE;
 			ELSE
 				AssertTrue(FALSE, 'FileContentManager must accept Start before executing the write task');
 
@@ -279,7 +283,7 @@ CASE stage OF
 			END_IF
 		END_IF
 
-	2:
+	READ_ONLY_FILE_TEST_STEP.CHECK_WRITE_FAILURE:
 		fileContentManager.Execute();
 
 		IF fileContentManager.State.Stopped THEN
@@ -421,6 +425,10 @@ END_IF]]></ST>
     <Method Name="ReuseAfterReset" Id="{a9229bf6-ad23-46c8-bc5f-a1c5b832a6e5}">
       <Declaration><![CDATA[//!<param name="FIRST_FILE_PATH">Reserved test files: created or overwritten by this test.</param>
 
+(*!
+<summary>Names the two runs and intervening cancellation in the file-manager reuse test.</summary>
+<description>Writes the first reserved file, cancels before the waiting read, then resets and runs against the second file. Checks that Reset drops waiting entries and that caller-prepared children can be reused. Reserved files are overwritten; timeout cleanup continues on later suite cycles.</description>
+*)
 METHOD ReuseAfterReset
 VAR CONSTANT
 	
@@ -430,7 +438,7 @@ VAR CONSTANT
 END_VAR
 VAR_INST
 	testFinished : BOOL;
-	stage : BYTE;
+	step : FILE_MANAGER_REUSE_TEST_STEP;
 
 	fileContentManager : TOF_FileSystem.FileContentManager("fileContentManager");
 	writeStringToFile : TOF_FileSystem.WriteString255ToFile("writeStringToFile");
@@ -453,8 +461,8 @@ TEST(__POUNAME());
 
 testTimeout(IN := TRUE, PT := T#20S);
 
-CASE stage OF
-	0:
+CASE step OF
+	FILE_MANAGER_REUSE_TEST_STEP.START_FIRST_WRITE:
 		// First run: write a file, with another task waiting in the queue.
 		fileContentManager.FilePath := FIRST_FILE_PATH;
 		fileContentManager.ModeFlags := Tc2_System.Global_Variables.FOPEN_MODEWRITE OR Tc2_System.Global_Variables.FOPEN_MODEPLUS OR Tc2_System.Global_Variables.FOPEN_MODETEXT;
@@ -479,9 +487,9 @@ CASE stage OF
 			RETURN;
 		END_IF
 
-		stage := 1;
+		step := FILE_MANAGER_REUSE_TEST_STEP.CANCEL_AFTER_WRITE;
 
-	1:
+	FILE_MANAGER_REUSE_TEST_STEP.CANCEL_AFTER_WRITE:
 		// Finish the write, then cancel before the waiting task starts.
 		fileContentManager.Execute();
 
@@ -499,10 +507,10 @@ CASE stage OF
 			// Keep one waiting task to verify that Reset actually clears the queue.
 			AssertTrue(fileContentManager.Cancel(), 'FileContentManager must accept Cancel between queued tasks');
 
-			stage := 2;
+			step := FILE_MANAGER_REUSE_TEST_STEP.RESET_AND_START_SECOND_FILE;
 		END_IF
 
-	2:
+	FILE_MANAGER_REUSE_TEST_STEP.RESET_AND_START_SECOND_FILE:
 		// Reset the stopped manager and prepare a new run with another file.
 		fileContentManager.Execute();
 
@@ -549,10 +557,10 @@ CASE stage OF
 				RETURN;
 			END_IF
 
-			stage := 3;
+			step := FILE_MANAGER_REUSE_TEST_STEP.CHECK_SECOND_FILE;
 		END_IF
 
-	3:
+	FILE_MANAGER_REUSE_TEST_STEP.CHECK_SECOND_FILE:
 		// Verify the second run and that the old waiting task stayed unused.
 		fileContentManager.Execute();
 

@@ -10,7 +10,13 @@ License: https://opensource.org/license/mit
 {attribute 'no_explicit_call' := 'do not call this function block directly'} 
 (*!
 <summary>Formats diagnostics for text-file logging and advances file operations through cyclic execution.</summary>
-<description>Use this backend for buffered text-file output. Direct TryLog and Execute calls on one instance must belong to one task: its message queue, buffers and file-operation state are not synchronized for concurrent access. For callers in multiple tasks, use QueuedLogger and let its owner task service this backend; do not bypass the wrapper with concurrent direct calls. Separate instances writing independently must use separate output files. Cyclic Execute is required to advance writing and cleanup. Exception logging accepts IReadOnlyException and reads borrowed diagnostics without transferring ownership. Implementations must not retain exception references beyond their task cleanup. FAILED is terminal for this instance: no automatic retry or recovery is provided. Continue calling Execute after failure to discard queued messages, cancel active tasks and release the send buffer once file operations have finished. Pending messages are not retried. The instance must remain alive during cleanup. Busy reports pending initialization, messages, file operations or failure cleanup; an idle open file alone does not make it TRUE. Busy = FALSE does not mean the file handle is closed. In FAILED state or when the per-instance message queue reaches Parameters.MAX_PENDING_LOG_MESSAGES, all TryLog methods return FALSE before formatting or queuing new diagnostics. Full-queue rejection preserves already accepted messages; the current send batch is separate from this limit. Buffered text preserves the optional message number and category prefix; oversized text is truncated to ERROR_MESSAGE capacity with a final ellipsis. TryLog methods and Execute do not propagate exceptions. Failed admission returns FALSE; Execute failures enter FAILED and require further cleanup calls. The terminal allocation latch is preserved for the task boundary.</description>
+<description>Use this backend for buffered text-file output. Direct TryLog and Execute calls on one instance must belong to one task: its message queue, buffers and file-operation state are not synchronized for concurrent access. For callers in multiple tasks, use QueuedLogger and let its owner task service this backend; do not bypass the wrapper with concurrent direct calls. Separate instances writing independently must use separate output files. Cyclic Execute is required to advance writing and cleanup. Exception logging accepts IReadOnlyException and reads borrowed diagnostics without transferring ownership. Implementations must not retain exception references beyond their task cleanup. FAILED is terminal for this instance: no automatic retry or recovery is provided. Continue calling Execute after failure to discard queued messages, cancel active tasks and release the send buffer once file operations have finished. Pending messages are not retried. The instance must remain alive during cleanup. Busy reports pending initialization, messages, file operations or failure cleanup; an idle open file alone does not make it TRUE. Busy = FALSE does not mean the file handle is closed. After Stop or in FAILED state, or when the per-instance message queue reaches Parameters.MAX_PENDING_LOG_MESSAGES, all TryLog methods return FALSE before formatting or queuing new diagnostics. Full-queue rejection preserves already accepted messages; the current send batch is separate from this limit. Buffered text preserves the optional message number and category prefix; oversized text is truncated to ERROR_MESSAGE capacity with a final ellipsis. TryLog methods and Execute do not propagate exceptions. Failed admission returns FALSE; Execute failures enter FAILED and require further cleanup calls. The terminal allocation latch is preserved for the task boundary.
+The initial instance starts automatically through Execute. Stop requests draining of accepted messages
+and best-effort file release; continue Execute until STOPPED or until FAILED cleanup finishes.
+Start resumes only STOPPED, retaining the file counter and opening the next generated file when a message
+arrives. New messages are rejected from Stop until Start. Lifecycle calls belong to the same owner task
+as Execute. STOPPED means the close attempt and buffer cleanup finished, not certified physical closure
+after a native close error; the underlying resource manager retains its best-effort policy.</description>
 *)
 FUNCTION_BLOCK SimpleTextFileLogger EXTENDS TOF_Core.Object IMPLEMENTS TOF_Core.ILogger
 VAR
@@ -22,6 +28,9 @@ VAR
 	_ErrorMessage : TOF_Core.ERROR_MESSAGE;
 	{attribute 'hide'}
 	_CleanupPending : BOOL;
+
+	//! <summary>Blocks new messages while accepted work drains and remains set until Start resumes a stopped logger.</summary>
+	_StopRequested : BOOL;
 	
 	_LogFilePrefix : STRING(32);
 
@@ -63,7 +72,7 @@ PROPERTY AmsNetId : Tc2_System.T_AmsNetID]]></Declaration>
     <Property Name="Busy" Id="{592a2ef0-f70e-46be-b435-2b32d7b1865a}">
       <Declaration><![CDATA[(*!
 <summary>Reports unfinished initialization, message processing, file operations or failure cleanup.</summary>
-<description>TRUE before initialization finishes, while messages or file tasks remain pending, during file acquisition or release, and until failure cleanup completes. An open file waiting for new messages does not make the logger busy. FALSE does not certify successful writes or a closed file handle. Continue Execute while cleanup is pending after FAILED.</description>
+<description>TRUE before initialization finishes, while messages or file tasks remain pending, during file acquisition or release, while a requested normal stop is unfinished, and until failure cleanup completes. An open file waiting for new messages does not make the logger busy. FALSE does not certify successful writes or a closed file handle. Continue Execute while cleanup is pending after FAILED.</description>
 *)
 {attribute 'monitoring' := 'call'}
 PROPERTY Busy : BOOL]]></Declaration>
@@ -72,6 +81,9 @@ PROPERTY Busy : BOOL]]></Declaration>
         <Implementation>
           <ST><![CDATA[Busy := _State = SIMPLE_TEXT_FILE_LOGGER_STATE.INITIAL
 	OR_ELSE _State = SIMPLE_TEXT_FILE_LOGGER_STATE.CREATING_DIRECTORY
+	OR_ELSE (_StopRequested
+		AND_THEN _State <> SIMPLE_TEXT_FILE_LOGGER_STATE.STOPPED
+		AND_THEN _State <> SIMPLE_TEXT_FILE_LOGGER_STATE.FAILED)
 	OR_ELSE _CleanupPending
 	OR_ELSE _MessageBuffer.Length > 0
 	OR_ELSE _FileContentManager.PendingTaskCount > 0
@@ -92,9 +104,16 @@ PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
       </Get>
     </Property>
     <Method Name="createCurrentFilePath" Id="{6d3ac00a-486a-4f00-87d7-8b126f05bc66}" FolderPath="Service memebers\">
-      <Declaration><![CDATA[METHOD PRIVATE createCurrentFilePath : Tc2_System.T_MaxString
+      <Declaration><![CDATA[(*!
+<summary>Builds the current log path from the configured directory, prefix, local timestamp and file counter.</summary>
+<description>Uses the existing naming policy without checking for an existing file.
+A path that exceeds the return capacity raises StringOverflowException for Execute to report as FAILED.
+The local builder is released before that explicit exception; no truncated path is used.</description>
+*)
+METHOD PRIVATE createCurrentFilePath : Tc2_System.T_MaxString
 VAR
 	stringBuilder : TOF_Core.StringBuilder;
+	filePathLength : UDINT;
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[stringBuilder
@@ -108,7 +127,10 @@ END_VAR]]></Declaration>
 	.AppendString255('.log');
 	
 IF stringBuilder.StringLength > 255 THEN
-	_FilePathOverflowException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), 'CurrentFilePath', stringBuilder.StringLength, 255);  
+	filePathLength := stringBuilder.StringLength;
+	(* An exception skips FB_exit for this local builder; release its buffer before Throw. *)
+	stringBuilder.Clear(releaseMemory := TRUE);
+	_FilePathOverflowException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), 'CurrentFilePath', filePathLength, 255);  
 END_IF
 
 stringBuilder.AssignToString(createCurrentFilePath); ]]></ST>
@@ -146,8 +168,13 @@ PROPERTY ErrorMessage : REFERENCE TO TOF_Core.ERROR_MESSAGE]]></Declaration>
     </Property>
     <Method Name="Execute" Id="{17cdfc70-e5ab-42fe-ab86-0d76e3d26166}">
       <Declaration><![CDATA[(*!
-<summary>Advances initialization and file writing, or cleanup after terminal failure.</summary>
-<description>Does not propagate exceptions. On the first failure, enters FAILED and attempts to store the diagnostic. If diagnostic extraction fails, stores a fixed fallback message without allocating an exception. Subsequent calls discard queued messages and advance cancellation without starting new writes. The send buffer is released only after its task and file operation have finished and the manager is no longer running. Cleanup exceptions are caught; cleanup remains pending for a later call without replacing the original ErrorMessage or recovering the logger. Fatal allocation state remains latched for the task boundary.</description>
+<summary>Advances initialization, writing, requested normal stopping or cleanup after terminal failure.</summary>
+<description>Does not propagate exceptions. On the first failure, enters FAILED and attempts to store the diagnostic. If diagnostic extraction fails, stores a fixed fallback message without allocating an exception. Subsequent calls discard queued messages and advance cancellation without starting new writes. The send buffer is released only after its task and file operation have finished and the manager is no longer running. Cleanup exceptions are caught; cleanup remains pending for a later call without replacing the original ErrorMessage or recovering the logger. Fatal allocation state remains latched for the task boundary.
+After Stop, initialization and already accepted messages finish normally, including file rotation.
+Once all writes complete, STOPPING advances resource release without scheduling further messages.
+Only then are the manager and write task reset and the send buffer released before entering STOPPED.
+A failure during draining uses the existing FAILED path and may discard unwritten messages.
+Execute does nothing in STOPPED; Start is required to resume.</description>
 *)
 METHOD Execute
 VAR	
@@ -193,7 +220,13 @@ END_VAR]]></Declaration>
 	END_IF
 
 	CASE _State OF
-		SIMPLE_TEXT_FILE_LOGGER_STATE.INITIAL:				
+		SIMPLE_TEXT_FILE_LOGGER_STATE.INITIAL:
+			IF _StopRequested AND_THEN _MessageBuffer.Length = TOF_Core.SignedInt32.ZERO THEN
+				_State := SIMPLE_TEXT_FILE_LOGGER_STATE.STOPPED;
+				RETURN;
+			END_IF
+
+			_CreateDirectoryIfNotExists.Reset();
 			_CreateDirectoryIfNotExists.Start();
 			
 			_State := SIMPLE_TEXT_FILE_LOGGER_STATE.CREATING_DIRECTORY;
@@ -219,6 +252,37 @@ END_VAR]]></Declaration>
 			END_IF	
 			
 			processPendingMessages();
+
+			IF _StopRequested
+				AND_THEN _MessageBuffer.Length = TOF_Core.SignedInt32.ZERO
+				AND_THEN _FileContentManager.PendingTaskCount = TOF_Core.SignedInt32.ZERO
+			THEN
+				_FileContentManager.StopWhenNoPendingTasks := TRUE;
+				_State := SIMPLE_TEXT_FILE_LOGGER_STATE.STOPPING;
+			END_IF
+
+		SIMPLE_TEXT_FILE_LOGGER_STATE.STOPPING:
+			_FileContentManager.Execute();
+
+			IF _FileContentManager.State.Stopped AND_THEN _FileContentManager.FinalStopReason.Failure THEN
+				_ErrorMessage := _FileContentManager.FinalStopReason.Message;
+				_State := SIMPLE_TEXT_FILE_LOGGER_STATE.FAILED;
+				_CleanupPending := TRUE;
+				RETURN;
+			END_IF
+
+			IF NOT _FileContentManager.State.Running THEN
+				(* No queued write or native I/O remains; borrowed buffer storage may now be released. *)
+				_FileContentManager.Reset();
+				_FileContentManager.StopWhenNoPendingTasks := FALSE;
+				_WriteBytesTask.Reset();
+				_WriteBytesTask.SourceBuffer := TOF_Core.Memory.NULL_ADDRESS;
+				_WriteBytesTask.BytesCountToWrite := TOF_Core.UnsignedInt32.ZERO;
+				_SendBuffer.Clear(releaseDynamicMemory := TRUE);
+				_RecordsPerFile := 0;
+
+				_State := SIMPLE_TEXT_FILE_LOGGER_STATE.STOPPED;
+			END_IF
 	END_CASE
 __CATCH(exceptionCode)
 	IF _State <> SIMPLE_TEXT_FILE_LOGGER_STATE.FAILED THEN
@@ -318,8 +382,8 @@ PROPERTY SelfSize : ULINT]]></Declaration>
     </Property>
     <Property Name="State" Id="{3a575e6f-bb16-4315-8c99-6e30e5beab57}">
       <Declaration><![CDATA[(*!
-<summary>Reports initialization, logging or terminal failure state.</summary>
-<description>FAILED does not recover automatically and rejects new diagnostics. It does not by itself certify that pending file operations have finished or buffered memory has been released.</description>
+<summary>Reports initialization, logging, normal stopping, stopped or terminal failure state.</summary>
+<description>After Stop, the current initialization/logging state persists while accepted messages drain; STOPPING then denotes final file release. STOPPED permits Start and has no pending writes or buffer cleanup, but does not certify physical closure after a native close error. FAILED does not recover automatically and rejects new diagnostics. It does not by itself certify that pending file operations have finished or buffered memory has been released.</description>
 *)
 {attribute 'monitoring' := 'call'}
 PROPERTY State : SIMPLE_TEXT_FILE_LOGGER_STATE]]></Declaration>
@@ -330,6 +394,47 @@ PROPERTY State : SIMPLE_TEXT_FILE_LOGGER_STATE]]></Declaration>
         </Implementation>
       </Get>
     </Property>
+    <Method Name="Start" Id="{7a4c4b20-0e3b-4d62-90a5-8d62f5053426}">
+      <Declaration><![CDATA[(*!
+<summary>Resumes a normally stopped logger and permits new messages.</summary>
+<description>Call from the owner task. Returns TRUE only from STOPPED; INITIAL already starts automatically,
+and initializing, logging, stopping or FAILED instances return FALSE without changing state.
+Does not perform I/O or propagate exceptions. Subsequent Execute calls check the directory again.
+The next accepted message opens the next generated file using the retained counter, rather than reopening
+the previous file. This uses the existing naming policy, not exclusive creation or global name uniqueness.
+Does not recover a FAILED instance or certify that an earlier best-effort close succeeded.</description>
+*)
+METHOD Start : BOOL]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF _State <> SIMPLE_TEXT_FILE_LOGGER_STATE.STOPPED THEN
+	RETURN;
+END_IF
+
+_StopRequested := FALSE;
+_State := SIMPLE_TEXT_FILE_LOGGER_STATE.INITIAL;
+Start := TRUE;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="Stop" Id="{f52fab42-de20-442c-a828-b92d1fc00779}">
+      <Declaration><![CDATA[(*!
+<summary>Requests completion of accepted messages followed by normal file release.</summary>
+<description>Call from the owner task. Returns TRUE for an accepted or repeated request, including STOPPED.
+Returns FALSE in FAILED, where Execute must instead finish the existing failure cleanup.
+Immediately rejects new TryLog calls without discarding accepted messages. Does not perform I/O or
+propagate exceptions. Continue cyclic Execute until STOPPED; failures may enter FAILED and discard
+unwritten messages under its existing cleanup policy. Start cannot cancel an unfinished stop.
+Best-effort close completion is not a guarantee of physical release after a native close error.</description>
+*)
+METHOD Stop : BOOL]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF _State = SIMPLE_TEXT_FILE_LOGGER_STATE.FAILED THEN
+	RETURN;
+END_IF
+
+_StopRequested := TRUE;
+Stop := TRUE;]]></ST>
+      </Implementation>
+    </Method>
     <Property Name="Timeout" Id="{99ab8e8d-9dc9-4652-a5a8-5bf0cbecebc1}" FolderPath="Settings\">
       <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
 PROPERTY Timeout : TIME]]></Declaration>
@@ -343,7 +448,7 @@ PROPERTY Timeout : TIME]]></Declaration>
     <Method Name="TryLogError" Id="{1ef519f1-badf-441c-b011-cbd27899462a}">
       <Declaration><![CDATA[(*!
 <summary>Formats an error and queues its text for later file writing.</summary>
-<description>Returns FALSE in FAILED state or when the message queue is full before reading or formatting the error. An invalid reference is ignored. Otherwise delegates to TryLogMessage; TRUE confirms buffering, not completion of the file write. Exceptions are caught and reported as FALSE without further logging. The terminal allocation latch is preserved.</description>
+<description>Returns FALSE after Stop or in FAILED state, or when the message queue is full before reading or formatting the error. An invalid reference is ignored. Otherwise delegates to TryLogMessage; TRUE confirms buffering, not completion of the file write. Exceptions are caught and reported as FALSE without further logging. The terminal allocation latch is preserved.</description>
 <param name="error">Borrowed error to format.</param>
 <param name="messageNumber">Optional borrowed number to include in the buffered text.</param>
 *)
@@ -357,7 +462,10 @@ VAR
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[__TRY
-	IF _State = SIMPLE_TEXT_FILE_LOGGER_STATE.FAILED OR_ELSE _MessageBuffer.Length >= Parameters.MAX_PENDING_LOG_MESSAGES THEN
+	IF _StopRequested
+		OR_ELSE _State = SIMPLE_TEXT_FILE_LOGGER_STATE.FAILED
+		OR_ELSE _MessageBuffer.Length >= Parameters.MAX_PENDING_LOG_MESSAGES
+	THEN
 		TryLogError := FALSE;
 		RETURN;
 	END_IF
@@ -377,7 +485,7 @@ __ENDTRY]]></ST>
     <Method Name="TryLogException" Id="{e7bb0a19-d38b-4050-ac16-1d13038e54cb}">
       <Declaration><![CDATA[(*!
 <summary>Attempts to log diagnostic information from a read-only exception view.</summary>
-<description>Borrows the exception for the call without clearing it or taking ownership. The exception and its inner causes must remain live while their diagnostics are read. Logging does not extend their lifetime. Returns FALSE in FAILED state or when the message queue is full before reading or formatting the exception. Otherwise TRUE confirms buffering, not completion of the file write. Exceptions are caught and reported as FALSE without further logging. The terminal allocation latch is preserved.</description>
+<description>Borrows the exception for the call without clearing it or taking ownership. The exception and its inner causes must remain live while their diagnostics are read. Logging does not extend their lifetime. Returns FALSE after Stop or in FAILED state, or when the message queue is full before reading or formatting the exception. Otherwise TRUE confirms buffering, not completion of the file write. Exceptions are caught and reported as FALSE without further logging. The terminal allocation latch is preserved.</description>
 <param name="exception">Exception view to read; null is ignored.</param>
 <param name="severity">Severity used to select the log category.</param>
 *)
@@ -392,7 +500,10 @@ VAR
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[__TRY
-	IF _State = SIMPLE_TEXT_FILE_LOGGER_STATE.FAILED OR_ELSE _MessageBuffer.Length >= Parameters.MAX_PENDING_LOG_MESSAGES THEN
+	IF _StopRequested
+		OR_ELSE _State = SIMPLE_TEXT_FILE_LOGGER_STATE.FAILED
+		OR_ELSE _MessageBuffer.Length >= Parameters.MAX_PENDING_LOG_MESSAGES
+	THEN
 		TryLogException := FALSE;
 		RETURN;
 	END_IF
@@ -412,7 +523,7 @@ __ENDTRY]]></ST>
     <Method Name="TryLogMessage" Id="{f95238b0-2f26-4019-bd69-7afd783a5817}">
       <Declaration><![CDATA[(*!
 <summary>Formats a diagnostic and queues its text for later file writing.</summary>
-<description>Returns FALSE in FAILED state or when the queue reaches Parameters.MAX_PENDING_LOG_MESSAGES, before formatting or allocating buffered text. Queue rejection does not discard previously accepted messages. Otherwise formats an optional message number followed by the category and message. Preserves the prefixes and marks truncated text with an ellipsis. Formatting uses local storage without raising a size-overflow exception; creating and queuing the owned text still requires memory. Returns TRUE after successful insertion into the message buffer; this confirms acceptance, not completion of the asynchronous file write. Exceptions are caught and reported as FALSE without further logging. The terminal allocation latch is preserved. An owned text copy is released if insertion fails before ownership transfers to the queue.</description>
+<description>Returns FALSE after Stop or in FAILED state, or when the queue reaches Parameters.MAX_PENDING_LOG_MESSAGES, before formatting or allocating buffered text. Queue rejection does not discard previously accepted messages. Otherwise formats an optional message number followed by the category and message. Preserves the prefixes and marks truncated text with an ellipsis. Formatting uses local storage without raising a size-overflow exception; creating and queuing the owned text still requires memory. Returns TRUE after successful insertion into the message buffer; this confirms acceptance, not completion of the asynchronous file write. Exceptions are caught and reported as FALSE without further logging. The terminal allocation latch is preserved. An owned text copy is released if insertion fails before ownership transfers to the queue.</description>
 *)
 METHOD TryLogMessage : BOOL
 VAR_INPUT
@@ -431,7 +542,10 @@ VAR
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[__TRY
-	IF _State = SIMPLE_TEXT_FILE_LOGGER_STATE.FAILED OR_ELSE _MessageBuffer.Length >= Parameters.MAX_PENDING_LOG_MESSAGES THEN
+	IF _StopRequested
+		OR_ELSE _State = SIMPLE_TEXT_FILE_LOGGER_STATE.FAILED
+		OR_ELSE _MessageBuffer.Length >= Parameters.MAX_PENDING_LOG_MESSAGES
+	THEN
 		TryLogMessage := FALSE;
 		RETURN;
 	END_IF
