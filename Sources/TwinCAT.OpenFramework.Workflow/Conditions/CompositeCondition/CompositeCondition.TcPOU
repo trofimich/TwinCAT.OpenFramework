@@ -7,17 +7,22 @@ SPDX-License-Identifier: MIT
 License: https://opensource.org/license/mit
 *)
 
-{attribute 'no_explicit_call' := 'do not call this function block directly'} 
-{attribute 'enable_dynamic_creation'}
 (*!
-<summary>Combines child workflow conditions.</summary>
-<description>Diagnostic string inputs are borrowed only during the call; retained diagnostic text is copied into owned storage.</description>
+<summary>Combines one or more child workflow conditions using a logical AND or OR operator.</summary>
+<description>
+Requires at least one child condition to be considered Configured. Short-circuits evaluation on the first
+decisive child result.
+</description>
 *)
-FUNCTION_BLOCK ABSTRACT CompositeCondition EXTENDS Condition IMPLEMENTS ICompositeCondition
-VAR
-	{attribute 'OPC.UA.DA' := '0'}
-	_ClassName : STRING := __POUNAME();
 
+{attribute 'no_explicit_call' := 'do not call this function block directly'}
+{attribute 'enable_dynamic_creation'}
+FUNCTION_BLOCK ABSTRACT CompositeCondition EXTENDS Condition IMPLEMENTS ICompositeCondition
+VAR_STAT
+	{attribute 'hide'}
+	_ClassName : STRING := __POUNAME();
+END_VAR
+VAR
 	{attribute 'OPC.UA.DA' := '0'}
 	_LogicalOperator : LOGICAL_OPERATOR;
 
@@ -29,21 +34,46 @@ END_VAR]]></Declaration>
     </Implementation>
     <Folder Name="Overriden members" Id="{92167edf-a171-45ae-b0b4-cbb4363d35a0}" />
     <Method Name="AddChildCondition" Id="{a9ba8ac8-dab1-4579-a8c6-f1dcf4f0781e}">
-      <Declaration><![CDATA[METHOD AddChildCondition
+      <Declaration><![CDATA[(*!
+<summary>Appends a child condition and assigns this composite as its ParentCondition.</summary>
+<description>
+Rejects null references, self/ancestor cycles and conditions already attached elsewhere.
+</description>
+<param name="condition">Child condition to append.</param>
+*)
+METHOD AddChildCondition
 VAR_INPUT
 	condition : ICondition;
 END_VAR
 VAR
-	argumentNullExcxeption : TOF_Core.ArgumentNotSpecifiedException;
+	ancestor : ICondition;
+	argumentNullException : TOF_Core.ArgumentNotSpecifiedException;
+	invalidAttachmentException : TOF_Core.StandardException;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[IF condition = 0  THEN
-	argumentNullExcxeption.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), 'condition');
+        <ST><![CDATA[IF condition = 0 THEN
+	argumentNullException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), 'condition');
 END_IF
 
-condition.ParentCondition := THIS^;
+ancestor := THIS^;
 
-_Children.AppendGeneric(TOF_Core.GenericValueFactory.FromParts(TOF_Core.GENERIC_TYPE_CLASS.OBJECT, condition.SelfAddress, condition.SelfSize, TOF_Core.GENERIC_MEMORY_MANAGEMENT_BEHAVIOR.STORE_ORIGINAL_REFERENCE_AND_NOT_OWNS_MEMORY));]]></ST>
+WHILE ancestor <> 0 DO
+	IF ancestor = condition THEN
+		invalidAttachmentException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), "Cannot attach a condition that is this composite condition or its ancestor");
+	END_IF
+
+	ancestor := ancestor.ParentCondition;
+END_WHILE
+
+IF condition.ParentActivity <> 0
+	OR_ELSE (condition.ParentCondition <> 0 AND_THEN condition.ParentCondition.SelfAddress <> SelfAddress)
+THEN
+	invalidAttachmentException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), "Child condition is already attached to another parent");
+END_IF
+
+_Children.AppendGeneric(TOF_Core.GenericValueFactory.FromParts(TOF_Core.GENERIC_TYPE_CLASS.OBJECT, condition.SelfAddress, condition.SelfSize, TOF_Core.GENERIC_MEMORY_MANAGEMENT_BEHAVIOR.STORE_ORIGINAL_REFERENCE_AND_NOT_OWNS_MEMORY));
+
+condition.ParentCondition := THIS^;]]></ST>
       </Implementation>
     </Method>
     <Property Name="ClassName" Id="{70333ea1-3549-4d0a-a3ad-521d1db0db74}">
@@ -57,7 +87,10 @@ PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
       </Get>
     </Property>
     <Property Name="Configured" Id="{21dacc3f-ed62-4ab7-8da9-cb67ea9bfcba}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Returns TRUE when at least one child condition has been added.</summary>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY Configured : BOOL]]></Declaration>
       <Get Name="Get" Id="{ea5c9fa4-9f95-445e-834b-d8986cf079b5}">
         <Declaration><![CDATA[]]></Declaration>
@@ -67,7 +100,10 @@ PROPERTY Configured : BOOL]]></Declaration>
       </Get>
     </Property>
     <Property Name="LogicalOperator" Id="{2e60dc3a-8843-4578-a90f-416536b1cdcb}">
-      <Declaration><![CDATA[PROPERTY LogicalOperator : LOGICAL_OPERATOR]]></Declaration>
+      <Declaration><![CDATA[(*!
+<summary>Gets or sets the logical operator (AND_ or OR_) used to combine child conditions.</summary>
+*)
+PROPERTY LogicalOperator : LOGICAL_OPERATOR]]></Declaration>
       <Get Name="Get" Id="{24be606b-b29e-4d7a-9059-3d33397fc9bc}">
         <Declaration><![CDATA[]]></Declaration>
         <Implementation>
@@ -93,8 +129,8 @@ PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
     </Property>
     <Method Name="OnEvalute" Id="{65421d01-d63f-414e-ae6f-3caad321436b}" FolderPath="Overriden members\">
       <Declaration><![CDATA[(*!
-<summary>Prepares diagnostic text locally before passing it to read-only logging or exception parameters.</summary>
-<description>Computed diagnostic strings are held in local buffers for the duration of the receiving call.</description>
+<summary>Evaluates child conditions in order and short-circuits according to LogicalOperator.</summary>
+<param name="activity">Activity context for evaluation.</param>
 *)
 METHOD PROTECTED OnEvalute : BOOL
 VAR_INPUT

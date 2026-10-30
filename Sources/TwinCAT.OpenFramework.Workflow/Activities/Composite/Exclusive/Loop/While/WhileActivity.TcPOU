@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <TcPlcObject Version="1.1.0.1">
   <POU Name="WhileActivity" Id="{a1dc987f-676e-48f4-8437-6b262709e26c}" SpecialFunc="None">
     <Declaration><![CDATA[(*
@@ -7,15 +7,29 @@ SPDX-License-Identifier: MIT
 License: https://opensource.org/license/mit
 *)
 
-{attribute 'no_explicit_call' := 'do not call this function block directly'} 
+(*!
+<summary>Repeats its sequential child activities while the configured Condition evaluates to TRUE.</summary>
+<description>
+Evaluates Condition before starting the first iteration and at the boundary after each completed body iteration.
+Before starting a subsequent iteration, resets completed body children back to PASSIVE_READY via OnResetting.
+Advances at most one body child per running call; an empty body with a TRUE condition remains in ACTIVE_RUNNING
+and re-evaluates Condition once per Execute call.
+</description>
+*)
+
+{attribute 'no_explicit_call' := 'do not call this function block directly'}
 {attribute 'enable_dynamic_creation'}
 FUNCTION_BLOCK WhileActivity EXTENDS SequenceActivity IMPLEMENTS IWhileActivity
+VAR_STAT
+	{attribute 'hide'}
+	_ClassName_ : STRING := __POUNAME();
+END_VAR
 VAR
 	{attribute 'OPC.UA.DA' := '0'}
-	_ClassName_ : STRING := __POUNAME();
+	_Condition : ICondition;
 
 	{attribute 'OPC.UA.DA' := '0'}
-	_Condition : ICondition;	
+	_ResettingBodyBetweenIterations : BOOL;
 END_VAR]]></Declaration>
     <Implementation>
       <ST><![CDATA[]]></ST>
@@ -31,7 +45,10 @@ PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
       </Get>
     </Property>
     <Property Name="Condition" Id="{1569931e-587f-4563-a5bc-90730247f2a7}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Returns the loop continuation condition configured for this activity.</summary>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY FINAL Condition : ICondition]]></Declaration>
       <Get Name="Get" Id="{99562b20-36d6-457b-8c31-a7b8437d4df1}">
         <Declaration><![CDATA[]]></Declaration>
@@ -39,24 +56,36 @@ PROPERTY FINAL Condition : ICondition]]></Declaration>
           <ST><![CDATA[Condition := _Condition;]]></ST>
         </Implementation>
       </Get>
-      <Set Name="Set" Id="{1ff2bd01-f001-40dc-ba83-6a4797b5f804}">
-        <Declaration><![CDATA[]]></Declaration>
-        <Implementation>
-          <ST><![CDATA[_Condition := Condition;]]></ST>
-        </Implementation>
-      </Set>
     </Property>
     <Method Name="Configure" Id="{977f0425-c37b-4e6b-8b39-b78bbd4d800a}">
-      <Declaration><![CDATA[METHOD Configure
+      <Declaration><![CDATA[(*!
+<summary>Assigns the required loop condition and binds its ParentActivity.</summary>
+<description>
+Permitted only in PASSIVE_READY. Rejects a null condition or a condition already attached elsewhere.
+</description>
+<param name="condition">Condition evaluated before each iteration.</param>
+*)
+METHOD Configure
 VAR_INPUT
 	condition : ICondition; 
 END_VAR
 VAR
 	argumentNullException : TOF_Core.ArgumentNotSpecifiedException;
+	invalidConfigurationException : TOF_Core.StandardException;
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[IF condition = 0 THEN
 	argumentNullException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), 'condition');
+END_IF
+
+IF State <> WORKFLOW_ELEMENT_STATE.PASSIVE_READY THEN
+	invalidConfigurationException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), "Cannot configure WhileActivity outside PASSIVE_READY");
+END_IF
+
+IF (condition.ParentActivity <> 0 AND_THEN condition.ParentActivity.SelfAddress <> SelfAddress)
+	OR_ELSE condition.ParentCondition <> 0
+THEN
+	invalidConfigurationException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), "Condition is already attached to another parent");
 END_IF
 
 condition.ParentActivity := THIS^;
@@ -74,8 +103,29 @@ PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
         </Implementation>
       </Get>
     </Property>
+    <Method Name="OnResetting" Id="{39e8d779-269c-49d0-821a-8cf503e6b215}">
+      <Declaration><![CDATA[(*!
+<summary>Clears between-iteration reset state and resets all body children back to PASSIVE_READY.</summary>
+<param name="startResetting">TRUE on the initial call from RequestReset.</param>
+*)
+METHOD PROTECTED OnResetting : ACTIVITY_RESETTING_STATE
+VAR_INPUT
+	startResetting : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_ResettingBodyBetweenIterations := FALSE;
+
+OnResetting := SUPER^.OnResetting(startResetting);]]></ST>
+      </Implementation>
+    </Method>
     <Method Name="OnRunning" Id="{f271eeb4-f3d7-4733-877e-04b96312cb2b}">
-      <Declaration><![CDATA[METHOD PROTECTED OnRunning : ACTIVITY_RUNNING_STATE
+      <Declaration><![CDATA[(*!
+<summary>Evaluates the loop condition at iteration boundaries, resets completed body children and advances one body step per call.</summary>
+<param name="startRunning">TRUE on the initial call of a fresh start.</param>
+<param name="startResuming">TRUE on the initial call when resuming from suspension.</param>
+<param name="haltReason">Receives the body child's HaltReason when halted.</param>
+*)
+METHOD PROTECTED OnRunning : ACTIVITY_RUNNING_STATE
 VAR_INPUT
 	startRunning : BOOL;
 	startResuming : BOOL;
@@ -84,13 +134,6 @@ VAR_OUTPUT
 	haltReason : WSTRING(255);
 END_VAR
 VAR
-	activity : IActivity;
-	
-	currentActivityIsNullException : TOF_Core.NullReferenceException;
-END_VAR
-VAR
-	workflowVariable : TOF_Core.GENERIC_VALUE;
-	
 	argumentNullException : TOF_Core.NullReferenceException;
 END_VAR]]></Declaration>
       <Implementation>
@@ -98,20 +141,93 @@ END_VAR]]></Declaration>
 	argumentNullException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), 'Condition');
 END_IF
 
-activity := CurrentActivity;
+IF startRunning THEN
+	_ResettingBodyBetweenIterations := FALSE;
+END_IF
 
-IF startRunning OR_ELSE (startResuming AND_THEN activity = 0) THEN
+IF _ResettingBodyBetweenIterations THEN
+	IF SUPER^.OnResetting(FALSE) = ACTIVITY_RESETTING_STATE.WORK_IN_PROGRESS THEN
+		OnRunning := ACTIVITY_RUNNING_STATE.WORK_IN_PROGRESS;
+		RETURN;
+	END_IF
+
+	_ResettingBodyBetweenIterations := FALSE;
+
+	OnRunning := SUPER^.OnRunning(TRUE, FALSE, haltReason => haltReason);
+
+	IF OnRunning = ACTIVITY_RUNNING_STATE.WORK_COMPLETED THEN
+		OnRunning := ACTIVITY_RUNNING_STATE.WORK_IN_PROGRESS;
+	END_IF
+
+	RETURN;
+END_IF
+
+IF startRunning OR_ELSE CurrentActivity = 0 THEN
 	IF NOT _Condition.Evaluate(THIS^) THEN
 		OnRunning := ACTIVITY_RUNNING_STATE.WORK_COMPLETED;
 		RETURN;
 	END_IF
+
+	IF _Children.Length < 1 THEN
+		OnRunning := ACTIVITY_RUNNING_STATE.WORK_IN_PROGRESS;
+		RETURN;
+	END_IF
+
+	IF NOT startRunning THEN
+		IF SUPER^.OnResetting(TRUE) = ACTIVITY_RESETTING_STATE.WORK_IN_PROGRESS THEN
+			_ResettingBodyBetweenIterations := TRUE;
+			OnRunning := ACTIVITY_RUNNING_STATE.WORK_IN_PROGRESS;
+			RETURN;
+		END_IF
+	END_IF
+
+	OnRunning := SUPER^.OnRunning(TRUE, FALSE, haltReason => haltReason);
+
+	IF OnRunning = ACTIVITY_RUNNING_STATE.WORK_COMPLETED THEN
+		OnRunning := ACTIVITY_RUNNING_STATE.WORK_IN_PROGRESS;
+	END_IF
+
+	RETURN;
 END_IF
 
-OnRunning := SUPER^.OnRunning(startRunning, startResuming, haltReason => haltReason);
+OnRunning := SUPER^.OnRunning(FALSE, startResuming, haltReason => haltReason);
 
-IF OnRunning = ACTIVITY_RUNNING_STATE.WORK_COMPLETED AND_THEN _Condition.Evaluate(THIS^) THEN
-	OnRunning := SUPER^.OnRunning(TRUE, FALSE, haltReason => haltReason);
+IF OnRunning = ACTIVITY_RUNNING_STATE.WORK_COMPLETED THEN
+	OnRunning := ACTIVITY_RUNNING_STATE.WORK_IN_PROGRESS;
 END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="OnStopping" Id="{89d79cf2-96d5-45e4-988a-74b92e158601}">
+      <Declaration><![CDATA[(*!
+<summary>Stops the loop immediately at an iteration boundary or empty body, or delegates stopping to the active body step.</summary>
+<param name="startCancelling">TRUE on the initial call from RequestCancel.</param>
+<param name="startSuspending">TRUE on the initial call from RequestSuspend.</param>
+<param name="haltReason">Receives the body child's HaltReason if it halts while stopping.</param>
+*)
+METHOD PROTECTED OnStopping : ACTIVITY_STOPPING_STATE
+VAR_INPUT
+	startCancelling : BOOL;
+	startSuspending : BOOL;
+END_VAR
+VAR_OUTPUT
+	haltReason : WSTRING(255);
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF _ResettingBodyBetweenIterations THEN
+	IF SUPER^.OnResetting(FALSE) = ACTIVITY_RESETTING_STATE.WORK_IN_PROGRESS THEN
+		OnStopping := ACTIVITY_STOPPING_STATE.WORK_IN_PROGRESS;
+		RETURN;
+	END_IF
+
+	_ResettingBodyBetweenIterations := FALSE;
+END_IF
+
+IF CurrentActivity = 0 THEN
+	OnStopping := ACTIVITY_STOPPING_STATE.WORK_STOPPED;
+	RETURN;
+END_IF
+
+OnStopping := SUPER^.OnStopping(startCancelling, startSuspending, haltReason => haltReason);]]></ST>
       </Implementation>
     </Method>
     <Property Name="SelfSize" Id="{2c9eb82d-325f-4688-b541-736efe376418}">

@@ -1,23 +1,29 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <TcPlcObject Version="1.1.0.1">
   <POU Name="WaitAndPickActivity" Id="{98b3e546-b646-44e7-bb5b-488f34e41fc2}" SpecialFunc="None">
-    <Declaration><![CDATA[(*!
-<summary>Waits for a branch condition and runs the selected activity.</summary>
-<description>Condition evaluation failures propagate to activity error handling rather than being treated as continued waiting.</description>
-*)
-(*
+    <Declaration><![CDATA[(*
 SPDX-FileCopyrightText: © 2026 Oleksandr Tiutyk <trofimich@gmail.com>
 SPDX-License-Identifier: MIT
 License: https://opensource.org/license/mit
 *)
 
-{attribute 'no_explicit_call' := 'do not call this function block directly'} 
+(*!
+<summary>Waits for the first branch condition that evaluates to TRUE and runs its paired activity.</summary>
+<description>
+When no branches are configured, completes immediately. While waiting for a ready branch, suspending or cancelling
+stops immediately without selecting a branch. Resetting resets any non-ready branch activity back to PASSIVE_READY
+and clears CurrentBranchIndex.
+</description>
+*)
+
+{attribute 'no_explicit_call' := 'do not call this function block directly'}
 {attribute 'enable_dynamic_creation'}
 FUNCTION_BLOCK WaitAndPickActivity EXTENDS ExclusiveCompositeActivity IMPLEMENTS IWaitAndPickActivity
-VAR
-	{attribute 'OPC.UA.DA' := '0'}
+VAR_STAT
+	{attribute 'hide'}
 	_ClassName : STRING := __POUNAME();
-
+END_VAR
+VAR
 	{attribute 'OPC.UA.DA' := '0'}
 	_BranchConditions : TOF_Collections.List<0>(0);
 
@@ -30,32 +36,53 @@ END_VAR]]></Declaration>
     <Implementation>
       <ST><![CDATA[]]></ST>
     </Implementation>
-    <Folder Name="Overriden" Id="{85831841-5ba2-46a5-9479-dc90add82035}" />
     <Folder Name="Service members" Id="{5438ee75-7621-4c52-a4d9-4dfea8dac7a8}" />
     <Method Name="AddBarnch" Id="{f3946fdc-ede0-4f71-bb51-f1411208bc91}">
-      <Declaration><![CDATA[METHOD AddBarnch : DINT
+      <Declaration><![CDATA[(*!
+<summary>Appends a condition-activity branch pair and returns its zero-based branch index.</summary>
+<description>
+Permitted only in PASSIVE_READY. Validates both condition and activity before appending the pair.
+</description>
+<param name="condition">Required branch condition.</param>
+<param name="activity">Required branch activity.</param>
+*)
+METHOD AddBarnch : DINT
 VAR_INPUT
 	condition : ICondition;
 	activity : IActivity;
 END_VAR
 VAR
-	conditionNullExcxeption : TOF_Core.ArgumentNotSpecifiedException;
-	activityNullExcxeption : TOF_Core.ArgumentNotSpecifiedException;
+	exceptionCode : __SYSTEM.ExceptionCode;
+	conditionNullException : TOF_Core.ArgumentNotSpecifiedException;
+	invalidConfigurationException : TOF_Core.StandardException;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[IF condition = 0  THEN
-	activityNullExcxeption.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), 'condition');
+        <ST><![CDATA[IF condition = 0 THEN
+	conditionNullException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), 'condition');
 END_IF
 
-IF activity = 0  THEN
-	activityNullExcxeption.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), 'activity');
-END_IF
+ValidateChildActivityAttachment(activity, 'activity');
 
-activity.ParentActivity := THIS^;
+IF (condition.ParentActivity <> 0 AND_THEN condition.ParentActivity.SelfAddress <> SelfAddress)
+	OR_ELSE condition.ParentCondition <> 0
+THEN
+	invalidConfigurationException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), "Condition is already attached to another parent");
+END_IF
 
 _BranchConditions.AppendGeneric(TOF_Core.GenericValueFactory.FromParts(TOF_Core.GENERIC_TYPE_CLASS.OBJECT, condition.SelfAddress, condition.SelfSize, TOF_Core.GENERIC_MEMORY_MANAGEMENT_BEHAVIOR.STORE_ORIGINAL_REFERENCE_AND_NOT_OWNS_MEMORY));
 
-_BranchActivities.AppendGeneric(TOF_Core.GenericValueFactory.FromParts(TOF_Core.GENERIC_TYPE_CLASS.OBJECT, activity.SelfAddress, activity.SelfSize, TOF_Core.GENERIC_MEMORY_MANAGEMENT_BEHAVIOR.STORE_ORIGINAL_REFERENCE_AND_NOT_OWNS_MEMORY), index => AddBarnch);]]></ST>
+__TRY
+	_BranchActivities.AppendGeneric(TOF_Core.GenericValueFactory.FromParts(TOF_Core.GENERIC_TYPE_CLASS.OBJECT, activity.SelfAddress, activity.SelfSize, TOF_Core.GENERIC_MEMORY_MANAGEMENT_BEHAVIOR.STORE_ORIGINAL_REFERENCE_AND_NOT_OWNS_MEMORY), index => AddBarnch);
+__CATCH(exceptionCode)
+	IF _BranchConditions.Length > _BranchActivities.Length THEN
+		_BranchConditions.RemoveAt(_BranchConditions.Length - 1);
+	END_IF
+
+	TOF_Core.ExceptionManager.ReThrowLastException(exceptionCode, NamespaceName, __POUNAME(), __POSITION());
+__ENDTRY
+
+condition.ParentActivity := THIS^;
+activity.ParentActivity := THIS^;]]></ST>
       </Implementation>
     </Method>
     <Property Name="ClassName" Id="{0fd055e5-b559-4b38-9ea0-4ca6dfde96f4}">
@@ -69,7 +96,10 @@ PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
       </Get>
     </Property>
     <Property Name="CurrentActivity" Id="{ff44d870-a64f-40ed-9ac5-63b06e2e61c2}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Returns the activity of the currently picked branch, or 0 while waiting or idle.</summary>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY FINAL CurrentActivity : IActivity]]></Declaration>
       <Get Name="Get" Id="{8185d1d9-3e50-4bb8-a6f5-2467a7aadc60}">
         <Declaration><![CDATA[]]></Declaration>
@@ -81,7 +111,10 @@ END_IF]]></ST>
       </Get>
     </Property>
     <Property Name="CurrentBranchIndex" Id="{33275b8e-2247-47e4-9607-47cd580c7b26}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Returns the zero-based index of the currently picked branch, or -1 while waiting or idle.</summary>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY FINAL CurrentBranchIndex : DINT]]></Declaration>
       <Get Name="Get" Id="{b77479ef-312c-49a9-8f3c-c0dff4b2b548}">
         <Declaration><![CDATA[]]></Declaration>
@@ -100,23 +133,43 @@ PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
         </Implementation>
       </Get>
     </Property>
-    <Method Name="OnCancelling" Id="{07e9f5dd-2a3d-4db3-89d5-f47d571203f6}" FolderPath="Overriden\">
-      <Declaration><![CDATA[METHOD PROTECTED OnCancelling 
+    <Method Name="OnResetting" Id="{d4c7143e-4666-46e4-a666-26a19c0a8171}">
+      <Declaration><![CDATA[(*!
+<summary>Resets all non-ready branch activities back to PASSIVE_READY and clears CurrentBranchIndex.</summary>
+<param name="startResetting">TRUE on the initial call from RequestReset.</param>
+*)
+METHOD PROTECTED OnResetting : ACTIVITY_RESETTING_STATE
 VAR_INPUT
-	start : BOOL;
-END_VAR
-VAR_OUTPUT
-	cancelled : BOOL;
+	startResetting : BOOL;
 END_VAR
 VAR
-	activity : IActivity;
+	i : DINT;
+	branchActivity : IActivity;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[]]></ST>
+        <ST><![CDATA[FOR i := 0 TO _BranchActivities.Length - 1 DO
+	__QUERYINTERFACE(_BranchActivities.Get(i).AsObject(), branchActivity);
+
+	IF branchActivity <> 0 AND_THEN branchActivity.State <> WORKFLOW_ELEMENT_STATE.PASSIVE_READY THEN
+		IF ResetChildActivity(branchActivity) = ACTIVITY_RESETTING_STATE.WORK_IN_PROGRESS THEN
+			OnResetting := ACTIVITY_RESETTING_STATE.WORK_IN_PROGRESS;
+			RETURN;
+		END_IF
+	END_IF
+END_FOR
+
+_CurrentBranchIndex := -1;
+OnResetting := ACTIVITY_RESETTING_STATE.WORK_RESET;]]></ST>
       </Implementation>
     </Method>
     <Method Name="OnRunning" Id="{6bdc48e7-942d-42d5-a41d-15bff80339b4}">
-      <Declaration><![CDATA[METHOD PROTECTED OnRunning : ACTIVITY_RUNNING_STATE
+      <Declaration><![CDATA[(*!
+<summary>Polls branch conditions until one is satisfied, then starts and advances the selected branch activity.</summary>
+<param name="startRunning">TRUE on the initial call of a fresh start.</param>
+<param name="startResuming">TRUE on the initial call when resuming from suspension.</param>
+<param name="haltReason">Receives the selected branch activity's HaltReason when halted.</param>
+*)
+METHOD PROTECTED OnRunning : ACTIVITY_RUNNING_STATE
 VAR_INPUT
 	startRunning : BOOL;
 	startResuming : BOOL;
@@ -126,6 +179,7 @@ VAR_OUTPUT
 END_VAR
 VAR
 	activity : IActivity;
+	branchJustPicked : BOOL;
 	
 	currentActivityNullException : TOF_Core.NullReferenceException;
 END_VAR]]></Declaration>
@@ -141,6 +195,7 @@ END_IF
 
 IF _CurrentBranchIndex < 0 THEN
 	_CurrentBranchIndex := findReadyBranch();
+	branchJustPicked := _CurrentBranchIndex >= 0;
 END_IF
 
 IF _CurrentBranchIndex < 0 THEN
@@ -153,17 +208,27 @@ IF activity = 0 THEN
 	currentActivityNullException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), 'CurrentActivity');
 END_IF
 
-IF startRunning OR_ELSE startResuming OR_ELSE NOT activity.Busy THEN
+IF startRunning OR_ELSE startResuming OR_ELSE branchJustPicked THEN
 	activity.RequestStart();
 ELSE
 	activity.Execute();
 END_IF
 
-OnRunning := GetActivityRunningStateByNestedActivityState(activity.State);]]></ST>
+OnRunning := GetActivityRunningStateByNestedActivityState(activity.State);
+
+IF OnRunning = ACTIVITY_RUNNING_STATE.WORK_HALTED THEN
+	haltReason := activity.HaltReason;
+END_IF]]></ST>
       </Implementation>
     </Method>
     <Method Name="OnStopping" Id="{90584366-9ed4-4c76-823f-f6583e8cb7e4}">
-      <Declaration><![CDATA[METHOD PROTECTED OnStopping : ACTIVITY_STOPPING_STATE
+      <Declaration><![CDATA[(*!
+<summary>Stops waiting immediately if no branch is picked, or stops the picked branch activity.</summary>
+<param name="startCancelling">TRUE on the initial call from RequestCancel.</param>
+<param name="startSuspending">TRUE on the initial call from RequestSuspend.</param>
+<param name="haltReason">Receives the picked branch activity's HaltReason if it halts while stopping.</param>
+*)
+METHOD PROTECTED OnStopping : ACTIVITY_STOPPING_STATE
 VAR_INPUT
 	startCancelling : BOOL;
 	startSuspending : BOOL;
@@ -193,7 +258,16 @@ IF activity = 0 THEN
 END_IF
 
 IF NOT activity.Busy THEN
+	IF startCancelling AND_THEN activity.State = WORKFLOW_ELEMENT_STATE.PASSIVE_SUSPENDED THEN
+		activity.RequestCancel(_CancelReason);
+	END_IF
+
 	OnStopping := GetActivityStoppingStateByNestedActivityState(activity.State);
+
+	IF OnStopping = ACTIVITY_STOPPING_STATE.WORK_HALTED THEN
+		haltReason := activity.HaltReason;
+	END_IF
+
 	RETURN;
 END_IF
 
@@ -205,7 +279,11 @@ ELSE
 	activity.Execute();
 END_IF
 
-OnStopping := GetActivityStoppingStateByNestedActivityState(activity.State);]]></ST>
+OnStopping := GetActivityStoppingStateByNestedActivityState(activity.State);
+
+IF OnStopping = ACTIVITY_STOPPING_STATE.WORK_HALTED THEN
+	haltReason := activity.HaltReason;
+END_IF]]></ST>
       </Implementation>
     </Method>
     <Property Name="SelfSize" Id="{f48717c6-b99e-47cb-94a9-c8d92c921628}">
@@ -220,7 +298,7 @@ PROPERTY SelfSize : ULINT]]></Declaration>
     </Property>
     <Method Name="findReadyBranch" Id="{8cf25bf3-94b9-4b19-951a-3c1cbb21bad6}" FolderPath="Service members\">
       <Declaration><![CDATA[(*!
-<summary>Finds the first branch whose condition is satisfied.</summary>
+<summary>Finds the first branch whose condition evaluates to TRUE.</summary>
 <description>Returns -1 when no condition is satisfied. Evaluation exceptions propagate to the activity error handler; they must not be interpreted as continued waiting.</description>
 *)
 METHOD PRIVATE findReadyBranch : DINT

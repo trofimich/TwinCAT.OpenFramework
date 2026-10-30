@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <TcPlcObject Version="1.1.0.1">
   <POU Name="ExclusiveCompositeActivity" Id="{13ce720f-cc4b-4c1a-8e26-2a31330dfb74}" SpecialFunc="None">
     <Declaration><![CDATA[(*
@@ -7,14 +7,25 @@ SPDX-License-Identifier: MIT
 License: https://opensource.org/license/mit
 *)
 
-{attribute 'no_explicit_call' := 'do not call this function block directly'} 
+(*!
+<summary>Base class for composite activities that execute at most one child activity at a time.</summary>
+<description>
+Provides state translation helpers for mapping a child activity's state into the parent composite's running,
+stopping or resetting result, as well as single-parent attachment validation and child resetting.
+</description>
+*)
+
+{attribute 'no_explicit_call' := 'do not call this function block directly'}
 FUNCTION_BLOCK ABSTRACT ExclusiveCompositeActivity EXTENDS Activity IMPLEMENTS IExclusiveCompositeActivity]]></Declaration>
     <Implementation>
       <ST><![CDATA[]]></ST>
     </Implementation>
     <Folder Name="Internal members" Id="{760a10bf-9189-41b6-af5c-f9a53d374520}" />
     <Property Name="CurrentActivity" Id="{f87026db-b40e-41a2-b4b1-af04873341d9}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Returns the currently selected child activity, or 0 when no child is selected.</summary>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY ABSTRACT CurrentActivity : IActivity]]></Declaration>
       <Get Name="Get" Id="{16b243ca-e41f-4cab-b539-f522d3ba872b}">
         <Declaration><![CDATA[]]></Declaration>
@@ -23,8 +34,46 @@ PROPERTY ABSTRACT CurrentActivity : IActivity]]></Declaration>
         </Implementation>
       </Get>
     </Property>
+    <Method Name="GetActivityResettingStateByNestedActivityState" Id="{3c7f81d1-2b46-4c60-9d21-4e7782e66b10}" FolderPath="Internal members\">
+      <Declaration><![CDATA[(*!
+<summary>Translates a child activity state after a reset step into the parent composite's resetting result.</summary>
+<description>
+ACTIVE_RESETTING and ACTIVE_CANCELLING map to WORK_IN_PROGRESS. PASSIVE_READY maps to WORK_RESET.
+Any other state raises InvalidNestedWorkflowStateException.
+</description>
+<param name="nestedActivityState">Observed state of the child activity being reset.</param>
+*)
+METHOD PROTECTED GetActivityResettingStateByNestedActivityState : ACTIVITY_RESETTING_STATE
+VAR_INPUT
+	nestedActivityState : WORKFLOW_ELEMENT_STATE;
+END_VAR
+VAR
+	invalidNestedWorkflowStateException : InvalidNestedWorkflowStateException;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[CASE nestedActivityState OF
+	WORKFLOW_ELEMENT_STATE.ACTIVE_RESETTING,
+	WORKFLOW_ELEMENT_STATE.ACTIVE_CANCELLING:
+		GetActivityResettingStateByNestedActivityState := ACTIVITY_RESETTING_STATE.WORK_IN_PROGRESS;
+
+	WORKFLOW_ELEMENT_STATE.PASSIVE_READY:
+		GetActivityResettingStateByNestedActivityState := ACTIVITY_RESETTING_STATE.WORK_RESET;
+
+	ELSE
+		invalidNestedWorkflowStateException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), nestedActivityState);
+END_CASE]]></ST>
+      </Implementation>
+    </Method>
     <Method Name="GetActivityRunningStateByNestedActivityState" Id="{c15358dd-5baf-4122-b6b7-ff0ce4db1cb4}" FolderPath="Internal members\">
-      <Declaration><![CDATA[METHOD PROTECTED GetActivityRunningStateByNestedActivityState : ACTIVITY_RUNNING_STATE
+      <Declaration><![CDATA[(*!
+<summary>Translates a child activity state after a running step into the parent composite's running result.</summary>
+<description>
+ACTIVE_RUNNING maps to WORK_IN_PROGRESS, PASSIVE_COMPLETED to WORK_COMPLETED, and PASSIVE_HALTED to WORK_HALTED.
+Any other state raises InvalidNestedWorkflowStateException.
+</description>
+<param name="nestedActivityState">Observed state of the active child activity.</param>
+*)
+METHOD PROTECTED GetActivityRunningStateByNestedActivityState : ACTIVITY_RUNNING_STATE
 VAR_INPUT
 	nestedActivityState : WORKFLOW_ELEMENT_STATE;
 END_VAR
@@ -48,7 +97,16 @@ END_CASE]]></ST>
       </Implementation>
     </Method>
     <Method Name="GetActivityStoppingStateByNestedActivityState" Id="{1b24d1c5-0190-4a91-b76b-ad26fb99c654}" FolderPath="Internal members\">
-      <Declaration><![CDATA[METHOD PROTECTED GetActivityStoppingStateByNestedActivityState : ACTIVITY_STOPPING_STATE
+      <Declaration><![CDATA[(*!
+<summary>Translates a child activity state after a stopping step into the parent composite's stopping result.</summary>
+<description>
+ACTIVE_CANCELLING and ACTIVE_SUSPENDING map to WORK_IN_PROGRESS; PASSIVE_CANCELLED and PASSIVE_SUSPENDED map to
+WORK_STOPPED; PASSIVE_COMPLETED maps to WORK_COMPLETED; PASSIVE_HALTED maps to WORK_HALTED.
+Any other state raises InvalidNestedWorkflowStateException.
+</description>
+<param name="nestedActivityState">Observed state of the stopping child activity.</param>
+*)
+METHOD PROTECTED GetActivityStoppingStateByNestedActivityState : ACTIVITY_STOPPING_STATE
 VAR_INPUT
 	nestedActivityState : WORKFLOW_ELEMENT_STATE;
 END_VAR
@@ -72,6 +130,99 @@ END_VAR]]></Declaration>
 	ELSE
 		invalidNestedWorkflowStateException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), nestedActivityState);
 END_CASE]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="ResetChildActivity" Id="{5b6c11e9-473a-41b3-9f90-2e5779ca1841}" FolderPath="Internal members\">
+      <Declaration><![CDATA[(*!
+<summary>Advances resetting of a child activity toward PASSIVE_READY by one step.</summary>
+<description>
+Returns WORK_RESET immediately when childActivity is 0 or already in PASSIVE_READY. If the child was left in
+PASSIVE_SUSPENDED or ACTIVE_CANCELLING, drives cancellation to PASSIVE_CANCELLED before invoking RequestReset.
+In ACTIVE_RESETTING, advances the child via Execute; in finished passive states, invokes RequestReset.
+</description>
+<param name="childActivity">Child activity to reset, or 0.</param>
+*)
+METHOD PROTECTED ResetChildActivity : ACTIVITY_RESETTING_STATE
+VAR_INPUT
+	childActivity : IActivity;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF childActivity = 0 OR_ELSE childActivity.State = WORKFLOW_ELEMENT_STATE.PASSIVE_READY THEN
+	ResetChildActivity := ACTIVITY_RESETTING_STATE.WORK_RESET;
+	RETURN;
+END_IF
+
+IF childActivity.State = WORKFLOW_ELEMENT_STATE.PASSIVE_SUSPENDED THEN
+	childActivity.RequestCancel("Parent composite activity resetting");
+
+	IF childActivity.State = WORKFLOW_ELEMENT_STATE.PASSIVE_CANCELLED THEN
+		childActivity.RequestReset();
+	END_IF
+ELSIF childActivity.State = WORKFLOW_ELEMENT_STATE.ACTIVE_CANCELLING THEN
+	childActivity.Execute();
+
+	IF childActivity.State = WORKFLOW_ELEMENT_STATE.PASSIVE_CANCELLED THEN
+		childActivity.RequestReset();
+	END_IF
+ELSIF childActivity.State = WORKFLOW_ELEMENT_STATE.ACTIVE_RESETTING THEN
+	childActivity.Execute();
+ELSE
+	childActivity.RequestReset();
+END_IF
+
+ResetChildActivity := GetActivityResettingStateByNestedActivityState(childActivity.State);]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="ValidateChildActivityAttachment" Id="{8a41e822-91f2-4b4e-83f4-650830f291c3}" FolderPath="Internal members\">
+      <Declaration><![CDATA[(*!
+<summary>Verifies that a candidate child activity can be attached to this composite without cycles or shared parents.</summary>
+<description>
+Rejects null references, attaching while this composite is not in PASSIVE_READY, self-attachment, ancestor cycles,
+children already assigned to another parent activity, or children already assigned as a workflow root.
+</description>
+<param name="childActivity">Candidate child activity to validate.</param>
+<param name="argumentName">Parameter name for diagnostic reporting.</param>
+*)
+METHOD PROTECTED ValidateChildActivityAttachment
+VAR_INPUT
+	childActivity : IActivity;
+	argumentName : STRING(255);
+END_VAR
+VAR
+	ancestor : IActivity;
+	childWorkflow : IWorkflow;
+
+	argumentNotSpecifiedException : TOF_Core.ArgumentNotSpecifiedException;
+	invalidAttachmentException : TOF_Core.StandardException;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF childActivity = 0 THEN
+	argumentNotSpecifiedException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), argumentName);
+END_IF
+
+IF State <> WORKFLOW_ELEMENT_STATE.PASSIVE_READY THEN
+	invalidAttachmentException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), "Cannot modify composite child activities outside PASSIVE_READY");
+END_IF
+
+ancestor := THIS^;
+
+WHILE ancestor <> 0 DO
+	IF ancestor = childActivity THEN
+		invalidAttachmentException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), "Cannot attach an activity that is this composite or its ancestor");
+	END_IF
+
+	ancestor := ancestor.ParentActivity;
+END_WHILE
+
+IF childActivity.ParentActivity <> 0 AND_THEN childActivity.ParentActivity.SelfAddress <> SelfAddress THEN
+	invalidAttachmentException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), "Child activity is already attached to another parent activity");
+END_IF
+
+childWorkflow := childActivity.Workflow;
+
+IF childWorkflow <> 0 AND_THEN childWorkflow.RootActivity = childActivity THEN
+	invalidAttachmentException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), "Child activity is already attached as the workflow root activity");
+END_IF]]></ST>
       </Implementation>
     </Method>
   </POU>

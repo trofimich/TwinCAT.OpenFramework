@@ -9,16 +9,18 @@ License: https://opensource.org/license/mit
 
 (*!
 <summary>Exercises directory operations in independently owned scenario directories.</summary>
-<description>C:\OpenFrameworkTests must exist on the local target and be reserved exclusively for this suite.
-Run one instance from one cyclic task; do not modify the root externally during a run. The root is never removed.
-Existing scenario directories fail preparation and are not adopted or deleted. Ownership is established only
-after ordinary CreateDirectory completes with WORK_DONE. Failed or cancelled creation may leave a directory
-with unknown ownership for manual inspection. Keep invoking the suite after a failed test for cleanup.
-Test completion does not prove cleanup completion or physical resource release.</description>
+<description>C:\OpenFrameworkTests is reserved exclusively for this suite and is created automatically as a
+prerequisite before the filesystem scenarios execute. Run one instance from one cyclic task; do not modify
+the root externally during a run. The root is never removed. Existing scenario directories fail preparation
+and are not adopted or deleted. Ownership is established only after ordinary CreateDirectory completes with
+WORK_DONE. Failed or cancelled creation may leave a directory with unknown ownership for manual inspection.
+Keep invoking the suite after a failed test for cleanup. Test completion does not prove cleanup completion
+or physical resource release.</description>
 *)
+
 FUNCTION_BLOCK DirectoryTest EXTENDS TcUnit.FB_TestSuite
 VAR CONSTANT
-	//! <summary>Existing, exclusively reserved parent directory; never removed by this suite.</summary>
+	//! <summary>Exclusively reserved parent directory prepared before scenarios run; never removed by this suite.</summary>
 	_TestRoot : STRING(255) := 'C:\OpenFrameworkTests';
 	//! <summary>Timeout for each native directory task; not a bound on total cleanup time.</summary>
 	_NativeTimeout : TIME := T#2S;
@@ -28,9 +30,15 @@ END_VAR
 VAR
 	{attribute 'hide'}
 	_ClassName : STRING := __POUNAME();
+
+	_PrepareTestRoot : TOF_FileSystem.CreateDirectoryIfNotExists("prepareTestRoot");
+	_TestRootPreparationStarted : BOOL;
+	_TestRootPrepared : BOOL;
+	_TestRootPreparationFailureMessage : STRING(255);
 END_VAR]]></Declaration>
     <Implementation>
-      <ST><![CDATA[PathValidation();
+      <ST><![CDATA[prepareTestRoot();
+PathValidation();
 CheckThenCreateThenRemoveDirectory();
 CheckInvalidDirectory();
 CreateDirectoryIfNotExistsThenRemoveItIfExists();]]></ST>
@@ -82,6 +90,10 @@ END_IF
    A cleanup exception leaves cleanup pending for subsequent cycles; no resource is force-released. *)
 __TRY
 	IF testFinished THEN
+		IF _PrepareTestRoot.State.Running THEN
+			RETURN;
+		END_IF
+
 		IF createDirectory.State.Running THEN
 			createDirectory.Cancel();
 			createDirectory.Execute();
@@ -142,8 +154,14 @@ __TRY
 	END_IF
 
 	IF scenarioDeadline.Q THEN
+		IF NOT _TestRootPrepared AND_THEN _TestRootPreparationFailureMessage = TOF_Core.Strings.Empty THEN
+			_TestRootPreparationFailureMessage := 'Test root preparation exceeded the scenario deadline';
+		END_IF
+
 		failureMessage := 'Scenario exceeded its 10-second deadline; creation may have an unknown result';
-	ELSE
+	ELSIF _TestRootPreparationFailureMessage <> TOF_Core.Strings.Empty THEN
+		failureMessage := _TestRootPreparationFailureMessage;
+	ELSIF _TestRootPrepared THEN
 		CASE step OF
 			DIRECTORY_TEST_STEP.CREATE_DIRECTORY:
 				IF NOT operationStarted THEN
@@ -320,6 +338,10 @@ END_IF
    A cleanup exception leaves cleanup pending for subsequent cycles; no resource is force-released. *)
 __TRY
 	IF testFinished THEN
+		IF _PrepareTestRoot.State.Running THEN
+			RETURN;
+		END_IF
+
 		IF createDirectory.State.Running THEN
 			createDirectory.Cancel();
 			createDirectory.Execute();
@@ -379,8 +401,14 @@ __TRY
 	END_IF
 
 	IF scenarioDeadline.Q THEN
+		IF NOT _TestRootPrepared AND_THEN _TestRootPreparationFailureMessage = TOF_Core.Strings.Empty THEN
+			_TestRootPreparationFailureMessage := 'Test root preparation exceeded the scenario deadline';
+		END_IF
+
 		failureMessage := 'Scenario exceeded its 10-second deadline; creation may have an unknown result';
-	ELSE
+	ELSIF _TestRootPreparationFailureMessage <> TOF_Core.Strings.Empty THEN
+		failureMessage := _TestRootPreparationFailureMessage;
+	ELSIF _TestRootPrepared THEN
 		CASE step OF
 			DIRECTORY_TEST_STEP.CREATE_DIRECTORY:
 				IF NOT operationStarted THEN
@@ -573,6 +601,10 @@ END_IF
    A cleanup exception leaves cleanup pending for subsequent cycles; no resource is force-released. *)
 __TRY
 	IF testFinished THEN
+		IF _PrepareTestRoot.State.Running THEN
+			RETURN;
+		END_IF
+
 		IF createDirectory.State.Running THEN
 			createDirectory.Cancel();
 			createDirectory.Execute();
@@ -674,8 +706,14 @@ __TRY
 	END_IF
 
 	IF scenarioDeadline.Q THEN
+		IF NOT _TestRootPrepared AND_THEN _TestRootPreparationFailureMessage = TOF_Core.Strings.Empty THEN
+			_TestRootPreparationFailureMessage := 'Test root preparation exceeded the scenario deadline';
+		END_IF
+
 		failureMessage := 'Scenario exceeded its 10-second deadline; creation may have an unknown result';
-	ELSE
+	ELSIF _TestRootPreparationFailureMessage <> TOF_Core.Strings.Empty THEN
+		failureMessage := _TestRootPreparationFailureMessage;
+	ELSIF _TestRootPrepared THEN
 		CASE step OF
 			DIRECTORY_TEST_STEP.CREATE_DIRECTORY:
 				IF NOT operationStarted THEN
@@ -1040,6 +1078,54 @@ AssertEquals_BOOL(FALSE, validationResult, 'Inalid directory path 2 validated as
 	
 testFinished := TRUE; 
 TEST_FINISHED();	]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="prepareTestRoot" Id="{7f43a218-9d21-4c6e-b3c4-81506e8f9a12}">
+      <Declaration><![CDATA[(*!
+<summary>Ensures that the suite's reserved root directory exists before scenarios execute.</summary>
+<description>Runs once at the suite level outside individual test assertions so the three concurrent scenarios
+do not race to create the same root. If preparation fails or is interrupted by an exception, records a diagnostic
+message that fails the dependent scenarios once and continues draining the task on subsequent cycles.</description>
+*)
+METHOD PRIVATE prepareTestRoot]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF _TestRootPrepared THEN
+	RETURN;
+END_IF
+
+__TRY
+	IF _TestRootPreparationFailureMessage <> TOF_Core.Strings.Empty THEN
+		IF _PrepareTestRoot.State.Running THEN
+			_PrepareTestRoot.Cancel();
+			_PrepareTestRoot.Execute();
+		END_IF
+
+		RETURN;
+	END_IF
+
+	IF NOT _TestRootPreparationStarted THEN
+		_PrepareTestRoot.DirectoryPath := _TestRoot;
+		_PrepareTestRoot.PathType := Tc2_System.E_OpenPath.PATH_GENERIC;
+		_PrepareTestRoot.Timeout := _NativeTimeout;
+		IF NOT _PrepareTestRoot.Start() THEN
+			_TestRootPreparationFailureMessage := 'prepareTestRoot: Start refused';
+			RETURN;
+		END_IF
+
+		_TestRootPreparationStarted := TRUE;
+	END_IF
+
+	_PrepareTestRoot.Execute();
+	IF _PrepareTestRoot.State.Stopped THEN
+		IF _PrepareTestRoot.FinalStopReason.WorkDone THEN
+			_TestRootPrepared := TRUE;
+		ELSE
+			_TestRootPreparationFailureMessage := TOF_Core.Strings.Concat255('prepareTestRoot: ', TO_STRING(_PrepareTestRoot.FinalStopReason.Message));
+		END_IF
+	END_IF
+__CATCH
+	_TestRootPreparationFailureMessage := 'Exception interrupted test root preparation';
+__ENDTRY]]></ST>
       </Implementation>
     </Method>
   </POU>

@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <TcPlcObject Version="1.1.0.1">
   <POU Name="SequenceActivity" Id="{1bca36af-b7de-4b08-b287-296cf8c67b1e}" SpecialFunc="None">
     <Declaration><![CDATA[(*
@@ -7,39 +7,55 @@ SPDX-License-Identifier: MIT
 License: https://opensource.org/license/mit
 *)
 
-{attribute 'no_explicit_call' := 'do not call this function block directly'} 
+(*!
+<summary>Executes an ordered list of child activities one after another.</summary>
+<description>
+Advances at most one child activity per running step. When a child completes and a subsequent child exists,
+the next child is selected as pending and started on the following running call. Suspending between two steps
+pauses before the pending child starts; cancelling between steps completes cancellation without starting the
+pending child. Resetting resets all non-ready child activities back to PASSIVE_READY and clears the selection.
+</description>
+*)
+
+{attribute 'no_explicit_call' := 'do not call this function block directly'}
 {attribute 'enable_dynamic_creation'}
 FUNCTION_BLOCK SequenceActivity EXTENDS ExclusiveCompositeActivity IMPLEMENTS ISequenceActivity
-VAR
-	{attribute 'OPC.UA.DA' := '0'}
+VAR_STAT
+	{attribute 'hide'}
 	_ClassName : STRING := __POUNAME();
-
+END_VAR
+VAR
 	{attribute 'OPC.UA.DA' := '0'}
 	_Children : TOF_Collections.List<0>(0);
 
 	{attribute 'OPC.UA.DA' := '0'}
 	_CurrentActivityIndex : DINT := -1;
+
+	{attribute 'OPC.UA.DA' := '0'}
+	_CurrentActivityStartPending : BOOL;
 END_VAR]]></Declaration>
     <Implementation>
       <ST><![CDATA[]]></ST>
     </Implementation>
     <Folder Name="Service members" Id="{3f51cbe1-be68-4e5e-a663-f6baed6e006e}" />
     <Method Name="AddChildActivity" Id="{a30975d8-8e95-48ec-a5ab-8e9aa1d75be7}">
-      <Declaration><![CDATA[METHOD AddChildActivity
+      <Declaration><![CDATA[(*!
+<summary>Appends a child activity to the sequence and assigns this sequence as its ParentActivity.</summary>
+<description>
+Requires PASSIVE_READY. Rejects null, self/ancestor cycles and children already attached elsewhere.
+</description>
+<param name="activity">Child activity to append.</param>
+*)
+METHOD AddChildActivity
 VAR_INPUT
 	activity : IActivity;
-END_VAR
-VAR
-	argumentNullExcxeption : TOF_Core.ArgumentNotSpecifiedException;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[IF activity = 0  THEN
-	argumentNullExcxeption.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), 'activity');
-END_IF
+        <ST><![CDATA[ValidateChildActivityAttachment(activity, 'activity');
 
-activity.ParentActivity := THIS^;
+_Children.AppendGeneric(TOF_Core.GenericValueFactory.FromParts(TOF_Core.GENERIC_TYPE_CLASS.OBJECT, activity.SelfAddress, activity.SelfSize, TOF_Core.GENERIC_MEMORY_MANAGEMENT_BEHAVIOR.STORE_ORIGINAL_REFERENCE_AND_NOT_OWNS_MEMORY));
 
-_Children.AppendGeneric(TOF_Core.GenericValueFactory.FromParts(TOF_Core.GENERIC_TYPE_CLASS.OBJECT, activity.SelfAddress, activity.SelfSize, TOF_Core.GENERIC_MEMORY_MANAGEMENT_BEHAVIOR.STORE_ORIGINAL_REFERENCE_AND_NOT_OWNS_MEMORY));]]></ST>
+activity.ParentActivity := THIS^;]]></ST>
       </Implementation>
     </Method>
     <Property Name="ClassName" Id="{72010df4-c4eb-4a27-acd3-c42588cae27a}">
@@ -53,7 +69,10 @@ PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
       </Get>
     </Property>
     <Property Name="CurrentActivity" Id="{1a4ebfb1-244f-44f9-8b12-8787ad4a03a7}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Returns the child activity at CurrentActivityIndex, or 0 when no step is selected.</summary>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY FINAL CurrentActivity : IActivity]]></Declaration>
       <Get Name="Get" Id="{3a9f72bd-ef17-4fe7-b05f-5afb314fb2fe}">
         <Declaration><![CDATA[]]></Declaration>
@@ -65,7 +84,10 @@ END_IF]]></ST>
       </Get>
     </Property>
     <Property Name="CurrentActivityIndex" Id="{8fdd1d3f-3fdc-492f-b895-9e1e6061e1cd}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Returns the zero-based index of the currently selected child activity, or -1 when none is selected.</summary>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY FINAL CurrentActivityIndex : DINT]]></Declaration>
       <Get Name="Get" Id="{1ac1fa84-8eed-4de1-9a51-3f86182c90ee}">
         <Declaration><![CDATA[]]></Declaration>
@@ -84,8 +106,44 @@ PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
         </Implementation>
       </Get>
     </Property>
+    <Method Name="OnResetting" Id="{7b20c640-7f05-4729-b6d4-37b7999c102f}">
+      <Declaration><![CDATA[(*!
+<summary>Resets all non-ready child activities to PASSIVE_READY and clears the step selection.</summary>
+<param name="startResetting">TRUE on the initial call from RequestReset.</param>
+*)
+METHOD PROTECTED OnResetting : ACTIVITY_RESETTING_STATE
+VAR_INPUT
+	startResetting : BOOL;
+END_VAR
+VAR
+	i : DINT;
+	childActivity : IActivity;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[FOR i := 0 TO _Children.Length - 1 DO
+	__QUERYINTERFACE(_Children.Get(i).AsObject(), childActivity);
+
+	IF childActivity <> 0 AND_THEN childActivity.State <> WORKFLOW_ELEMENT_STATE.PASSIVE_READY THEN
+		IF ResetChildActivity(childActivity) = ACTIVITY_RESETTING_STATE.WORK_IN_PROGRESS THEN
+			OnResetting := ACTIVITY_RESETTING_STATE.WORK_IN_PROGRESS;
+			RETURN;
+		END_IF
+	END_IF
+END_FOR
+
+_CurrentActivityIndex := -1;
+_CurrentActivityStartPending := FALSE;
+OnResetting := ACTIVITY_RESETTING_STATE.WORK_RESET;]]></ST>
+      </Implementation>
+    </Method>
     <Method Name="OnRunning" Id="{53e0829c-4dbd-4b85-a474-dd611d0f45cd}">
-      <Declaration><![CDATA[METHOD PROTECTED OnRunning : ACTIVITY_RUNNING_STATE
+      <Declaration><![CDATA[(*!
+<summary>Advances the current child activity by one step and selects the next child upon completion.</summary>
+<param name="startRunning">TRUE on the initial call of a fresh start.</param>
+<param name="startResuming">TRUE on the initial call when resuming from suspension.</param>
+<param name="haltReason">Receives the child's HaltReason when the child halts.</param>
+*)
+METHOD PROTECTED OnRunning : ACTIVITY_RUNNING_STATE
 VAR_INPUT
 	startRunning : BOOL;
 	startResuming : BOOL;
@@ -100,12 +158,15 @@ VAR
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[IF _Children.Length < 1 THEN
+	_CurrentActivityIndex := -1;
+	_CurrentActivityStartPending := FALSE;
 	OnRunning := ACTIVITY_RUNNING_STATE.WORK_COMPLETED;
 	RETURN;
 END_IF
 
 IF startRunning OR_ELSE (startResuming AND_THEN _CurrentActivityIndex < 0) THEN
 	_CurrentActivityIndex := 0;
+	_CurrentActivityStartPending := TRUE;
 END_IF
 
 activity := CurrentActivity;
@@ -114,7 +175,8 @@ IF activity = 0 THEN
 	currentActivityIsNullException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), 'CurrentActivity');
 END_IF
 
-IF startRunning OR_ELSE startResuming OR_ELSE NOT activity.Busy THEN
+IF startRunning OR_ELSE startResuming OR_ELSE _CurrentActivityStartPending THEN
+	_CurrentActivityStartPending := FALSE;
 	activity.RequestStart();
 ELSE
 	activity.Execute();
@@ -122,7 +184,9 @@ END_IF
 
 OnRunning := GetActivityRunningStateByNestedActivityState(activity.State);
 
-IF OnRunning = ACTIVITY_RUNNING_STATE.WORK_COMPLETED THEN
+IF OnRunning = ACTIVITY_RUNNING_STATE.WORK_HALTED THEN
+	haltReason := activity.HaltReason;
+ELSIF OnRunning = ACTIVITY_RUNNING_STATE.WORK_COMPLETED THEN
 	selectNextTask();
 	
 	IF _CurrentActivityIndex >= 0 THEN
@@ -132,7 +196,13 @@ END_IF]]></ST>
       </Implementation>
     </Method>
     <Method Name="OnStopping" Id="{58c42973-4e56-4492-9a0d-c7eb58c052dc}">
-      <Declaration><![CDATA[METHOD PROTECTED OnStopping : ACTIVITY_STOPPING_STATE
+      <Declaration><![CDATA[(*!
+<summary>Stops the active child activity or stops immediately at a pending step boundary.</summary>
+<param name="startCancelling">TRUE on the initial call from RequestCancel.</param>
+<param name="startSuspending">TRUE on the initial call from RequestSuspend.</param>
+<param name="haltReason">Receives the child's HaltReason if the child halts while stopping.</param>
+*)
+METHOD PROTECTED OnStopping : ACTIVITY_STOPPING_STATE
 VAR_INPUT
 	startCancelling : BOOL;
 	startSuspending : BOOL;
@@ -161,8 +231,22 @@ IF activity = 0 THEN
 	RETURN;
 END_IF
 
+IF _CurrentActivityStartPending THEN
+	OnStopping := ACTIVITY_STOPPING_STATE.WORK_STOPPED;
+	RETURN;
+END_IF
+
 IF NOT activity.Busy THEN
+	IF startCancelling AND_THEN activity.State = WORKFLOW_ELEMENT_STATE.PASSIVE_SUSPENDED THEN
+		activity.RequestCancel(_CancelReason);
+	END_IF
+
 	OnStopping := GetActivityStoppingStateByNestedActivityState(activity.State);
+
+	IF OnStopping = ACTIVITY_STOPPING_STATE.WORK_HALTED THEN
+		haltReason := activity.HaltReason;
+	END_IF
+
 	RETURN;
 END_IF
 
@@ -174,16 +258,25 @@ ELSE
 	activity.Execute();
 END_IF
 
-OnStopping := GetActivityStoppingStateByNestedActivityState(activity.State);]]></ST>
+OnStopping := GetActivityStoppingStateByNestedActivityState(activity.State);
+
+IF OnStopping = ACTIVITY_STOPPING_STATE.WORK_HALTED THEN
+	haltReason := activity.HaltReason;
+END_IF]]></ST>
       </Implementation>
     </Method>
     <Method Name="selectNextTask" Id="{7ad99828-ec1f-4f8b-bfdb-f4b31de1f87c}" FolderPath="Service members\">
-      <Declaration><![CDATA[METHOD PRIVATE selectNextTask]]></Declaration>
+      <Declaration><![CDATA[(*!
+<summary>Selects the next child activity in sequence as pending, or clears the selection after the last child.</summary>
+*)
+METHOD PRIVATE selectNextTask]]></Declaration>
       <Implementation>
         <ST><![CDATA[IF _CurrentActivityIndex < _Children.Length - 1 THEN
 	_CurrentActivityIndex := _CurrentActivityIndex + 1;
+	_CurrentActivityStartPending := TRUE;
 ELSE	
 	_CurrentActivityIndex := -1;
+	_CurrentActivityStartPending := FALSE;
 END_IF]]></ST>
       </Implementation>
     </Method>

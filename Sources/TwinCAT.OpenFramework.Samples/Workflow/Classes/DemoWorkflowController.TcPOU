@@ -1,22 +1,23 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <TcPlcObject Version="1.1.0.1">
   <POU Name="DemoWorkflowController" Id="{dc096c7a-49dd-4129-a1d0-54dcfc137d76}" SpecialFunc="None">
-    <Declaration><![CDATA[(*!
-<summary>Demonstrates construction and cyclic execution of a workflow.</summary>
-<description>Dynamically created activities and conditions are explicitly registered immediately after allocation checks, before configuration.</description>
-*)
-(*
+    <Declaration><![CDATA[(*
 SPDX-FileCopyrightText: © 2026 Oleksandr Tiutyk <trofimich@gmail.com>
 SPDX-License-Identifier: MIT
 License: https://opensource.org/license/mit
 *)
 
-{attribute 'no_explicit_call' := 'do not call this function block directly'} 
+(*!
+<summary>Demonstrates construction and cyclic execution of a workflow.</summary>
+<description>Dynamically created activities and conditions are explicitly registered immediately after allocation checks, before configuration.</description>
+*)
+
+{attribute 'no_explicit_call' := 'do not call this function block directly'}
 FUNCTION_BLOCK DemoWorkflowController EXTENDS TOF_Automation.AutomationController<0>
 VAR_OUTPUT
 	DemoWorkflow : DemoWorkflow;	
 END_VAR
-VAR	
+VAR_STAT	
 	{attribute 'hide'} 
 	_ClassName : STRING := __POUNAME();
 END_VAR]]></Declaration>
@@ -29,6 +30,9 @@ END_VAR]]></Declaration>
       <Declaration><![CDATA[(*!
 <summary>Constructs workflow activities and transfers their ownership before configuration.</summary>
 <description>Checks each allocation and registers every new dynamic element before further use. Later failures leave registered elements owned by the workflow for disposal.</description>
+<param name="workflow">Owner workflow instance.</param>
+<param name="parentSequence">Parent loop sequence to append the activities to.</param>
+<param name="cornerNumber">One-based corner index (1..4).</param>
 *)
 METHOD PRIVATE addMoveFromToActivity 
 VAR_INPUT
@@ -37,16 +41,13 @@ VAR_INPUT
 	cornerNumber : BYTE;
 END_VAR
 VAR	
-	waitAndPickActivity : POINTER TO TOF_Workflow.WaitAndPickActivity;
-	
 	trueValue : BOOL := TRUE;
 	
 	needMoveVariableName : STRING;	
-	targetXPosition : LREAL;
-	targetYPosition : LREAL;
+	targetXPosition : INT;
+	targetYPosition : INT;
 	
 	waitButtonPressActivity : POINTER TO TOF_Workflow.WaitVariableValueActivity;
-	
 	moveActivity : POINTER TO MoveFromToActivity;
 END_VAR]]></Declaration>
       <Implementation>
@@ -101,7 +102,10 @@ parentSequence.AddChildActivity(moveActivity^);]]></ST>
       </Implementation>
     </Method>
     <Property Name="Children" Id="{8735154c-178f-4bcc-a2c4-80749379f15d}">
-      <Declaration><![CDATA[PROPERTY Children : REFERENCE TO ARRAY [0.._ChildCount - 1] OF TOF_Automation.IChildAutomationComponent]]></Declaration>
+      <Declaration><![CDATA[(*!
+<summary>Gets the child automation components array reference (none for this controller).</summary>
+*)
+PROPERTY Children : REFERENCE TO ARRAY [0.._ChildCount - 1] OF TOF_Automation.IChildAutomationComponent]]></Declaration>
       <Get Name="Get" Id="{e2436b7e-47bc-4e03-b117-577110a01efc}">
         <Declaration><![CDATA[]]></Declaration>
         <Implementation>
@@ -110,7 +114,10 @@ parentSequence.AddChildActivity(moveActivity^);]]></ST>
       </Get>
     </Property>
     <Property Name="ClassName" Id="{ad6b5264-2d84-464d-8021-1d07f9d49884}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Gets the runtime class name of this object.</summary>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
       <Get Name="Get" Id="{897a4b58-f1c6-4661-8c68-f7b7183bfc21}">
         <Declaration><![CDATA[]]></Declaration>
@@ -120,7 +127,10 @@ PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
       </Get>
     </Property>
     <Property Name="NamespaceName" Id="{938e57da-e42b-4b88-8eda-dae4a4febad2}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Gets the namespace name of this object.</summary>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
       <Get Name="Get" Id="{5a6e3df0-fc18-48c5-84f1-c69b86c3fddd}">
         <Declaration><![CDATA[]]></Declaration>
@@ -156,7 +166,6 @@ END_IF
 
 DemoWorkflow.RegisterChild(trueCondition^);
 
-
 whileActivity^.Configure(trueCondition^);
 
 addMoveFromToActivity(DemoWorkflow, whileActivity^, 1);
@@ -167,17 +176,38 @@ addMoveFromToActivity(DemoWorkflow, whileActivity^, 4);
 DemoWorkflow.SetRootActivity(whileActivity^);]]></ST>
       </Implementation>
     </Method>
+    <Method Name="OnBeforeChildrenReset" Id="{c84e19b2-7a35-4d91-b620-9e4f1a8c2d73}" FolderPath="Overriden members\">
+      <Declaration><![CDATA[(*!
+<summary>Requests resetting of DemoWorkflow when the controller is reset.</summary>
+*)
+METHOD PROTECTED OnBeforeChildrenReset]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF DemoWorkflow.ResettingAllowed THEN
+	DemoWorkflow.RequestReset();
+END_IF]]></ST>
+      </Implementation>
+    </Method>
     <Method Name="OnBeforeChildrenStopped" Id="{3c199eb9-4006-4b9a-98cf-6e3625336148}" FolderPath="Overriden members\">
-      <Declaration><![CDATA[METHOD PROTECTED OnBeforeChildrenStopped
+      <Declaration><![CDATA[(*!
+<summary>Cancels DemoWorkflow when the controller stops and advances it until cancellation completes.</summary>
+*)
+METHOD PROTECTED OnBeforeChildrenStopped
 ]]></Declaration>
       <Implementation>
-        <ST><![CDATA[IF DemoWorkflow.Busy THEN
+        <ST><![CDATA[IF DemoWorkflow.CancellingAllowed THEN
 	DemoWorkflow.RequestCancel("External stop");
+END_IF
+
+IF DemoWorkflow.Busy THEN
+	DemoWorkflow.Execute();
 END_IF]]></ST>
       </Implementation>
     </Method>
     <Method Name="OnBeforeChildrenWorking" Id="{2d7b684e-2908-4409-82de-f87452b1d410}" FolderPath="Overriden members\">
-      <Declaration><![CDATA[METHOD PROTECTED OnBeforeChildrenWorking
+      <Declaration><![CDATA[(*!
+<summary>Starts DemoWorkflow on the first working cycle and executes it cyclically thereafter.</summary>
+*)
+METHOD PROTECTED OnBeforeChildrenWorking
 VAR_INST
 	started : BOOL;
 END_VAR]]></Declaration>
@@ -192,7 +222,10 @@ END_IF]]></ST>
       </Implementation>
     </Method>
     <Property Name="OperationalStateName" Id="{a420c5dc-2bb8-4e16-9768-680503fa8551}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Gets the string representation of the current controller operational state.</summary>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY OperationalStateName : STRING(16)]]></Declaration>
       <Get Name="Get" Id="{5cb6bc34-a729-4d81-bb44-8fd2db6da917}">
         <Declaration><![CDATA[]]></Declaration>
@@ -202,7 +235,10 @@ PROPERTY OperationalStateName : STRING(16)]]></Declaration>
       </Get>
     </Property>
     <Property Name="SelfSize" Id="{e4928d85-ffb2-44cd-81d8-5da5452d15ff}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Gets the size in bytes of this function block instance.</summary>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY SelfSize : ULINT]]></Declaration>
       <Get Name="Get" Id="{f290be1b-b375-45a7-a2dc-21a7680125fb}">
         <Declaration><![CDATA[]]></Declaration>

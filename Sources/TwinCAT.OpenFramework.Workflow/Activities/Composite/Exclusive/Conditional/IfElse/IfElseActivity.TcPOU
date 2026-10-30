@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <TcPlcObject Version="1.1.0.1">
   <POU Name="IfElseActivity" Id="{1cd30e3c-846b-4eb9-a9ce-7fa6e666beef}" SpecialFunc="None">
     <Declaration><![CDATA[(*
@@ -7,13 +7,22 @@ SPDX-License-Identifier: MIT
 License: https://opensource.org/license/mit
 *)
 
-{attribute 'no_explicit_call' := 'do not call this function block directly'} 
+(*!
+<summary>Evaluates a branching condition on start and executes either TrueActivity or FalseActivity.</summary>
+<description>
+Condition is required; TrueActivity and FalseActivity are optional. Selecting a null branch completes immediately.
+Resetting resets any non-ready branch activity back to PASSIVE_READY and clears CurrentActivity.
+</description>
+*)
+
+{attribute 'no_explicit_call' := 'do not call this function block directly'}
 {attribute 'enable_dynamic_creation'}
 FUNCTION_BLOCK IfElseActivity EXTENDS ExclusiveCompositeActivity IMPLEMENTS IIfElseActivity
-VAR
-	{attribute 'OPC.UA.DA' := '0'}
+VAR_STAT
+	{attribute 'hide'}
 	_ClassName : STRING := __POUNAME();
-
+END_VAR
+VAR
 	{attribute 'OPC.UA.DA' := '0'}
 	_Condition : ICondition;	
 
@@ -40,7 +49,10 @@ PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
       </Get>
     </Property>
     <Property Name="Condition" Id="{b1a702af-bbd2-41d2-be9e-afd2daed47d9}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Returns the branching condition configured for this activity.</summary>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY FINAL Condition : ICondition]]></Declaration>
       <Get Name="Get" Id="{f0c499e6-6e86-4678-858a-b550bf5e4979}">
         <Declaration><![CDATA[]]></Declaration>
@@ -48,15 +60,18 @@ PROPERTY FINAL Condition : ICondition]]></Declaration>
           <ST><![CDATA[Condition := _Condition;]]></ST>
         </Implementation>
       </Get>
-      <Set Name="Set" Id="{bfe4189e-8b4d-45bc-a83e-7082a85612cd}">
-        <Declaration><![CDATA[]]></Declaration>
-        <Implementation>
-          <ST><![CDATA[_Condition := Condition;]]></ST>
-        </Implementation>
-      </Set>
     </Property>
     <Method Name="Configure" Id="{6f8a03c5-4e89-47fe-8a2e-84d291f92130}">
-      <Declaration><![CDATA[METHOD Configure
+      <Declaration><![CDATA[(*!
+<summary>Configures the required branching condition and optional true/false branch activities.</summary>
+<description>
+Permitted only in PASSIVE_READY. Validates all supplied references before mutating state.
+</description>
+<param name="condition">Required branching condition.</param>
+<param name="trueActivity">Optional activity executed when condition is TRUE.</param>
+<param name="falseActivity">Optional activity executed when condition is FALSE.</param>
+*)
+METHOD Configure
 VAR_INPUT
 	condition : ICondition; 
 	trueActivity : IActivity;
@@ -64,24 +79,56 @@ VAR_INPUT
 END_VAR
 VAR
 	argumentNullException : TOF_Core.ArgumentNotSpecifiedException;
+	invalidConfigurationException : TOF_Core.StandardException;
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[IF condition = 0 THEN
 	argumentNullException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), 'condition');
 END_IF
 
+IF State <> WORKFLOW_ELEMENT_STATE.PASSIVE_READY THEN
+	invalidConfigurationException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), "Cannot configure IfElseActivity outside PASSIVE_READY");
+END_IF
+
+IF (condition.ParentActivity <> 0 AND_THEN condition.ParentActivity.SelfAddress <> SelfAddress)
+	OR_ELSE condition.ParentCondition <> 0
+THEN
+	invalidConfigurationException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), "Condition is already attached to another parent");
+END_IF
+
+IF trueActivity <> 0 THEN
+	ValidateChildActivityAttachment(trueActivity, 'trueActivity');
+END_IF
+
+IF falseActivity <> 0 THEN
+	ValidateChildActivityAttachment(falseActivity, 'falseActivity');
+END_IF
+
+IF trueActivity <> 0 AND_THEN trueActivity = falseActivity THEN
+	invalidConfigurationException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), "TrueActivity and FalseActivity cannot reference the same activity instance");
+END_IF
+
 _Condition := condition;
 _Condition.ParentActivity := THIS^;
 
 _TrueActivity := trueActivity;
-_TrueActivity.ParentActivity := THIS^;
+
+IF _TrueActivity <> 0 THEN
+	_TrueActivity.ParentActivity := THIS^;
+END_IF
 
 _FalseActivity := falseActivity;
-_FalseActivity.ParentActivity := THIS^;]]></ST>
+
+IF _FalseActivity <> 0 THEN
+	_FalseActivity.ParentActivity := THIS^;
+END_IF]]></ST>
       </Implementation>
     </Method>
     <Property Name="CurrentActivity" Id="{caf7e17b-b2e7-4778-ae87-9d0c6526b5a9}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Returns the currently selected branch activity, or 0 when none is selected.</summary>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY FINAL CurrentActivity : IActivity]]></Declaration>
       <Get Name="Get" Id="{536fec86-ac4f-456b-b1d7-f39b6e0344e6}">
         <Declaration><![CDATA[]]></Declaration>
@@ -91,7 +138,10 @@ PROPERTY FINAL CurrentActivity : IActivity]]></Declaration>
       </Get>
     </Property>
     <Property Name="FalseActivity" Id="{38914bcd-273b-46e7-ba69-f901c8bb24c8}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Returns the optional branch activity executed when Condition evaluates to FALSE.</summary>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY FINAL FalseActivity : IActivity]]></Declaration>
       <Get Name="Get" Id="{194e2671-2144-4972-955b-4877d38aed87}">
         <Declaration><![CDATA[]]></Declaration>
@@ -99,12 +149,6 @@ PROPERTY FINAL FalseActivity : IActivity]]></Declaration>
           <ST><![CDATA[FalseActivity := _FalseActivity;]]></ST>
         </Implementation>
       </Get>
-      <Set Name="Set" Id="{da2e0f60-3837-4071-a770-72a1bb8114cf}">
-        <Declaration><![CDATA[]]></Declaration>
-        <Implementation>
-          <ST><![CDATA[_FalseActivity := FalseActivity;]]></ST>
-        </Implementation>
-      </Set>
     </Property>
     <Property Name="NamespaceName" Id="{debfe04e-1e73-43a8-995c-aeec5341d752}">
       <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
@@ -116,8 +160,42 @@ PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
         </Implementation>
       </Get>
     </Property>
+    <Method Name="OnResetting" Id="{27a480a7-379a-4989-99b6-13fb28dc8329}">
+      <Declaration><![CDATA[(*!
+<summary>Resets any non-ready branch activity back to PASSIVE_READY and clears CurrentActivity.</summary>
+<param name="startResetting">TRUE on the initial call from RequestReset.</param>
+*)
+METHOD PROTECTED OnResetting : ACTIVITY_RESETTING_STATE
+VAR_INPUT
+	startResetting : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF _TrueActivity <> 0 AND_THEN _TrueActivity.State <> WORKFLOW_ELEMENT_STATE.PASSIVE_READY THEN
+	IF ResetChildActivity(_TrueActivity) = ACTIVITY_RESETTING_STATE.WORK_IN_PROGRESS THEN
+		OnResetting := ACTIVITY_RESETTING_STATE.WORK_IN_PROGRESS;
+		RETURN;
+	END_IF
+END_IF
+
+IF _FalseActivity <> 0 AND_THEN _FalseActivity.State <> WORKFLOW_ELEMENT_STATE.PASSIVE_READY THEN
+	IF ResetChildActivity(_FalseActivity) = ACTIVITY_RESETTING_STATE.WORK_IN_PROGRESS THEN
+		OnResetting := ACTIVITY_RESETTING_STATE.WORK_IN_PROGRESS;
+		RETURN;
+	END_IF
+END_IF
+
+_CurrentActivity := 0;
+OnResetting := ACTIVITY_RESETTING_STATE.WORK_RESET;]]></ST>
+      </Implementation>
+    </Method>
     <Method Name="OnRunning" Id="{f4476714-3be4-4911-b532-89d30e8187a3}">
-      <Declaration><![CDATA[METHOD PROTECTED OnRunning : ACTIVITY_RUNNING_STATE
+      <Declaration><![CDATA[(*!
+<summary>Evaluates Condition on start to select a branch and advances the selected branch activity.</summary>
+<param name="startRunning">TRUE on the initial call of a fresh start.</param>
+<param name="startResuming">TRUE on the initial call when resuming from suspension.</param>
+<param name="haltReason">Receives the selected branch's HaltReason when halted.</param>
+*)
+METHOD PROTECTED OnRunning : ACTIVITY_RUNNING_STATE
 VAR_INPUT
 	startRunning : BOOL;
 	startResuming : BOOL;
@@ -126,8 +204,6 @@ VAR_OUTPUT
 	haltReason : WSTRING(255);
 END_VAR
 VAR
-	workflowVariable : TOF_Core.GENERIC_VALUE;
-	
 	conditionIsNullException : TOF_Core.NullReferenceException;
 END_VAR]]></Declaration>
       <Implementation>
@@ -151,13 +227,23 @@ IF _CurrentActivity <> 0 THEN
 	END_IF
 	
 	OnRunning := GetActivityRunningStateByNestedActivityState(_CurrentActivity.State);
+
+	IF OnRunning = ACTIVITY_RUNNING_STATE.WORK_HALTED THEN
+		haltReason := _CurrentActivity.HaltReason;
+	END_IF
 ELSE
 	OnRunning := ACTIVITY_RUNNING_STATE.WORK_COMPLETED;
 END_IF]]></ST>
       </Implementation>
     </Method>
     <Method Name="OnStopping" Id="{1cb4bb99-ed5f-452b-8916-d1301610d977}">
-      <Declaration><![CDATA[METHOD PROTECTED OnStopping : ACTIVITY_STOPPING_STATE
+      <Declaration><![CDATA[(*!
+<summary>Stops the currently selected branch activity on cancel or suspend.</summary>
+<param name="startCancelling">TRUE on the initial call from RequestCancel.</param>
+<param name="startSuspending">TRUE on the initial call from RequestSuspend.</param>
+<param name="haltReason">Receives the selected branch's HaltReason if it halts while stopping.</param>
+*)
+METHOD PROTECTED OnStopping : ACTIVITY_STOPPING_STATE
 VAR_INPUT
 	startCancelling : BOOL;
 	startSuspending : BOOL;
@@ -166,8 +252,22 @@ VAR_OUTPUT
 	haltReason : WSTRING(255);
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[IF _CurrentActivity = 0 OR_ELSE NOT _CurrentActivity.Busy THEN
+        <ST><![CDATA[IF _CurrentActivity = 0 THEN
 	OnStopping := ACTIVITY_STOPPING_STATE.WORK_STOPPED;
+	RETURN;
+END_IF
+
+IF NOT _CurrentActivity.Busy THEN
+	IF startCancelling AND_THEN _CurrentActivity.State = WORKFLOW_ELEMENT_STATE.PASSIVE_SUSPENDED THEN
+		_CurrentActivity.RequestCancel(_CancelReason);
+	END_IF
+
+	OnStopping := GetActivityStoppingStateByNestedActivityState(_CurrentActivity.State);
+
+	IF OnStopping = ACTIVITY_STOPPING_STATE.WORK_HALTED THEN
+		haltReason := _CurrentActivity.HaltReason;
+	END_IF
+
 	RETURN;
 END_IF
 
@@ -179,7 +279,11 @@ ELSE
 	_CurrentActivity.Execute();
 END_IF
 	
-OnStopping := GetActivityStoppingStateByNestedActivityState(_CurrentActivity.State);]]></ST>
+OnStopping := GetActivityStoppingStateByNestedActivityState(_CurrentActivity.State);
+
+IF OnStopping = ACTIVITY_STOPPING_STATE.WORK_HALTED THEN
+	haltReason := _CurrentActivity.HaltReason;
+END_IF]]></ST>
       </Implementation>
     </Method>
     <Property Name="SelfSize" Id="{d99b041f-06da-431d-b026-49be93679871}">
@@ -193,7 +297,10 @@ PROPERTY SelfSize : ULINT]]></Declaration>
       </Get>
     </Property>
     <Property Name="TrueActivity" Id="{f3b9527e-da8a-43c8-bf8f-24c1c8bff026}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Returns the optional branch activity executed when Condition evaluates to TRUE.</summary>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY FINAL TrueActivity : IActivity]]></Declaration>
       <Get Name="Get" Id="{0af70087-f3de-4a61-833c-bfcdd754f1e4}">
         <Declaration><![CDATA[]]></Declaration>
@@ -201,12 +308,6 @@ PROPERTY FINAL TrueActivity : IActivity]]></Declaration>
           <ST><![CDATA[TrueActivity := _TrueActivity;]]></ST>
         </Implementation>
       </Get>
-      <Set Name="Set" Id="{e098e726-9630-4106-b578-af2eefca2864}">
-        <Declaration><![CDATA[]]></Declaration>
-        <Implementation>
-          <ST><![CDATA[_TrueActivity := TrueActivity;]]></ST>
-        </Implementation>
-      </Set>
     </Property>
   </POU>
 </TcPlcObject>

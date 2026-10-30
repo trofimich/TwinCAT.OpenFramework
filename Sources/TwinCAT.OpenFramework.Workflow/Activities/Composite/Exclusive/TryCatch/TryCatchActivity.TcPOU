@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <TcPlcObject Version="1.1.0.1">
   <POU Name="TryCatchActivity" Id="{a1c6778a-1c1f-42dd-a420-c513f7979378}" SpecialFunc="None">
     <Declaration><![CDATA[(*
@@ -7,18 +7,29 @@ SPDX-License-Identifier: MIT
 License: https://opensource.org/license/mit
 *)
 
-{attribute 'no_explicit_call' := 'do not call this function block directly'} 
+(*!
+<summary>Executes TryActivity and recovers via an optional CatchActivity when TryActivity raises an exception.</summary>
+<description>
+When TryActivity throws a non-terminal exception and CatchActivity is configured, synchronous diagnostics are
+passed to CatchActivity.CaptureException before starting CatchActivity. Terminal allocation failures and
+exceptions when CatchActivity is 0 (or thrown by CatchActivity itself) propagate to the parent. Resetting
+resets both TryActivity and CatchActivity back to PASSIVE_READY and clears CurrentActivity.
+</description>
+*)
+
+{attribute 'no_explicit_call' := 'do not call this function block directly'}
 {attribute 'enable_dynamic_creation'}
 FUNCTION_BLOCK TryCatchActivity EXTENDS ExclusiveCompositeActivity IMPLEMENTS ITryCatchActivity
-VAR
-	{attribute 'OPC.UA.DA' := '0'}
+VAR_STAT
+	{attribute 'hide'}
 	_ClassName : STRING := __POUNAME();
-	
+END_VAR
+VAR
 	{attribute 'OPC.UA.DA' := '0'}
 	_TryActivity : IActivity;
 
 	{attribute 'OPC.UA.DA' := '0'}
-	_CatchActivity : IActivity;
+	_CatchActivity : ICatchActivity;
 
 	{attribute 'OPC.UA.DA' := '0'}
 	_CurrentActivity : IActivity;
@@ -26,24 +37,18 @@ END_VAR]]></Declaration>
     <Implementation>
       <ST><![CDATA[]]></ST>
     </Implementation>
-    <Folder Name="Overriden" Id="{4c510967-bbb1-4313-b8c1-b846162d98cc}" />
     <Property Name="CatchActivity" Id="{d45db91b-6e3c-4d25-88ad-eccd861a1235}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Returns the optional recovery activity executed when TryActivity raises an exception.</summary>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY FINAL CatchActivity : ICatchActivity]]></Declaration>
       <Get Name="Get" Id="{d47a176f-7515-4853-bd3a-48f4103cee47}">
         <Declaration><![CDATA[]]></Declaration>
         <Implementation>
-          <ST><![CDATA[IF _CatchActivity <> 0 THEN
-	__QUERYINTERFACE(_CatchActivity, CatchActivity);
-END_IF]]></ST>
+          <ST><![CDATA[CatchActivity := _CatchActivity;]]></ST>
         </Implementation>
       </Get>
-      <Set Name="Set" Id="{aa0d2c0e-c119-4508-9595-a205f0ba278e}">
-        <Declaration><![CDATA[]]></Declaration>
-        <Implementation>
-          <ST><![CDATA[_CatchActivity := CatchActivity;]]></ST>
-        </Implementation>
-      </Set>
     </Property>
     <Property Name="ClassName" Id="{fdfdec0c-6bcb-49f1-bea5-0a524cb226e3}">
       <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
@@ -56,28 +61,48 @@ PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
       </Get>
     </Property>
     <Method Name="Configure" Id="{1ad8b2fa-0f3e-40cb-907d-1c905fa035da}">
-      <Declaration><![CDATA[METHOD Configure
+      <Declaration><![CDATA[(*!
+<summary>Configures the required TryActivity and optional CatchActivity.</summary>
+<description>
+Permitted only in PASSIVE_READY. Validates all supplied references before mutating state.
+</description>
+<param name="tryActivity">Required primary activity to execute.</param>
+<param name="catchActivity">Optional recovery activity invoked when tryActivity fails, or 0.</param>
+*)
+METHOD Configure
 VAR_INPUT
 	tryActivity : IActivity;
 	catchActivity : ICatchActivity;
 END_VAR
 VAR
-	argumentNullException : TOF_Core.ArgumentNotSpecifiedException;
+	invalidConfigurationException : TOF_Core.StandardException;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[IF tryActivity = 0 THEN
-	argumentNullException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), 'tryActivity');
+        <ST><![CDATA[ValidateChildActivityAttachment(tryActivity, 'tryActivity');
+
+IF catchActivity <> 0 THEN
+	ValidateChildActivityAttachment(catchActivity, 'catchActivity');
+
+	IF catchActivity.SelfAddress = tryActivity.SelfAddress THEN
+		invalidConfigurationException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), "TryActivity and CatchActivity cannot reference the same activity instance");
+	END_IF
 END_IF
 
 _TryActivity := tryActivity;
 _TryActivity.ParentActivity := THIS^;
 
 _CatchActivity := catchActivity;
-_CatchActivity.ParentActivity := THIS^;]]></ST>
+
+IF _CatchActivity <> 0 THEN
+	_CatchActivity.ParentActivity := THIS^;
+END_IF]]></ST>
       </Implementation>
     </Method>
     <Property Name="CurrentActivity" Id="{882195bd-d9d1-4458-ab34-d7d9d29e51f1}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Returns the currently active branch (TryActivity or CatchActivity), or 0 when idle.</summary>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY FINAL CurrentActivity : IActivity]]></Declaration>
       <Get Name="Get" Id="{2f22007f-b61b-46eb-b0f7-86bd74729b31}">
         <Declaration><![CDATA[]]></Declaration>
@@ -96,21 +121,42 @@ PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
         </Implementation>
       </Get>
     </Property>
-    <Method Name="OnCancelling" Id="{4d0df651-6a40-44cf-aae2-44e5cdc60f35}" FolderPath="Overriden\">
-      <Declaration><![CDATA[METHOD PROTECTED OnCancelling 
+    <Method Name="OnResetting" Id="{5b92043f-7a56-4812-8b93-2f93c74a1504}">
+      <Declaration><![CDATA[(*!
+<summary>Resets TryActivity and CatchActivity back to PASSIVE_READY and clears CurrentActivity.</summary>
+<param name="startResetting">TRUE on the initial call from RequestReset.</param>
+*)
+METHOD PROTECTED OnResetting : ACTIVITY_RESETTING_STATE
 VAR_INPUT
-	start : BOOL;
-END_VAR
-VAR_OUTPUT
-	cancelled : BOOL;
-END_VAR
-]]></Declaration>
+	startResetting : BOOL;
+END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[]]></ST>
+        <ST><![CDATA[IF _TryActivity <> 0 AND_THEN _TryActivity.State <> WORKFLOW_ELEMENT_STATE.PASSIVE_READY THEN
+	IF ResetChildActivity(_TryActivity) = ACTIVITY_RESETTING_STATE.WORK_IN_PROGRESS THEN
+		OnResetting := ACTIVITY_RESETTING_STATE.WORK_IN_PROGRESS;
+		RETURN;
+	END_IF
+END_IF
+
+IF _CatchActivity <> 0 AND_THEN _CatchActivity.State <> WORKFLOW_ELEMENT_STATE.PASSIVE_READY THEN
+	IF ResetChildActivity(_CatchActivity) = ACTIVITY_RESETTING_STATE.WORK_IN_PROGRESS THEN
+		OnResetting := ACTIVITY_RESETTING_STATE.WORK_IN_PROGRESS;
+		RETURN;
+	END_IF
+END_IF
+
+_CurrentActivity := 0;
+OnResetting := ACTIVITY_RESETTING_STATE.WORK_RESET;]]></ST>
       </Implementation>
     </Method>
     <Method Name="OnRunning" Id="{ca2f10c4-f86d-4e87-bfe8-d64bbb3b6bc6}">
-      <Declaration><![CDATA[METHOD PROTECTED OnRunning : ACTIVITY_RUNNING_STATE
+      <Declaration><![CDATA[(*!
+<summary>Runs TryActivity and transitions to CatchActivity if TryActivity raises a non-terminal exception.</summary>
+<param name="startRunning">TRUE on the initial call of a fresh start.</param>
+<param name="startResuming">TRUE on the initial call when resuming from suspension.</param>
+<param name="haltReason">Receives the active child's HaltReason when halted.</param>
+*)
+METHOD PROTECTED OnRunning : ACTIVITY_RUNNING_STATE
 VAR_INPUT
 	startRunning : BOOL;
 	startResuming : BOOL;
@@ -122,8 +168,7 @@ VAR
 	nullReferenceException : TOF_Core.NullReferenceException;
 
 	exceptionCode : __SYSTEM.ExceptionCode;
-	
-	catchActivity : ICatchActivity;
+	exception : TOF_Core.IException;
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[IF _TryActivity = 0 THEN
@@ -143,28 +188,65 @@ IF _CurrentActivity = _TryActivity THEN
 		END_IF
 		
 		OnRunning := GetActivityRunningStateByNestedActivityState(_CurrentActivity.State);
-	__CATCH(exceptionCode)		
-		IF _CatchActivity <> 0 THEN
-			__QUERYINTERFACE(_CatchActivity, catchActivity);
-			
-			catchActivity.Exception := TOF_Core.ExceptionManager.GetLastException(exceptionCode, NamespaceName, __POUNAME(), __POSITION());
-			
-			_CurrentActivity := catchActivity;
-			
-			_CurrentActivity.RequestStart();
-	
-			OnRunning := GetActivityRunningStateByNestedActivityState(_CurrentActivity.State);
+
+		IF OnRunning = ACTIVITY_RUNNING_STATE.WORK_HALTED THEN
+			haltReason := _CurrentActivity.HaltReason;
+		END_IF
+	__CATCH(exceptionCode)
+		TOF_Core.DynamicMemoryManager.RaiseIfAllocationFailed();
+
+		IF _CatchActivity = 0 THEN
+			TOF_Core.ExceptionManager.ReThrowLastException(exceptionCode, NamespaceName, __POUNAME(), __POSITION());
+		END_IF
+
+		exception := TOF_Core.ExceptionManager.GetLastException(exceptionCode, NamespaceName, __POUNAME(), __POSITION());
+
+		// Keep the native wrapper stable while CaptureException may handle another exception.
+		IF NOT exception.IsDynamicInstance THEN
+			__QUERYINTERFACE(exception.Clone(), exception);
+		END_IF
+
+		__TRY
+			_CatchActivity.CaptureException(exception);
+		__CATCH
+			TOF_Core.DynamicMemoryManager.RaiseIfAllocationFailed();
+			TOF_Core.ExceptionManager.Throw(exception);
+		__ENDTRY
+
+		TOF_Core.DynamicMemoryManager.RaiseIfAllocationFailed();
+
+		_CurrentActivity := _CatchActivity;
+		_CurrentActivity.RequestStart();
+
+		OnRunning := GetActivityRunningStateByNestedActivityState(_CurrentActivity.State);
+
+		IF OnRunning = ACTIVITY_RUNNING_STATE.WORK_HALTED THEN
+			haltReason := _CurrentActivity.HaltReason;
 		END_IF
 	__ENDTRY
-ELSIF _CurrentActivity <> 0 AND_THEN _CurrentActivity = _CatchActivity THEN
-	_CurrentActivity.Execute();
+ELSIF _CurrentActivity <> 0 AND_THEN _CatchActivity <> 0 AND_THEN _CurrentActivity.SelfAddress = _CatchActivity.SelfAddress THEN
+	IF startResuming THEN
+		_CurrentActivity.RequestStart();
+	ELSE
+		_CurrentActivity.Execute();
+	END_IF
 
 	OnRunning := GetActivityRunningStateByNestedActivityState(_CurrentActivity.State);
+
+	IF OnRunning = ACTIVITY_RUNNING_STATE.WORK_HALTED THEN
+		haltReason := _CurrentActivity.HaltReason;
+	END_IF
 END_IF]]></ST>
       </Implementation>
     </Method>
     <Method Name="OnStopping" Id="{3ff4c539-5cf6-4ae8-9712-0a7f4b6fdb99}">
-      <Declaration><![CDATA[METHOD PROTECTED OnStopping : ACTIVITY_STOPPING_STATE
+      <Declaration><![CDATA[(*!
+<summary>Stops the currently active try or catch branch on cancel or suspend.</summary>
+<param name="startCancelling">TRUE on the initial call from RequestCancel.</param>
+<param name="startSuspending">TRUE on the initial call from RequestSuspend.</param>
+<param name="haltReason">Receives the active branch's HaltReason if it halts while stopping.</param>
+*)
+METHOD PROTECTED OnStopping : ACTIVITY_STOPPING_STATE
 VAR_INPUT
 	startCancelling : BOOL;
 	startSuspending : BOOL;
@@ -173,8 +255,22 @@ VAR_OUTPUT
 	haltReason : WSTRING(255);
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[IF _CurrentActivity = 0 OR_ELSE NOT _CurrentActivity.Busy THEN
+        <ST><![CDATA[IF _CurrentActivity = 0 THEN
 	OnStopping := ACTIVITY_STOPPING_STATE.WORK_STOPPED;
+	RETURN;
+END_IF
+
+IF NOT _CurrentActivity.Busy THEN
+	IF startCancelling AND_THEN _CurrentActivity.State = WORKFLOW_ELEMENT_STATE.PASSIVE_SUSPENDED THEN
+		_CurrentActivity.RequestCancel(_CancelReason);
+	END_IF
+
+	OnStopping := GetActivityStoppingStateByNestedActivityState(_CurrentActivity.State);
+
+	IF OnStopping = ACTIVITY_STOPPING_STATE.WORK_HALTED THEN
+		haltReason := _CurrentActivity.HaltReason;
+	END_IF
+
 	RETURN;
 END_IF
 
@@ -186,7 +282,11 @@ ELSE
 	_CurrentActivity.Execute();
 END_IF
 	
-OnStopping := GetActivityStoppingStateByNestedActivityState(_CurrentActivity.State);]]></ST>
+OnStopping := GetActivityStoppingStateByNestedActivityState(_CurrentActivity.State);
+
+IF OnStopping = ACTIVITY_STOPPING_STATE.WORK_HALTED THEN
+	haltReason := _CurrentActivity.HaltReason;
+END_IF]]></ST>
       </Implementation>
     </Method>
     <Property Name="SelfSize" Id="{e3dcfcd8-e5b6-434c-b73b-40d8ae840636}">
@@ -200,7 +300,10 @@ PROPERTY SelfSize : ULINT]]></Declaration>
       </Get>
     </Property>
     <Property Name="TryActivity" Id="{a258f937-76f3-47db-be03-89bec51ed17e}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Returns the primary activity executed by this composite.</summary>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY FINAL TryActivity : IActivity]]></Declaration>
       <Get Name="Get" Id="{c24798e4-9b45-4cdf-b41a-9fccd6b4f85b}">
         <Declaration><![CDATA[]]></Declaration>
@@ -208,12 +311,6 @@ PROPERTY FINAL TryActivity : IActivity]]></Declaration>
           <ST><![CDATA[TryActivity := _TryActivity;]]></ST>
         </Implementation>
       </Get>
-      <Set Name="Set" Id="{9386c464-beb2-43e4-b9c6-795426debdf5}">
-        <Declaration><![CDATA[]]></Declaration>
-        <Implementation>
-          <ST><![CDATA[_TryActivity := TryActivity;]]></ST>
-        </Implementation>
-      </Set>
     </Property>
   </POU>
 </TcPlcObject>

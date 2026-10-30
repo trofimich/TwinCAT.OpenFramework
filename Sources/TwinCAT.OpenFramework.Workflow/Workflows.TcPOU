@@ -1,10 +1,19 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <TcPlcObject Version="1.1.0.1">
   <POU Name="Workflows" Id="{09179207-e85a-4ce9-a60e-213a99d7b743}" SpecialFunc="None">
     <Declaration><![CDATA[(*
 SPDX-FileCopyrightText: © 2026 Oleksandr Tiutyk <trofimich@gmail.com>
 SPDX-License-Identifier: MIT
 License: https://opensource.org/license/mit
+*)
+
+(*!
+<summary>Provides state transition validation and allowed-transition formatting for workflow elements.</summary>
+<description>
+Defines the canonical transition table for WORKFLOW_ELEMENT_STATE. Fresh starts require PASSIVE_READY,
+resuming requires PASSIVE_SUSPENDED, and completed, halted, cancelled or failed elements must pass through
+ACTIVE_RESETTING before returning to PASSIVE_READY.
+</description>
 *)
 
 PROGRAM Workflows
@@ -16,7 +25,10 @@ END_VAR]]></Declaration>
       <ST><![CDATA[]]></ST>
     </Implementation>
     <Property Name="ClassName" Id="{481cf308-45d8-4e8a-9beb-4d74c6f3cadc}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Returns the program name for diagnostic reporting.</summary>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
       <Get Name="Get" Id="{d4104013-1803-475d-a0e1-512983ee4a03}">
         <Declaration><![CDATA[]]></Declaration>
@@ -26,21 +38,31 @@ PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
       </Get>
     </Property>
     <Method Name="GetAllowedTransitionNames" Id="{41bf9062-9c5f-4633-8ce3-cbe75b618334}">
-      <Declaration><![CDATA[METHOD GetAllowedTransitionNames : STRING(255)
+      <Declaration><![CDATA[(*!
+<summary>Returns a comma-separated list of target states permitted from the given state.</summary>
+<description>
+Matches the transitions accepted by ValidateTransition. The newState parameter is retained for signature compatibility and does not filter the result.
+</description>
+<param name="currentState">Current state of the workflow element.</param>
+<param name="newState">Unused target state parameter retained for compatibility.</param>
+*)
+METHOD GetAllowedTransitionNames : STRING(255)
 VAR_INPUT
 	currentState : WORKFLOW_ELEMENT_STATE;
 	newState : WORKFLOW_ELEMENT_STATE;
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[CASE currentState OF	
-	WORKFLOW_ELEMENT_STATE.PASSIVE_INITIAL: // can be changed to ACTIVE_RUNNING (with RequestStart)
-	WORKFLOW_ELEMENT_STATE.PASSIVE_COMPLETED: // can be changed to ACTIVE_RUNNING (with RequestStart)
-	WORKFLOW_ELEMENT_STATE.PASSIVE_HALTED: // can be switched to ACTIVE_RUNNING (with RequestStart) 
-	WORKFLOW_ELEMENT_STATE.PASSIVE_CANCELLED: // can be changed to ACTIVE_RUNNING (with RequestStart)
-	WORKFLOW_ELEMENT_STATE.PASSIVE_FAILED: // can be changed to ACTIVE_RUNNING (with RequestStart)
+	WORKFLOW_ELEMENT_STATE.PASSIVE_READY: // can be changed to ACTIVE_RUNNING (with RequestStart)
 		GetAllowedTransitionNames := TO_STRING(WORKFLOW_ELEMENT_STATE.ACTIVE_RUNNING);
+
+	WORKFLOW_ELEMENT_STATE.PASSIVE_COMPLETED, // can be changed to ACTIVE_RESETTING (with RequestReset)
+	WORKFLOW_ELEMENT_STATE.PASSIVE_HALTED, // can be changed to ACTIVE_RESETTING (with RequestReset) 
+	WORKFLOW_ELEMENT_STATE.PASSIVE_CANCELLED, // can be changed to ACTIVE_RESETTING (with RequestReset)
+	WORKFLOW_ELEMENT_STATE.PASSIVE_FAILED: // can be changed to ACTIVE_RESETTING (with RequestReset)
+		GetAllowedTransitionNames := TO_STRING(WORKFLOW_ELEMENT_STATE.ACTIVE_RESETTING);
 	
-	WORKFLOW_ELEMENT_STATE.PASSIVE_SUSPENDED: // can be changed to ACTIVE_RUNNING (with RequestResume) or ACTIVE_CANCELLING (with RequestCancel)
+	WORKFLOW_ELEMENT_STATE.PASSIVE_SUSPENDED: // can be changed to ACTIVE_RUNNING (with RequestStart) or ACTIVE_CANCELLING (with RequestCancel)
 		GetAllowedTransitionNames := TOF_Core.Strings.Concat255(
 			TO_STRING(WORKFLOW_ELEMENT_STATE.ACTIVE_RUNNING),
 			',',
@@ -68,7 +90,6 @@ END_VAR]]></Declaration>
 			',',
 			TO_STRING(WORKFLOW_ELEMENT_STATE.PASSIVE_FAILED));
 
-
 	WORKFLOW_ELEMENT_STATE.ACTIVE_SUSPENDING: // can be changed to PASSIVE_SUSPENDED (internally) or PASSIVE_COMPLETED (internally) or PASSIVE_HALTED (internally) or PASSIVE_FAILED (internally)
 		GetAllowedTransitionNames := TOF_Core.Strings.Concat255(
 			TO_STRING(WORKFLOW_ELEMENT_STATE.PASSIVE_SUSPENDED), 
@@ -78,11 +99,20 @@ END_VAR]]></Declaration>
 			TO_STRING(WORKFLOW_ELEMENT_STATE.PASSIVE_HALTED),
 			',',
 			TO_STRING(WORKFLOW_ELEMENT_STATE.PASSIVE_FAILED));
+
+	WORKFLOW_ELEMENT_STATE.ACTIVE_RESETTING: // can be changed to PASSIVE_READY (internally) or PASSIVE_FAILED (internally)
+		GetAllowedTransitionNames := TOF_Core.Strings.Concat255(
+			TO_STRING(WORKFLOW_ELEMENT_STATE.PASSIVE_READY), 
+			',',
+			TO_STRING(WORKFLOW_ELEMENT_STATE.PASSIVE_FAILED));
 END_CASE]]></ST>
       </Implementation>
     </Method>
     <Property Name="NamespaceName" Id="{f189a98d-babc-4b35-b814-9f960e872687}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Returns the library namespace name for diagnostic reporting.</summary>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
       <Get Name="Get" Id="{7cc74d8e-6055-476f-8cf2-6211037db96f}">
         <Declaration><![CDATA[]]></Declaration>
@@ -92,21 +122,31 @@ PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
       </Get>
     </Property>
     <Method Name="ValidateTransition" Id="{bc368e59-28e8-40f0-ada3-0cec58c2ed3a}">
-      <Declaration><![CDATA[METHOD ValidateTransition : BOOL
+      <Declaration><![CDATA[(*!
+<summary>Reports whether transitioning from currentState to newState is permitted.</summary>
+<description>
+Does not mutate state or raise exceptions. Callers use this predicate before changing state or validating external requests.
+</description>
+<param name="currentState">Current state of the workflow element.</param>
+<param name="newState">Requested target state.</param>
+*)
+METHOD ValidateTransition : BOOL
 VAR_INPUT
 	currentState : WORKFLOW_ELEMENT_STATE;
 	newState : WORKFLOW_ELEMENT_STATE;
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[CASE currentState OF
-	WORKFLOW_ELEMENT_STATE.PASSIVE_INITIAL, // can be changed to ACTIVE_RUNNING (with RequestStart)
-	WORKFLOW_ELEMENT_STATE.PASSIVE_COMPLETED, // can be changed to ACTIVE_RUNNING (with RequestStart)
-	WORKFLOW_ELEMENT_STATE.PASSIVE_HALTED, // can be switched to ACTIVE_RUNNING (with RequestStart) 
-	WORKFLOW_ELEMENT_STATE.PASSIVE_CANCELLED, // can be changed to ACTIVE_RUNNING (with RequestStart)
-	WORKFLOW_ELEMENT_STATE.PASSIVE_FAILED: // can be changed to ACTIVE_RUNNING (with RequestStart)
+	WORKFLOW_ELEMENT_STATE.PASSIVE_READY: // can be changed to ACTIVE_RUNNING (with RequestStart)
 		ValidateTransition := newState = WORKFLOW_ELEMENT_STATE.ACTIVE_RUNNING;
 
-	WORKFLOW_ELEMENT_STATE.PASSIVE_SUSPENDED: // can be changed to ACTIVE_RUNNING (with RequestResume) or ACTIVE_CANCELLING (with RequestCancel)
+	WORKFLOW_ELEMENT_STATE.PASSIVE_COMPLETED, // can be changed to ACTIVE_RESETTING (with RequestReset)
+	WORKFLOW_ELEMENT_STATE.PASSIVE_HALTED, // can be changed to ACTIVE_RESETTING (with RequestReset) 
+	WORKFLOW_ELEMENT_STATE.PASSIVE_CANCELLED, // can be changed to ACTIVE_RESETTING (with RequestReset)
+	WORKFLOW_ELEMENT_STATE.PASSIVE_FAILED: // can be changed to ACTIVE_RESETTING (with RequestReset)
+		ValidateTransition := newState = WORKFLOW_ELEMENT_STATE.ACTIVE_RESETTING;
+
+	WORKFLOW_ELEMENT_STATE.PASSIVE_SUSPENDED: // can be changed to ACTIVE_RUNNING (with RequestStart) or ACTIVE_CANCELLING (with RequestCancel)
 		ValidateTransition := newState = WORKFLOW_ELEMENT_STATE.ACTIVE_RUNNING 
 			OR_ELSE newState = WORKFLOW_ELEMENT_STATE.ACTIVE_CANCELLING;
 		
@@ -127,6 +167,10 @@ END_VAR]]></Declaration>
 		ValidateTransition := newState = WORKFLOW_ELEMENT_STATE.PASSIVE_SUSPENDED 
 			OR_ELSE newState = WORKFLOW_ELEMENT_STATE.PASSIVE_COMPLETED
 			OR_ELSE newState = WORKFLOW_ELEMENT_STATE.PASSIVE_HALTED
+			OR_ELSE newState = WORKFLOW_ELEMENT_STATE.PASSIVE_FAILED;
+
+	WORKFLOW_ELEMENT_STATE.ACTIVE_RESETTING: // can be changed to PASSIVE_READY (internally) or PASSIVE_FAILED (internally)
+		ValidateTransition := newState = WORKFLOW_ELEMENT_STATE.PASSIVE_READY 
 			OR_ELSE newState = WORKFLOW_ELEMENT_STATE.PASSIVE_FAILED;
 END_CASE]]></ST>
       </Implementation>

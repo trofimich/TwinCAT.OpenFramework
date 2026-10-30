@@ -1,40 +1,73 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <TcPlcObject Version="1.1.0.1">
   <Itf Name="IWorkflow" Id="{19b23945-7465-4738-b842-b017f4cd93c8}">
-    <Declaration><![CDATA[(*!
-<summary>Coordinates execution and ownership of workflow elements.</summary>
-<description>RegisterChild explicitly transfers dynamic child ownership after construction; FB_init does not register children.</description>
-*)
-(*
+    <Declaration><![CDATA[(*
 SPDX-FileCopyrightText: © 2026 Oleksandr Tiutyk <trofimich@gmail.com>
 SPDX-License-Identifier: MIT
 License: https://opensource.org/license/mit
 *)
 
+(*!
+<summary>Coordinates execution, state transitions, variable storage and dynamic child ownership of a workflow.</summary>
+<description>
+RegisterChild explicitly transfers dynamic child ownership after construction; FB_init does not register children.
+Uncaught non-terminal exceptions from the root activity and workflow hooks are contained at the workflow boundary,
+recorded in FailError and logged via LogManager. Terminal allocation failures are propagated.
+</description>
+*)
+
 INTERFACE IWorkflow EXTENDS TOF_Core.IExecutable, IVariableContainer]]></Declaration>
     <Property Name="Busy" Id="{cf98e6ff-23ed-4a38-a6cc-841fb1829b50}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Indicates whether the root activity is currently in an active state.</summary>
+<description>
+Returns TRUE while the root activity is in ACTIVE_RUNNING, ACTIVE_CANCELLING, ACTIVE_SUSPENDING or ACTIVE_RESETTING.
+</description>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY Busy : BOOL]]></Declaration>
       <Get Name="Get" Id="{7a9189cd-9176-43c6-95ab-234f2967ccd8}">
         <Declaration><![CDATA[]]></Declaration>
       </Get>
     </Property>
+    <Property Name="CancellingAllowed" Id="{8fd766c7-f701-4066-b878-710046413cd1}">
+      <Declaration><![CDATA[(*!
+<summary>Indicates whether RequestCancel is permitted in the current workflow state.</summary>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY CancellingAllowed : BOOL]]></Declaration>
+      <Get Name="Get" Id="{193b3c08-96d4-49c6-81c5-1dfb0ec5734f}">
+        <Declaration><![CDATA[]]></Declaration>
+      </Get>
+    </Property>
     <Property Name="CancelReason" Id="{3c6e463b-c134-48c2-a2fd-0ad54e9864f7}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Gets a reference to the cancellation reason of the root activity.</summary>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY CancelReason : REFERENCE TO WSTRING(255)]]></Declaration>
       <Get Name="Get" Id="{b7dbdc59-3981-4205-ba55-b27f6ffa9192}">
         <Declaration><![CDATA[]]></Declaration>
       </Get>
     </Property>
-    <Property Name="FailErrorMessage" Id="{57da4fb8-7f6c-4a9c-893f-9a1da5784f6a}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
-PROPERTY FailErrorMessage : REFERENCE TO TOF_Core.ERROR_MESSAGE]]></Declaration>
+    <Property Name="FailError" Id="{57da4fb8-7f6c-4a9c-893f-9a1da5784f6a}">
+      <Declaration><![CDATA[(*!
+<summary>Gets a reference to the durable error snapshot captured when the workflow or root activity fails.</summary>
+<description>
+Empty while no unhandled failure has occurred or after the workflow has been reset to PASSIVE_READY.
+</description>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY FailError : REFERENCE TO TOF_Core.ERROR]]></Declaration>
       <Get Name="Get" Id="{86b48482-9d71-4f6f-8e85-aed0f8821574}">
         <Declaration><![CDATA[]]></Declaration>
       </Get>
     </Property>
     <Property Name="HaltReason" Id="{87288542-4f38-4ac6-b703-0f8258d6cd3d}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Gets a reference to the halt reason of the root activity.</summary>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY HaltReason : REFERENCE TO WSTRING(255)]]></Declaration>
       <Get Name="Get" Id="{4e8bbc72-c2d2-4b0f-ba90-c8e5eabfcdaa}">
         <Declaration><![CDATA[]]></Declaration>
@@ -44,6 +77,7 @@ PROPERTY HaltReason : REFERENCE TO WSTRING(255)]]></Declaration>
       <Declaration><![CDATA[(*!
 <summary>Accepts ownership of a constructed dynamic workflow element.</summary>
 <description>Call after successful __NEW, outside FB_init/FB_exit/FB_reinit, before configuring or exposing the child. Null and static children are ignored. Requires a live child exclusively owned by the caller and associated with this workflow. On success the workflow owns the child until DisposeDynamicChildren or destruction; callers only borrow it. Duplicate addresses are ignored; distinct addresses are retained regardless of payload equality. Before ownership transfer, a registration exception triggers an attempt to delete the child and is propagated; the caller must not reuse its pointer. Destructors must not raise. Post-registration diagnostic failures do not undo ownership. Registration and disposal must not run concurrently or reenter this workflow.</description>
+<param name="child">Constructed workflow element to register.</param>
 *)
 METHOD RegisterChild
 VAR_INPUT
@@ -51,34 +85,105 @@ VAR_INPUT
 END_VAR]]></Declaration>
     </Method>
     <Method Name="RequestCancel" Id="{5da8701c-a3aa-413e-b26f-50a5e2e2e6be}">
-      <Declaration><![CDATA[METHOD RequestCancel : BOOL
+      <Declaration><![CDATA[(*!
+<summary>Requests cancellation of the root activity when permitted in the current state.</summary>
+<description>
+Requires RootActivity to be configured. Returns TRUE when the request was accepted and forwarded to RootActivity.
+</description>
+<param name="reason">Diagnostic reason for cancellation.</param>
+*)
+METHOD RequestCancel : BOOL
 VAR_INPUT
 	reason : WSTRING(255);
 END_VAR]]></Declaration>
     </Method>
+    <Method Name="RequestReset" Id="{4ebd8fbf-d1c7-4804-8ece-92573531ca74}">
+      <Declaration><![CDATA[(*!
+<summary>Requests resetting of the root activity from a finished passive state.</summary>
+<description>
+Requires RootActivity to be configured. Returns TRUE when the request was accepted and forwarded to RootActivity.
+</description>
+*)
+METHOD RequestReset : BOOL]]></Declaration>
+    </Method>
     <Method Name="RequestStart" Id="{a01bec22-2fd1-48a9-8af0-1af285fabf09}">
-      <Declaration><![CDATA[METHOD RequestStart : BOOL]]></Declaration>
+      <Declaration><![CDATA[(*!
+<summary>Requests starting or resuming of the root activity when permitted in the current state.</summary>
+<description>
+Requires RootActivity to be configured. Returns TRUE when the request was accepted and forwarded to RootActivity.
+</description>
+*)
+METHOD RequestStart : BOOL]]></Declaration>
     </Method>
     <Method Name="RequestSuspend" Id="{ad32938d-4af2-44cc-8cb1-b9452cbb5eb5}">
-      <Declaration><![CDATA[METHOD RequestSuspend : BOOL]]></Declaration>
+      <Declaration><![CDATA[(*!
+<summary>Requests suspension of the root activity when permitted in the current state.</summary>
+<description>
+Requires RootActivity to be configured. Returns TRUE when the request was accepted and forwarded to RootActivity.
+</description>
+*)
+METHOD RequestSuspend : BOOL]]></Declaration>
     </Method>
+    <Property Name="ResettingAllowed" Id="{cc46e10c-739c-4d2e-956e-fd08e5042ed5}">
+      <Declaration><![CDATA[(*!
+<summary>Indicates whether RequestReset is permitted in the current workflow state.</summary>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY ResettingAllowed : BOOL]]></Declaration>
+      <Get Name="Get" Id="{60c0bca6-e2a8-4010-a747-23a6a5c0ddf0}">
+        <Declaration><![CDATA[]]></Declaration>
+      </Get>
+    </Property>
     <Property Name="RootActivity" Id="{0e5d0a1e-7434-4faa-80fe-c6362efb5ea0}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Gets the root activity of the workflow, or zero if not configured.</summary>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY RootActivity : IActivity]]></Declaration>
       <Get Name="Get" Id="{502bd1df-aa85-4d47-af3c-569e04d047dc}">
         <Declaration><![CDATA[]]></Declaration>
       </Get>
     </Property>
     <Method Name="SetRootActivity" Id="{f5f43f5f-59be-4ac4-a3f8-50bd5d2a40e8}">
-      <Declaration><![CDATA[METHOD SetRootActivity
+      <Declaration><![CDATA[(*!
+<summary>Assigns the root activity of the workflow and initializes workflow variables on first assignment.</summary>
+<description>
+Cannot be called while Busy is TRUE. Requires rootActivity to have no parent activity and not belong to another workflow.
+</description>
+<param name="rootActivity">Root activity to assign, or zero to detach.</param>
+*)
+METHOD SetRootActivity
 VAR_INPUT
 	rootActivity : IActivity;
 END_VAR]]></Declaration>
     </Method>
+    <Property Name="StartingAllowed" Id="{fde3031e-b446-4021-9e5a-5e9a115c2825}">
+      <Declaration><![CDATA[(*!
+<summary>Indicates whether RequestStart is permitted in the current workflow state.</summary>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY StartingAllowed : BOOL]]></Declaration>
+      <Get Name="Get" Id="{b5e0588f-c523-4551-bf88-42122e1dd950}">
+        <Declaration><![CDATA[]]></Declaration>
+      </Get>
+    </Property>
     <Property Name="State" Id="{534cbbc2-717b-45cb-b181-c84495c57176}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Gets the current workflow state reflected from RootActivity, or PASSIVE_READY when unconfigured.</summary>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY State : WORKFLOW_ELEMENT_STATE]]></Declaration>
       <Get Name="Get" Id="{b32d5b42-7271-4d76-b3d9-2e708a63a91b}">
+        <Declaration><![CDATA[]]></Declaration>
+      </Get>
+    </Property>
+    <Property Name="SuspendingAllowed" Id="{45c74773-4170-4a14-a214-b975a2d8144f}">
+      <Declaration><![CDATA[(*!
+<summary>Indicates whether RequestSuspend is permitted in the current workflow state.</summary>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY SuspendingAllowed : BOOL]]></Declaration>
+      <Get Name="Get" Id="{c85e95fe-0564-483f-9614-73b0c5d993d3}">
         <Declaration><![CDATA[]]></Declaration>
       </Get>
     </Property>

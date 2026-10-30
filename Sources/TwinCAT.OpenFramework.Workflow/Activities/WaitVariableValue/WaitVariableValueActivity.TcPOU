@@ -1,17 +1,25 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <TcPlcObject Version="1.1.0.1">
   <POU Name="WaitVariableValueActivity" Id="{9ae865c9-381c-4131-8577-ff22adc6b1cb}" SpecialFunc="None">
-    <Declaration><![CDATA[(*!
+    <Declaration><![CDATA[(*
+SPDX-FileCopyrightText: © 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+SPDX-License-Identifier: MIT
+License: https://opensource.org/license/mit
+*)
+
+(*!
 <summary>Waits until a workflow variable matches a configured value.</summary>
 <description>Its internal condition is created and registered on first Configure, not in FB_init. Configure must succeed before execution. The condition is workflow-owned; repeated Configure calls reuse it. Before creation, MonitoredVariableName is empty and ReferenceValue is null.</description>
 *)
-{attribute 'no_explicit_call' := 'do not call this function block directly'} 
+
+{attribute 'no_explicit_call' := 'do not call this function block directly'}
 {attribute 'enable_dynamic_creation'}
 FUNCTION_BLOCK WaitVariableValueActivity EXTENDS Activity IMPLEMENTS IWaitVariableValueActivity
-VAR
-	{attribute 'OPC.UA.DA' := '0'}
+VAR_STAT
+	{attribute 'hide'}
 	_ClassName : STRING := __POUNAME();
-	
+END_VAR
+VAR
 	{attribute 'OPC.UA.DA' := '0'}
 	_Condition : IVariableHasValueCondition;
 	
@@ -35,6 +43,8 @@ PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
       <Declaration><![CDATA[(*!
 <summary>Creates the internal condition on first use and configures the value to wait for.</summary>
 <description>Requires an associated live workflow. Registers the condition before configuring it; the workflow owns it until disposal. Later calls reuse the condition. A failed condition configuration leaves this activity unconfigured. Allocation and configuration failures propagate from this ordinary method, never from FB_init.</description>
+<param name="monitoredVariableName">Non-empty name of the variable to monitor.</param>
+<param name="referenceValue">Non-empty reference value to compare against.</param>
 *)
 METHOD Configure
 VAR_INPUT
@@ -42,6 +52,7 @@ VAR_INPUT
 	referenceValue : ANY; 
 END_VAR
 VAR
+	ownerWorkflow : IWorkflow;
 	variableNameEmptyException : TOF_Core.ArgumentOutOfRangeException;
 	argumentNotSpecifiedException : TOF_Core.ArgumentNotSpecifiedException;
 
@@ -56,20 +67,22 @@ IF referenceValue.pValue = 0 OR_ELSE referenceValue.diSize = 0 THEN
 	argumentNotSpecifiedException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), 'referenceValue');
 END_IF
 
-IF _Workflow = 0 THEN
+ownerWorkflow := Workflow;
+
+IF ownerWorkflow = 0 THEN
 	argumentNotSpecifiedException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), 'Workflow');
 END_IF
 
 _Configured := FALSE;
 
 IF _Condition = 0 THEN
-	condition := __NEW(VariableHasValueCondition(workflow := _Workflow));
+	condition := __NEW(VariableHasValueCondition(workflow := ownerWorkflow));
 
 	IF condition = 0 THEN
 		TOF_Core.DynamicMemoryManager.RaiseAllocationFailure();
 	END_IF
 
-	_Workflow.RegisterChild(condition^);
+	ownerWorkflow.RegisterChild(condition^);
 	condition^.ParentActivity := THIS^;
 	_Condition := condition^;
 END_IF
@@ -80,10 +93,10 @@ _Configured := TRUE;]]></ST>
       </Implementation>
     </Method>
     <Property Name="MonitoredVariableName" Id="{1d438d91-52fe-4f5c-94af-3d961ae45a4b}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
-(*!
+      <Declaration><![CDATA[(*!
 <summary>Returns the monitored variable name, or an empty string before the condition is created.</summary>
 *)
+{attribute 'monitoring' := 'call'}
 PROPERTY MonitoredVariableName : STRING]]></Declaration>
       <Get Name="Get" Id="{7e079cbe-d346-42a9-a0e0-28dfd64715e9}">
         <Declaration><![CDATA[]]></Declaration>
@@ -107,7 +120,13 @@ PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
       </Get>
     </Property>
     <Method Name="OnRunning" Id="{7256e873-ad90-40ce-9bfb-e8e3b6c4fdf7}">
-      <Declaration><![CDATA[METHOD PROTECTED OnRunning : ACTIVITY_RUNNING_STATE
+      <Declaration><![CDATA[(*!
+<summary>Evaluates the internal variable condition and completes when it becomes TRUE.</summary>
+<param name="startRunning">TRUE on the initial call of a fresh start.</param>
+<param name="startResuming">TRUE on the initial call when resuming from suspension.</param>
+<param name="haltReason">Unused halt reason output.</param>
+*)
+METHOD PROTECTED OnRunning : ACTIVITY_RUNNING_STATE
 VAR_INPUT
 	startRunning : BOOL;
 	startResuming : BOOL;
@@ -116,8 +135,6 @@ VAR_OUTPUT
 	haltReason : WSTRING(255);
 END_VAR
 VAR
-	workflowVariable : TOF_Core.GENERIC_VALUE;
-
 	notConfiguredException : TOF_Core.StandardException;
 END_VAR]]></Declaration>
       <Implementation>
@@ -131,7 +148,13 @@ END_IF]]></ST>
       </Implementation>
     </Method>
     <Method Name="OnStopping" Id="{cb35b0b4-7e4b-4f21-962e-9df35e5ede20}">
-      <Declaration><![CDATA[METHOD PROTECTED OnStopping : ACTIVITY_STOPPING_STATE
+      <Declaration><![CDATA[(*!
+<summary>Stops waiting immediately on cancel or suspend.</summary>
+<param name="startCancelling">TRUE when stopping due to cancellation.</param>
+<param name="startSuspending">TRUE when stopping due to suspension.</param>
+<param name="haltReason">Unused halt reason output.</param>
+*)
+METHOD PROTECTED OnStopping : ACTIVITY_STOPPING_STATE
 VAR_INPUT
 	startCancelling : BOOL;
 	startSuspending : BOOL;
@@ -144,11 +167,11 @@ END_VAR]]></Declaration>
       </Implementation>
     </Method>
     <Property Name="ReferenceValue" Id="{dc6c9824-324d-4558-96e2-a00d3db704a7}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
-(*!
+      <Declaration><![CDATA[(*!
 <summary>Returns a borrowed reference to the configured comparison value.</summary>
 <description>Returns a null reference before the condition is created. The reference does not transfer ownership and expires when the workflow disposes the condition.</description>
 *)
+{attribute 'monitoring' := 'call'}
 PROPERTY ReferenceValue : REFERENCE TO TOF_Core.GENERIC_VALUE]]></Declaration>
       <Get Name="Get" Id="{0bc02602-5ac3-40ea-858c-396fd965ca04}">
         <Declaration><![CDATA[]]></Declaration>

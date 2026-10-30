@@ -7,17 +7,22 @@ SPDX-License-Identifier: MIT
 License: https://opensource.org/license/mit
 *)
 
-{attribute 'no_explicit_call' := 'do not call this function block directly'} 
-{attribute 'enable_dynamic_creation'}
 (*!
-<summary>Evaluates a workflow variable against a configured value.</summary>
-<description>Diagnostic string inputs are borrowed only during the call; retained diagnostic text is copied into owned storage.</description>
+<summary>Evaluates whether a named workflow variable matches a configured reference value by bytewise equality.</summary>
+<description>
+Resolves the variable through this condition's hierarchy or the evaluating activity's scope. Raises an exception
+when evaluated before Configure or when the monitored variable cannot be found.
+</description>
 *)
-FUNCTION_BLOCK VariableHasValueCondition EXTENDS Condition IMPLEMENTS IVariableHasValueCondition
-VAR
-	{attribute 'OPC.UA.DA' := '0'}
-	_ClassName : STRING := __POUNAME();
 
+{attribute 'no_explicit_call' := 'do not call this function block directly'}
+{attribute 'enable_dynamic_creation'}
+FUNCTION_BLOCK VariableHasValueCondition EXTENDS Condition IMPLEMENTS IVariableHasValueCondition
+VAR_STAT
+	{attribute 'hide'}
+	_ClassName : STRING := __POUNAME();
+END_VAR
+VAR
 	{attribute 'OPC.UA.DA' := '0'}
 	_MonitoredVariableName : STRING;
 
@@ -40,7 +45,12 @@ PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
       </Get>
     </Property>
     <Method Name="Configure" Id="{beea4cf4-f4df-4bfa-87eb-0a7431cad617}">
-      <Declaration><![CDATA[METHOD Configure
+      <Declaration><![CDATA[(*!
+<summary>Configures the monitored variable name and copies the reference value for comparison.</summary>
+<param name="monitoredVariableName">Non-empty name of the variable to monitor.</param>
+<param name="referenceValue">Non-empty reference value to compare against.</param>
+*)
+METHOD Configure
 VAR_INPUT
 	monitoredVariableName : STRING;
 	referenceValue : ANY; 
@@ -62,7 +72,10 @@ InternalConfigure(monitoredVariableName, referenceValue);]]></ST>
       </Implementation>
     </Method>
     <Property Name="Configured" Id="{d3138cc2-4f83-42fd-a975-721b3efc8f84}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Reports whether both the variable name and reference value have been configured.</summary>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY Configured : BOOL]]></Declaration>
       <Get Name="Get" Id="{0840293a-29eb-4900-b343-b40209a68d29}">
         <Declaration><![CDATA[]]></Declaration>
@@ -72,7 +85,12 @@ PROPERTY Configured : BOOL]]></Declaration>
       </Get>
     </Property>
     <Method Name="InternalConfigure" Id="{0fc36eec-48f7-4ec9-ab94-4c8afdbe1add}" FolderPath="Internal methods\">
-      <Declaration><![CDATA[METHOD INTERNAL InternalConfigure
+      <Declaration><![CDATA[(*!
+<summary>Stores the variable name and copies the reference value into the equality predicate.</summary>
+<param name="monitoredWorkflowVariableName">Validated variable name.</param>
+<param name="referenceValue">Validated reference value.</param>
+*)
+METHOD INTERNAL InternalConfigure
 VAR_INPUT
 	monitoredWorkflowVariableName : STRING;
 	referenceValue : __SYSTEM.AnyType; 
@@ -83,7 +101,10 @@ _Predicate.SetReferenceValueByAnyType(referenceValue);]]></ST>
       </Implementation>
     </Method>
     <Property Name="MonitoredVariableName" Id="{7e4166f8-1c74-494f-b340-b1e526abbf0a}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Returns the configured variable name.</summary>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY MonitoredVariableName : STRING]]></Declaration>
       <Get Name="Get" Id="{1eb33d4c-ec62-4599-b5f6-fa72662f6551}">
         <Declaration><![CDATA[]]></Declaration>
@@ -104,8 +125,8 @@ PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
     </Property>
     <Method Name="OnEvalute" Id="{8440fe50-06b4-43d8-bb22-4354c386b514}" FolderPath="Overriden members\">
       <Declaration><![CDATA[(*!
-<summary>Prepares diagnostic text locally before passing it to read-only logging or exception parameters.</summary>
-<description>Computed diagnostic strings are held in local buffers for the duration of the receiving call.</description>
+<summary>Resolves the monitored variable and checks bytewise equality against ReferenceValue.</summary>
+<param name="activity">Activity context for variable lookup.</param>
 *)
 METHOD PROTECTED OnEvalute : BOOL
 VAR_INPUT
@@ -117,6 +138,7 @@ VAR
 	conditionNotConfiguredException : TOF_Core.StandardException;
 	variableNotFoundException : TOF_Core.StandardException;
 
+	variableFound : BOOL;
 	variable : TOF_Core.GENERIC_VALUE;
 	variableValue : __SYSTEM.AnyType;
 END_VAR]]></Declaration>
@@ -127,8 +149,14 @@ END_VAR]]></Declaration>
 	conditionNotConfiguredException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), formattedExceptionMessage);
 END_IF
 
-IF NOT _Workflow.TryGetVariable(_MonitoredVariableName, variable => variable) THEN
-	formattedExceptionMessage := TOF_Core.WideStrings.Concat255("Condition '", Name, "' requirs variable '", TO_WSTRING(_MonitoredVariableName), "' which is not found");
+variableFound := TryGetVariable(_MonitoredVariableName, variable => variable);
+
+IF NOT variableFound AND_THEN activity <> 0 THEN
+	variableFound := activity.TryGetVariable(_MonitoredVariableName, variable => variable);
+END_IF
+
+IF NOT variableFound THEN
+	formattedExceptionMessage := TOF_Core.WideStrings.Concat255("Condition '", Name, "' requires variable '", TO_WSTRING(_MonitoredVariableName), "' which is not found");
 
 	variableNotFoundException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), formattedExceptionMessage);
 END_IF
@@ -139,7 +167,10 @@ OnEvalute := _Predicate.Check(variableValue);]]></ST>
       </Implementation>
     </Method>
     <Property Name="ReferenceValue" Id="{f2dea975-210b-4d62-87af-bcb2e4255b55}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Returns a borrowed reference to the stored comparison value.</summary>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY ReferenceValue : REFERENCE TO TOF_Core.GENERIC_VALUE]]></Declaration>
       <Get Name="Get" Id="{2820c5a1-237c-4f4e-8eb7-440359a3c141}">
         <Declaration><![CDATA[]]></Declaration>

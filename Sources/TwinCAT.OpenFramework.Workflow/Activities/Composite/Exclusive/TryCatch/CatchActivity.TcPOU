@@ -1,0 +1,91 @@
+<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="CatchActivity" Id="{7bd16588-563d-4379-9476-8a835c59134e}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+SPDX-FileCopyrightText: © 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+SPDX-License-Identifier: MIT
+License: https://opensource.org/license/mit
+*)
+
+(*!
+<summary>Base recovery activity that stores a durable ERROR snapshot captured from a failed try branch.</summary>
+<description>
+CaptureException copies exception diagnostics into Error without retaining the task-scoped exception reference.
+Resetting clears the captured Error snapshot when returning to PASSIVE_READY.
+</description>
+*)
+
+{attribute 'no_explicit_call' := 'do not call this function block directly'}
+FUNCTION_BLOCK ABSTRACT CatchActivity EXTENDS Activity IMPLEMENTS ICatchActivity
+VAR
+	_Error : TOF_Core.ERROR;
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[]]></ST>
+    </Implementation>
+    <Method Name="CaptureException" Id="{d9d61120-f3d9-4934-9559-e527454c65b5}">
+      <Declaration><![CDATA[(*!
+<summary>Copies exception diagnostics into the activity-owned Error snapshot.</summary>
+<description>
+Rejects a null exception reference. Clears any prior snapshot and converts the exception via ToError.
+On conversion failure, clears partial diagnostics and rethrows; no exception reference is retained.
+</description>
+<param name="exception">Live exception borrowed only during capture.</param>
+*)
+METHOD CaptureException
+VAR_INPUT
+	exception : TOF_Core.IReadOnlyException;
+END_VAR
+VAR
+	argumentNotSpecifiedException : TOF_Core.ArgumentNotSpecifiedException;
+	exceptionCode : __SYSTEM.ExceptionCode;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF exception = 0 THEN
+	argumentNotSpecifiedException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), 'exception');
+END_IF
+
+_Error.Clear();
+
+__TRY
+	exception.ToError(_Error, TOF_Core.ERROR_SEVERITY.ERROR);
+__CATCH(exceptionCode)
+	_Error.Clear();
+	TOF_Core.ExceptionManager.ReThrowLastException(exceptionCode, NamespaceName, __POUNAME(), __POSITION());
+__ENDTRY]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="Error" Id="{31a255c6-6895-449c-a94f-081db36d9305}">
+      <Declaration><![CDATA[(*!
+<summary>Exposes a borrowed read-only view of the captured recovery diagnostics.</summary>
+<description>
+Storage belongs to this activity, survives task exception cleanup and is cleared when resetting completes.
+Callers must not mutate fields or invoke Clear or SetSeverity through this reference.
+</description>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY FINAL Error : REFERENCE TO TOF_Core.ERROR]]></Declaration>
+      <Get Name="Get" Id="{98656b93-daa9-45d0-bf59-7904db859c91}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[Error REF= _Error;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="OnResetting" Id="{81f39b41-77b3-40f6-8f12-71c5a8a77149}">
+      <Declaration><![CDATA[(*!
+<summary>Clears the captured recovery Error snapshot and completes resetting.</summary>
+<param name="startResetting">TRUE on the initial call from RequestReset.</param>
+*)
+METHOD PROTECTED OnResetting : ACTIVITY_RESETTING_STATE
+VAR_INPUT
+	startResetting : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_Error.Clear();
+
+OnResetting := ACTIVITY_RESETTING_STATE.WORK_RESET;]]></ST>
+      </Implementation>
+    </Method>
+  </POU>
+</TcPlcObject>

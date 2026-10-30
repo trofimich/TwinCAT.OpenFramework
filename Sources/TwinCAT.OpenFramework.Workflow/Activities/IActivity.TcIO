@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <TcPlcObject Version="1.1.0.1">
   <Itf Name="IActivity" Id="{46a777dc-cb17-44a1-8b27-cee98703fc49}">
     <Declaration><![CDATA[(*
@@ -7,9 +7,26 @@ SPDX-License-Identifier: MIT
 License: https://opensource.org/license/mit
 *)
 
+(*!
+<summary>Defines the lifecycle, state, hierarchy and diagnostic contract for a workflow activity.</summary>
+<description>
+Activities start from PASSIVE_READY via RequestStart, pause and resume via RequestSuspend and RequestStart,
+cancel via RequestCancel, and return from finished passive states (PASSIVE_COMPLETED, PASSIVE_HALTED,
+PASSIVE_CANCELLED, PASSIVE_FAILED) to PASSIVE_READY via RequestReset. While Busy is TRUE, the owner advances
+the active state by calling Execute cyclically. Uncaught exceptions transition the activity to PASSIVE_FAILED,
+populate FailError and propagate to the caller.
+</description>
+*)
+
 INTERFACE IActivity EXTENDS TOF_Core.IExecutable, IWorkflowElement]]></Declaration>
     <Property Name="Busy" Id="{3a02f0a9-3283-4322-8396-4d5f0a21b020}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Reports whether the activity is currently in an active state requiring cyclic Execute calls.</summary>
+<description>
+Returns TRUE in ACTIVE_RUNNING, ACTIVE_CANCELLING, ACTIVE_SUSPENDING and ACTIVE_RESETTING.
+</description>
+*)
+{attribute 'monitoring' := 'call'}
 {attribute 'OPC.UA.DA.Property' := '1'}
 {attribute 'OPC.UA.DA.Access' := '1'}
 PROPERTY Busy : BOOL
@@ -19,7 +36,13 @@ PROPERTY Busy : BOOL
       </Get>
     </Property>
     <Property Name="CancelReason" Id="{9aef8376-732a-4083-acd4-6675859daaaa}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Returns the reason recorded for the most recent cancellation request.</summary>
+<description>
+Set when RequestCancel is accepted and cleared when resetting completes or a new run starts.
+</description>
+*)
+{attribute 'monitoring' := 'call'}
 {attribute 'OPC.UA.DA.Property' := '1'}
 {attribute 'OPC.UA.DA.Access' := '1'}
 PROPERTY CancelReason : REFERENCE TO WSTRING(255)
@@ -28,18 +51,31 @@ PROPERTY CancelReason : REFERENCE TO WSTRING(255)
         <Declaration><![CDATA[]]></Declaration>
       </Get>
     </Property>
-    <Property Name="FailErrorMessage" Id="{7e90fd04-6136-461c-95a2-ffc850de8db2}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+    <Property Name="FailError" Id="{7e90fd04-6136-461c-95a2-ffc850de8db2}">
+      <Declaration><![CDATA[(*!
+<summary>Returns a borrowed read-only view of the durable error snapshot captured when the activity failed.</summary>
+<description>
+Populated when an exception transitions the activity to PASSIVE_FAILED and cleared when resetting completes
+or a new run starts. Callers must not mutate the returned ERROR instance.
+</description>
+*)
+{attribute 'monitoring' := 'call'}
 {attribute 'OPC.UA.DA.Property' := '1'}
 {attribute 'OPC.UA.DA.Access' := '1'}
-PROPERTY FailErrorMessage : REFERENCE TO TOF_Core.ERROR_MESSAGE
+PROPERTY FailError : REFERENCE TO TOF_Core.ERROR
 ]]></Declaration>
       <Get Name="Get" Id="{4df7cb65-6f6e-470d-8d4d-3615225a6512}">
         <Declaration><![CDATA[]]></Declaration>
       </Get>
     </Property>
     <Property Name="HaltReason" Id="{1b3a3840-93ef-4d27-8c1c-fecff07e1dc6}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Returns the diagnostic reason reported when the activity halted its work internally.</summary>
+<description>
+Set when the activity transitions to PASSIVE_HALTED and cleared when resetting completes or a new run starts.
+</description>
+*)
+{attribute 'monitoring' := 'call'}
 {attribute 'OPC.UA.DA.Property' := '1'}
 {attribute 'OPC.UA.DA.Access' := '1'}
 PROPERTY HaltReason : REFERENCE TO WSTRING(255)
@@ -49,7 +85,13 @@ PROPERTY HaltReason : REFERENCE TO WSTRING(255)
       </Get>
     </Property>
     <Property Name="ParentActivity" Id="{034897b8-541d-4ed2-8850-1607960d899f}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Gets or sets the borrowed parent composite activity in the workflow tree.</summary>
+<description>
+Zero when this activity is the root of a workflow or not yet attached to a composite parent.
+</description>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY ParentActivity : IActivity]]></Declaration>
       <Get Name="Get" Id="{d0588bdd-b395-45c7-9cdd-d5fbed714620}">
         <Declaration><![CDATA[]]></Declaration>
@@ -61,26 +103,65 @@ END_VAR
       </Set>
     </Property>
     <Method Name="RequestCancel" Id="{3b375a84-c263-4abf-8b67-25083c52f513}">
-      <Declaration><![CDATA[METHOD RequestCancel
+      <Declaration><![CDATA[(*!
+<summary>Requests cooperative cancellation from ACTIVE_RUNNING, ACTIVE_SUSPENDING or PASSIVE_SUSPENDED.</summary>
+<description>
+No-op when the current state does not allow transitioning to ACTIVE_CANCELLING. Executes the initial stopping
+step immediately; if stopping remains in progress, continue calling Execute until a passive state is reached.
+</description>
+<param name="reason">Diagnostic reason for cancellation.</param>
+*)
+METHOD RequestCancel
 VAR_INPUT
 	reason : WSTRING(255);
 END_VAR]]></Declaration>
     </Method>
+    <Method Name="RequestReset" Id="{a9f22376-b044-4094-bac8-89121879eb3b}">
+      <Declaration><![CDATA[(*!
+<summary>Requests resetting from a finished passive state back to PASSIVE_READY.</summary>
+<description>
+Permitted from PASSIVE_COMPLETED, PASSIVE_HALTED, PASSIVE_CANCELLED and PASSIVE_FAILED; no-op in other states.
+Executes the initial resetting step immediately and clears stored diagnostics when PASSIVE_READY is reached.
+If resetting remains in progress, continue calling Execute until PASSIVE_READY is reached.
+</description>
+*)
+METHOD RequestReset]]></Declaration>
+    </Method>
     <Method Name="RequestStart" Id="{0248424e-8d99-4d94-9dda-a7e73b39a6e7}">
-      <Declaration><![CDATA[METHOD RequestStart]]></Declaration>
+      <Declaration><![CDATA[(*!
+<summary>Requests a fresh start from PASSIVE_READY or resumes execution from PASSIVE_SUSPENDED.</summary>
+<description>
+No-op when the current state does not allow transitioning to ACTIVE_RUNNING. Executes the initial running
+step immediately; if work remains in progress, continue calling Execute until a passive state is reached.
+</description>
+*)
+METHOD RequestStart]]></Declaration>
     </Method>
     <Method Name="RequestSuspend" Id="{42d42750-a746-45e5-86f7-6016a93fee51}">
-      <Declaration><![CDATA[METHOD RequestSuspend]]></Declaration>
+      <Declaration><![CDATA[(*!
+<summary>Requests cooperative suspension from ACTIVE_RUNNING.</summary>
+<description>
+No-op when the current state does not allow transitioning to ACTIVE_SUSPENDING. Executes the initial
+suspending step immediately; if suspending remains in progress, continue calling Execute.
+</description>
+*)
+METHOD RequestSuspend]]></Declaration>
     </Method>
     <Property Name="State" Id="{44deaa5b-6f42-4b7d-a3aa-513cbbccb2af}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Returns the current lifecycle state of the activity.</summary>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY State : WORKFLOW_ELEMENT_STATE]]></Declaration>
       <Get Name="Get" Id="{379950be-229e-462c-8ef0-210492f18ace}">
         <Declaration><![CDATA[]]></Declaration>
       </Get>
     </Property>
     <Property Name="Workflow" Id="{9f60fdae-8fa8-4681-ba8b-759d93dfad33}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Returns the workflow that owns or hosts this activity.</summary>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY Workflow : IWorkflow]]></Declaration>
       <Get Name="Get" Id="{ced2bfca-448a-415d-8941-66abd47e1f56}">
         <Declaration><![CDATA[]]></Declaration>
