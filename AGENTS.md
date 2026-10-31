@@ -1,254 +1,308 @@
-# OpenFramework: правила роботи
+# OpenFramework: Working Rules & Guidelines
 
-Правила діють для всього проєкту, включно з тестами й прикладами.
-Нові прямі уточнення власника мають перевагу. Старі плани й записи не є
-дозволом повторно виконувати описані в них зміни.
+These rules apply across the entire project, including tests and samples.
+New direct clarifications from the owner take precedence. Prior plans and notes do not constitute permission
+to re-apply previously described changes.
 
-## Документація й контракти
+Target platform: TwinCAT 3.1 Build 4026. TwinCAT behavior described below is confirmed by the owner and may not yet
+be reflected in Beckhoff documentation; do not override it based on documentation or assumptions.
 
-- Нові типи (FB/клас, interface, DUT тощо), методи, властивості й функції
-  документуй біля декларації. При зміні наявних актуалізуй DocGen або додай
-  відсутній опис у межах зміненого типу чи члена.
-- Формат: `(*! ... *)` або `//!`, XML-теги `<summary>`, `<description>`,
-  `<param>`. Не змішуй DocGen із Markdown/rST і не додавай порожніх секцій.
-- Summary пояснює призначення; description — суттєві передумови, результати,
-  інваріанти, зміни стану, ownership/lifetime, умови й спосіб повідомлення
-  відмов, стан після них, гарантії Try/lifecycle та обмеження успадкування,
-  callbacks і використання між tasks. Не переказуй синтаксис; відрізняй
-  задокументовані гарантії від спостережуваної поведінки й припущень.
-  Не вигадуй контракт із поточної реалізації.
-- Для неочевидних констант пояснюй зміст і застосування. Для бітових масок —
-  які біти виділяються чи прибираються, до якого представлення застосовується
-  маска та як використовується результат.
-- Пояснення алгоритму в implementation і ліцензійні notices — звичайні
-  ST-коментарі. Ліцензія — MIT (`LICENSE.txt`); зберігай авторство.
-- Стандартні коментарі TwinCAT біля системних параметрів методу FB_init
+## Terms
+
+- **Owner**: the project author who issues instructions, approves plans and contracts, and performs verifications.
+- **Agreed plan / agreed contract**: a plan or contract explicitly confirmed by the owner in chat or recorded
+  as a decision in `docs/audit/`.
+- **Try method**: any method whose name starts with `Try`, regardless of casing or visibility.
+- **Terminal OOM**: a failed dynamic allocation after which the application must not continue normal execution.
+- **Fatal allocation latch**: the application-wide state of `DynamicMemoryManager` set on terminal OOM
+  (`RaiseAllocationFailure`) and raised by `RaiseIfAllocationFailed`. Task cleanup does not reset it;
+  only application reinitialization clears it.
+- **`ERROR`**: the Core function block (`Data/Errors/ERROR`) that stores a copied error state independently
+  of transient exception objects.
+
+## Language & Communication
+
+- Always converse and communicate with the owner in Ukrainian, unless explicitly requested otherwise.
+- Code, comments, identifiers, commit messages, and DocGen documentation must strictly be written in English.
+- Working notes and audit journals in `docs/` are maintained in Ukrainian as part of local workspace documentation.
+
+## Documentation and Contracts
+
+- Document new types (FB/class, interface, DUT, etc.), methods, properties, and functions directly next to their
+  declaration. When modifying existing ones, update DocGen or add missing descriptions within the scope of the modified
+  type or member.
+- Format: `(*! ... *)` or `//!` with XML tags `<summary>`, `<description>`, `<param>`. Do not mix DocGen with
+  Markdown/rST, and do not add empty sections.
+- `<summary>` explains purpose. `<description>` details essential preconditions, results, invariants, state transitions,
+  ownership/lifetime, failure conditions and reporting mechanisms, post-failure state, Try/lifecycle guarantees,
+  and constraints on inheritance, callbacks, and cross-task usage. Do not paraphrase syntax.
+- Distinguish documented guarantees from observed behavior and assumptions. Do not invent a contract based on the
+  current implementation.
+- For non-obvious constants, document meaning and application. For bitmasks, document which bits are isolated or
+  cleared, which representation the mask applies to, and how the result is used.
+- Implementation explanations and license notices are standard ST comments. License is MIT (`LICENSE.txt`);
+  preserve authorship.
+- Standard TwinCAT comments next to system parameters of the `FB_init` method
   (`bInitRetains: BOOL; // TRUE: the retain variables are initialized (reset warm / reset cold)`
-  та `bInCopyCode: BOOL; // TRUE: the instance will be copied to the copy code afterward (online change)`)
-  ніколи не переносити нагору в блок DocGen як `//!<param name="bInitRetains">...`
-  чи `(*! <param ... *)`. Вони завжди мають залишатися стандартними інлайн-коментарями
-  TwinCAT безпосередньо біля відповідних змінних у VAR_INPUT.
-- Заголовок функціонального блока оформлюй у такому порядку: блок ліцензії,
-  потім блок DocGen із `<summary>` та іншими потрібними тегами контракту,
-  потім порожній рядок, потім атрибути й одразу декларація `FUNCTION_BLOCK`.
-  Усі атрибути блока, зокрема
-  `{attribute 'no_explicit_call' := 'do not call this function block directly'}`,
-  розміщуй разом після DocGen, а не перед ним чи між блоками коментарів.
+  and `bInCopyCode: BOOL; // TRUE: the instance will be copied to the copy code afterward (online change)`)
+  must never be moved into the DocGen block as `//!<param name="bInitRetains">...` or `(*! <param ... *)`.
+  They must always remain standard TwinCAT inline comments directly next to the respective variables in `VAR_INPUT`.
+- Format function block headers in the following order: license block, then DocGen block with `<summary>` and other
+  required contract tags, then a blank line, then attributes, followed immediately by the `FUNCTION_BLOCK` declaration.
+  Place all block attributes, including `{attribute 'no_explicit_call' := 'do not call this function block directly'}`,
+  together after DocGen, not before it or between comment blocks.
 
-## Проєктування
+## Architecture & Design
 
-- Відсутність залежності трактуй за її погодженою роллю: обов'язковий
-  операнд — помилка конфігурації; необов'язкова дія — відсутність дії;
-  необов'язковий локальний обробник — передавання відмови зовнішньому
-  обробнику, а не успіх чи нескінченне очікування. Порожня композиція
-  не тотожна null-елементу в ній. Якщо API має Configure і setters, вони мають узгоджуватися
-  щодо допустимих залежностей і parent-зв'язків; required аргументи
-  перевіряй до mutation. Це не гарантує rollback exceptions із callbacks.
+- Treat the absence of a dependency according to its agreed role: a missing mandatory operand is a configuration error;
+  a missing optional action is a no-op; a missing optional local handler delegates the failure to the outer handler
+  and is neither success nor indefinite waiting. An empty composition is not equivalent to a null element within it.
+- If an API provides both `Configure` and setters, they must be consistent regarding allowable dependencies and parent
+  relationships. Validate required arguments before mutation; this does not guarantee rollback of exceptions raised
+  from callbacks.
+- Adhere to SOLID and modern design principles: single responsibilities, encapsulation, explicit dependencies,
+  and low coupling. Avoid caller dependency on internal structure of nested objects; pass required dependencies
+  explicitly. Account for testability, maintainability, contracts, and TwinCAT/ST constraints.
+- Choose the simplest understandable code for the agreed contract. Patterns and abstractions must solve a concrete
+  problem and simplify maintenance; do not add them purely for formal compliance. Do not add helpers, flags,
+  or fallback paths "just in case" (for `TRY/CATCH`, see "Exceptions and Lifecycle"). Explain necessary complexity,
+  its cost, and its impact on compatibility; do not hide issues.
+- Names of types, members, and variables must explain their role and behavior. Distinguish configuration, current
+  state, and observation; name specific actions or failure causes if a generic word obscures meaning (for example,
+  `ThrowOnGetMessage` instead of `FailMessage`). Use specific domain terms: `directory`, not `workspace`.
+  Do not rename clear identifiers merely for stylistic uniformity.
+- Cross-task guarantees exist only where they are documented next to the API. Without such a guarantee, treat an object
+  as used by a single task; call-local storage alone does not establish concurrency safety. When adding state shared
+  between tasks, document which operations are synchronized and which require external synchronization.
 
-- Дотримуйся SOLID і сучасних принципів проєктування: чіткі відповідальності,
-  інкапсуляція, явні залежності й низька зв'язність. Уникай залежності caller-а
-  від внутрішньої будови вкладених об'єктів; передавай потрібні залежності явно.
-  Враховуй тестованість, підтримуваність, контракти та обмеження TwinCAT/ST.
-- Обирай найпростіший зрозумілий код для погодженого контракту. Патерни
-  й абстракції мають розв'язувати конкретну проблему та спрощувати підтримку.
-  Не додавай їх заради формальної відповідності, а helpers, flags, fallback
-  paths чи TRY/CATCH — «про всяк випадок». Пояснюй необхідну складність,
-  її ціну й вплив на сумісність; не приховуй проблем.
-- Назви типів, членів і змінних мають пояснювати їхню роль і поведінку.
-  Розрізняй налаштування, поточний стан і спостереження; називай конкретну дію
-  чи причину відмови, якщо загальне слово приховує зміст (наприклад,
-  ThrowOnGetMessage замість FailMessage). Використовуй конкретні предметні слова: directory для каталогу, а не workspace. Не перейменовуй зрозуміле
-  лише заради стилістичної одноманітності.
+## Structured Text Style
 
-## Стиль Structured Text
+- Implement state machines based on typed enumerations (`TYPE ... ENUM`), never numerical variables with constant sets.
+  State names must explain the step or phase.
+- One statement per line. Format `IF/ELSIF/ELSE/END_IF`, loops, `CASE`, and `TRY/CATCH` multiline, even for a single
+  `RETURN` or call.
+- For multiline `IF` conditions, place `THEN` on a separate line indented to match `IF`.
+- In comparisons with boundaries and special values, use constants of the corresponding framework types.
+  Add missing constants to the appropriate type along with a description of their purpose.
+- Separate independent groups of declarations and algorithm steps with blank lines, not every variable or operation.
+- ST code is indented with tabs. Take indentation, casing, and formatting cues from consistent surrounding owner
+  patterns; condensed agent constructions are not the reference standard.
+- In property getters, an early `RETURN` without assigning a result returns the default/initial value of the type.
+  Do not add local `defaultValue` variables and assignments purely to duplicate this default initialization.
 
-- Стейтмашини організовуй на основі типізованих перелічень, а не числових
-  змінних із набором констант станів. Назви станів мають пояснювати крок або фазу.
+### Naming Conventions
 
-- Один оператор на рядок. IF/ELSIF/ELSE/END_IF, цикли, CASE і TRY/CATCH
-  оформлюй багаторядково, навіть для одного RETURN або виклику.
-- Для багаторядкової умови IF став THEN на окремому рядку з відступом IF.
-- Приватні поля класів/FB починай з `_`; це не правило для локальних змінних
-  і параметрів. Не перейменовуй сторонній API.
-- У порівняннях із межами й спеціальними значеннями використовуй константи
-  відповідних типів фреймворка. Відсутню константу додай до відповідного типу
-  з описом призначення.
-- Порожніми рядками відділяй незалежні групи декларацій і кроки алгоритму,
-  а не кожну змінну чи операцію. Відступи, регістр та інше оформлення бери
-  з послідовних сусідніх зразків власника; стислі конструкції агента не еталон.
-- У геттерах властивостей ранній RETURN без присвоєння результату повертає
-  початкове значення типу. Не додавай локальні defaultValue та присвоєння
-  лише для дублювання цієї ініціалізації.
+- Classes/FBs and interfaces use PascalCase without type prefixes (`List`, `AutomationRunner`); interface names start
+  with `I` (`IAutomationComponent`).
+- Enumerations and structures use UPPER_SNAKE_CASE for type names and enumeration values (`OPERATIONAL_STATE`,
+  `ERROR_MESSAGE`). Some data-holder FBs follow the same style (`ERROR`, `GENERIC_VALUE`); follow the pattern
+  of the surrounding area.
+- Public, protected, and internal methods and properties use PascalCase; private methods use camelCase
+  (`cleanupTaskMemory`).
+- Private fields of classes/FBs use the `_` prefix with PascalCase (`_AllocationFailed`); local variables and
+  parameters use camelCase without the prefix.
+- Do not rename third-party APIs.
 
-## Exceptions і lifecycle
+## Exceptions and Lifecycle
 
-- При нормальному виході з методу FB_exit локального FB викликається, при
-  виході через exception — ні. Локальні ресурси звільняй до Throw після
-  копіювання потрібного результату; не покладайся на FB_exit для exception path.
-  Для builders застосовуй Clear(TRUE), пояснюючи причину звичайним ST-коментарем.
+### Exception Usage
 
-- Використовуй exceptions цілеспрямовано: для переривання операції та передачі
-  відмови, яку контракт не подає як звичайний результат. Штатні результати,
-  зокрема допустиму відсутність, очікування чи відмову Try, виражай через
-  передбачені API результат або стан. Критерій — контракт, а не частота події.
-  Видалення відсутнього значення може бути no-op і в порожній колекції;
-  поведінку фіксуй біля API. Invalid arguments, обов'язкові передумови й
-  terminal OOM перевіряються. Не послаблюй перевірки й не замінюй масово
-  погоджені exceptions на коди помилок. Пояснення для користувачів:
-  [раціональне використання exceptions](Concepts/Exceptions/ExceptionsConcept.md#when-to-use-exceptions).
-- Додаючи Throw або TRY/CATCH, поясни його роль: чому звичайного результату
-  недостатньо, де обробляється відмова або який no-throw контракт забезпечується.
-  Не створюй exception лише для негайного перетворення очікуваного результату
-  на статус через CATCH. Перехоплення має визначену дію: відновлення, cleanup,
-  перетворення на результат/діагностику або передавання далі з контекстом.
-  Якщо дозволяєш продовження після exception, визначай стан компонента після
-  перерваної операції: саме перехоплення не означає відновлення стану.
-- Усі методи з префіксом Try, незалежно від регістру й видимості, не повинні
-  пропускати exceptions, включно з вкладеними викликами й callbacks.
-  Це цільовий контракт, а не гарантія відповідності всього наявного коду.
-  Аналізуй також allocation, ресурси, стан і ownership після невдачі:
-  самого CATCH недостатньо, якщо він залишає їх некоректними.
-- При terminal OOM Try повертає невдачу й залишає critical allocation flag.
-  RaiseIfAllocationFailed піднімає помилку на межі задачі поза Try та
-  recoverable handlers, зокрема для задач без AutomationRunner. Не скидай
-  terminal flag і не дозволяй продовжувати наступні цикли після terminal OOM.
-- FB_init, FB_exit, FB_reinit та викликані ними helpers мають завершуватися
-  без exceptions; не створюй і не піднімай їх та не використовуй throwing
-  paths як штатну обробку відмови в lifecycle-методах.
-- Базовий FB_init у TwinCAT викликається автоматично середовищем виконання
-  для відповідних однойменних параметрів. Якщо нащадок розширює перелік
-  параметрів FB_init, компілятор самостійно викликає базовий FB_init,
-  тому відсутність повторного копіювання чи виклику SUPER^.FB_init для
-  базових параметрів не є помилкою.
-- У базовому FB_init не обчислюй дані через перевизначувані методи чи
-  властивості, які читають instance-поля нащадка (вони ще можуть бути
-  не ініціалізовані). Водночас ініціалізовані поля VAR_STAT (зокрема
-  `_ClassName := __POUNAME()`) уже готові до виклику базового FB_init, тому
-  властивість ClassName, що лише повертає таке статичне поле без побічних
-  ефектів і exceptions, можна використовувати в FB_init для формування
-  default name без lazy initialization чи прапорців готовності. Завжди
-  перевіряй фактичне сховище та залежності getter-а.
-- У FB_init синтаксично допустимі початкові значення параметрів, але
-  компілятор не дозволяє використати їх як default arguments і пропустити
-  відповідні аргументи. Не задавай оманливих defaults у декларації;
-  явно передавай усі додаткові параметри в кожному місці ініціалізації,
-  включно з нульовими посиланнями на необов'язкові залежності.
-- Якщо FB_exit порушив контракт під час TryRelease, helper повертає FALSE
-  й обнуляє переданий pointer/interface. Це не гарантує deallocation та не
-  обнуляє aliases; частково зруйнований об'єкт не використовуй і не видаляй
-  повторно через інші посилання.
-- Exceptions реєструються явно в Clone після __NEW/null guard, до копіювання
-  payload, через DynamicMemoryManager.RegisterAutoDisposedObject поза
-  lifecycle-методами. Custom Clone має виконати цю реєстрацію; plain __NEW
-  не передає ownership менеджеру. Автоматичний registrar у FB_init і
-  відкладений registrar OOM не використовуються.
-- При створенні нового типу exception або додаванні payload перевіряй,
-  що Clone зберігає конкретний тип і всі його дані; успадкований Clone
-  не вважай автоматично придатним.
-- Посилання на exceptions не зберігай після cleanup своєї task і не передавай
-  між tasks. Для довготривалої діагностики використовуй ERROR.
+- Use exceptions purposefully: to interrupt an operation and propagate a failure that the contract does not represent
+  as a regular outcome. Regular results—including allowable absence, pending states, or Try failures—must be expressed
+  via designated API return values or states. The criterion is the contract, not event frequency.
+- Deleting a missing value can be a no-op even in an empty collection; document behavior next to the API.
+- Invalid arguments, mandatory preconditions, and terminal OOM must be checked. Do not relax validations or replace
+  agreed exceptions with error codes en masse.
+  User explanation: [Rational Exception Handling](Concepts/Exceptions/ExceptionsConcept.md#when-to-use-exceptions).
+- Do not add `TRY/CATCH` "just in case". When adding `Throw` or `TRY/CATCH`, explain its purpose: why a regular outcome
+  is insufficient, where failure is handled, or what no-throw contract is enforced. Do not create an exception merely
+  to immediately convert an expected outcome into a status code via `CATCH`.
+- Catching must perform a defined action: recovery, cleanup, conversion into a result/diagnostic, or rethrowing with
+  context. If continuation after an exception is permitted, define the component state following the aborted
+  operation: catching by itself does not restore valid state.
+- The `__TRY ... __FINALLY ... __ENDTRY` construct without a `__CATCH` section is not supported by the compiler.
+- In all TwinCAT versions, the `__FINALLY` block is not executed if a secondary exception occurs inside `__CATCH`.
+
+### Try Methods and Terminal OOM
+
+- Try methods must never leak exceptions, including from nested calls and callbacks. This is a target contract,
+  not a guarantee of existing code conformance. Analyze allocations, resources, state, and ownership after failure:
+  `CATCH` alone is insufficient if it leaves state corrupt or resources leaked.
+- On terminal OOM, a Try method returns failure and leaves the fatal allocation latch set.
+- Each task must call `DynamicMemoryManager.RaiseIfAllocationFailed` at its task boundary, outside Try methods and
+  recoverable handlers. `AutomationRunner` does this for the tasks it runs; tasks without `AutomationRunner` must do
+  it explicitly. Do not clear the latch or allow subsequent execution cycles to continue after terminal OOM.
+
+### Lifecycle Methods
+
+- `FB_init`, `FB_exit`, `FB_reinit`, and helpers called by them must complete without exceptions; do not create or
+  raise exceptions and do not use throwing paths as routine failure handling in lifecycle methods.
+- TwinCAT calls the base `FB_init` implicitly and passes the parameters with matching names, including when a derived
+  class extends the parameter list. Therefore, the absence of duplicate parameter copying or an explicit
+  `SUPER^.FB_init` call for base parameters is not an error.
+- In the base `FB_init`, do not compute data via overridable methods or properties that read instance fields of the
+  derived class (they may not be initialized yet).
+- Initialized `VAR_STAT` fields (notably `_ClassName := __POUNAME()`) are ready before the base `FB_init` executes.
+  A `ClassName` property that merely returns such a static field without side effects or exceptions can safely be used
+  in `FB_init` to construct a default name without lazy initialization or readiness flags. Always inspect actual
+  storage and dependencies of the getter.
+- In `FB_init`, parameter default values are syntactically permitted, but the compiler does not allow using them
+  to omit arguments at call sites. Do not declare misleading defaults in the declaration; explicitly pass all
+  additional parameters at every initialization site, including null references for optional dependencies.
+- In `PROGRAM`, `FB_init` and `FB_exit` methods are not called automatically by the runtime upon start or unloading.
+  Encapsulate program resource cleanup and initialization in a nested FB instance (resource manager) or invoke them
+  explicitly.
+
+### Memory and Ownership
+
+- On normal exit from a method, `FB_exit` of a local FB instance is invoked; on exit via an exception, it is NOT.
+  Release local resources before `Throw` after copying the required result; do not rely on `FB_exit` for exception
+  paths. For builders, use `Clear(TRUE)` and document the rationale with a standard ST comment.
+- `__DELETE(ptr)` automatically invokes `FB_exit` only when the pointer is typed as a concrete function block
+  (`POINTER TO FB_Type`). When deleting through `PVOID` or an interface, the runtime only frees memory, and `FB_exit`
+  is NOT invoked (risk of resource and handle leaks).
+- If `FB_exit` violates its contract during `TryRelease`, the helper returns `FALSE` and clears the passed
+  pointer/interface. This does not guarantee deallocation and does not nullify aliases; do not use or re-delete
+  a partially destroyed object via other references.
+- Assigning FB instances by value (`fb_B := fb_A`) performs a bitwise `MEMCPY` without calling `FB_init` or `FB_exit`.
+  If the FB contains pointers, references, or interfaces, copying creates hazardous aliases (shallow copy) and violates
+  ownership models (risk of double-free or unexpected mutations); avoid copying such objects by value.
+- To make such copying a compile-time error, new FBs that own pointers, references, or interfaces may declare
+  `{attribute 'no_assign'}`. Do not add it to existing types without owner approval: it breaks call sites that copy
+  instances.
+
+### Exception Objects
+
+- Exception objects created in `Clone` must be registered explicitly via
+  `DynamicMemoryManager.RegisterAutoDisposedObject` after `__NEW` and the null guard, before copying payload.
+  Plain `__NEW` does not transfer ownership to the manager.
+- Registration happens outside lifecycle methods; automatic registrars in `FB_init` and deferred OOM registrars
+  are not used. Registered dynamic exceptions are owned by `DynamicMemoryManager` until task cleanup; static instances
+  remain caller-owned.
+- When creating a new exception type or adding payload, verify that `Clone` preserves the concrete type and all of its
+  payload data; do not assume an inherited `Clone` is automatically suitable.
+- Do not retain references to exceptions after task cleanup and do not pass them across tasks. For long-term
+  diagnostics, copy the state into `ERROR`.
 
 ## TwinCAT
 
-- Перед видачею або записом ST-коду перевіряй його на типізацію та правила
-  компілятора TwinCAT: тотожність сигнатур між INTERFACE, базовим FB і
-  нащадками (типи, секції VAR_INPUT/VAR_OUTPUT/VAR_IN_OUT CONSTANT, імена
-  параметрів); прив'язку REFERENCE TO через `REF=` та перевірку через
-  `__ISVALIDREF` (а не порівняння з 0); використання `__QUERYINTERFACE` лише
-  для інтерфейсів або `THIS^` і `__QUERYPOINTER` для отримання вказівника на FB;
-  відсутність повторного оголошення поля з тим самим ім'ям (зокрема `_ClassName`),
-  якщо воно вже оголошене в базовому FB.
-- У PROGRAM секція VAR_STAT недопустима; `_ClassName` залишай у VAR.
-- Міграція діагностичних рядків на VAR_IN_OUT CONSTANT стосується лише рядків
-  довших за 255 символів. STRING(255)/WSTRING(255) залишаються VAR_INPUT;
-  API, які вже передавали рядки за посиланням, не переводь назад.
-- TwinCAT sources — XML із CDATA: зберігай структуру й object IDs.
-  `.plcproj` редагуй точково, без повторної серіалізації всього XML.
-- Зберігай TwinCAT Referenced Library: квадратні дужки в Resolution та
-  DefaultResolution означають посилання на PLC-проєкт. Не прибирай їх,
-  не нормалізуй library identity та не змінюй VirtualLibrary,
-  PlaceholderReference чи PlaceholderResolution без доручення.
-- Фактичне library resolution не тотожне sources. Для читання чи аудиту
-  не активуй target/hardware. XML parsing не означає ST compilation.
+### Compiler and Typing Rules
 
-## Що означає «зроби аудит …»
+- Before issuing or writing ST code, verify it against TwinCAT typing and compiler rules:
+  - Exact signature identity between `INTERFACE`, base FB, and derived classes (types,
+    `VAR_INPUT`/`VAR_OUTPUT`/`VAR_IN_OUT CONSTANT` sections, parameter names).
+  - Binding `REFERENCE TO` via `REF=` and checking validity via `__ISVALIDREF` (never compare references to 0).
+  - `__QUERYINTERFACE` converts only between interfaces. To obtain a pointer to an FB, use `THIS` (pointer to the own
+    instance; `THIS^` is the instance itself) or `__QUERYPOINTER` (from an interface).
+  - No duplicate field declarations with the same name (notably `_ClassName`) if already declared in a base FB.
+- In a property getter of type `REFERENCE TO`, always use the `REF=` operator (never `:=`); otherwise, dereferencing
+  an uninitialized reference causes an exception (Access Violation / Page Fault) and triggers an emergency PLC crash.
+- A `REFERENCE TO` property cannot be made truly read-only: direct assignment `fb.Prop := val` dereferences the
+  reference and mutates the target object even in the absence of a setter.
+- For method parameters of type `REFERENCE TO`, the compiler does not allow passing literals (except string literals)
+  or direct method calls (`Method(ref := GetVal())` will not compile); values must be passed via an intermediate
+  local variable.
+- Default parameter values (optional method arguments) are not supported by the compiler for `ANY` types
+  (`ANY_TYPE`, `ANY_STRING`, etc.) or for `VAR_IN_OUT CONSTANT` sections; all such arguments must be passed explicitly
+  in the call.
+- Pass diagnostic strings longer than 255 characters via `VAR_IN_OUT CONSTANT`; `STRING(255)`/`WSTRING(255)` remain
+  `VAR_INPUT`. Do not revert APIs that already pass strings by reference.
+- In `PROGRAM`, `VAR_STAT` sections are invalid; keep `_ClassName` in `VAR`.
 
-- Запит «зроби аудит» означає комплексний аналіз зазначеної частини проєкту
-  з позиції архітектора й досвідченого програміста зі звітом і рекомендаціями.
-- Спочатку визнач межі аудиту та перелік об'єктів. Охоплюй усі об'єкти в цих
-  межах: функціональні блоки, програми, функції, інтерфейси, типи, методи,
-  властивості, глобальні дані, константи, внутрішні helpers, тести й приклади.
-  Простежуй залежності, успадкування, callbacks і місця використання настільки,
-  наскільки потрібно для перевірки контрактів та поведінки; не обмежуйся
-  публічним API або вибірковим переглядом файлів.
-- Перевіряй наявність, повноту й несуперечність контрактів за розділом
-  «Документація й контракти» та відповідність їм коду. Відсутні й неоднозначні
-  контракти фіксуй окремо.
-- Оцінюй, чи розв'язує задум заявлену проблему, чи доречні API й алгоритми,
-  чи дотримано правил розділу «Проєктування». Архітектурні зауваження
-  обґрунтовуй конкретними наслідками.
-- Шукай дефекти в основних, граничних і помилкових сценаріях: некоректні
-  переходи стану, порушення інваріантів, помилки ресурсів і пам'яті,
-  некоректну обробку відмов, проблеми взаємодії об'єктів та, де застосовно,
-  міжзадачної взаємодії й часу виконання. Аналізуй також якість наявних тестів
-  і прикладів та прогалини в покритті важливих сценаріїв.
-- У звіті зазначай охоплення й обмеження, загальну оцінку задуму та реалізації,
-  а знахідки впорядковуй за критичністю. Для кожної наводь актуальне місце
-  в коді, суть проблеми, сценарій або доказ, наслідки й конкретну рекомендацію
-  з урахуванням сумісності. Відділяй підтверджені дефекти від ризиків,
-  відкритих питань і необов'язкових покращень.
-- Завершуй звіт пріоритетами подальших дій, потрібними рішеннями власника
-  та рекомендованими перевірками. Явно вказуй, що не оглянуто або не перевірено;
-  не називай частковий аудит повним і не прирівнюй читання коду до виконання
-  тестів чи підтвердження поведінки runtime.
+### Source Files and Projects
 
-## Порядок роботи й перевірки
+- TwinCAT source files are XML with CDATA: preserve structure and object IDs. Edit `.plcproj` files surgically without
+  re-serializing the entire XML.
+- TwinCAT source files (`.TcPOU`, `.TcDUT`, `.TcIO`, `.TcGVL`, etc.) use UTF-8 with BOM and CRLF line endings.
+  Do not strip BOM when editing; new source files must be created with UTF-8 BOM and CRLF.
+  Edit `.plcproj` files surgically without re-serializing the entire XML, preserving their encoding and structure.
+- A new object file (`.TcPOU`, `.TcDUT`, `.TcIO`, `.TcGVL`) starts with `<?xml version="1.0" encoding="utf-8"?>` and
+  `<TcPlcObject Version="1.1.0.1">`. Generate a new unique GUID for the object and for every nested element with an
+  `Id` (methods, properties, accessors, folders); never reuse IDs copied from other files.
+- Place a new file in the folder of its subsystem and register it in the library `.plcproj`
+  as `<Compile Include="relative\path"><SubType>Code</SubType></Compile>`; add `<Folder Include="...">` entries for new
+  folders.
+- Preserve TwinCAT Referenced Library entries: square brackets in `Resolution` and `DefaultResolution` indicate
+  references to the PLC project. Do not remove them, normalize library identity, or change `VirtualLibrary`,
+  `PlaceholderReference`, or `PlaceholderResolution` without explicit instruction.
+- Actual library resolution is not identical to source files. Do not activate target/hardware for reading or auditing.
+  XML parsing does not imply ST compilation.
 
-- Сам запит на аудит дозволяє аналіз і звіт; виправлення коду та зміни
-  контрактів потребують окремого доручення. Працюй малими завершеними кроками:
-  не змінюй погоджені контракти масово, не розширюй scope рефакторингу
-  й не форматуй код поза запитом. Після виправлення попередньої проблеми
-  автоматично переходь до наступної проблеми поточного погодженого плану:
-  аналізуй її та виконуй уже дозволені правки без окремого запиту «продовжувати?».
-  Не зупиняйся лише через завершення одного кроку. Нові зміни поведінки
-  погоджуй окремо; якщо потрібне рішення власника, сформулюй конкретне
-  питання щодо наступної проблеми, продовжуючи незалежну погоджену роботу.
-- Якщо задум, контракт, поведінка чи стиль неоднозначні, постав конкретне
-  питання до залежної правки; незалежну погоджену роботу продовжуй.
-  Не вигадуй вимоги, власний стандарт і не перепитуй уже погоджене.
-- Зберігай зміни власника. Контракти й старі file/line references звіряй
-  із поточним кодом. Погоджені рішення переглядай лише за новими фактами
-  або дорученням, пояснюючи причину.
-- Шукай і читай релевантні фрагменти; розширюй читання за залежностями.
-  Не перечитуй актуальне без потреби, але не пропускай обов'язкові матеріали
-  й не жертвуй повнотою аналізу заради економії контексту.
-- Відкочений план T00–T10 та його авторизація не чинні: не відновлюй його
-  API, scripts чи tests.
-- Перевірки виконує власник. Без нового доручення не запускай compilation,
-  TcUnit/runtime, XML validation, check-скрипти чи генерацію DocGen.
-  Читання й пошук дозволені. Старі перевірки не підтверджують нову редакцію коду.
-- У чаті звітуй стисло: результат, сумісність, що ще не перевірено та яке
-  рішення потрібне; повний звіт аудиту зберігай у тематичному журналі.
-  Код показуй лише для конкретної проблеми або вибору.
+## Tests and Samples
 
-## Локальна документація
+- Unit tests use TcUnit and live in `Sources/TwinCAT.OpenFramework.Tests/Tests/<Area>/`. A test suite is an FB named
+  `<Subject>Test` that extends `TcUnit.FB_TestSuite`.
+- Usage examples belong to `TwinCAT.OpenFramework.Samples` and `TwinCAT.OpenFramework.HowTo`; their intended split is
+  described in `docs/audit/tests-and-examples-review.md`.
+- New behavior and fixed defects must be covered by tests in the same change. Include these tests in the proposed plan;
+  approval of the plan authorizes them. If a scenario cannot be covered by TcUnit, state this in the plan and propose
+  a manual verification for `docs/audit/validation.md`. Test runs are performed by the owner.
 
-`docs/` зберігається локально й не входить до Git. Чинні правила наведені вище;
-робочі матеріали в `docs/audit/` дають контекст рішень і продовження аудиту.
+## What "Perform an Audit..." Means
 
-- Нові підтверджені загальні правила записуй у `AGENTS.md`, конкретні
-  контракти — біля декларацій і в тематичному журналі. У журналі стисло
-  підтримуй результати аудиту, поточний крок, рішення, зміни, відкриті питання,
-  перевірки й наступну дію; не дублюй історію.
-- При переході в новий чат продовжуй за планом і журналом, без повторного
-  аудиту завершеного чи вимоги нового чату після кожного кроку.
-  Не зупиняй дозволену роботу лише задля скорочення контексту.
-- Перед архітектурними змінами читай `architecture.md`.
-- Для продовження аудиту читай `README.md`, `findings.md`, `validation.md`
-  та відповідний тематичний підсумок. Core — `core-contracts.md`, Tasks і
-  FileSystem — `tasks-contracts.md`, exceptions — `exceptions-status.md`;
-  інші теми та їхні журнали наведені в README.
-- Зразок DocGen: `docgen-migration.md`.
+- An "audit" request means a comprehensive analysis of the specified project scope from the perspective of an architect
+  and experienced engineer, resulting in a structured report and actionable recommendations.
+- First, define the audit boundaries and the list of objects. Cover all objects within these boundaries: function
+  blocks, programs, functions, interfaces, types, methods, properties, global data, constants, internal helpers, tests,
+  and samples. Trace dependencies, inheritance, callbacks, and call sites as deeply as required to verify contracts and
+  behavior; do not limit review to public APIs or selective file inspection.
+- Verify the existence, completeness, and consistency of contracts against the "Documentation and Contracts" section
+  and check code compliance. Record missing or ambiguous contracts separately.
+- Assess whether the design solves the stated problem, whether APIs and algorithms are appropriate, and whether
+  "Architecture & Design" rules are followed. Justify architectural remarks with specific consequences.
+- Look for defects in normal, edge-case, and error scenarios: invalid state transitions, invariant violations, resource
+  and memory leaks, improper failure handling, object interaction issues, and, where applicable, cross-task concurrency
+  and execution timing. Also evaluate the quality of existing tests and samples, identifying coverage gaps for critical
+  scenarios.
+- In the report, state scope and limitations, overall assessment of design and implementation, and order findings by
+  criticality. For each finding, provide the current code location, core issue, scenario or proof, consequences, and
+  a specific recommendation accounting for backward compatibility. Separate confirmed defects from risks, open
+  questions, and optional improvements.
+- Conclude the report with prioritized next actions, decisions required from the owner, and recommended verifications.
+  Explicitly state what was not inspected or verified; do not label a partial audit as complete, and never equate
+  reading code with executing tests or confirming runtime behavior.
 
-Якщо потрібного локального матеріалу немає, уточни відсутній контекст для
-залежної роботи. Чинні правила діють і за відсутності `docs/`.
+## Execution Workflow & Verification
+
+- An audit request authorizes analysis and reporting only; code modifications and contract changes require separate
+  authorization.
+- Work in small, completed steps: do not modify agreed contracts en masse, do not broaden refactoring scope, and do not
+  reformat code outside the request.
+- After completing an item of the current agreed plan, automatically proceed to the next one: analyze it and implement
+  authorized changes without an extra "should I continue?" prompt. Do not stop simply because a single step completed.
+- Coordinate new behavioral changes separately. If intent, contract, behavior, or style is ambiguous, ask a concrete
+  question before dependent edits and continue independent agreed work meanwhile. Do not invent requirements or
+  personal standards, and do not re-ask previously settled decisions.
+- Preserve owner changes. Cross-check contracts and older file/line references against current code. Revisit agreed
+  decisions only upon new facts or explicit instructions, explaining the rationale.
+- Search and read relevant fragments; expand reading along dependencies. Do not re-read current files unnecessarily,
+  but never skip mandatory materials or sacrifice analysis completeness to conserve context.
+- Verifications are performed by the owner. Without explicit authorization, do not launch compilation, TcUnit/runtime,
+  XML validation, check scripts, or DocGen generation. Reading and searching are permitted. Old verifications do not
+  confirm new revisions of code.
+- Git: without a direct instruction from the owner, do not add changes to the staging area, commit (including amend),
+  or push. Do not discard or rewrite owner changes (`reset`, `checkout`, `restore`, `stash`). Read-only commands
+  (`status`, `diff`, `log`, `show`) are permitted.
+- In chat, report concisely: results, compatibility, what remains unverified, and what decisions are required;
+  maintain the full audit report in the dedicated thematic journal. Show code only for a specific problem or
+  architectural choice.
+
+## Local Documentation
+
+`docs/` is stored locally and is excluded from Git. The governing rules are set forth above; working materials
+in `docs/audit/` provide context for decisions and continuation of the audit.
+
+- Record new confirmed general rules in `AGENTS.md`, and specific contracts next to declarations and in the thematic
+  journal. In the journal, concisely maintain audit findings, current step, decisions, changes, open questions,
+  verifications, and next action; do not duplicate history.
+- When transitioning to a new chat, continue using the plan and journal without re-auditing completed work or requiring
+  a new chat after each step. Do not stop authorized work merely to shorten context.
+- Read `docs/audit/architecture.md` before making architectural changes.
+- To continue audits, consult `docs/audit/README.md`, `docs/audit/current-state.md`, `docs/audit/findings.md`,
+  `docs/audit/validation.md`, and the respective thematic summary: Core — `docs/audit/core-contracts.md`,
+  Tasks and FileSystem — `docs/audit/tasks-contracts.md`, exceptions — `docs/audit/exceptions-status.md`;
+  other topics and their journals are indexed in `docs/audit/README.md`.
+- DocGen reference: `docs/audit/docgen-migration.md`.
+
+If required local materials are missing, clarify the missing context for dependent work. Governing rules remain
+in effect even in the absence of `docs/`.

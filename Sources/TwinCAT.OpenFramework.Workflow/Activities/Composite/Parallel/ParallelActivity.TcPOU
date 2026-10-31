@@ -1,0 +1,627 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="ParallelActivity" Id="{6c5ddb07-2877-413c-a1a1-f1e269fb6def}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+SPDX-FileCopyrightText: © 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+SPDX-License-Identifier: MIT
+License: https://opensource.org/license/mit
+*)
+
+(*!
+<summary>Coordinates multiple child activities executing concurrently in parallel branches.</summary>
+<description>
+Advances all busy child activities concurrently in each execution cycle according to the configured Mode.
+Under WAIT_ALL, completes when all child activities reach PASSIVE_COMPLETED. If any child halts, cancels remaining
+busy children and transitions to PASSIVE_HALTED once stopped.
+Under WAIT_ANY, when the first child reaches PASSIVE_COMPLETED, cancels remaining busy children and transitions to
+PASSIVE_COMPLETED once all branches have safely stopped.
+Propagates cancellation, suspension, and resetting across all children.
+</description>
+*)
+
+{attribute 'no_explicit_call' := 'do not call this function block directly'}
+{attribute 'enable_dynamic_creation'}
+FUNCTION_BLOCK ParallelActivity EXTENDS Activity IMPLEMENTS IParallelActivity
+VAR_STAT
+	{attribute 'hide'}
+	_ClassName : STRING := __POUNAME();
+END_VAR
+VAR
+	{attribute 'OPC.UA.DA' := '0'}
+	_Children : TOF_Collections.List<0>(0);
+
+	{attribute 'OPC.UA.DA' := '0'}
+	_Mode : PARALLEL_JOIN_MODE := PARALLEL_JOIN_MODE.WAIT_ALL;
+
+	{attribute 'OPC.UA.DA' := '0'}
+	_BranchHalted : BOOL;
+
+	{attribute 'OPC.UA.DA' := '0'}
+	_BranchHaltedReason : WSTRING(255);
+
+	{attribute 'OPC.UA.DA' := '0'}
+	_AnyBranchCompleted : BOOL;
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[]]></ST>
+    </Implementation>
+    <Folder Name="Internal members" Id="{7baed18b-ddb6-4a91-b4cc-1407e3826a3f}" />
+    <Method Name="AddChildActivity" Id="{0292ec90-8c9b-4d75-b95c-7d712d77dd0f}">
+      <Declaration><![CDATA[(*!
+<summary>Appends a child activity to be executed in parallel and returns its zero-based index.</summary>
+<description>
+Permitted only in PASSIVE_READY. Validates that the activity belongs to the same workflow, is not already attached,
+and does not form an ancestor cycle.
+</description>
+<param name="activity">Child activity to execute concurrently.</param>
+*)
+METHOD AddChildActivity : DINT
+VAR_INPUT
+	activity : IActivity;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[ValidateChildActivityAttachment(activity, 'activity');
+
+_Children.AppendGeneric(
+	TOF_Core.GenericValueFactory.FromParts(
+		TOF_Core.GENERIC_TYPE_CLASS.OBJECT,
+		activity.SelfAddress,
+		activity.SelfSize,
+		TOF_Core.GENERIC_MEMORY_MANAGEMENT_BEHAVIOR.STORE_ORIGINAL_REFERENCE_AND_NOT_OWNS_MEMORY
+	),
+	index => AddChildActivity
+);
+
+activity.ParentActivity := THIS^;]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="ChildCount" Id="{f1d507c7-8363-4045-a8d3-b5afa6acf345}">
+      <Declaration><![CDATA[(*!
+<summary>Returns the number of child activities registered for parallel execution.</summary>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY ChildCount : DINT]]></Declaration>
+      <Get Name="Get" Id="{c3962e91-9a15-4b7f-a47a-e846d6b53c5b}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ChildCount := _Children.Length;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="ClassName" Id="{f108a989-028d-405d-87cf-71f0f548a4d6}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{e13e85c6-7fb6-49a2-bb4c-1ac98668a3d5}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ClassName REF= _ClassName;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="GetChildActivity" Id="{2954fc95-78c9-4fde-a38b-2c20fa1f2471}">
+      <Declaration><![CDATA[(*!
+<summary>Returns the child activity at the specified zero-based index, or 0 if the index is out of bounds.</summary>
+<param name="index">Zero-based index of the child activity.</param>
+*)
+METHOD GetChildActivity : IActivity
+VAR_INPUT
+	index : DINT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[GetChildActivity := getChildActivityAt(index);]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="getChildActivityAt" Id="{d34256f5-80c9-4c5c-b41f-2e64d1fea5f0}" FolderPath="Internal members\">
+      <Declaration><![CDATA[(*!
+<summary>Internal helper to retrieve a typed child activity reference at the specified index.</summary>
+<param name="index">Zero-based index in the child activity list.</param>
+*)
+METHOD PRIVATE getChildActivityAt : IActivity
+VAR_INPUT
+	index : DINT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF index >= 0 AND_THEN index < _Children.Length THEN
+	__QUERYINTERFACE(_Children.Get(index).AsObject(), getChildActivityAt);
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="Mode" Id="{58a2c073-b79d-497c-818c-5b08eed0876e}">
+      <Declaration><![CDATA[(*!
+<summary>Gets or sets the join completion mode (WAIT_ALL or WAIT_ANY).</summary>
+<description>
+Can only be modified while the activity is in PASSIVE_READY.
+</description>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY Mode : PARALLEL_JOIN_MODE]]></Declaration>
+      <Get Name="Get" Id="{1924c67c-4f95-4132-b4d7-95ec46fb3d61}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[Mode := _Mode;]]></ST>
+        </Implementation>
+      </Get>
+      <Set Name="Set" Id="{7bec509a-a3f2-481b-a9f3-cf6a6bff1473}">
+        <Declaration><![CDATA[VAR
+END_VAR]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[IF State <> WORKFLOW_ELEMENT_STATE.PASSIVE_READY THEN
+	WorkflowExceptions.ThrowWorkflowConfiguration(
+		NamespaceName,
+		ClassName,
+		__POUNAME(),
+		__POSITION(),
+		"Cannot modify parallel join mode outside PASSIVE_READY"
+	);
+END_IF
+
+_Mode := Mode;]]></ST>
+        </Implementation>
+      </Set>
+    </Property>
+    <Property Name="NamespaceName" Id="{b01d14a2-cf3c-4554-83c0-3da70ecb2e96}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{e65dc63c-0d39-4335-b979-44071d360f90}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[NamespaceName REF= CurrentNamespace.Name;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="OnFail" Id="{0d7481d5-e08f-41df-bce5-678c7c1a7ebe}">
+      <Declaration><![CDATA[(*!
+<summary>Cancels all active child activities when this parallel activity transitions to PASSIVE_FAILED.</summary>
+<param name="exception">Caught exception that caused the failure.</param>
+*)
+METHOD PROTECTED OnFail
+VAR_INPUT
+	exception : TOF_Core.IException;
+END_VAR
+VAR
+	i : DINT;
+	child : IActivity;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[FOR i := 0 TO _Children.Length - 1 DO
+	child := getChildActivityAt(i);
+
+	IF child <> 0 AND_THEN child.Busy THEN
+		__TRY
+			child.RequestCancel("Parent parallel activity failed");
+		__CATCH
+		__ENDTRY
+	END_IF
+END_FOR]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="OnResetting" Id="{59a532c0-886c-4108-9fd7-fbea264997ee}">
+      <Declaration><![CDATA[(*!
+<summary>Drives resetting of all non-ready child activities back to PASSIVE_READY.</summary>
+<param name="startResetting">TRUE on the initial call from RequestReset.</param>
+*)
+METHOD PROTECTED OnResetting : ACTIVITY_RESETTING_STATE
+VAR_INPUT
+	startResetting : BOOL;
+END_VAR
+VAR
+	i : DINT;
+	child : IActivity;
+	allReset : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF _Children.Length < 1 THEN
+	_BranchHalted := FALSE;
+	_BranchHaltedReason := "";
+	_AnyBranchCompleted := FALSE;
+	OnResetting := ACTIVITY_RESETTING_STATE.WORK_RESET;
+	RETURN;
+END_IF
+
+allReset := TRUE;
+
+FOR i := 0 TO _Children.Length - 1 DO
+	child := getChildActivityAt(i);
+
+	IF child <> 0 AND_THEN child.State <> WORKFLOW_ELEMENT_STATE.PASSIVE_READY THEN
+		IF resetChildActivity(child) = ACTIVITY_RESETTING_STATE.WORK_IN_PROGRESS THEN
+			allReset := FALSE;
+		END_IF
+	END_IF
+END_FOR
+
+IF allReset THEN
+	_BranchHalted := FALSE;
+	_BranchHaltedReason := "";
+	_AnyBranchCompleted := FALSE;
+	OnResetting := ACTIVITY_RESETTING_STATE.WORK_RESET;
+ELSE
+	OnResetting := ACTIVITY_RESETTING_STATE.WORK_IN_PROGRESS;
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="OnRunning" Id="{83a490b1-f30e-48d1-81a8-4c4cf4e6def3}">
+      <Declaration><![CDATA[(*!
+<summary>Advances all busy child activities concurrently and evaluates parallel join completion.</summary>
+<param name="startRunning">TRUE on the initial call of a fresh start from PASSIVE_READY.</param>
+<param name="startResuming">TRUE on the initial call when resuming from PASSIVE_SUSPENDED.</param>
+<param name="haltReason">Receives the diagnostic reason if a child activity halts.</param>
+*)
+METHOD PROTECTED OnRunning : ACTIVITY_RUNNING_STATE
+VAR_INPUT
+	startRunning : BOOL;
+	startResuming : BOOL;
+END_VAR
+VAR_OUTPUT
+	haltReason : WSTRING(255);
+END_VAR
+VAR
+	i : DINT;
+	child : IActivity;
+	allCompleted : BOOL;
+	anyBusy : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF _Children.Length < 1 THEN
+	_BranchHalted := FALSE;
+	_BranchHaltedReason := "";
+	_AnyBranchCompleted := FALSE;
+	OnRunning := ACTIVITY_RUNNING_STATE.WORK_COMPLETED;
+	RETURN;
+END_IF
+
+IF startRunning THEN
+	_BranchHalted := FALSE;
+	_BranchHaltedReason := "";
+	_AnyBranchCompleted := FALSE;
+
+	FOR i := 0 TO _Children.Length - 1 DO
+		child := getChildActivityAt(i);
+
+		IF child <> 0 THEN
+			child.RequestStart();
+		END_IF
+	END_FOR
+ELSIF startResuming THEN
+	FOR i := 0 TO _Children.Length - 1 DO
+		child := getChildActivityAt(i);
+
+		IF child <> 0 AND_THEN child.State = WORKFLOW_ELEMENT_STATE.PASSIVE_SUSPENDED THEN
+			child.RequestStart();
+		END_IF
+	END_FOR
+ELSE
+	FOR i := 0 TO _Children.Length - 1 DO
+		child := getChildActivityAt(i);
+
+		IF child <> 0 AND_THEN child.Busy THEN
+			child.Execute();
+		END_IF
+	END_FOR
+END_IF
+
+allCompleted := TRUE;
+anyBusy := FALSE;
+
+FOR i := 0 TO _Children.Length - 1 DO
+	child := getChildActivityAt(i);
+
+	IF child <> 0 THEN
+		IF child.Busy THEN
+			anyBusy := TRUE;
+			allCompleted := FALSE;
+		ELSIF child.State = WORKFLOW_ELEMENT_STATE.PASSIVE_COMPLETED THEN
+			_AnyBranchCompleted := TRUE;
+		ELSIF child.State = WORKFLOW_ELEMENT_STATE.PASSIVE_HALTED THEN
+			allCompleted := FALSE;
+
+			IF NOT _BranchHalted THEN
+				_BranchHalted := TRUE;
+				_BranchHaltedReason := child.HaltReason;
+			END_IF
+		ELSE
+			allCompleted := FALSE;
+		END_IF
+	END_IF
+END_FOR
+
+IF _BranchHalted THEN
+	IF anyBusy THEN
+		FOR i := 0 TO _Children.Length - 1 DO
+			child := getChildActivityAt(i);
+
+			IF child <> 0 AND_THEN child.Busy AND_THEN child.State <> WORKFLOW_ELEMENT_STATE.ACTIVE_CANCELLING THEN
+				child.RequestCancel("Parallel sibling branch halted");
+			END_IF
+		END_FOR
+
+		OnRunning := ACTIVITY_RUNNING_STATE.WORK_IN_PROGRESS;
+	ELSE
+		haltReason := _BranchHaltedReason;
+		OnRunning := ACTIVITY_RUNNING_STATE.WORK_HALTED;
+	END_IF
+
+	RETURN;
+END_IF
+
+IF _Mode = PARALLEL_JOIN_MODE.WAIT_ANY AND_THEN _AnyBranchCompleted THEN
+	IF anyBusy THEN
+		FOR i := 0 TO _Children.Length - 1 DO
+			child := getChildActivityAt(i);
+
+			IF child <> 0 AND_THEN child.Busy AND_THEN child.State <> WORKFLOW_ELEMENT_STATE.ACTIVE_CANCELLING THEN
+				child.RequestCancel("Parallel branch completed (WAIT_ANY)");
+			END_IF
+		END_FOR
+
+		OnRunning := ACTIVITY_RUNNING_STATE.WORK_IN_PROGRESS;
+	ELSE
+		OnRunning := ACTIVITY_RUNNING_STATE.WORK_COMPLETED;
+	END_IF
+
+	RETURN;
+END_IF
+
+IF allCompleted THEN
+	OnRunning := ACTIVITY_RUNNING_STATE.WORK_COMPLETED;
+ELSE
+	OnRunning := ACTIVITY_RUNNING_STATE.WORK_IN_PROGRESS;
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="OnStopping" Id="{e5406289-8349-40c6-ac4a-67e538744cfa}">
+      <Declaration><![CDATA[(*!
+<summary>Stops all active child activities cooperatively and waits for them to reach a passive state.</summary>
+<param name="startCancelling">TRUE on the initial call from RequestCancel.</param>
+<param name="startSuspending">TRUE on the initial call from RequestSuspend.</param>
+<param name="haltReason">Receives the diagnostic reason if a child activity halts while stopping.</param>
+*)
+METHOD PROTECTED OnStopping : ACTIVITY_STOPPING_STATE
+VAR_INPUT
+	startCancelling : BOOL;
+	startSuspending : BOOL;
+END_VAR
+VAR_OUTPUT
+	haltReason : WSTRING(255);
+END_VAR
+VAR
+	i : DINT;
+	child : IActivity;
+	anyBusy : BOOL;
+	anyHalted : BOOL;
+	allCompleted : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF _Children.Length < 1 THEN
+	OnStopping := ACTIVITY_STOPPING_STATE.WORK_STOPPED;
+	RETURN;
+END_IF
+
+IF startCancelling THEN
+	FOR i := 0 TO _Children.Length - 1 DO
+		child := getChildActivityAt(i);
+
+		IF child <> 0 THEN
+			IF child.Busy THEN
+				child.RequestCancel(_CancelReason);
+			ELSIF child.State = WORKFLOW_ELEMENT_STATE.PASSIVE_SUSPENDED THEN
+				child.RequestCancel(_CancelReason);
+			END_IF
+		END_IF
+	END_FOR
+ELSIF startSuspending THEN
+	FOR i := 0 TO _Children.Length - 1 DO
+		child := getChildActivityAt(i);
+
+		IF child <> 0 AND_THEN child.Busy THEN
+			child.RequestSuspend();
+		END_IF
+	END_FOR
+ELSE
+	FOR i := 0 TO _Children.Length - 1 DO
+		child := getChildActivityAt(i);
+
+		IF child <> 0 AND_THEN child.Busy THEN
+			child.Execute();
+		END_IF
+	END_FOR
+END_IF
+
+anyBusy := FALSE;
+anyHalted := FALSE;
+allCompleted := TRUE;
+
+FOR i := 0 TO _Children.Length - 1 DO
+	child := getChildActivityAt(i);
+
+	IF child <> 0 THEN
+		IF child.Busy THEN
+			anyBusy := TRUE;
+			allCompleted := FALSE;
+		ELSIF child.State = WORKFLOW_ELEMENT_STATE.PASSIVE_HALTED THEN
+			allCompleted := FALSE;
+
+			IF NOT anyHalted THEN
+				anyHalted := TRUE;
+
+				IF _BranchHaltedReason = "" THEN
+					_BranchHaltedReason := child.HaltReason;
+				END_IF
+			END_IF
+		ELSIF child.State <> WORKFLOW_ELEMENT_STATE.PASSIVE_COMPLETED THEN
+			allCompleted := FALSE;
+		END_IF
+	END_IF
+END_FOR
+
+IF anyBusy THEN
+	OnStopping := ACTIVITY_STOPPING_STATE.WORK_IN_PROGRESS;
+	RETURN;
+END_IF
+
+IF anyHalted OR_ELSE _BranchHalted THEN
+	haltReason := _BranchHaltedReason;
+	OnStopping := ACTIVITY_STOPPING_STATE.WORK_HALTED;
+ELSIF allCompleted THEN
+	OnStopping := ACTIVITY_STOPPING_STATE.WORK_COMPLETED;
+ELSE
+	OnStopping := ACTIVITY_STOPPING_STATE.WORK_STOPPED;
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="resetChildActivity" Id="{92256385-9c2d-41ca-b895-4719a423bc33}" FolderPath="Internal members\">
+      <Declaration><![CDATA[(*!
+<summary>Advances resetting of a child activity toward PASSIVE_READY by one step.</summary>
+<description>
+Returns WORK_RESET immediately when childActivity is 0 or already in PASSIVE_READY. If the child was left in
+PASSIVE_SUSPENDED or ACTIVE_CANCELLING, drives cancellation to PASSIVE_CANCELLED before invoking RequestReset.
+In ACTIVE_RESETTING, advances the child via Execute; in finished passive states, invokes RequestReset.
+</description>
+<param name="childActivity">Child activity to reset, or 0.</param>
+*)
+METHOD PRIVATE resetChildActivity : ACTIVITY_RESETTING_STATE
+VAR_INPUT
+	childActivity : IActivity;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF childActivity = 0 OR_ELSE childActivity.State = WORKFLOW_ELEMENT_STATE.PASSIVE_READY THEN
+	resetChildActivity := ACTIVITY_RESETTING_STATE.WORK_RESET;
+	RETURN;
+END_IF
+
+IF childActivity.State = WORKFLOW_ELEMENT_STATE.PASSIVE_SUSPENDED THEN
+	childActivity.RequestCancel("Parent parallel activity resetting");
+
+	IF childActivity.State = WORKFLOW_ELEMENT_STATE.PASSIVE_CANCELLED THEN
+		childActivity.RequestReset();
+	END_IF
+ELSIF childActivity.State = WORKFLOW_ELEMENT_STATE.ACTIVE_CANCELLING THEN
+	childActivity.Execute();
+
+	IF childActivity.State = WORKFLOW_ELEMENT_STATE.PASSIVE_CANCELLED THEN
+		childActivity.RequestReset();
+	END_IF
+ELSIF childActivity.State = WORKFLOW_ELEMENT_STATE.ACTIVE_RESETTING THEN
+	childActivity.Execute();
+ELSE
+	childActivity.RequestReset();
+END_IF
+
+CASE childActivity.State OF
+	WORKFLOW_ELEMENT_STATE.ACTIVE_RESETTING,
+	WORKFLOW_ELEMENT_STATE.ACTIVE_CANCELLING:
+		resetChildActivity := ACTIVITY_RESETTING_STATE.WORK_IN_PROGRESS;
+
+	WORKFLOW_ELEMENT_STATE.PASSIVE_READY:
+		resetChildActivity := ACTIVITY_RESETTING_STATE.WORK_RESET;
+
+	ELSE
+		WorkflowExceptions.ThrowInvalidNestedWorkflowState(NamespaceName, ClassName, __POUNAME(), __POSITION(), childActivity.State);
+END_CASE]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="SelfSize" Id="{a91f65a8-cf85-4b20-a318-aec1e1d0f781}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+PROPERTY SelfSize : ULINT]]></Declaration>
+      <Get Name="Get" Id="{63d24e9a-fedc-40ac-9fcc-d98ab14927ae}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[SelfSize := XSIZEOF(THIS^);]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="ValidateChildActivityAttachment" Id="{d9ebf347-b252-46ff-91b8-1ef334536ad6}" FolderPath="Internal members\">
+      <Declaration><![CDATA[(*!
+<summary>Verifies that a candidate child activity can be attached to this parallel composite without cycles or conflicts.</summary>
+<description>
+Rejects null references, attaching while not in PASSIVE_READY, self-attachment, ancestor cycles,
+children already attached to a parent activity, workflow root conflicts, or different workflow ownership.
+</description>
+<param name="childActivity">Candidate child activity to validate.</param>
+<param name="argumentName">Parameter name for diagnostic reporting.</param>
+*)
+METHOD PROTECTED ValidateChildActivityAttachment
+VAR_INPUT
+	childActivity : IActivity;
+	argumentName : STRING(255);
+END_VAR
+VAR
+	ancestor : IActivity;
+	childWorkflow : IWorkflow;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF childActivity = 0 THEN
+	TOF_Core.Exceptions.ThrowArgumentNotSpecified(NamespaceName, ClassName, __POUNAME(), __POSITION(), argumentName);
+END_IF
+
+IF State <> WORKFLOW_ELEMENT_STATE.PASSIVE_READY THEN
+	WorkflowExceptions.ThrowWorkflowConfiguration(
+		NamespaceName,
+		ClassName,
+		__POUNAME(),
+		__POSITION(),
+		"Cannot modify composite child activities outside PASSIVE_READY"
+	);
+END_IF
+
+ancestor := THIS^;
+
+WHILE ancestor <> 0 DO
+	IF ancestor = childActivity THEN
+		WorkflowExceptions.ThrowWorkflowAttachment(
+			NamespaceName,
+			ClassName,
+			__POUNAME(),
+			__POSITION(),
+			"Cannot attach an activity that is this composite or its ancestor"
+		);
+	END_IF
+
+	ancestor := ancestor.ParentActivity;
+END_WHILE
+
+IF childActivity.ParentActivity <> 0 THEN
+	IF childActivity.ParentActivity.SelfAddress = SelfAddress THEN
+		WorkflowExceptions.ThrowWorkflowAttachment(
+			NamespaceName,
+			ClassName,
+			__POUNAME(),
+			__POSITION(),
+			"Child activity is already attached to this parent activity"
+		);
+	ELSE
+		WorkflowExceptions.ThrowWorkflowAttachment(
+			NamespaceName,
+			ClassName,
+			__POUNAME(),
+			__POSITION(),
+			"Child activity is already attached to another parent activity"
+		);
+	END_IF
+END_IF
+
+childWorkflow := childActivity.Workflow;
+
+IF childWorkflow <> 0 AND_THEN childWorkflow.RootActivity = childActivity THEN
+	WorkflowExceptions.ThrowWorkflowAttachment(
+		NamespaceName,
+		ClassName,
+		__POUNAME(),
+		__POSITION(),
+		"Child activity is already attached as the workflow root activity"
+	);
+END_IF
+
+IF childWorkflow <> 0 AND_THEN Workflow <> 0 AND_THEN childWorkflow <> Workflow THEN
+	WorkflowExceptions.ThrowWorkflowAttachment(
+		NamespaceName,
+		ClassName,
+		__POUNAME(),
+		__POSITION(),
+		"Child activity belongs to a different workflow"
+	);
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+  </POU>
+</TcPlcObject>

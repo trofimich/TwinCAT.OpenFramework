@@ -1,0 +1,180 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="WaitConditionActivity" Id="{0916704d-d918-47c7-8c0e-c8da18f42f13}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+SPDX-FileCopyrightText: © 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+SPDX-License-Identifier: MIT
+License: https://opensource.org/license/mit
+*)
+
+(*!
+<summary>Waits until a configured workflow condition evaluates to TRUE.</summary>
+<description>
+Evaluates the attached condition cyclically in ACTIVE_RUNNING. Transitions to PASSIVE_COMPLETED
+when the condition returns TRUE. Cancelling or suspending stops waiting immediately.
+</description>
+*)
+
+{attribute 'no_explicit_call' := 'do not call this function block directly'}
+{attribute 'enable_dynamic_creation'}
+FUNCTION_BLOCK WaitConditionActivity EXTENDS Activity IMPLEMENTS IWaitConditionActivity
+VAR_STAT
+	{attribute 'hide'}
+	_ClassName : STRING := __POUNAME();
+END_VAR
+VAR
+	{attribute 'OPC.UA.DA' := '0'}
+	_Condition : ICondition;
+
+	{attribute 'OPC.UA.DA' := '0'}
+	_Configured : BOOL;
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[]]></ST>
+    </Implementation>
+    <Property Name="ClassName" Id="{d1752f9e-57cf-4764-a0c1-9ed82f64081e}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{0142adec-9a1f-40ba-9edf-55dab0af9cb3}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ClassName REF= _ClassName;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="Condition" Id="{09cb088a-beaf-41db-a5bb-81751b0a87ab}">
+      <Declaration><![CDATA[(*!
+<summary>Returns the condition being evaluated, or 0 before configuration.</summary>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY Condition : ICondition]]></Declaration>
+      <Get Name="Get" Id="{ebfbe611-3ed2-4287-9d89-a3a34c1b445d}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[Condition := _Condition;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="Configure" Id="{52e11014-c0d9-473e-a276-5438377e75e8}">
+      <Declaration><![CDATA[(*!
+<summary>Configures the condition to wait for.</summary>
+<description>
+Validates that the condition is live, unattached to another parent, and establishes the parent link.
+</description>
+<param name="condition">Condition to evaluate during execution.</param>
+*)
+METHOD Configure
+VAR_INPUT
+	condition : ICondition;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF condition = 0 THEN
+	TOF_Core.Exceptions.ThrowArgumentNotSpecified(NamespaceName, ClassName, __POUNAME(), __POSITION(), 'condition');
+END_IF
+
+IF (condition.ParentActivity <> 0 AND_THEN condition.ParentActivity.SelfAddress <> SelfAddress)
+	OR_ELSE condition.ParentCondition <> 0
+THEN
+	WorkflowExceptions.ThrowWorkflowAttachment(NamespaceName, ClassName, __POUNAME(), __POSITION(), "Condition is already attached to another parent");
+END_IF
+
+_Configured := FALSE;
+
+_Condition := condition;
+_Condition.ParentActivity := THIS^;
+
+_Configured := TRUE;]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="Configured" Id="{c0b002fa-3d61-4b93-ac3e-bed6aec10d4a}">
+      <Declaration><![CDATA[(*!
+<summary>Reports whether the condition has been configured.</summary>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY Configured : BOOL]]></Declaration>
+      <Get Name="Get" Id="{8764b566-fd9f-4d8f-b740-bcb39bd3ca7a}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[Configured := _Configured;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="NamespaceName" Id="{d2aa2dd8-7c8d-4c49-a66c-eb757eb24965}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{42870797-7f65-46e6-84e4-80b3ea493422}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[NamespaceName REF= CurrentNamespace.Name;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="OnResetting" Id="{4e25309c-9bda-4398-8979-3f8c64d201d2}">
+      <Declaration><![CDATA[(*!
+<summary>Completes resetting in a single step.</summary>
+<param name="startResetting">TRUE on the initial call from RequestReset.</param>
+*)
+METHOD PROTECTED OnResetting : ACTIVITY_RESETTING_STATE
+VAR_INPUT
+	startResetting : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[OnResetting := ACTIVITY_RESETTING_STATE.WORK_RESET;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="OnRunning" Id="{f56a370a-0201-439d-b79b-b4a23784d2df}">
+      <Declaration><![CDATA[(*!
+<summary>Evaluates the configured condition and completes when it returns TRUE.</summary>
+<param name="startRunning">TRUE on the initial call of a fresh start.</param>
+<param name="startResuming">TRUE when resuming execution after suspension.</param>
+<param name="haltReason">Unused halt reason output.</param>
+*)
+METHOD PROTECTED OnRunning : ACTIVITY_RUNNING_STATE
+VAR_INPUT
+	startRunning : BOOL;
+	startResuming : BOOL;
+END_VAR
+VAR_OUTPUT
+	haltReason : WSTRING(255);
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF NOT _Configured THEN
+	WorkflowExceptions.ThrowWorkflowConfiguration(NamespaceName, ClassName, __POUNAME(), __POSITION(), "Activity is not configured");
+END_IF
+
+IF _Condition.Evaluate(THIS^) THEN
+	OnRunning := ACTIVITY_RUNNING_STATE.WORK_COMPLETED;
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="OnStopping" Id="{7d8c16f6-b73b-4b3e-b96f-ccd88ad1a7d4}">
+      <Declaration><![CDATA[(*!
+<summary>Stops waiting immediately on cancel or suspend.</summary>
+<param name="startCancelling">TRUE when stopping due to cancellation.</param>
+<param name="startSuspending">TRUE when stopping due to suspension.</param>
+<param name="haltReason">Unused halt reason output.</param>
+*)
+METHOD PROTECTED OnStopping : ACTIVITY_STOPPING_STATE
+VAR_INPUT
+	startCancelling : BOOL;
+	startSuspending : BOOL;
+END_VAR
+VAR_OUTPUT
+	haltReason : WSTRING(255);
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[OnStopping := ACTIVITY_STOPPING_STATE.WORK_STOPPED;]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="SelfSize" Id="{17ad9913-b398-4404-a687-463af48f4ef4}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+PROPERTY SelfSize : ULINT]]></Declaration>
+      <Get Name="Get" Id="{9029c1e2-7d7d-492d-b7b0-360bebbc6748}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[SelfSize := XSIZEOF(THIS^);]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+  </POU>
+</TcPlcObject>

@@ -1,0 +1,268 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="InvokeTaskActivity" Id="{3b07755b-3665-4737-9ad2-6fdac9fdd07d}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+SPDX-FileCopyrightText: © 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+SPDX-License-Identifier: MIT
+License: https://opensource.org/license/mit
+*)
+
+(*!
+<summary>Executes an asynchronous ITask from TwinCAT.OpenFramework.Tasks within a workflow.</summary>
+<description>
+Starts the task on entry, cyclically executes it while RUNNING, and coordinates cancellation and resetting.
+When the task completes with WORK_DONE, this activity completes. When the task aborts or cancels, it transitions
+to PASSIVE_HALTED with the task's stop message. When the task terminates with FAILURE, it raises a standard exception.
+</description>
+*)
+
+{attribute 'no_explicit_call' := 'do not call this function block directly'}
+{attribute 'enable_dynamic_creation'}
+FUNCTION_BLOCK InvokeTaskActivity EXTENDS Activity IMPLEMENTS IInvokeTaskActivity
+VAR_STAT
+	{attribute 'hide'}
+	_ClassName : STRING := __POUNAME();
+END_VAR
+VAR
+	{attribute 'OPC.UA.DA' := '0'}
+	_Task : TOF_Tasks.ITask;
+
+	{attribute 'OPC.UA.DA' := '0'}
+	_Configured : BOOL;
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[]]></ST>
+    </Implementation>
+    <Property Name="ClassName" Id="{535d0327-a4db-4687-8471-79785ff04224}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{e0df0140-9afe-4cb4-8e00-b2e01c649db3}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ClassName REF= _ClassName;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="Configure" Id="{642b10ff-0e02-445d-822a-c8b541f41f12}">
+      <Declaration><![CDATA[(*!
+<summary>Configures the task to be executed.</summary>
+<description>
+Requires a non-zero task instance.
+</description>
+<param name="task">The task instance to execute.</param>
+*)
+METHOD Configure
+VAR_INPUT
+	task : TOF_Tasks.ITask;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF task = 0 THEN
+	TOF_Core.Exceptions.ThrowArgumentNotSpecified(NamespaceName, ClassName, __POUNAME(), __POSITION(), 'task');
+END_IF
+
+_Configured := FALSE;
+
+_Task := task;
+
+_Configured := TRUE;]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="Configured" Id="{4ee4913e-e9b5-4082-827c-d4bf7a9953d1}">
+      <Declaration><![CDATA[(*!
+<summary>Reports whether the task activity has been configured.</summary>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY Configured : BOOL]]></Declaration>
+      <Get Name="Get" Id="{577b11b5-7ed0-44cf-b0b6-3e751d86d539}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[Configured := _Configured;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="NamespaceName" Id="{2139b150-41de-4351-bbcc-e69724ff224a}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{18ab3231-1812-4adb-9361-24254a945427}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[NamespaceName REF= CurrentNamespace.Name;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="OnFail" Id="{15e3e2ba-cf2d-4b9f-b585-b21dd25c7dfc}">
+      <Declaration><![CDATA[(*!
+<summary>Requests cancellation of the running task when this activity fails.</summary>
+<param name="exception">Caught exception that caused the failure.</param>
+*)
+METHOD PROTECTED OnFail
+VAR_INPUT
+	exception : TOF_Core.IException;
+END_VAR
+VAR
+	refuseReason : TOF_Core.ERROR_MESSAGE;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF _Configured AND_THEN _Task <> 0 AND_THEN _Task.State.Running THEN
+	_Task.Cancel(refuseReason => refuseReason);
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="OnResetting" Id="{fc8824f6-0635-4038-8338-6908a83b9dda}">
+      <Declaration><![CDATA[(*!
+<summary>Resets the underlying task and completes resetting when the task reaches READY.</summary>
+<param name="startResetting">TRUE on the initial call from RequestReset.</param>
+*)
+METHOD PROTECTED OnResetting : ACTIVITY_RESETTING_STATE
+VAR_INPUT
+	startResetting : BOOL;
+END_VAR
+VAR
+	refuseReason : TOF_Core.ERROR_MESSAGE;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF NOT _Configured THEN
+	OnResetting := ACTIVITY_RESETTING_STATE.WORK_RESET;
+	RETURN;
+END_IF
+
+IF _Task.State.Stopped THEN
+	IF _Task.Reset(refuseReason => refuseReason) THEN
+		OnResetting := ACTIVITY_RESETTING_STATE.WORK_RESET;
+	END_IF
+ELSIF _Task.State.Ready THEN
+	OnResetting := ACTIVITY_RESETTING_STATE.WORK_RESET;
+ELSIF _Task.State.Running THEN
+	_Task.Cancel(refuseReason => refuseReason);
+	_Task.Execute();
+
+	IF _Task.State.Stopped AND_THEN _Task.Reset(refuseReason => refuseReason) THEN
+		OnResetting := ACTIVITY_RESETTING_STATE.WORK_RESET;
+	END_IF
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="OnRunning" Id="{daa8b942-4160-4730-8ecd-7d466d9d1fc2}">
+      <Declaration><![CDATA[(*!
+<summary>Starts and cyclically executes the configured task until completion, halting or failure.</summary>
+<param name="startRunning">TRUE on the initial call of a fresh start.</param>
+<param name="startResuming">TRUE when resuming execution after suspension.</param>
+<param name="haltReason">Halt reason output when the task aborts or cancels.</param>
+*)
+METHOD PROTECTED OnRunning : ACTIVITY_RUNNING_STATE
+VAR_INPUT
+	startRunning : BOOL;
+	startResuming : BOOL;
+END_VAR
+VAR_OUTPUT
+	haltReason : WSTRING(255);
+END_VAR
+VAR
+	taskRefuseReason : TOF_Core.ERROR_MESSAGE;
+	formattedExceptionMessage : TOF_Core.ERROR_MESSAGE;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF NOT _Configured THEN
+	WorkflowExceptions.ThrowWorkflowConfiguration(NamespaceName, ClassName, __POUNAME(), __POSITION(), "Activity is not configured");
+END_IF
+
+IF startRunning THEN
+	IF _Task.State.Ready THEN
+		IF NOT _Task.Start(refuseReason => taskRefuseReason) THEN
+			formattedExceptionMessage := TOF_Core.WideStrings.Concat255("Failed to start task '", _Task.Name, "': ", taskRefuseReason);
+			WorkflowExceptions.ThrowWorkflowConfiguration(NamespaceName, ClassName, __POUNAME(), __POSITION(), formattedExceptionMessage);
+		END_IF
+	ELSIF _Task.State.Stopped THEN
+		IF NOT _Task.Reset(refuseReason => taskRefuseReason) THEN
+			formattedExceptionMessage := TOF_Core.WideStrings.Concat255("Failed to reset task '", _Task.Name, "': ", taskRefuseReason);
+			WorkflowExceptions.ThrowWorkflowConfiguration(NamespaceName, ClassName, __POUNAME(), __POSITION(), formattedExceptionMessage);
+		END_IF
+
+		IF NOT _Task.Start(refuseReason => taskRefuseReason) THEN
+			formattedExceptionMessage := TOF_Core.WideStrings.Concat255("Failed to start task '", _Task.Name, "': ", taskRefuseReason);
+			WorkflowExceptions.ThrowWorkflowConfiguration(NamespaceName, ClassName, __POUNAME(), __POSITION(), formattedExceptionMessage);
+		END_IF
+	END_IF
+END_IF
+
+_Task.Execute();
+
+IF _Task.State.Stopped THEN
+	CASE _Task.FinalStopReason.Value OF
+		TOF_Tasks.TASK_STOP_REASON.WORK_DONE:
+			OnRunning := ACTIVITY_RUNNING_STATE.WORK_COMPLETED;
+
+		TOF_Tasks.TASK_STOP_REASON.INTERNAL_ABORT,
+		TOF_Tasks.TASK_STOP_REASON.EXTERNAL_CANCEL:
+			haltReason := _Task.FinalStopReason.Message;
+			OnRunning := ACTIVITY_RUNNING_STATE.WORK_HALTED;
+
+		TOF_Tasks.TASK_STOP_REASON.FAILURE:
+			formattedExceptionMessage := TOF_Core.WideStrings.Concat255("Task '", _Task.Name, "' failed: ", _Task.FinalStopReason.Message);
+			TOF_Core.Exceptions.ThrowStandard(NamespaceName, ClassName, __POUNAME(), __POSITION(), formattedExceptionMessage);
+	END_CASE
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="OnStopping" Id="{4046a63a-9467-4603-b5c9-9c196f6321b4}">
+      <Declaration><![CDATA[(*!
+<summary>Cancels the running task and drives it to STOPPED.</summary>
+<param name="startCancelling">TRUE when stopping due to cancellation.</param>
+<param name="startSuspending">TRUE when stopping due to suspension.</param>
+<param name="haltReason">Unused halt reason output.</param>
+*)
+METHOD PROTECTED OnStopping : ACTIVITY_STOPPING_STATE
+VAR_INPUT
+	startCancelling : BOOL;
+	startSuspending : BOOL;
+END_VAR
+VAR_OUTPUT
+	haltReason : WSTRING(255);
+END_VAR
+VAR
+	taskRefuseReason : TOF_Core.ERROR_MESSAGE;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF NOT _Configured THEN
+	OnStopping := ACTIVITY_STOPPING_STATE.WORK_STOPPED;
+	RETURN;
+END_IF
+
+IF startCancelling AND_THEN _Task.State.Running THEN
+	_Task.Cancel(refuseReason => taskRefuseReason);
+END_IF
+
+IF _Task.State.Running THEN
+	_Task.Execute();
+END_IF
+
+IF _Task.State.Stopped THEN
+	OnStopping := ACTIVITY_STOPPING_STATE.WORK_STOPPED;
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="SelfSize" Id="{cb67ecf2-c298-4211-a9bc-cf4579b49edf}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+PROPERTY SelfSize : ULINT]]></Declaration>
+      <Get Name="Get" Id="{9b2f2569-44f4-46b5-8b74-908ef0568d68}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[SelfSize := XSIZEOF(THIS^);]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="Task" Id="{f4475b16-41ef-4101-803e-4db5ae6d2efc}">
+      <Declaration><![CDATA[(*!
+<summary>Returns the configured task instance, or 0 before configuration.</summary>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY Task : TOF_Tasks.ITask]]></Declaration>
+      <Get Name="Get" Id="{3c2b4606-85b3-4db5-873c-60b262728dd6}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[Task := _Task;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+  </POU>
+</TcPlcObject>

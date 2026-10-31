@@ -1,0 +1,318 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="CompareVariableCondition" Id="{e6af0489-4250-42f8-a1a5-877dabb5feb1}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+SPDX-FileCopyrightText: © 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+SPDX-License-Identifier: MIT
+License: https://opensource.org/license/mit
+*)
+
+(*!
+<summary>Evaluates relational or equality comparisons on workflow variables.</summary>
+<description>
+Supports evaluating a workflow variable against a literal reference value, or comparing two workflow variables.
+Operands are ordered using a custom IComparer or automatically via TOF_Comparison.StandardComparers.
+Raises an exception when evaluated before configuration or when a referenced variable cannot be resolved.
+</description>
+*)
+
+{attribute 'no_explicit_call' := 'do not call this function block directly'}
+{attribute 'enable_dynamic_creation'}
+FUNCTION_BLOCK CompareVariableCondition EXTENDS Condition IMPLEMENTS ICompareVariableCondition
+VAR_STAT
+	{attribute 'hide'}
+	_ClassName : STRING := __POUNAME();
+END_VAR
+VAR
+	{attribute 'OPC.UA.DA' := '0'}
+	_FirstVariableName : STRING;
+
+	{attribute 'OPC.UA.DA' := '0'}
+	_SecondVariableName : STRING;
+
+	{attribute 'OPC.UA.DA' := '0'}
+	_Operator : COMPARISON_OPERATOR := COMPARISON_OPERATOR.EQUAL;
+
+	{attribute 'OPC.UA.DA' := '0'}
+	_ReferenceValue : TOF_Core.GENERIC_VALUE;
+
+	{attribute 'OPC.UA.DA' := '0'}
+	_Comparer : TOF_Core.IComparer;
+
+	{attribute 'OPC.UA.DA' := '0'}
+	_Configured : BOOL;
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[]]></ST>
+    </Implementation>
+    <Folder Name="Internal members" Id="{58dd9158-ea44-441f-ae30-1e47152182db}" />
+    <Property Name="ClassName" Id="{fab625c7-99bf-4544-8456-04904e433ff5}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{a77c592c-ae7e-4fb4-900b-6ab3303cd63c}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ClassName REF= _ClassName;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="Comparer" Id="{c5cee58f-97b1-4e3b-b4c0-30a32d650a18}">
+      <Declaration><![CDATA[(*!
+<summary>Gets or sets the custom comparer used for comparison, or 0 to use standard type-based comparers.</summary>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY Comparer : TOF_Core.IComparer]]></Declaration>
+      <Get Name="Get" Id="{236d6b99-6016-448d-a7dd-1b328b75be8a}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[Comparer := _Comparer;]]></ST>
+        </Implementation>
+      </Get>
+      <Set Name="Set" Id="{6b4dfd9b-b143-4b69-a963-52f482393721}">
+        <Declaration><![CDATA[VAR
+END_VAR]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[_Comparer := Comparer;]]></ST>
+        </Implementation>
+      </Set>
+    </Property>
+    <Property Name="Configured" Id="{c8e83b65-0437-4436-a991-d1a48c3abaaa}">
+      <Declaration><![CDATA[(*!
+<summary>Reports whether the condition has been configured and is ready for evaluation.</summary>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY Configured : BOOL]]></Declaration>
+      <Get Name="Get" Id="{ca898883-f588-4111-9c2b-3159a0007bc2}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[Configured := _Configured;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="Configure" Id="{807ed91f-00e7-440c-9ac7-14b98571059f}">
+      <Declaration><![CDATA[(*!
+<summary>Configures the condition to compare a workflow variable with a literal reference value.</summary>
+<param name="variableName">Non-empty name of the workflow variable to evaluate.</param>
+<param name="comparisonOperator">Relational or equality operator to apply.</param>
+<param name="referenceValue">Literal reference value to compare against.</param>
+*)
+METHOD Configure
+VAR_INPUT
+	variableName : STRING;
+	comparisonOperator : COMPARISON_OPERATOR;
+	referenceValue : ANY;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF variableName = '' THEN
+	TOF_Core.Exceptions.ThrowArgumentOutOfRange(NamespaceName, ClassName, __POUNAME(), __POSITION(), 'variableName', variableName);
+END_IF
+
+IF referenceValue.pValue = 0 OR_ELSE referenceValue.diSize = 0 THEN
+	TOF_Core.Exceptions.ThrowArgumentNotSpecified(NamespaceName, ClassName, __POUNAME(), __POSITION(), 'referenceValue');
+END_IF
+
+_Configured := FALSE;
+
+_ReferenceValue.Release();
+_ReferenceValue := TOF_Core.GenericValueFactory.FromAnyType(referenceValue, FALSE, TOF_Core.GENERIC_MEMORY_MANAGEMENT_BEHAVIOR.CLONE_ORIGINAL_VALUE_AND_OWNS_MEMORY);
+
+_FirstVariableName := variableName;
+_SecondVariableName := '';
+_Operator := comparisonOperator;
+
+_Configured := TRUE;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="ConfigureVariable" Id="{63fdf89f-287b-4c38-9b3b-f718981db849}">
+      <Declaration><![CDATA[(*!
+<summary>Configures the condition to compare two workflow variables.</summary>
+<param name="firstVariableName">Non-empty name of the first (left-hand) workflow variable.</param>
+<param name="comparisonOperator">Relational or equality operator to apply.</param>
+<param name="secondVariableName">Non-empty name of the second (right-hand) workflow variable.</param>
+*)
+METHOD ConfigureVariable
+VAR_INPUT
+	firstVariableName : STRING;
+	comparisonOperator : COMPARISON_OPERATOR;
+	secondVariableName : STRING;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF firstVariableName = '' THEN
+	TOF_Core.Exceptions.ThrowArgumentOutOfRange(NamespaceName, ClassName, __POUNAME(), __POSITION(), 'firstVariableName', firstVariableName);
+END_IF
+
+IF secondVariableName = '' THEN
+	TOF_Core.Exceptions.ThrowArgumentOutOfRange(NamespaceName, ClassName, __POUNAME(), __POSITION(), 'secondVariableName', secondVariableName);
+END_IF
+
+_Configured := FALSE;
+
+_ReferenceValue.Release();
+
+_FirstVariableName := firstVariableName;
+_SecondVariableName := secondVariableName;
+_Operator := comparisonOperator;
+
+_Configured := TRUE;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="FB_exit" Id="{a6ce3e19-6f11-4f34-a7c3-4b9eff5768e5}" FolderPath="Internal members\">
+      <Declaration><![CDATA[METHOD FB_exit : BOOL
+VAR_INPUT
+	bInCopyCode : BOOL; // TRUE: the instance will be copied to the copy code afterward (online change)
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_ReferenceValue.Release();]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="FirstVariableName" Id="{97c2ca05-cf60-4c11-b293-d16b084fe0ab}">
+      <Declaration><![CDATA[(*!
+<summary>Returns the name of the first workflow variable.</summary>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY FirstVariableName : STRING]]></Declaration>
+      <Get Name="Get" Id="{d8cfc091-42f6-4c18-8948-66ff0c21e4b3}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[FirstVariableName := _FirstVariableName;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="NamespaceName" Id="{9a3dab93-7a16-4fd2-abd7-f3283f20b0f4}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{aa5b9ecb-ffd5-4d38-92ed-b439a0e2537a}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[NamespaceName REF= CurrentNamespace.Name;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="OnEvaluate" Id="{d1e7db02-9592-4e74-af2f-447ec2bae63f}" FolderPath="Internal members\">
+      <Declaration><![CDATA[(*!
+<summary>Resolves operands and evaluates the comparison operator using the active comparer.</summary>
+<param name="activity">Activity context for variable lookup.</param>
+*)
+METHOD PROTECTED OnEvaluate : BOOL
+VAR_INPUT
+	activity : IActivity;
+END_VAR
+VAR
+	formattedExceptionMessage : TOF_Core.ERROR_MESSAGE;
+	variableFound : BOOL;
+	firstVal : TOF_Core.GENERIC_VALUE;
+	secondVal : TOF_Core.GENERIC_VALUE;
+	activeComparer : TOF_Core.IComparer;
+	cmpResult : TOF_Core.COMPARISON_RESULT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF NOT Configured THEN
+	formattedExceptionMessage := TOF_Core.WideStrings.Concat255("Condition '", Name, "' is not configured");
+
+	WorkflowExceptions.ThrowWorkflowConfiguration(NamespaceName, ClassName, __POUNAME(), __POSITION(), formattedExceptionMessage);
+END_IF
+
+variableFound := TryGetVariable(_FirstVariableName, variable => firstVal);
+
+IF NOT variableFound AND_THEN activity <> 0 THEN
+	variableFound := activity.TryGetVariable(_FirstVariableName, variable => firstVal);
+END_IF
+
+IF NOT variableFound THEN
+	formattedExceptionMessage := TOF_Core.WideStrings.Concat255("Condition '", Name, "' requires variable '", TO_WSTRING(_FirstVariableName), "' which is not found");
+
+	WorkflowExceptions.ThrowWorkflowVariableNotFound(NamespaceName, ClassName, __POUNAME(), __POSITION(), formattedExceptionMessage);
+END_IF
+
+IF _SecondVariableName <> '' THEN
+	variableFound := TryGetVariable(_SecondVariableName, variable => secondVal);
+
+	IF NOT variableFound AND_THEN activity <> 0 THEN
+		variableFound := activity.TryGetVariable(_SecondVariableName, variable => secondVal);
+	END_IF
+
+	IF NOT variableFound THEN
+		formattedExceptionMessage := TOF_Core.WideStrings.Concat255("Condition '", Name, "' requires variable '", TO_WSTRING(_SecondVariableName), "' which is not found");
+
+		WorkflowExceptions.ThrowWorkflowVariableNotFound(NamespaceName, ClassName, __POUNAME(), __POSITION(), formattedExceptionMessage);
+	END_IF
+ELSE
+	secondVal := _ReferenceValue;
+END_IF
+
+IF _Comparer <> 0 THEN
+	activeComparer := _Comparer;
+ELSE
+	activeComparer := TOF_Comparison.StandardComparers.GetForTypeClass(firstVal.TypeClass);
+END_IF
+
+cmpResult := activeComparer.Compare(firstVal, secondVal);
+
+CASE _Operator OF
+	COMPARISON_OPERATOR.EQUAL:
+		OnEvaluate := cmpResult = TOF_Core.COMPARISON_RESULT.FIRST_EQUAL_TO_SECOND;
+
+	COMPARISON_OPERATOR.NOT_EQUAL:
+		OnEvaluate := cmpResult <> TOF_Core.COMPARISON_RESULT.FIRST_EQUAL_TO_SECOND;
+
+	COMPARISON_OPERATOR.LESS_THAN:
+		OnEvaluate := cmpResult = TOF_Core.COMPARISON_RESULT.FIRST_LESS_THAN_SECOND;
+
+	COMPARISON_OPERATOR.LESS_THAN_OR_EQUAL:
+		OnEvaluate := cmpResult = TOF_Core.COMPARISON_RESULT.FIRST_LESS_THAN_SECOND
+			OR_ELSE cmpResult = TOF_Core.COMPARISON_RESULT.FIRST_EQUAL_TO_SECOND;
+
+	COMPARISON_OPERATOR.GREATER_THAN:
+		OnEvaluate := cmpResult = TOF_Core.COMPARISON_RESULT.FIRST_GREATER_THAN_SECOND;
+
+	COMPARISON_OPERATOR.GREATER_THAN_OR_EQUAL:
+		OnEvaluate := cmpResult = TOF_Core.COMPARISON_RESULT.FIRST_GREATER_THAN_SECOND
+			OR_ELSE cmpResult = TOF_Core.COMPARISON_RESULT.FIRST_EQUAL_TO_SECOND;
+END_CASE]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="Operator" Id="{5b497c96-2374-4bde-82a8-17a76eb8cb98}">
+      <Declaration><![CDATA[(*!
+<summary>Gets or sets the comparison operator.</summary>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY Operator : COMPARISON_OPERATOR]]></Declaration>
+      <Get Name="Get" Id="{f73558b1-4852-4f69-a17b-828e66ba7763}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[Operator := _Operator;]]></ST>
+        </Implementation>
+      </Get>
+      <Set Name="Set" Id="{71481cab-9031-402b-85b2-c2601863c13d}">
+        <Declaration><![CDATA[VAR
+END_VAR]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[_Operator := Operator;]]></ST>
+        </Implementation>
+      </Set>
+    </Property>
+    <Property Name="SecondVariableName" Id="{5cfa2b48-ea7a-4c15-8755-e130e52052b1}">
+      <Declaration><![CDATA[(*!
+<summary>Returns the name of the second workflow variable, or empty when comparing against a literal.</summary>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY SecondVariableName : STRING]]></Declaration>
+      <Get Name="Get" Id="{3a70bf0c-96df-49bf-9a49-ca7770033c44}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[SecondVariableName := _SecondVariableName;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="SelfSize" Id="{3814306b-ab0b-4a8a-a1bb-4cae5a4f72c6}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+PROPERTY SelfSize : ULINT]]></Declaration>
+      <Get Name="Get" Id="{b335a7a9-3ed6-4e9c-bbe2-2b4d0ca44dc5}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[SelfSize := XSIZEOF(THIS^);]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+  </POU>
+</TcPlcObject>

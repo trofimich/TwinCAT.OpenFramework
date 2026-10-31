@@ -1,0 +1,549 @@
+<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="WorkflowComprehensiveTest" Id="{d7e08298-7ac4-41d4-b416-1c0c7d8a4ce5}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+SPDX-FileCopyrightText: © 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+SPDX-License-Identifier: MIT
+License: https://opensource.org/license/mit
+*)
+
+(*!
+<summary>Comprehensive end-to-end integration test exercising all workflow activities, conditions and lifecycle states.</summary>
+<description>
+Constructs a complete packaging and inspection scenario combining SequenceActivity, WhileActivity,
+IfElseActivity, WaitAndPickActivity, TryCatchActivity, DelayActivity, WaitConditionActivity,
+AssignVariableActivity, InvokeTaskActivity and ParallelActivity, verifying execution, exception recovery,
+cancellation, join modes, condition negation, relational comparisons and reset.
+</description>
+*)
+
+FUNCTION_BLOCK WorkflowComprehensiveTest EXTENDS TcUnit.FB_TestSuite
+VAR
+	{attribute 'hide'}
+	_ClassName : STRING := __POUNAME();
+
+	_Workflow : ComprehensiveTestWorkflow;
+	_ThrowingActivity : ThrowingTestActivity(workflow := _Workflow);
+	_CounterTask : CounterTask("CounterTask");
+
+	_Configured : BOOL;
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[TestEndToEndComprehensiveScenario();
+TestWorkflowReset();
+TestWorkflowCancel();
+TestParallelActivityWaitAll();
+TestParallelActivityWaitAny();
+TestNotCondition();
+TestCompareVariableCondition();]]></ST>
+    </Implementation>
+    <Folder Name="Internal methods" Id="{15a9c232-e68f-46d4-ae7b-3bb4b6d7f5df}" />
+    <Folder Name="Tests" Id="{870960a7-e3dd-407a-95d4-b6c88de23284}" />
+    <Property Name="ClassName" Id="{c3bcd94f-5489-4542-b19e-0662a75b1185}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{a60b3aca-1e02-431a-829a-b4bd6d1f5c09}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ClassName REF= _ClassName;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="NamespaceName" Id="{30522f3a-8ef1-4a77-9477-70dd60f3c6cc}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{9951e144-ddf1-4657-b72d-e11cf13da2da}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[NamespaceName REF= CurrentNamespace.Name;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="buildScenarioTree" Id="{12919d61-cd2f-459d-b2f9-334de9148c1a}" FolderPath="Internal methods\">
+      <Declaration><![CDATA[METHOD PRIVATE buildScenarioTree
+VAR
+	rootSequence : POINTER TO TOF_Workflow.SequenceActivity;
+	initBatchTarget : POINTER TO TOF_Workflow.AssignVariableActivity;
+
+	parallelStep : POINTER TO TOF_Workflow.ParallelActivity;
+	parallelDelay : POINTER TO TOF_Workflow.DelayActivity;
+	parallelAssign : POINTER TO TOF_Workflow.AssignVariableActivity;
+
+	whileCondition : POINTER TO TOF_Workflow.VariableHasValueCondition;
+	whileActivity : POINTER TO TOF_Workflow.WhileActivity;
+
+	feedTaskActivity : POINTER TO TOF_Workflow.InvokeTaskActivity;
+
+	condPart : POINTER TO TOF_Workflow.VariableHasValueCondition;
+	condVacuum : POINTER TO TOF_Workflow.VariableHasValueCondition;
+	compCond : POINTER TO TOF_Workflow.CompositeCondition;
+	waitCondAct : POINTER TO TOF_Workflow.WaitConditionActivity;
+
+	delayAct : POINTER TO TOF_Workflow.DelayActivity;
+
+	pickAct : POINTER TO TOF_Workflow.WaitAndPickActivity;
+	condOk : POINTER TO TOF_Workflow.VariableHasValueCondition;
+	actOk : POINTER TO TOF_Workflow.AssignVariableActivity;
+	condRej : POINTER TO TOF_Workflow.VariableHasValueCondition;
+	actRej : POINTER TO TOF_Workflow.AssignVariableActivity;
+
+	ifCond : POINTER TO TOF_Workflow.VariableHasValueCondition;
+	trueAct : POINTER TO TOF_Workflow.DelayActivity;
+	ifElseAct : POINTER TO TOF_Workflow.IfElseActivity;
+
+	tryCatchAct : POINTER TO TOF_Workflow.TryCatchActivity;
+	catchAct : POINTER TO RecoveryCatchTestActivity;
+
+	refuseReason : TOF_Core.ERROR_MESSAGE;
+	initTargetValue : INT := 2;
+	producedIncrement : INT := 1;
+	rejectIncrement : INT := 1;
+	trueValue : BOOL := TRUE;
+	falseValue : BOOL := FALSE;
+	zeroCount : INT := 0;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF _Configured THEN
+	RETURN;
+END_IF
+
+// 1. Root Sequence
+rootSequence := __NEW(TOF_Workflow.SequenceActivity(workflow := _Workflow));
+_Workflow.RegisterChild(rootSequence^);
+
+// 2. AssignVariableActivity: initialize BatchTarget
+initBatchTarget := __NEW(TOF_Workflow.AssignVariableActivity(workflow := _Workflow));
+_Workflow.RegisterChild(initBatchTarget^);
+initBatchTarget^.Configure('BatchTarget', initTargetValue);
+rootSequence^.AddChildActivity(initBatchTarget^);
+
+// 2.5. ParallelActivity: concurrently run a delay and an assignment with WAIT_ALL
+parallelStep := __NEW(TOF_Workflow.ParallelActivity(workflow := _Workflow));
+_Workflow.RegisterChild(parallelStep^);
+parallelStep^.Mode := TOF_Workflow.PARALLEL_JOIN_MODE.WAIT_ALL;
+
+parallelDelay := __NEW(TOF_Workflow.DelayActivity(workflow := _Workflow));
+_Workflow.RegisterChild(parallelDelay^);
+parallelDelay^.Interval := T#0S;
+parallelStep^.AddChildActivity(parallelDelay^);
+
+parallelAssign := __NEW(TOF_Workflow.AssignVariableActivity(workflow := _Workflow));
+_Workflow.RegisterChild(parallelAssign^);
+parallelAssign^.Configure('SensorFeedPart', trueValue);
+parallelStep^.AddChildActivity(parallelAssign^);
+
+rootSequence^.AddChildActivity(parallelStep^);
+
+// 3. WhileActivity: run while ProducedCount = 0
+whileCondition := __NEW(TOF_Workflow.VariableHasValueCondition(workflow := _Workflow));
+_Workflow.RegisterChild(whileCondition^);
+whileCondition^.Configure('ProducedCount', zeroCount);
+
+whileActivity := __NEW(TOF_Workflow.WhileActivity(workflow := _Workflow));
+_Workflow.RegisterChild(whileActivity^);
+whileActivity^.Configure(condition := whileCondition^);
+rootSequence^.AddChildActivity(whileActivity^);
+
+// 3.1. InvokeTaskActivity inside while body
+feedTaskActivity := __NEW(TOF_Workflow.InvokeTaskActivity(workflow := _Workflow));
+_Workflow.RegisterChild(feedTaskActivity^);
+_CounterTask.Reset(refuseReason => refuseReason);
+_CounterTask.TargetValue := 1;
+feedTaskActivity^.Configure(task := _CounterTask);
+whileActivity^.AddChildActivity(feedTaskActivity^);
+
+// 3.2. WaitConditionActivity with CompositeCondition (AND)
+condPart := __NEW(TOF_Workflow.VariableHasValueCondition(workflow := _Workflow));
+_Workflow.RegisterChild(condPart^);
+condPart^.Configure('SensorFeedPart', trueValue);
+
+condVacuum := __NEW(TOF_Workflow.VariableHasValueCondition(workflow := _Workflow));
+_Workflow.RegisterChild(condVacuum^);
+condVacuum^.Configure('SensorVacuumOk', trueValue);
+
+compCond := __NEW(TOF_Workflow.CompositeCondition(workflow := _Workflow));
+_Workflow.RegisterChild(compCond^);
+compCond^.LogicalOperator := TOF_Workflow.LOGICAL_OPERATOR.AND_;
+compCond^.AddChildCondition(condPart^);
+compCond^.AddChildCondition(condVacuum^);
+
+waitCondAct := __NEW(TOF_Workflow.WaitConditionActivity(workflow := _Workflow));
+_Workflow.RegisterChild(waitCondAct^);
+waitCondAct^.Configure(compCond^);
+whileActivity^.AddChildActivity(waitCondAct^);
+
+// 3.3. DelayActivity
+delayAct := __NEW(TOF_Workflow.DelayActivity(workflow := _Workflow));
+_Workflow.RegisterChild(delayAct^);
+delayAct^.Interval := T#0S;
+whileActivity^.AddChildActivity(delayAct^);
+
+// 3.4. WaitAndPickActivity (Inspection decision)
+pickAct := __NEW(TOF_Workflow.WaitAndPickActivity(workflow := _Workflow));
+_Workflow.RegisterChild(pickAct^);
+
+condOk := __NEW(TOF_Workflow.VariableHasValueCondition(workflow := _Workflow));
+_Workflow.RegisterChild(condOk^);
+condOk^.Configure('SensorInspectionOk', trueValue);
+
+actOk := __NEW(TOF_Workflow.AssignVariableActivity(workflow := _Workflow));
+_Workflow.RegisterChild(actOk^);
+actOk^.Configure('ProducedCount', producedIncrement);
+pickAct^.AddBarnch(condOk^, actOk^);
+
+condRej := __NEW(TOF_Workflow.VariableHasValueCondition(workflow := _Workflow));
+_Workflow.RegisterChild(condRej^);
+condRej^.Configure('SensorInspectionOk', falseValue);
+
+actRej := __NEW(TOF_Workflow.AssignVariableActivity(workflow := _Workflow));
+_Workflow.RegisterChild(actRej^);
+actRej^.Configure('RejectCount', rejectIncrement);
+pickAct^.AddBarnch(condRej^, actRej^);
+
+whileActivity^.AddChildActivity(pickAct^);
+
+// 3.5. IfElseActivity
+ifCond := __NEW(TOF_Workflow.VariableHasValueCondition(workflow := _Workflow));
+_Workflow.RegisterChild(ifCond^);
+ifCond^.Configure('SensorInspectionOk', trueValue);
+
+trueAct := __NEW(TOF_Workflow.DelayActivity(workflow := _Workflow));
+_Workflow.RegisterChild(trueAct^);
+trueAct^.Interval := T#0S;
+
+ifElseAct := __NEW(TOF_Workflow.IfElseActivity(workflow := _Workflow));
+_Workflow.RegisterChild(ifElseAct^);
+ifElseAct^.Configure(condition := ifCond^, trueActivity := trueAct^, falseActivity := 0);
+whileActivity^.AddChildActivity(ifElseAct^);
+
+// 3.6. TryCatchActivity: verifies exception interception and recovery
+tryCatchAct := __NEW(TOF_Workflow.TryCatchActivity(workflow := _Workflow));
+_Workflow.RegisterChild(tryCatchAct^);
+_ThrowingActivity.ShouldThrow := TRUE;
+
+catchAct := __NEW(RecoveryCatchTestActivity(workflow := _Workflow));
+_Workflow.RegisterChild(catchAct^);
+
+tryCatchAct^.Configure(tryActivity := _ThrowingActivity, catchActivity := catchAct^);
+whileActivity^.AddChildActivity(tryCatchAct^);
+
+// Set root activity on workflow
+_Workflow.SetRootActivity(rootSequence^);
+_Configured := TRUE;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="TestCompareVariableCondition" Id="{49b2550f-1361-4e37-acf4-0e8a608b4733}" FolderPath="Tests\">
+      <Declaration><![CDATA[METHOD TestCompareVariableCondition
+VAR
+	compareCond : TOF_Workflow.CompareVariableCondition(workflow := _Workflow);
+	threshold10 : INT := 10;
+	threshold5 : INT := 5;
+END_VAR
+VAR_INST
+	testFinished : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN
+	RETURN;
+END_IF
+
+TEST(__POUNAME());
+
+_Workflow.ProducedCount := 5;
+
+// Literal comparisons
+compareCond.Configure('ProducedCount', TOF_Workflow.COMPARISON_OPERATOR.LESS_THAN, threshold10);
+AssertTrue(compareCond.Evaluate(0), '5 < 10 must be TRUE');
+
+compareCond.Configure('ProducedCount', TOF_Workflow.COMPARISON_OPERATOR.GREATER_THAN, threshold10);
+AssertFalse(compareCond.Evaluate(0), '5 > 10 must be FALSE');
+
+compareCond.Configure('ProducedCount', TOF_Workflow.COMPARISON_OPERATOR.EQUAL, threshold5);
+AssertTrue(compareCond.Evaluate(0), '5 == 5 must be TRUE');
+
+compareCond.Configure('ProducedCount', TOF_Workflow.COMPARISON_OPERATOR.NOT_EQUAL, threshold5);
+AssertFalse(compareCond.Evaluate(0), '5 != 5 must be FALSE');
+
+compareCond.Configure('ProducedCount', TOF_Workflow.COMPARISON_OPERATOR.GREATER_THAN_OR_EQUAL, threshold5);
+AssertTrue(compareCond.Evaluate(0), '5 >= 5 must be TRUE');
+
+compareCond.Configure('ProducedCount', TOF_Workflow.COMPARISON_OPERATOR.LESS_THAN_OR_EQUAL, threshold10);
+AssertTrue(compareCond.Evaluate(0), '5 <= 10 must be TRUE');
+
+// Variable-to-variable comparisons
+_Workflow.BatchTarget := 10;
+compareCond.ConfigureVariable('ProducedCount', TOF_Workflow.COMPARISON_OPERATOR.LESS_THAN, 'BatchTarget');
+AssertTrue(compareCond.Evaluate(0), 'ProducedCount (5) < BatchTarget (10) must be TRUE');
+
+compareCond.ConfigureVariable('ProducedCount', TOF_Workflow.COMPARISON_OPERATOR.GREATER_THAN, 'BatchTarget');
+AssertFalse(compareCond.Evaluate(0), 'ProducedCount (5) > BatchTarget (10) must be FALSE');
+
+testFinished := TRUE;
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="TestEndToEndComprehensiveScenario" Id="{54b4d03c-b4da-4bb0-a5c1-dc2876d896c5}" FolderPath="Tests\">
+      <Declaration><![CDATA[METHOD TestEndToEndComprehensiveScenario
+VAR
+	cycleIndex : INT;
+END_VAR
+VAR_INST
+	testFinished : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN
+	RETURN;
+END_IF
+
+TEST(__POUNAME());
+
+buildScenarioTree();
+
+_Workflow.SensorFeedPart := FALSE; // will be set TRUE by parallelStep
+_Workflow.SensorVacuumOk := TRUE;
+_Workflow.SensorInspectionOk := TRUE;
+
+AssertTrue(_Workflow.StartingAllowed, 'Workflow must allow starting from PASSIVE_READY');
+_Workflow.RequestStart();
+
+FOR cycleIndex := 1 TO 200 DO
+	_Workflow.Execute();
+	IF NOT _Workflow.Busy THEN
+		EXIT;
+	END_IF
+END_FOR
+
+AssertEquals_INT(TOF_Workflow.WORKFLOW_ELEMENT_STATE.PASSIVE_COMPLETED, _Workflow.State, 'Workflow must complete with PASSIVE_COMPLETED');
+AssertEquals_INT(1, _Workflow.ProducedCount, 'ProducedCount must equal 1 after WhileActivity and AssignVariableActivity');
+AssertTrue(_Workflow.ErrorHandled, 'ErrorHandled must be TRUE after CatchActivity recovered from Try exception');
+AssertTrue(_ThrowingActivity.ThrowCount > 0, 'ThrowingActivity must have executed and thrown');
+
+testFinished := TRUE;
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="TestNotCondition" Id="{8bb51156-29df-4aeb-929b-4fad120d5903}" FolderPath="Tests\">
+      <Declaration><![CDATA[METHOD TestNotCondition
+VAR
+	notCond : TOF_Workflow.NotCondition(workflow := _Workflow);
+	trueCond : TOF_Workflow.TrueCondition(workflow := _Workflow);
+	varCond : TOF_Workflow.VariableHasValueCondition(workflow := _Workflow);
+	testVal : INT := 10;
+END_VAR
+VAR_INST
+	testFinished : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN
+	RETURN;
+END_IF
+
+TEST(__POUNAME());
+
+AssertFalse(notCond.Configured, 'NotCondition must not be configured initially');
+
+notCond.Configure(trueCond);
+AssertTrue(notCond.Configured, 'NotCondition must be configured after Configure');
+AssertFalse(notCond.Evaluate(0), 'NOT True must evaluate to FALSE');
+
+_Workflow.ProducedCount := testVal;
+varCond.Configure('ProducedCount', testVal);
+notCond.Configure(varCond);
+AssertFalse(notCond.Evaluate(0), 'NOT (ProducedCount = 10) when ProducedCount = 10 must be FALSE');
+
+_Workflow.ProducedCount := 99;
+AssertTrue(notCond.Evaluate(0), 'NOT (ProducedCount = 10) when ProducedCount = 99 must be TRUE');
+
+testFinished := TRUE;
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="TestParallelActivityWaitAll" Id="{404e9d64-2836-4d94-83b8-09fd22ed2069}" FolderPath="Tests\">
+      <Declaration><![CDATA[METHOD TestParallelActivityWaitAll
+VAR
+	parallelAct : TOF_Workflow.ParallelActivity(workflow := _Workflow);
+	counterTask1 : CounterTask("WaitAllCounter1");
+	counterTask2 : CounterTask("WaitAllCounter2");
+	taskAct1 : TOF_Workflow.InvokeTaskActivity(workflow := _Workflow);
+	taskAct2 : TOF_Workflow.InvokeTaskActivity(workflow := _Workflow);
+	cycleIndex : INT;
+	refuseReason : TOF_Core.ERROR_MESSAGE;
+END_VAR
+VAR_INST
+	testFinished : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN
+	RETURN;
+END_IF
+
+TEST(__POUNAME());
+
+counterTask1.Reset(refuseReason => refuseReason);
+counterTask1.TargetValue := 1;
+taskAct1.Configure(task := counterTask1);
+
+counterTask2.Reset(refuseReason => refuseReason);
+counterTask2.TargetValue := 2;
+taskAct2.Configure(task := counterTask2);
+
+parallelAct.Mode := TOF_Workflow.PARALLEL_JOIN_MODE.WAIT_ALL;
+parallelAct.AddChildActivity(taskAct1);
+parallelAct.AddChildActivity(taskAct2);
+
+AssertEquals_DINT(2, parallelAct.ChildCount, 'ChildCount must be 2');
+
+parallelAct.RequestStart();
+AssertTrue(parallelAct.Busy, 'ParallelActivity must be busy after RequestStart');
+
+FOR cycleIndex := 1 TO 50 DO
+	parallelAct.Execute();
+	IF NOT parallelAct.Busy THEN
+		EXIT;
+	END_IF
+END_FOR
+
+AssertEquals_INT(TOF_Workflow.WORKFLOW_ELEMENT_STATE.PASSIVE_COMPLETED, parallelAct.State, 'ParallelActivity with WAIT_ALL must complete with PASSIVE_COMPLETED');
+AssertEquals_INT(TOF_Workflow.WORKFLOW_ELEMENT_STATE.PASSIVE_COMPLETED, taskAct1.State, 'taskAct1 must be PASSIVE_COMPLETED');
+AssertEquals_INT(TOF_Workflow.WORKFLOW_ELEMENT_STATE.PASSIVE_COMPLETED, taskAct2.State, 'taskAct2 must be PASSIVE_COMPLETED');
+
+parallelAct.RequestReset();
+AssertEquals_INT(TOF_Workflow.WORKFLOW_ELEMENT_STATE.PASSIVE_READY, parallelAct.State, 'ParallelActivity must reset to PASSIVE_READY');
+AssertEquals_INT(TOF_Workflow.WORKFLOW_ELEMENT_STATE.PASSIVE_READY, taskAct1.State, 'taskAct1 must reset to PASSIVE_READY');
+AssertEquals_INT(TOF_Workflow.WORKFLOW_ELEMENT_STATE.PASSIVE_READY, taskAct2.State, 'taskAct2 must reset to PASSIVE_READY');
+
+testFinished := TRUE;
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="TestParallelActivityWaitAny" Id="{c0db5536-0b75-4739-b1a4-e5327ff95246}" FolderPath="Tests\">
+      <Declaration><![CDATA[METHOD TestParallelActivityWaitAny
+VAR
+	parallelAct : TOF_Workflow.ParallelActivity(workflow := _Workflow);
+	fastAssign : TOF_Workflow.AssignVariableActivity(workflow := _Workflow);
+	longDelay : TOF_Workflow.DelayActivity(workflow := _Workflow);
+	cycleIndex : INT;
+	val : INT := 42;
+END_VAR
+VAR_INST
+	testFinished : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN
+	RETURN;
+END_IF
+
+TEST(__POUNAME());
+
+fastAssign.Configure('ProducedCount', val);
+longDelay.Interval := T#10S;
+
+parallelAct.Mode := TOF_Workflow.PARALLEL_JOIN_MODE.WAIT_ANY;
+parallelAct.AddChildActivity(fastAssign);
+parallelAct.AddChildActivity(longDelay);
+
+parallelAct.RequestStart();
+
+FOR cycleIndex := 1 TO 20 DO
+	parallelAct.Execute();
+	IF NOT parallelAct.Busy THEN
+		EXIT;
+	END_IF
+END_FOR
+
+AssertEquals_INT(TOF_Workflow.WORKFLOW_ELEMENT_STATE.PASSIVE_COMPLETED, parallelAct.State, 'ParallelActivity with WAIT_ANY must complete once fast branch finishes');
+AssertEquals_INT(TOF_Workflow.WORKFLOW_ELEMENT_STATE.PASSIVE_COMPLETED, fastAssign.State, 'fastAssign must be PASSIVE_COMPLETED');
+AssertEquals_INT(TOF_Workflow.WORKFLOW_ELEMENT_STATE.PASSIVE_CANCELLED, longDelay.State, 'longDelay must be cancelled when sibling branch completed under WAIT_ANY');
+
+parallelAct.RequestReset();
+AssertEquals_INT(TOF_Workflow.WORKFLOW_ELEMENT_STATE.PASSIVE_READY, parallelAct.State, 'ParallelActivity must reset to PASSIVE_READY');
+
+testFinished := TRUE;
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="TestWorkflowCancel" Id="{eee0f66c-89d5-43d2-ba1f-36296219b20a}" FolderPath="Tests\">
+      <Declaration><![CDATA[METHOD TestWorkflowCancel
+VAR
+	cycleIndex : INT;
+END_VAR
+VAR_INST
+	testFinished : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN
+	RETURN;
+END_IF
+
+TEST(__POUNAME());
+
+buildScenarioTree();
+
+IF _Workflow.State <> TOF_Workflow.WORKFLOW_ELEMENT_STATE.PASSIVE_READY THEN
+	_Workflow.RequestReset();
+	FOR cycleIndex := 1 TO 20 DO
+		_Workflow.Execute();
+		IF NOT _Workflow.Busy THEN
+			EXIT;
+		END_IF
+	END_FOR
+END_IF
+
+_Workflow.SensorVacuumOk := FALSE; // keep waiting at condition
+_Workflow.RequestStart();
+
+AssertTrue(_Workflow.CancellingAllowed, 'Workflow must allow cancelling while busy');
+_Workflow.RequestCancel("Cancelled by test");
+
+FOR cycleIndex := 1 TO 20 DO
+	_Workflow.Execute();
+	IF NOT _Workflow.Busy THEN
+		EXIT;
+	END_IF
+END_FOR
+
+AssertEquals_INT(TOF_Workflow.WORKFLOW_ELEMENT_STATE.PASSIVE_CANCELLED, _Workflow.State, 'Workflow must transition to PASSIVE_CANCELLED');
+
+testFinished := TRUE;
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="TestWorkflowReset" Id="{300d150a-46e9-4de3-9a65-aa69e7e32834}" FolderPath="Tests\">
+      <Declaration><![CDATA[METHOD TestWorkflowReset
+VAR
+	cycleIndex : INT;
+END_VAR
+VAR_INST
+	testFinished : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN
+	RETURN;
+END_IF
+
+TEST(__POUNAME());
+
+buildScenarioTree();
+
+IF _Workflow.State = TOF_Workflow.WORKFLOW_ELEMENT_STATE.PASSIVE_COMPLETED THEN
+	AssertTrue(_Workflow.ResettingAllowed, 'ResettingAllowed must be TRUE for COMPLETED workflow');
+	_Workflow.RequestReset();
+
+	FOR cycleIndex := 1 TO 20 DO
+		_Workflow.Execute();
+		IF NOT _Workflow.Busy THEN
+			EXIT;
+		END_IF
+	END_FOR
+
+	AssertEquals_INT(TOF_Workflow.WORKFLOW_ELEMENT_STATE.PASSIVE_READY, _Workflow.State, 'Workflow must reset to PASSIVE_READY');
+	AssertEquals_INT(0, _Workflow.ProducedCount, 'ProducedCount must be reset to 0');
+	AssertFalse(_Workflow.ErrorHandled, 'ErrorHandled must be reset to FALSE');
+END_IF
+
+testFinished := TRUE;
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+  </POU>
+</TcPlcObject>
