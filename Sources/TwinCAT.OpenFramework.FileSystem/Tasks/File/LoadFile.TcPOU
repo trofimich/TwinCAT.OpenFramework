@@ -29,11 +29,6 @@ VAR
 	_ClassName : STRING := __POUNAME();
 
     _LoadFile : Tc2_System.FB_FileLoad; 
-
-	{attribute 'hide'} 
-	_PropertyNotSpecifiedException :	TOF_Core.DataMemberNotSpecifiedException;
-	{attribute 'hide'} 
-	_LoadFileException : TOF_Core.StandardException;
 END_VAR]]></Declaration>
     <Implementation>
       <ST><![CDATA[]]></ST>
@@ -162,7 +157,7 @@ METHOD PROTECTED OnReset ]]></Declaration>
       <Declaration><![CDATA[(*!
 <summary>Submits and advances a native file load into caller-owned memory.</summary>
 <description>Validates required configuration before submitting the request. Native errors raise an exception
-for the base Task failure/stopping path; the local diagnostic builder is released before that Throw.
+for the base Task failure/stopping path without dynamic string-builder allocations.
 Normal completion reports DONE only after the native block is no longer busy. No rollback is performed.</description>
 <param name="processingState">BUSY while pending; DONE after native completion without an error.</param>
 <param name="stopReasonMessage">Not changed here; failures are passed through exceptions.</param>
@@ -175,40 +170,33 @@ VAR_IN_OUT
 	stopReasonMessage : TOF_Core.ERROR_MESSAGE;
 END_VAR
 VAR
-	formattedExceptionMessage : WSTRING(255);
-
-	pathErrorMessage : WSTRING(255);
-	errorMessageBuilder : TOF_Core.WideStringBuilder;
+	formattedExceptionMessage : TOF_Core.ERROR_MESSAGE;
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[IF NOT _LoadFile.bExecute THEN 
 	IF TOF_Core.Strings.IsNullOrWhiteSpace(_LoadFile.sPathName) THEN
-		_PropertyNotSpecifiedException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), 'FilePath');		
+		TOF_Core.Exceptions.ThrowDataMemberNotSpecified(NamespaceName, ClassName, __POUNAME(), __POSITION(), 'FilePath');		
 	END_IF
 
 	IF _LoadFile.pReadBuff = 0 THEN
-		_PropertyNotSpecifiedException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), 'TargetBuffer');		
+		TOF_Core.Exceptions.ThrowDataMemberNotSpecified(NamespaceName, ClassName, __POUNAME(), __POSITION(), 'TargetBuffer');		
 	END_IF
 
 	IF _LoadFile.cbReadLen = 0 THEN
-		_PropertyNotSpecifiedException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), 'TargetBufferLength');		
+		TOF_Core.Exceptions.ThrowDataMemberNotSpecified(NamespaceName, ClassName, __POUNAME(), __POSITION(), 'TargetBufferLength');		
 	END_IF
 END_IF
 
 _LoadFile(bExecute := TRUE);
 
 IF _LoadFile.bError THEN
-	errorMessageBuilder
-		.AppendString("An error occurred while loading the file '")
-		.Append(_LoadFile.sPathName)
-		.AppendString("'");
+	TOF_Core.WideStrings.Append255(
+		formattedExceptionMessage,
+		"An error occurred while loading the file '",
+		TO_WSTRING(_LoadFile.sPathName),
+		"'");
 
-	formattedExceptionMessage := errorMessageBuilder.ToString255();
-
-	(* An exception skips FB_exit for this local builder; release its buffer before Throw. *)
-	errorMessageBuilder.Clear(releaseMemory := TRUE);
-
-	_LoadFileException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), formattedExceptionMessage, errorCode := _LoadFile.nErrId);
+	FileSystemExceptions.ThrowFileSystem(NamespaceName, ClassName, __POUNAME(), __POSITION(), formattedExceptionMessage, errorCode := _LoadFile.nErrId);
 END_IF
 
 IF NOT _LoadFile.bBusy THEN

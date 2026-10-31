@@ -1,4 +1,4 @@
-<?xml version="1.0" encoding="utf-8"?>
+﻿<?xml version="1.0" encoding="utf-8"?>
 <TcPlcObject Version="1.1.0.1">
   <POU Name="ReadString255FromFile" Id="{41262c4b-3425-416b-97ce-608743b9ee3d}" SpecialFunc="None">
     <Declaration><![CDATA[(*
@@ -30,11 +30,6 @@ VAR
 	//! <summary>Instance-owned empty result returned when no successful string-read result is available.</summary>
 	{attribute 'hide'}
 	_EmptyReadString : STRING(255);
-
-	{attribute 'hide'} 
-	_FileHandleNotSpecifiedException :	TOF_Core.DataMemberNotSpecifiedException;
-	{attribute 'hide'} 
-	_GetStringException : TOF_Core.StandardException;
 END_VAR]]></Declaration>
     <Implementation>
       <ST><![CDATA[]]></ST>
@@ -69,6 +64,20 @@ PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
         <Declaration><![CDATA[]]></Declaration>
         <Implementation>
           <ST><![CDATA[ClassName REF= _ClassName;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="FileOperationInProgress" Id="{586635bd-fab0-4bb9-8eac-64dcda3a3b61}">
+      <Declaration><![CDATA[(*!
+<summary>Reports whether the underlying native file operation is busy.</summary>
+<description>Observes native I/O, including work drained during stopping. FALSE is not a task-success result and does not independently permit the resource owner to close or destroy the file.</description>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY FileOperationInProgress : BOOL]]></Declaration>
+      <Get Name="Get" Id="{56b50421-e01f-4edd-96ed-956b25478f1d}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[FileOperationInProgress := _GetString.bBusy;]]></ST>
         </Implementation>
       </Get>
     </Property>
@@ -108,6 +117,63 @@ PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
         </Implementation>
       </Get>
     </Property>
+    <Method Name="OnReset" Id="{bc6c6478-9f6a-4ea4-898a-1f8c1e054c6a}" FolderPath="Overriden methods\">
+      <Declaration><![CDATA[(*!
+<summary>Resets the native request edge after the task has stopped.</summary>
+<description>Also preserves the inherited resource-binding cleanup. Configured inputs remain available for reuse; borrowed buffers are not freed or cleared. Pending I/O must finish during stopping before this hook runs.</description>
+*)
+METHOD PROTECTED OnReset ]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[SUPER^.OnReset();
+
+_GetString(bExecute := FALSE);]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="OnRunning" Id="{0c036560-db05-4598-b714-f8fd01fca8dd}" FolderPath="Overriden methods\">
+      <Declaration><![CDATA[(*!
+<summary>Reads a string from the bound file through the native line reader.</summary>
+<description>Requires a live bound resource whose owner keeps the handle acquired until stopping completes.
+Native errors raise an exception for the base Task failure and cleanup path without dynamic string-builder allocations; completed I/O effects are not rolled back.</description>
+<param name="processingState">BUSY while pending; DONE after native completion without an error.</param>
+<param name="stopReasonMessage">Not changed; native failures use exceptions.</param>
+*)
+METHOD PROTECTED OnRunning
+VAR_OUTPUT
+	processingState : TOF_Tasks.TASK_PROCESSING_STATE;
+END_VAR
+VAR_IN_OUT
+	stopReasonMessage : TOF_Core.ERROR_MESSAGE;
+END_VAR
+VAR
+	errorMessage : TOF_Core.ERROR_MESSAGE;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF NOT _GetString.bExecute THEN 
+	IF NOT __ISVALIDREF(_FileHandleResource) THEN
+		TOF_Core.Exceptions.ThrowDataMemberNotSpecified(NamespaceName, ClassName, __POUNAME(), __POSITION(), 'FileHandleResource');		
+	END_IF
+	
+	_GetString.sNetId := _FileHandleResource.AmsNetId;
+	_GetString.hFile := _FileHandleResource.FileHandle;
+END_IF
+
+_GetString(bExecute := TRUE);
+
+IF _GetString.bError THEN
+	TOF_Core.WideStrings.Append255(
+		errorMessage,
+		"An error occurred while reading string from file ",
+		TO_WSTRING(FilePath),
+		"'");
+
+	FileSystemExceptions.ThrowFileSystem(NamespaceName, ClassName, __POUNAME(), __POSITION(), errorMessage, errorCode := _GetString.nErrId);
+END_IF
+
+IF NOT _GetString.bBusy THEN
+	processingState := TOF_Tasks.TASK_PROCESSING_STATE.DONE;
+END_IF]]></ST>
+      </Implementation>
+    </Method>
     <Method Name="OnStopping" Id="{91549f4f-90bf-433d-b748-03e26755e8a1}" FolderPath="Overriden methods\">
       <Declaration><![CDATA[(*!
 <summary>Wait for an already submitted file operation before allowing handle release.</summary>
@@ -128,68 +194,6 @@ END_VAR]]></Declaration>
 END_IF
 
 readyToRelease := NOT _GetString.bBusy;]]></ST>
-      </Implementation>
-    </Method>
-    <Method Name="OnReset" Id="{bc6c6478-9f6a-4ea4-898a-1f8c1e054c6a}" FolderPath="Overriden methods\">
-      <Declaration><![CDATA[(*!
-<summary>Resets the native request edge after the task has stopped.</summary>
-<description>Also preserves the inherited resource-binding cleanup. Configured inputs remain available for reuse; borrowed buffers are not freed or cleared. Pending I/O must finish during stopping before this hook runs.</description>
-*)
-METHOD PROTECTED OnReset ]]></Declaration>
-      <Implementation>
-        <ST><![CDATA[SUPER^.OnReset();
-
-_GetString(bExecute := FALSE);]]></ST>
-      </Implementation>
-    </Method>
-    <Method Name="OnRunning" Id="{0c036560-db05-4598-b714-f8fd01fca8dd}" FolderPath="Overriden methods\">
-      <Declaration><![CDATA[(*!
-<summary>Reads a string from the bound file through the native line reader.</summary>
-<description>Requires a live bound resource whose owner keeps the handle acquired until stopping completes.
-Native errors raise an exception for the base Task failure and cleanup path; completed I/O effects are not rolled back.
-The local diagnostic builder is released after copying its message and before raising the native-operation exception.</description>
-<param name="processingState">BUSY while pending; DONE after native completion without an error.</param>
-<param name="stopReasonMessage">Not changed; native failures use exceptions.</param>
-*)
-METHOD PROTECTED OnRunning
-VAR_OUTPUT
-	processingState : TOF_Tasks.TASK_PROCESSING_STATE;
-END_VAR
-VAR_IN_OUT
-	stopReasonMessage : TOF_Core.ERROR_MESSAGE;
-END_VAR
-VAR
-	errorMessageBuilder : TOF_Core.WideStringBuilder;
-	errorMessage : TOF_Core.ERROR_MESSAGE;
-END_VAR]]></Declaration>
-      <Implementation>
-        <ST><![CDATA[IF NOT _GetString.bExecute THEN 
-	IF NOT __ISVALIDREF(_FileHandleResource) THEN
-		_FileHandleNotSpecifiedException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), 'FileHandleResource');		
-	END_IF
-	
-	_GetString.sNetId := _FileHandleResource.AmsNetId;
-	_GetString.hFile := _FileHandleResource.FileHandle;
-END_IF
-
-_GetString(bExecute := TRUE);
-
-IF _GetString.bError THEN
-	errorMessageBuilder
-		.AppendString("An error occurred while reading string from file ")
-		.AppendString255(STRING_TO_WSTRING(FilePath))
-		.AppendString("'")
-		.AssignToString(errorMessage);
-
-	(* An exception skips FB_exit for this local builder; release its buffer before Throw. *)
-	errorMessageBuilder.Clear(releaseMemory := TRUE);
-
-	_GetStringException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), errorMessage, errorCode := _GetString.nErrId);
-END_IF
-
-IF NOT _GetString.bBusy THEN
-	processingState := TOF_Tasks.TASK_PROCESSING_STATE.DONE;
-END_IF]]></ST>
       </Implementation>
     </Method>
     <Property Name="ReadString" Id="{f8733a64-16f5-476a-82ad-78b6e24f3bd4}" FolderPath="Outputs\">
@@ -248,20 +252,6 @@ PROPERTY Timeout : TIME]]></Declaration>
           <ST><![CDATA[_GetString.tTimeout := Timeout;]]></ST>
         </Implementation>
       </Set>
-    </Property>
-    <Property Name="FileOperationInProgress" Id="{586635bd-fab0-4bb9-8eac-64dcda3a3b61}">
-      <Declaration><![CDATA[(*!
-<summary>Reports whether the underlying native file operation is busy.</summary>
-<description>Observes native I/O, including work drained during stopping. FALSE is not a task-success result and does not independently permit the resource owner to close or destroy the file.</description>
-*)
-{attribute 'monitoring' := 'call'}
-PROPERTY FileOperationInProgress : BOOL]]></Declaration>
-      <Get Name="Get" Id="{56b50421-e01f-4edd-96ed-956b25478f1d}">
-        <Declaration><![CDATA[]]></Declaration>
-        <Implementation>
-          <ST><![CDATA[FileOperationInProgress := _GetString.bBusy;]]></ST>
-        </Implementation>
-      </Get>
     </Property>
   </POU>
 </TcPlcObject>

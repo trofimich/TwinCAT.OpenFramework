@@ -36,15 +36,6 @@ VAR
 	
 	//! <summary>Latches a found directory for this run so removal cannot restart the search.</summary>
 	_DirectoryFound : BOOL;
-
-	{attribute 'hide'} 
-	_DirectoryPathNotSpecifiedException : TOF_Core.DataMemberNotSpecifiedException;
-	{attribute 'hide'} 
-	_InvalidPathException : InvalidPathException;	
-	{attribute 'hide'} 
-	_FindDirectoryException : TOF_Core.StandardException;
-	{attribute 'hide'} 
-	_RemoveDirectoryException : TOF_Core.StandardException;
 END_VAR]]></Declaration>
     <Implementation>
       <ST><![CDATA[]]></ST>
@@ -208,8 +199,8 @@ _EnumerationAbortIssued := FALSE;]]></ST>
       <Declaration><![CDATA[(*!
 <summary>Checks for a directory and removes it only after closing the search.</summary>
 <description>On early discovery, the search abort must complete before the remove FB is started. A missing
-directory completes successfully. Computed diagnostics are held in local buffers for the receiving call.
-A found file returns ERROR with a diagnostic message and leaves enumeration cleanup to OnStopping; no remove request starts. The local diagnostic builder is released after copying its message and before raising the operation exception.</description>
+directory completes successfully. Computed diagnostics are held in local buffers for the receiving call without dynamic string-builder allocations.
+A found file returns ERROR with a diagnostic message and leaves enumeration cleanup to OnStopping; no remove request starts.</description>
 <param name="processingState">BUSY while searching, closing the search or removing; DONE after completion; ERROR when the path refers to a file.</param>
 <param name="stopReasonMessage">Receives diagnostics when the path refers to a file; native failures use exceptions.</param>
 *)
@@ -221,20 +212,18 @@ VAR_IN_OUT
 	stopReasonMessage : TOF_Core.ERROR_MESSAGE;
 END_VAR
 VAR
-	formattedExceptionMessage : WSTRING(255);
-
-	errorMessageBuilder : TOF_Core.WideStringBuilder;
+	formattedExceptionMessage : TOF_Core.ERROR_MESSAGE;
 	pathErrorMessage : WSTRING(255);
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[IF NOT _DirectoryChecking AND_THEN NOT _EnumerationStarted AND_THEN NOT _DirectoryFound
 THEN
 	IF TOF_Core.Strings.IsNullOrWhiteSpace(_EnumFindFile.sPathName) THEN
-		_DirectoryPathNotSpecifiedException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), 'DirectoryPath');		
+		TOF_Core.Exceptions.ThrowDataMemberNotSpecified(NamespaceName, ClassName, __POUNAME(), __POSITION(), 'DirectoryPath');		
 	END_IF
 	
 	IF NOT PathHelper.IsValidDirectoryPath(_EnumFindFile.sPathName, errorMessage => pathErrorMessage) THEN
-		_InvalidPathException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), _EnumFindFile.sPathName, pathErrorMessage);
+		FileSystemExceptions.ThrowInvalidPath(NamespaceName, ClassName, __POUNAME(), __POSITION(), _EnumFindFile.sPathName, pathErrorMessage);
 	END_IF
 	
 	_DirectoryChecking := TRUE;
@@ -248,17 +237,13 @@ IF _DirectoryChecking THEN
 	_EnumFindFile(bExecute := TRUE);
 	
 	IF _EnumFindFile.bError THEN
-		errorMessageBuilder
-			.AppendString("Error while checking directory '")
-			.Append(_EnumFindFile.sPathName)
-			.AppendString("'");
-	
-		formattedExceptionMessage := errorMessageBuilder.ToString255();
+		TOF_Core.WideStrings.Append255(
+			formattedExceptionMessage,
+			"Error while checking directory '",
+			TO_WSTRING(_EnumFindFile.sPathName),
+			"'");
 
-		(* An exception skips FB_exit for this local builder; release its buffer before Throw. *)
-		errorMessageBuilder.Clear(releaseMemory := TRUE);
-
-		_FindDirectoryException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), formattedExceptionMessage, errorCode := _EnumFindFile.nErrId);
+		FileSystemExceptions.ThrowFileSystem(NamespaceName, ClassName, __POUNAME(), __POSITION(), formattedExceptionMessage, errorCode := _EnumFindFile.nErrId);
 	ELSIF NOT _EnumFindFile.bBusy THEN	
 		_DirectoryChecking := FALSE;
 		
@@ -281,17 +266,13 @@ ELSE
 	_RemoveDirectory(bExecute := TRUE);
 	
 	IF _RemoveDirectory.bError THEN
-		errorMessageBuilder
-			.AppendString("Error while removing directory '")
-			.Append(_RemoveDirectory.sPathName)
-			.AppendString("'");
-	
-		formattedExceptionMessage := errorMessageBuilder.ToString255();
+		TOF_Core.WideStrings.Append255(
+			formattedExceptionMessage,
+			"Error while removing directory '",
+			TO_WSTRING(_RemoveDirectory.sPathName),
+			"'");
 
-		(* An exception skips FB_exit for this local builder; release its buffer before Throw. *)
-		errorMessageBuilder.Clear(releaseMemory := TRUE);
-
-		_RemoveDirectoryException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), formattedExceptionMessage, errorCode := _RemoveDirectory.nErrId);
+		FileSystemExceptions.ThrowFileSystem(NamespaceName, ClassName, __POUNAME(), __POSITION(), formattedExceptionMessage, errorCode := _RemoveDirectory.nErrId);
 	END_IF
 	
 	IF NOT _RemoveDirectory.bBusy THEN

@@ -23,11 +23,6 @@ VAR
 	_ClassName : STRING := __POUNAME();
 
     _RenameFile : Tc2_System.FB_FileRename;
-
-	{attribute 'hide'} 
-	_FilePathNotSpecifiedException : TOF_Core.DataMemberNotSpecifiedException;
-	{attribute 'hide'} 
-	_RenameFileException : TOF_Core.StandardException;
 END_VAR]]></Declaration>
     <Implementation>
       <ST><![CDATA[]]></ST>
@@ -159,7 +154,7 @@ METHOD PROTECTED OnReset ]]></Declaration>
       <Declaration><![CDATA[(*!
 <summary>Submits and advances native renaming of the configured file.</summary>
 <description>Validates required configuration before submitting the request. Native errors raise an exception
-for the base Task failure/stopping path; the local diagnostic builder is released before that Throw.
+for the base Task failure/stopping path without dynamic string-builder allocations.
 Normal completion reports DONE only after the native block is no longer busy. No rollback is performed.</description>
 <param name="processingState">BUSY while pending; DONE after native completion without an error.</param>
 <param name="stopReasonMessage">Not changed here; failures are passed through exceptions.</param>
@@ -172,19 +167,16 @@ VAR_IN_OUT
 	stopReasonMessage : TOF_Core.ERROR_MESSAGE;
 END_VAR
 VAR
-	formattedExceptionMessage : WSTRING(255);
-
-	pathErrorMessage : WSTRING(255);
-	errorMessageBuilder : TOF_Core.WideStringBuilder;
+	formattedExceptionMessage : TOF_Core.ERROR_MESSAGE;
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[IF NOT _RenameFile.bExecute THEN 
 	IF TOF_Core.Strings.IsNullOrWhiteSpace(_RenameFile.sOldName) THEN
-		_FilePathNotSpecifiedException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), 'OldFilePath');		
+		TOF_Core.Exceptions.ThrowDataMemberNotSpecified(NamespaceName, ClassName, __POUNAME(), __POSITION(), 'OldFilePath');		
 	END_IF
 
 	IF TOF_Core.Strings.IsNullOrWhiteSpace(_RenameFile.sNewName) THEN
-		_FilePathNotSpecifiedException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), 'NewFilePath');		
+		TOF_Core.Exceptions.ThrowDataMemberNotSpecified(NamespaceName, ClassName, __POUNAME(), __POSITION(), 'NewFilePath');		
 	END_IF
 	
 	_RenameFile(bExecute := FALSE);
@@ -193,19 +185,15 @@ END_IF
 _RenameFile(bExecute := TRUE);
 
 IF _RenameFile.bError THEN
-	errorMessageBuilder
-		.AppendString("An error occurred while renaming the file '")
-		.Append(_RenameFile.sOldName)
-		.AppendString("' to '")
-		.Append(_RenameFile.sNewName)
-		.AppendString("'");
+	TOF_Core.WideStrings.Append255(
+		formattedExceptionMessage,
+		"An error occurred while renaming the file '",
+		TO_WSTRING(_RenameFile.sOldName),
+		"' to '",
+		TO_WSTRING(_RenameFile.sNewName),
+		"'");
 
-	formattedExceptionMessage := errorMessageBuilder.ToString255();
-
-	(* An exception skips FB_exit for this local builder; release its buffer before Throw. *)
-	errorMessageBuilder.Clear(releaseMemory := TRUE);
-
-	_RenameFileException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), formattedExceptionMessage, errorCode := _RenameFile.nErrId);
+	FileSystemExceptions.ThrowFileSystem(NamespaceName, ClassName, __POUNAME(), __POSITION(), formattedExceptionMessage, errorCode := _RenameFile.nErrId);
 END_IF
 
 IF NOT _RenameFile.bBusy THEN

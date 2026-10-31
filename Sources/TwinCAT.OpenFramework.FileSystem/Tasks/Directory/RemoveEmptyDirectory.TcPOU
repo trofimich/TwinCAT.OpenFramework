@@ -24,13 +24,6 @@ VAR
 	_ClassName : STRING := __POUNAME();
 
     _RemoveDirectory : Tc2_System.FB_RemoveDir;	
-
-	{attribute 'hide'} 
-	_DirectoryPathNotSpecifiedException :	TOF_Core.DataMemberNotSpecifiedException;
-	{attribute 'hide'} 
-	_InvalidPathException : InvalidPathException;	
-	{attribute 'hide'} 
-	_DeleteDirectoryException : TOF_Core.StandardException;
 END_VAR]]></Declaration>
     <Implementation>
       <ST><![CDATA[]]></ST>
@@ -115,8 +108,7 @@ METHOD PROTECTED OnReset ]]></Declaration>
     <Method Name="OnRunning" Id="{df915afb-aa65-445f-a579-78975326fa79}" FolderPath="Members to override\">
       <Declaration><![CDATA[(*!
 <summary>Validates the configured path and advances the native empty-directory removal request.</summary>
-<description>Computed diagnostic strings are held in local buffers for the duration of the receiving call.
-The local diagnostic builder is released after copying its message and before raising the operation exception.</description>
+<description>Computed diagnostic strings are held in local buffers for the duration of the receiving call without dynamic string-builder allocations.</description>
 *)
 METHOD PROTECTED OnRunning
 VAR_OUTPUT
@@ -127,36 +119,29 @@ VAR_IN_OUT
 END_VAR
 VAR	
 	pathErrorMessage : WSTRING(255);
-	errorMessageBuilder : TOF_Core.WideStringBuilder;
-END_VAR
-VAR
-	formattedExceptionMessage : WSTRING(255);
+	formattedExceptionMessage : TOF_Core.ERROR_MESSAGE;
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[IF NOT _RemoveDirectory.bExecute THEN 
 	IF TOF_Core.Strings.IsNullOrWhiteSpace(_RemoveDirectory.sPathName) THEN
-		_DirectoryPathNotSpecifiedException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), 'DirectoryPath');		
+		TOF_Core.Exceptions.ThrowDataMemberNotSpecified(NamespaceName, ClassName, __POUNAME(), __POSITION(), 'DirectoryPath');		
 	END_IF
 	
 	IF NOT PathHelper.IsValidDirectoryPath(_RemoveDirectory.sPathName, errorMessage => pathErrorMessage) THEN
-		_InvalidPathException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), _RemoveDirectory.sPathName, pathErrorMessage);
+		FileSystemExceptions.ThrowInvalidPath(NamespaceName, ClassName, __POUNAME(), __POSITION(), _RemoveDirectory.sPathName, pathErrorMessage);
 	END_IF
 END_IF
 
 _RemoveDirectory(bExecute := TRUE);
 
 IF _RemoveDirectory.bError THEN
-	errorMessageBuilder
-		.AppendString("An while removing directory '")
-		.Append(_RemoveDirectory.sPathName)
-		.AppendString("'");
+	TOF_Core.WideStrings.Append255(
+		formattedExceptionMessage,
+		"An while removing directory '",
+		TO_WSTRING(_RemoveDirectory.sPathName),
+		"'");
 
-	formattedExceptionMessage := errorMessageBuilder.ToString255();
-
-	(* An exception skips FB_exit for this local builder; release its buffer before Throw. *)
-	errorMessageBuilder.Clear(releaseMemory := TRUE);
-
-	_DeleteDirectoryException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), formattedExceptionMessage, errorCode := _RemoveDirectory.nErrId);
+	FileSystemExceptions.ThrowFileSystem(NamespaceName, ClassName, __POUNAME(), __POSITION(), formattedExceptionMessage, errorCode := _RemoveDirectory.nErrId);
 END_IF
 
 IF NOT _RemoveDirectory.bBusy THEN

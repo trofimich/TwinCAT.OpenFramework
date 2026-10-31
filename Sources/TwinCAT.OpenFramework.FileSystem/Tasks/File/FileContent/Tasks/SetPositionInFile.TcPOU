@@ -1,4 +1,4 @@
-<?xml version="1.0" encoding="utf-8"?>
+﻿<?xml version="1.0" encoding="utf-8"?>
 <TcPlcObject Version="1.1.0.1">
   <POU Name="SetPositionInFile" Id="{2ffd7f2a-d3d6-47c9-9d3a-1e9a401c5b19}" SpecialFunc="None">
     <Declaration><![CDATA[(*
@@ -23,11 +23,6 @@ VAR
 	_ClassName : STRING := __POUNAME();
 
     _SetPosition : Tc2_System.FB_FileSeek;
-
-	{attribute 'hide'} 
-	_FileHandleNotSpecifiedException :	TOF_Core.DataMemberNotSpecifiedException;
-	{attribute 'hide'} 
-	_SetPositionException : TOF_Core.StandardException;
 END_VAR]]></Declaration>
     <Implementation>
       <ST><![CDATA[]]></ST>
@@ -64,6 +59,20 @@ PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
         </Implementation>
       </Get>
     </Property>
+    <Property Name="FileOperationInProgress" Id="{d2f9cbc9-0bf1-4bfb-bb02-4e28ad125b5c}">
+      <Declaration><![CDATA[(*!
+<summary>Reports whether the underlying native file operation is busy.</summary>
+<description>Observes native I/O, including work drained during stopping. FALSE is not a task-success result and does not independently permit the resource owner to close or destroy the file.</description>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY FileOperationInProgress : BOOL]]></Declaration>
+      <Get Name="Get" Id="{2f0a7120-515d-4b95-a71e-21856b7a972c}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[FileOperationInProgress := _SetPosition.bBusy;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
     <Property Name="NamespaceName" Id="{5d4e917a-caa7-42e6-b306-afda1ea469d1}">
       <Declaration><![CDATA[(*!
 <summary>Provides the library namespace used in diagnostics.</summary>
@@ -78,6 +87,63 @@ PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
         </Implementation>
       </Get>
     </Property>
+    <Method Name="OnReset" Id="{cfc6df6b-d281-4a15-b319-5749c80fbdb9}" FolderPath="Overriden methods\">
+      <Declaration><![CDATA[(*!
+<summary>Clears the borrowed binding and native request state after stopping.</summary>
+<description>Preserves Position, Origin and Timeout. Does not cancel pending I/O; stopping must finish first.</description>
+*)
+METHOD PROTECTED OnReset]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[SUPER^.OnReset();
+
+_SetPosition(bExecute := FALSE);]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="OnRunning" Id="{5baa2eff-208e-451f-9d4c-98409c9ff39d}" FolderPath="Overriden methods\">
+      <Declaration><![CDATA[(*!
+<summary>Changes the position of the bound file using the configured offset and origin.</summary>
+<description>Requires a live bound resource whose owner keeps the handle acquired until stopping completes.
+Native errors raise an exception for the base Task failure and cleanup path without dynamic string-builder allocations; completed I/O effects are not rolled back.</description>
+<param name="processingState">BUSY while pending; DONE after native completion without an error.</param>
+<param name="stopReasonMessage">Not changed; native failures use exceptions.</param>
+*)
+METHOD PROTECTED OnRunning
+VAR_OUTPUT
+	processingState : TOF_Tasks.TASK_PROCESSING_STATE;
+END_VAR
+VAR_IN_OUT
+	stopReasonMessage : TOF_Core.ERROR_MESSAGE;
+END_VAR
+VAR
+	errorMessage : TOF_Core.ERROR_MESSAGE;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF NOT _SetPosition.bExecute THEN 
+	IF NOT __ISVALIDREF(_FileHandleResource) THEN
+		TOF_Core.Exceptions.ThrowDataMemberNotSpecified(NamespaceName, ClassName, __POUNAME(), __POSITION(), 'FileHandleResource');		
+	END_IF
+	
+	_SetPosition.sNetId := _FileHandleResource.AmsNetId;
+	_SetPosition.hFile := _FileHandleResource.FileHandle;
+END_IF
+
+_SetPosition(bExecute := TRUE);
+
+IF _SetPosition.bError THEN
+	TOF_Core.WideStrings.Append255(
+		errorMessage,
+		"An error occurred while changing position in file ",
+		TO_WSTRING(FilePath),
+		"'");
+
+	FileSystemExceptions.ThrowFileSystem(NamespaceName, ClassName, __POUNAME(), __POSITION(), errorMessage, errorCode := _SetPosition.nErrId);
+END_IF
+
+IF NOT _SetPosition.bBusy THEN
+	processingState := TOF_Tasks.TASK_PROCESSING_STATE.DONE;
+END_IF]]></ST>
+      </Implementation>
+    </Method>
     <Method Name="OnStopping" Id="{a3832dc5-33f8-4a9b-9737-37bc7f72bd87}" FolderPath="Overriden methods\">
       <Declaration><![CDATA[(*!
 <summary>Wait for an already submitted file operation before allowing handle release.</summary>
@@ -98,68 +164,6 @@ END_VAR]]></Declaration>
 END_IF
 
 readyToRelease := NOT _SetPosition.bBusy;]]></ST>
-      </Implementation>
-    </Method>
-    <Method Name="OnReset" Id="{cfc6df6b-d281-4a15-b319-5749c80fbdb9}" FolderPath="Overriden methods\">
-      <Declaration><![CDATA[(*!
-<summary>Clears the borrowed binding and native request state after stopping.</summary>
-<description>Preserves Position, Origin and Timeout. Does not cancel pending I/O; stopping must finish first.</description>
-*)
-METHOD PROTECTED OnReset]]></Declaration>
-      <Implementation>
-        <ST><![CDATA[SUPER^.OnReset();
-
-_SetPosition(bExecute := FALSE);]]></ST>
-      </Implementation>
-    </Method>
-    <Method Name="OnRunning" Id="{5baa2eff-208e-451f-9d4c-98409c9ff39d}" FolderPath="Overriden methods\">
-      <Declaration><![CDATA[(*!
-<summary>Changes the position of the bound file using the configured offset and origin.</summary>
-<description>Requires a live bound resource whose owner keeps the handle acquired until stopping completes.
-Native errors raise an exception for the base Task failure and cleanup path; completed I/O effects are not rolled back.
-The local diagnostic builder is released after copying its message and before raising the native-operation exception.</description>
-<param name="processingState">BUSY while pending; DONE after native completion without an error.</param>
-<param name="stopReasonMessage">Not changed; native failures use exceptions.</param>
-*)
-METHOD PROTECTED OnRunning
-VAR_OUTPUT
-	processingState : TOF_Tasks.TASK_PROCESSING_STATE;
-END_VAR
-VAR_IN_OUT
-	stopReasonMessage : TOF_Core.ERROR_MESSAGE;
-END_VAR
-VAR
-	errorMessageBuilder : TOF_Core.WideStringBuilder;
-	errorMessage : TOF_Core.ERROR_MESSAGE;
-END_VAR]]></Declaration>
-      <Implementation>
-        <ST><![CDATA[IF NOT _SetPosition.bExecute THEN 
-	IF NOT __ISVALIDREF(_FileHandleResource) THEN
-		_FileHandleNotSpecifiedException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), 'FileHandleResource');		
-	END_IF
-	
-	_SetPosition.sNetId := _FileHandleResource.AmsNetId;
-	_SetPosition.hFile := _FileHandleResource.FileHandle;
-END_IF
-
-_SetPosition(bExecute := TRUE);
-
-IF _SetPosition.bError THEN
-	errorMessageBuilder
-		.AppendString("An error occurred while changing position in file ")
-		.AppendString255(STRING_TO_WSTRING(FilePath))
-		.AppendString("'")
-		.AssignToString(errorMessage);
-
-	(* An exception skips FB_exit for this local builder; release its buffer before Throw. *)
-	errorMessageBuilder.Clear(releaseMemory := TRUE);
-
-	_SetPositionException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), errorMessage, errorCode := _SetPosition.nErrId);
-END_IF
-
-IF NOT _SetPosition.bBusy THEN
-	processingState := TOF_Tasks.TASK_PROCESSING_STATE.DONE;
-END_IF]]></ST>
       </Implementation>
     </Method>
     <Property Name="Origin" Id="{59a9a4c8-934e-41d3-b102-8ce67e140be5}" FolderPath="Inputs\">
@@ -236,20 +240,6 @@ PROPERTY Timeout : TIME]]></Declaration>
           <ST><![CDATA[_SetPosition.tTimeout := Timeout;]]></ST>
         </Implementation>
       </Set>
-    </Property>
-    <Property Name="FileOperationInProgress" Id="{d2f9cbc9-0bf1-4bfb-bb02-4e28ad125b5c}">
-      <Declaration><![CDATA[(*!
-<summary>Reports whether the underlying native file operation is busy.</summary>
-<description>Observes native I/O, including work drained during stopping. FALSE is not a task-success result and does not independently permit the resource owner to close or destroy the file.</description>
-*)
-{attribute 'monitoring' := 'call'}
-PROPERTY FileOperationInProgress : BOOL]]></Declaration>
-      <Get Name="Get" Id="{2f0a7120-515d-4b95-a71e-21856b7a972c}">
-        <Declaration><![CDATA[]]></Declaration>
-        <Implementation>
-          <ST><![CDATA[FileOperationInProgress := _SetPosition.bBusy;]]></ST>
-        </Implementation>
-      </Get>
     </Property>
   </POU>
 </TcPlcObject>

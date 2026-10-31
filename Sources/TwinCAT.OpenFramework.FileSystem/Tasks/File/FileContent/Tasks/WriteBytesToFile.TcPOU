@@ -1,4 +1,4 @@
-<?xml version="1.0" encoding="utf-8"?>
+﻿<?xml version="1.0" encoding="utf-8"?>
 <TcPlcObject Version="1.1.0.1">
   <POU Name="WriteBytesToFile" Id="{7fb15e59-abf9-416d-bf95-7588c3be0b84}" SpecialFunc="None">
     <Declaration><![CDATA[(*
@@ -23,14 +23,6 @@ VAR
 	_ClassName : STRING := __POUNAME();
 
     _WriteBytes : Tc2_System.FB_FileWrite;
-
-	{attribute 'hide'} 
-	_FileHandleNotSpecifiedException :	TOF_Core.DataMemberNotSpecifiedException;
-	//! <summary>Instance-owned exception template for missing buffer configuration, avoiding a method-local exception object on the call stack.</summary>
-	{attribute 'hide'}
-	_PropertyNotSpecifiedException : TOF_Core.DataMemberNotSpecifiedException;
-	{attribute 'hide'} 
-	_WriteBytesException : TOF_Core.StandardException;
 END_VAR]]></Declaration>
     <Implementation>
       <ST><![CDATA[]]></ST>
@@ -110,6 +102,20 @@ PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
         </Implementation>
       </Get>
     </Property>
+    <Property Name="FileOperationInProgress" Id="{dec96700-4c27-4085-b567-037497945de8}">
+      <Declaration><![CDATA[(*!
+<summary>Reports whether the underlying native file operation is busy.</summary>
+<description>Observes native I/O, including work drained during stopping. FALSE is not a task-success result and does not independently permit the resource owner to close or destroy the file.</description>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY FileOperationInProgress : BOOL]]></Declaration>
+      <Get Name="Get" Id="{9a19ffab-a886-4858-85ae-7700db207ea7}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[FileOperationInProgress := _WriteBytes.bBusy;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
     <Property Name="NamespaceName" Id="{46067b07-021a-4c1d-928e-c925a93bb725}">
       <Declaration><![CDATA[(*!
 <summary>Provides the library namespace used in diagnostics.</summary>
@@ -124,6 +130,78 @@ PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
         </Implementation>
       </Get>
     </Property>
+    <Method Name="OnReset" Id="{2a0ac1a8-8e3d-47b4-8633-8e7e44e211d7}" FolderPath="Overriden methods\">
+      <Declaration><![CDATA[(*!
+<summary>Resets the native request edge after the task has stopped.</summary>
+<description>Also preserves the inherited resource-binding cleanup. Configured inputs remain available for reuse; borrowed buffers are not freed or cleared. Pending I/O must finish during stopping before this hook runs.</description>
+*)
+METHOD PROTECTED OnReset ]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[SUPER^.OnReset();
+
+_WriteBytes(bExecute := FALSE);]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="OnRunning" Id="{1441cdc8-acfb-4842-a5f8-6dffac4135e4}" FolderPath="Overriden methods\">
+      <Declaration><![CDATA[(*!
+<summary>Writes the configured byte buffer to the bound file and checks the written count.</summary>
+<description>Requires a live bound resource whose owner keeps the handle acquired until stopping completes.
+Before submitting I/O, a null buffer or zero count raises DataMemberNotSpecifiedException for the missing property. This rejects invalid configuration through the base Task failure and cleanup path. Native errors also raise an exception without dynamic string-builder allocations; completed I/O effects are not rolled back.</description>
+<param name="processingState">BUSY while pending; DONE after a full write; ERROR on a short write.</param>
+<param name="stopReasonMessage">Receives byte-count diagnostics on a short write; native failures use exceptions.</param>
+*)
+METHOD PROTECTED OnRunning
+VAR_OUTPUT
+	processingState : TOF_Tasks.TASK_PROCESSING_STATE;
+END_VAR
+VAR_IN_OUT
+	stopReasonMessage : TOF_Core.ERROR_MESSAGE;
+END_VAR
+VAR
+	errorMessage : TOF_Core.ERROR_MESSAGE;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF NOT _WriteBytes.bExecute THEN 
+	IF NOT __ISVALIDREF(_FileHandleResource) THEN
+		TOF_Core.Exceptions.ThrowDataMemberNotSpecified(NamespaceName, ClassName, __POUNAME(), __POSITION(), 'FileHandleResource');		
+	END_IF
+	
+	IF _WriteBytes.pWriteBuff = TOF_Core.Memory.NULL_ADDRESS THEN
+		TOF_Core.Exceptions.ThrowDataMemberNotSpecified(NamespaceName, ClassName, __POUNAME(), __POSITION(), 'SourceBuffer');
+	END_IF
+
+	IF _WriteBytes.cbWriteLen = TOF_Core.UnsignedInt32.ZERO THEN
+		TOF_Core.Exceptions.ThrowDataMemberNotSpecified(NamespaceName, ClassName, __POUNAME(), __POSITION(), 'BytesCountToWrite');
+	END_IF
+
+	_WriteBytes.sNetId := _FileHandleResource.AmsNetId;
+	_WriteBytes.hFile := _FileHandleResource.FileHandle;
+END_IF
+
+_WriteBytes(bExecute := TRUE);
+
+IF _WriteBytes.bError THEN
+	TOF_Core.WideStrings.Append255(
+		errorMessage,
+		"An error occurred while writing bytes to file ",
+		TO_WSTRING(FilePath),
+		"'");
+
+	FileSystemExceptions.ThrowFileSystem(NamespaceName, ClassName, __POUNAME(), __POSITION(), errorMessage, errorCode := _WriteBytes.nErrId);
+END_IF
+
+IF NOT _WriteBytes.bBusy THEN
+	(* A short write may leave bError=FALSE; success requires the full byte count. *)
+	IF _WriteBytes.cbWrite <> _WriteBytes.cbWriteLen THEN
+		stopReasonMessage := TOF_Core.WideStrings.Concat255("File write byte count mismatch: expected ", TO_WSTRING(_WriteBytes.cbWriteLen), ", written ", TO_WSTRING(_WriteBytes.cbWrite));
+		
+		processingState := TOF_Tasks.TASK_PROCESSING_STATE.ERROR;
+	ELSE
+		processingState := TOF_Tasks.TASK_PROCESSING_STATE.DONE;
+	END_IF
+END_IF]]></ST>
+      </Implementation>
+    </Method>
     <Method Name="OnStopping" Id="{0e54eed8-3851-4bfb-8d95-75b4cf2d9c12}" FolderPath="Overriden methods\">
       <Declaration><![CDATA[(*!
 <summary>Wait for an already submitted file operation before allowing handle release.</summary>
@@ -144,83 +222,6 @@ END_VAR]]></Declaration>
 END_IF
 
 readyToRelease := NOT _WriteBytes.bBusy;]]></ST>
-      </Implementation>
-    </Method>
-    <Method Name="OnReset" Id="{2a0ac1a8-8e3d-47b4-8633-8e7e44e211d7}" FolderPath="Overriden methods\">
-      <Declaration><![CDATA[(*!
-<summary>Resets the native request edge after the task has stopped.</summary>
-<description>Also preserves the inherited resource-binding cleanup. Configured inputs remain available for reuse; borrowed buffers are not freed or cleared. Pending I/O must finish during stopping before this hook runs.</description>
-*)
-METHOD PROTECTED OnReset ]]></Declaration>
-      <Implementation>
-        <ST><![CDATA[SUPER^.OnReset();
-
-_WriteBytes(bExecute := FALSE);]]></ST>
-      </Implementation>
-    </Method>
-    <Method Name="OnRunning" Id="{1441cdc8-acfb-4842-a5f8-6dffac4135e4}" FolderPath="Overriden methods\">
-      <Declaration><![CDATA[(*!
-<summary>Writes the configured byte buffer to the bound file and checks the written count.</summary>
-<description>Requires a live bound resource whose owner keeps the handle acquired until stopping completes.
-Before submitting I/O, a null buffer or zero count raises DataMemberNotSpecifiedException for the missing property. This rejects invalid configuration through the base Task failure and cleanup path. Native errors also raise an exception; completed I/O effects are not rolled back.
-The local diagnostic builder is released after copying its message and before raising the native-operation exception.</description>
-<param name="processingState">BUSY while pending; DONE after a full write; ERROR on a short write.</param>
-<param name="stopReasonMessage">Receives byte-count diagnostics on a short write; native failures use exceptions.</param>
-*)
-METHOD PROTECTED OnRunning
-VAR_OUTPUT
-	processingState : TOF_Tasks.TASK_PROCESSING_STATE;
-END_VAR
-VAR_IN_OUT
-	stopReasonMessage : TOF_Core.ERROR_MESSAGE;
-END_VAR
-VAR
-	errorMessageBuilder : TOF_Core.WideStringBuilder;
-	errorMessage : TOF_Core.ERROR_MESSAGE;
-END_VAR]]></Declaration>
-      <Implementation>
-        <ST><![CDATA[IF NOT _WriteBytes.bExecute THEN 
-	IF NOT __ISVALIDREF(_FileHandleResource) THEN
-		_FileHandleNotSpecifiedException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), 'FileHandleResource');		
-	END_IF
-	
-	IF _WriteBytes.pWriteBuff = TOF_Core.Memory.NULL_ADDRESS THEN
-		_PropertyNotSpecifiedException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), 'SourceBuffer');
-	END_IF
-
-	IF _WriteBytes.cbWriteLen = TOF_Core.UnsignedInt32.ZERO THEN
-		_PropertyNotSpecifiedException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), 'BytesCountToWrite');
-	END_IF
-
-	_WriteBytes.sNetId := _FileHandleResource.AmsNetId;
-	_WriteBytes.hFile := _FileHandleResource.FileHandle;
-END_IF
-
-_WriteBytes(bExecute := TRUE);
-
-IF _WriteBytes.bError THEN
-	errorMessageBuilder
-		.AppendString("An error occurred while writing bytes to file ")
-		.AppendString255(STRING_TO_WSTRING(FilePath))
-		.AppendString("'")
-		.AssignToString(errorMessage);
-
-	(* An exception skips FB_exit for this local builder; release its buffer before Throw. *)
-	errorMessageBuilder.Clear(releaseMemory := TRUE);
-
-	_WriteBytesException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), errorMessage, errorCode := _WriteBytes.nErrId);
-END_IF
-
-IF NOT _WriteBytes.bBusy THEN
-	(* A short write may leave bError=FALSE; success requires the full byte count. *)
-	IF _WriteBytes.cbWrite <> _WriteBytes.cbWriteLen THEN
-		stopReasonMessage := TOF_Core.WideStrings.Concat255("File write byte count mismatch: expected ", TO_WSTRING(_WriteBytes.cbWriteLen), ", written ", TO_WSTRING(_WriteBytes.cbWrite));
-		
-		processingState := TOF_Tasks.TASK_PROCESSING_STATE.ERROR;
-	ELSE
-		processingState := TOF_Tasks.TASK_PROCESSING_STATE.DONE;
-	END_IF
-END_IF]]></ST>
       </Implementation>
     </Method>
     <Property Name="SelfSize" Id="{f485ccb4-946c-4324-9dd2-3933e7d9c49f}">
@@ -275,20 +276,6 @@ PROPERTY Timeout : TIME]]></Declaration>
           <ST><![CDATA[_WriteBytes.tTimeout := Timeout;]]></ST>
         </Implementation>
       </Set>
-    </Property>
-    <Property Name="FileOperationInProgress" Id="{dec96700-4c27-4085-b567-037497945de8}">
-      <Declaration><![CDATA[(*!
-<summary>Reports whether the underlying native file operation is busy.</summary>
-<description>Observes native I/O, including work drained during stopping. FALSE is not a task-success result and does not independently permit the resource owner to close or destroy the file.</description>
-*)
-{attribute 'monitoring' := 'call'}
-PROPERTY FileOperationInProgress : BOOL]]></Declaration>
-      <Get Name="Get" Id="{9a19ffab-a886-4858-85ae-7700db207ea7}">
-        <Declaration><![CDATA[]]></Declaration>
-        <Implementation>
-          <ST><![CDATA[FileOperationInProgress := _WriteBytes.bBusy;]]></ST>
-        </Implementation>
-      </Get>
     </Property>
   </POU>
 </TcPlcObject>

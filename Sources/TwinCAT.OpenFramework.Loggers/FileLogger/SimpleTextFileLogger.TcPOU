@@ -43,22 +43,19 @@ VAR
 	
 	_MaxRecordsPerFile : UINT := 100;
 	
-	_MessageBuffer : TOF_Collections.List<0>(0);
+	_Queue : ARRAY [0..Parameters.MAX_PENDING_LOG_MESSAGES - 1] OF TOF_Core.ERROR_MESSAGE;
+	_ReadIndex : UDINT;
+	_WriteIndex : UDINT;
+	_QueueCount : UDINT;
+
 	_SendBuffer : TOF_Collections.ByteList<0>;
 	
 	_LogFileCounter : UDINT;
-	
-	{attribute 'hide'} 
-	_CreateDirectoryException : TOF_Core.StandardException;
-	{attribute 'hide'} 
-	_LogNewMessageException : TOF_Core.StandardException;
-	{attribute 'hide'} 
-	_FilePathOverflowException : TOF_Core.StringOverflowException;	
 END_VAR]]></Declaration>
     <Implementation>
       <ST><![CDATA[]]></ST>
     </Implementation>
-    <Folder Name="Service memebers" Id="{31f4dc51-0481-47a0-9f27-e4a804e1bc51}" />
+    <Folder Name="Service members" Id="{31f4dc51-0481-47a0-9f27-e4a804e1bc51}" />
     <Folder Name="Settings" Id="{a5c9b4b6-8ecf-4d2a-aad7-cca7912de4af}" />
     <Property Name="AmsNetId" Id="{db9518e6-7a39-4ac8-867a-92c65be113ea}" FolderPath="Settings\">
       <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
@@ -86,7 +83,7 @@ PROPERTY Busy : BOOL]]></Declaration>
 		AND_THEN _State <> SIMPLE_TEXT_FILE_LOGGER_STATE.STOPPED
 		AND_THEN _State <> SIMPLE_TEXT_FILE_LOGGER_STATE.FAILED)
 	OR_ELSE _CleanupPending
-	OR_ELSE _MessageBuffer.Length > 0
+	OR_ELSE _QueueCount > TOF_Core.UnsignedInt32.ZERO
 	OR_ELSE _FileContentManager.PendingTaskCount > 0
 	OR_ELSE _WriteBytesTask.State.Running
 	OR_ELSE _WriteBytesTask.FileOperationInProgress
@@ -104,37 +101,45 @@ PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
         </Implementation>
       </Get>
     </Property>
-    <Method Name="createCurrentFilePath" Id="{6d3ac00a-486a-4f00-87d7-8b126f05bc66}" FolderPath="Service memebers\">
+    <Method Name="createCurrentFilePath" Id="{6d3ac00a-486a-4f00-87d7-8b126f05bc66}" FolderPath="Service members\">
       <Declaration><![CDATA[(*!
 <summary>Builds the current log path from the configured directory, prefix, local timestamp and file counter.</summary>
 <description>Uses the existing naming policy without checking for an existing file.
 A path that exceeds the return capacity raises StringOverflowException for Execute to report as FAILED.
-The local builder is released before that explicit exception; no truncated path is used.</description>
+Computes the path on the stack without dynamic string-builder allocations; no truncated path is used.</description>
 *)
 METHOD PRIVATE createCurrentFilePath : Tc2_System.T_MaxString
 VAR
-	stringBuilder : TOF_Core.StringBuilder;
+	directoryPathText : Tc2_System.T_MaxString;
+	timestampText : STRING(32);
+	counterText : STRING(16);
 	filePathLength : UDINT;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[stringBuilder
-	.AppendString255(DirectoryPath)
-	.AppendString255('\')
-	.Append(_LogFilePrefix)
-	.AppendString255('_')
-	.AppendString255(TOF_Core.DateAndTimes.ToString(LDT_TO_DT(TOF_Core.System.SystemLocalDateTime)))
-	.AppendString255('_')
-	.AppendString255(TO_STRING(_LogFileCounter))
-	.AppendString255('.log');
-	
-IF stringBuilder.StringLength > 255 THEN
-	filePathLength := stringBuilder.StringLength;
-	(* An exception skips FB_exit for this local builder; release its buffer before Throw. *)
-	stringBuilder.Clear(releaseMemory := TRUE);
-	_FilePathOverflowException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), 'CurrentFilePath', filePathLength, 255);  
+        <ST><![CDATA[directoryPathText := DirectoryPath;
+timestampText := TOF_Core.DateAndTimes.ToString(LDT_TO_DT(TOF_Core.System.SystemLocalDateTime));
+counterText := TO_STRING(_LogFileCounter);
+
+// Fixed separators and extension '\' + '_' + '_' + '.log' add 7 characters.
+filePathLength := TO_UDINT(Tc2_Standard.LEN(directoryPathText))
+	+ TO_UDINT(Tc2_Standard.LEN(_LogFilePrefix))
+	+ TO_UDINT(Tc2_Standard.LEN(timestampText))
+	+ TO_UDINT(Tc2_Standard.LEN(counterText))
+	+ 7;
+
+IF filePathLength > 255 THEN
+	TOF_Core.Exceptions.ThrowStringOverflow(NamespaceName, ClassName, __POUNAME(), __POSITION(), 'CurrentFilePath', filePathLength, 255);  
 END_IF
 
-stringBuilder.AssignToString(createCurrentFilePath); ]]></ST>
+createCurrentFilePath := TOF_Core.Strings.Concat255(
+	directoryPathText,
+	'\',
+	_LogFilePrefix,
+	'_',
+	timestampText,
+	'_',
+	counterText,
+	'.log');]]></ST>
       </Implementation>
     </Method>
     <Property Name="DirectoryPath" Id="{28aea964-b2f7-4d34-9438-82c3e54285f7}" FolderPath="Settings\">
@@ -192,7 +197,9 @@ END_VAR]]></Declaration>
 			RETURN;
 		END_IF
 
-		_MessageBuffer.Clear();
+		_QueueCount := 0;
+		_ReadIndex := 0;
+		_WriteIndex := 0;
 
 		IF _CreateDirectoryIfNotExists.State.Running THEN
 			_CreateDirectoryIfNotExists.Cancel();
@@ -222,7 +229,7 @@ END_VAR]]></Declaration>
 
 	CASE _State OF
 		SIMPLE_TEXT_FILE_LOGGER_STATE.INITIAL:
-			IF _StopRequested AND_THEN _MessageBuffer.Length = TOF_Core.SignedInt32.ZERO THEN
+			IF _StopRequested AND_THEN _QueueCount = TOF_Core.UnsignedInt32.ZERO THEN
 				_State := SIMPLE_TEXT_FILE_LOGGER_STATE.STOPPED;
 				RETURN;
 			END_IF
@@ -239,7 +246,7 @@ END_VAR]]></Declaration>
 				IF _CreateDirectoryIfNotExists.FinalStopReason.WorkDone THEN					
 					_State := SIMPLE_TEXT_FILE_LOGGER_STATE.LOGGING;
 				ELSE			
-					_CreateDirectoryException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), "Log directory not created");
+					TOF_Core.Exceptions.ThrowStandard(NamespaceName, ClassName, __POUNAME(), __POSITION(), "Log directory not created");
 				END_IF
 			END_IF	
 			
@@ -249,13 +256,13 @@ END_VAR]]></Declaration>
 			IF _FileContentManager.State.Stopped AND_THEN _FileContentManager.FinalStopReason.Failure THEN					
 				formattedExceptionMessage := _FileContentManager.FinalStopReason.Message;
 
-				_CreateDirectoryException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), formattedExceptionMessage);
+				TOF_Core.Exceptions.ThrowStandard(NamespaceName, ClassName, __POUNAME(), __POSITION(), formattedExceptionMessage);
 			END_IF	
 			
 			processPendingMessages();
 
 			IF _StopRequested
-				AND_THEN _MessageBuffer.Length = TOF_Core.SignedInt32.ZERO
+				AND_THEN _QueueCount = TOF_Core.UnsignedInt32.ZERO
 				AND_THEN _FileContentManager.PendingTaskCount = TOF_Core.SignedInt32.ZERO
 			THEN
 				_FileContentManager.StopWhenNoPendingTasks := TRUE;
@@ -301,22 +308,17 @@ __ENDTRY]]></ST>
       </Implementation>
     </Method>
     <Method Name="FB_init" Id="{bc5368c5-4e8b-4212-a2e8-e686311d988e}">
-      <Declaration><![CDATA[//!<param name="bInitRetains">if TRUE, the retain variables are initialized (warm start / cold start)</param>
-
-//!<param name="bInCopyCode">if TRUE, the instance afterwards gets moved into the copy code (online change)</param>
+      <Declaration><![CDATA[
 
 //!<param name="directoryPathType">use Tc2_System.E_OpenPath.PATH_GENERIC by default</param>
 
 //!<param name="timeout">use Tc2_System.Global_Variables.DEFAULT_ADS_TIMEOUT by default</param>
 
 //!<param name="amsNetId">use '' for local system</param>
-
 METHOD FB_init : BOOL
 VAR_INPUT
-	
-	bInitRetains	: BOOL;
-	
-	bInCopyCode	: BOOL;
+	bInitRetains : BOOL; // TRUE: the retain variables are initialized (reset warm / reset cold)
+	bInCopyCode : BOOL;  // TRUE: the instance will be copied to the copy code afterward (online change)
 	directoryPath : Tc2_System.T_MaxString;
 	logFilePrefix : STRING(32);
 	maxRecordsPerFile : UINT;
@@ -371,6 +373,85 @@ PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
         </Implementation>
       </Get>
     </Property>
+    <Method Name="processPendingMessages" Id="{b3206f74-587e-4877-b310-0e0e64ffdebf}" FolderPath="Service members\">
+      <Declaration><![CDATA[(*!
+<summary>Transfers queued messages into a batch and schedules its asynchronous file write.</summary>
+<description>Called by Execute. Leaves messages queued while a previous file task or file rotation is pending.
+Removes messages from the queue as they are copied into the send buffer, up to the per-file record limit.
+The send buffer must remain alive until the write operation finishes. Invalid write-task state and
+failures from nested operations propagate to Execute for its failure handling and cleanup.
+Returning does not mean that the messages have been written to the file.</description>
+*)
+METHOD PRIVATE processPendingMessages
+VAR
+	formattedExceptionMessage : TOF_Core.ERROR_MESSAGE;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF _QueueCount = 0 OR_ELSE _FileContentManager.PendingTaskCount > 0 THEN
+	RETURN;
+END_IF
+
+IF NOT _WriteBytesTask.State.Ready AND_THEN NOT _WriteBytesTask.State.Stopped THEN
+	formattedExceptionMessage := TOF_Core.WideStrings.Concat255("WriteBytesTask has invalid state '", TO_WSTRING(_WriteBytesTask.State.Value), "'");
+
+	TOF_Core.Exceptions.ThrowStandard(NamespaceName, ClassName, __POUNAME(), __POSITION(), formattedExceptionMessage);
+END_IF
+ 
+IF _WriteBytesTask.State.Stopped AND_THEN NOT _WriteBytesTask.FinalStopReason.WorkDone THEN
+	formattedExceptionMessage := TOF_Core.WideStrings.Concat255("WriteBytesTask has invalid stop reason '", TO_WSTRING(_WriteBytesTask.FinalStopReason.Value), "'");
+
+	TOF_Core.Exceptions.ThrowStandard(NamespaceName, ClassName, __POUNAME(), __POSITION(), formattedExceptionMessage);	
+END_IF
+
+IF _RecordsPerFile >= _MaxRecordsPerFile AND_THEN _FileContentManager.State.Running THEN
+	IF NOT _FileContentManager.RunningSubstate.ResourceReleasing THEN
+		_FileContentManager.Cancel();
+	END_IF
+
+	IF _FileContentManager.State.Running THEN
+		RETURN;
+	END_IF	
+END_IF
+
+_SendBuffer.Clear();
+
+IF _FileContentManager.FilePath = '' OR_ELSE _RecordsPerFile >= _MaxRecordsPerFile THEN
+	_RecordsPerFile := 0;
+	_LogFileCounter := _LogFileCounter + 1;
+	
+	_FileContentManager.Reset();
+	
+	_FileContentManager.FilePath := createCurrentFilePath();
+	
+	_FileContentManager.Start();
+	
+	_SendBuffer.AppendData(ADR(TOF_Core.WideStrings.ByteOrderMark), SIZEOF(TOF_Core.WideStrings.ByteOrderMark));
+END_IF
+
+WHILE _QueueCount > 0 DO
+	_SendBuffer.AppendData(ADR(_Queue[_ReadIndex]), TO_DINT(Tc2_Utilities.WLEN2(ADR(_Queue[_ReadIndex])) * TOF_Core.WideStrings.CharSize));
+	_SendBuffer.AppendData(ADR(TOF_Core.WideStrings.NewLine), TO_DINT(SIZEOF(TOF_Core.WideStrings.NewLine) - TOF_Core.WideStrings.CharSize));
+	
+	_ReadIndex := _ReadIndex + 1;
+	IF _ReadIndex >= Parameters.MAX_PENDING_LOG_MESSAGES THEN
+		_ReadIndex := 0;
+	END_IF
+	_QueueCount := _QueueCount - 1;
+	
+	_RecordsPerFile := _RecordsPerFile + 1;
+	
+	IF _RecordsPerFile >= _MaxRecordsPerFile THEN
+		EXIT;
+	END_IF
+END_WHILE
+
+_WriteBytesTask.Reset();
+_WriteBytesTask.SourceBuffer := _SendBuffer.DataAddress;
+_WriteBytesTask.BytesCountToWrite := TO_UDINT(_SendBuffer.Length);
+
+_FileContentManager.Enqueue(_WriteBytesTask);]]></ST>
+      </Implementation>
+    </Method>
     <Property Name="SelfSize" Id="{b9231c56-1285-4e63-ad5b-c9e11184018f}">
       <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
 PROPERTY SelfSize : ULINT]]></Declaration>
@@ -378,20 +459,6 @@ PROPERTY SelfSize : ULINT]]></Declaration>
         <Declaration><![CDATA[]]></Declaration>
         <Implementation>
           <ST><![CDATA[SelfSize := XSIZEOF(THIS^);]]></ST>
-        </Implementation>
-      </Get>
-    </Property>
-    <Property Name="State" Id="{3a575e6f-bb16-4315-8c99-6e30e5beab57}">
-      <Declaration><![CDATA[(*!
-<summary>Reports initialization, logging, normal stopping, stopped or terminal failure state.</summary>
-<description>After Stop, the current initialization/logging state persists while accepted messages drain; STOPPING then denotes final file release. STOPPED permits Start and has no pending writes or buffer cleanup, but does not certify physical closure after a native close error. FAILED does not recover automatically and rejects new diagnostics. It does not by itself certify that pending file operations have finished or buffered memory has been released.</description>
-*)
-{attribute 'monitoring' := 'call'}
-PROPERTY State : SIMPLE_TEXT_FILE_LOGGER_STATE]]></Declaration>
-      <Get Name="Get" Id="{3db3f673-1f63-4a8b-861c-f15fab2f1187}">
-        <Declaration><![CDATA[]]></Declaration>
-        <Implementation>
-          <ST><![CDATA[State := _State;]]></ST>
         </Implementation>
       </Get>
     </Property>
@@ -416,6 +483,20 @@ _State := SIMPLE_TEXT_FILE_LOGGER_STATE.INITIAL;
 Start := TRUE;]]></ST>
       </Implementation>
     </Method>
+    <Property Name="State" Id="{3a575e6f-bb16-4315-8c99-6e30e5beab57}">
+      <Declaration><![CDATA[(*!
+<summary>Reports initialization, logging, normal stopping, stopped or terminal failure state.</summary>
+<description>After Stop, the current initialization/logging state persists while accepted messages drain; STOPPING then denotes final file release. STOPPED permits Start and has no pending writes or buffer cleanup, but does not certify physical closure after a native close error. FAILED does not recover automatically and rejects new diagnostics. It does not by itself certify that pending file operations have finished or buffered memory has been released.</description>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY State : SIMPLE_TEXT_FILE_LOGGER_STATE]]></Declaration>
+      <Get Name="Get" Id="{3db3f673-1f63-4a8b-861c-f15fab2f1187}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[State := _State;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
     <Method Name="Stop" Id="{f52fab42-de20-442c-a828-b92d1fc00779}">
       <Declaration><![CDATA[(*!
 <summary>Requests completion of accepted messages followed by normal file release.</summary>
@@ -465,7 +546,7 @@ END_VAR]]></Declaration>
         <ST><![CDATA[__TRY
 	IF _StopRequested
 		OR_ELSE _State = SIMPLE_TEXT_FILE_LOGGER_STATE.FAILED
-		OR_ELSE _MessageBuffer.Length >= Parameters.MAX_PENDING_LOG_MESSAGES
+		OR_ELSE _QueueCount >= Parameters.MAX_PENDING_LOG_MESSAGES
 	THEN
 		TryLogError := FALSE;
 		RETURN;
@@ -503,7 +584,7 @@ END_VAR]]></Declaration>
         <ST><![CDATA[__TRY
 	IF _StopRequested
 		OR_ELSE _State = SIMPLE_TEXT_FILE_LOGGER_STATE.FAILED
-		OR_ELSE _MessageBuffer.Length >= Parameters.MAX_PENDING_LOG_MESSAGES
+		OR_ELSE _QueueCount >= Parameters.MAX_PENDING_LOG_MESSAGES
 	THEN
 		TryLogException := FALSE;
 		RETURN;
@@ -538,14 +619,12 @@ VAR_INPUT
 END_VAR
 VAR
 	textToLog : TOF_Core.ERROR_MESSAGE;
-	queuedMessage : TOF_Core.GENERIC_VALUE;
-	messageCharacters : POINTER TO WORD;
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[__TRY
 	IF _StopRequested
 		OR_ELSE _State = SIMPLE_TEXT_FILE_LOGGER_STATE.FAILED
-		OR_ELSE _MessageBuffer.Length >= Parameters.MAX_PENDING_LOG_MESSAGES
+		OR_ELSE _QueueCount >= Parameters.MAX_PENDING_LOG_MESSAGES
 	THEN
 		TryLogMessage := FALSE;
 		RETURN;
@@ -555,106 +634,20 @@ END_VAR]]></Declaration>
 		textToLog := TOF_Core.WideStrings.Concat255(TO_WSTRING(TOF_Core.Exceptions.MESSAGE_NUMBER_PREFIX), TO_WSTRING(messageNumber), TO_WSTRING(TOF_Core.Exceptions.MESSAGE_NUMBER_SUFFIX));
 	END_IF
 
-	TOF_Core.WideStrings.AppendToTarget255(textToLog, "[", TO_WSTRING(category), "] ");
+	TOF_Core.WideStrings.Append255(textToLog, "[", TO_WSTRING(category), "] ");
+	TOF_Core.WideStrings.AppendFit(textToLog, message);
 
-	IF NOT TOF_Core.WideStrings.TryAppendToTarget(textToLog, message) THEN
-		messageCharacters := ADR(textToLog);
-		messageCharacters[SIZEOF(textToLog) / TOF_Core.WideStrings.CharSize - 2] := TOF_Core.WideStrings.ELLIPSIS;
+	_Queue[_WriteIndex] := textToLog;
+	_WriteIndex := _WriteIndex + 1;
+	IF _WriteIndex >= Parameters.MAX_PENDING_LOG_MESSAGES THEN
+		_WriteIndex := 0;
 	END_IF
-
-	queuedMessage := TOF_Core.GenericValueFactory.FromWStringValue(textToLog);
-	_MessageBuffer.AppendGeneric(queuedMessage);
-	queuedMessage.Reset();
+	_QueueCount := _QueueCount + 1;
 
 	TryLogMessage := TRUE;
 __CATCH
-	__TRY
-		queuedMessage.Release();
-	__CATCH
-		// Do not propagate a secondary cleanup exception.
-	__ENDTRY
-
 	TryLogMessage := FALSE;
 __ENDTRY]]></ST>
-      </Implementation>
-    </Method>
-    <Method Name="processPendingMessages" Id="{b3206f74-587e-4877-b310-0e0e64ffdebf}" FolderPath="Service memebers\">
-      <Declaration><![CDATA[(*!
-<summary>Transfers queued messages into a batch and schedules its asynchronous file write.</summary>
-<description>Called by Execute. Leaves messages queued while a previous file task or file rotation is pending.
-Removes messages from the queue as they are copied into the send buffer, up to the per-file record limit.
-The send buffer must remain alive until the write operation finishes. Invalid write-task state and
-failures from nested operations propagate to Execute for its failure handling and cleanup.
-Returning does not mean that the messages have been written to the file.</description>
-*)
-METHOD PRIVATE processPendingMessages
-VAR
-	formattedExceptionMessage : WSTRING(255);
-
-	message : TOF_Core.GENERIC_VALUE;
-END_VAR]]></Declaration>
-      <Implementation>
-        <ST><![CDATA[IF _MessageBuffer.Length = 0 OR_ELSE _FileContentManager.PendingTaskCount > 0 THEN
-	RETURN;
-END_IF
-
-IF NOT _WriteBytesTask.State.Ready AND_THEN NOT _WriteBytesTask.State.Stopped THEN
-	formattedExceptionMessage := TOF_Core.WideStrings.Concat255("WriteBytesTask has invalid state '", TO_WSTRING(_WriteBytesTask.State.Value), "'");
-
-	_LogNewMessageException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), formattedExceptionMessage);
-END_IF
- 
-IF _WriteBytesTask.State.Stopped AND_THEN NOT _WriteBytesTask.FinalStopReason.WorkDone THEN
-	formattedExceptionMessage := TOF_Core.WideStrings.Concat255("WriteBytesTask has invalid stop reason '", TO_WSTRING(_WriteBytesTask.FinalStopReason.Value), "'");
-
-	_LogNewMessageException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), formattedExceptionMessage);	
-END_IF
-
-IF _RecordsPerFile >= _MaxRecordsPerFile AND_THEN _FileContentManager.State.Running THEN
-	IF  NOT _FileContentManager.RunningSubstate.ResourceReleasing THEN
-		_FileContentManager.Cancel();
-	END_IF
-
-	IF _FileContentManager.State.Running THEN
-		RETURN;
-	END_IF	
-END_IF
-
-_SendBuffer.Clear();
-
-IF _FileContentManager.FilePath = '' OR_ELSE _RecordsPerFile >= _MaxRecordsPerFile THEN
-	_RecordsPerFile := 0;
-	_LogFileCounter := _LogFileCounter + 1;
-	
-	_FileContentManager.Reset();
-	
-	_FileContentManager.FilePath := createCurrentFilePath();
-	
-	_FileContentManager.Start();
-	
-	_SendBuffer.AppendData(ADR(TOF_Core.WideStrings.ByteOrderMark), SIZEOF(TOF_Core.WideStrings.ByteOrderMark));
-END_IF
-
-WHILE _MessageBuffer.Length > 0 DO
-	message := _MessageBuffer.Get(0);
-	
-	_SendBuffer.AppendData(message.Address, TO_DINT(message.Size - TOF_Core.WideStrings.CharSize));
-	_SendBuffer.AppendData(ADR(TOF_Core.WideStrings.NewLine), TO_DINT(SIZEOF(TOF_Core.WideStrings.NewLine) - TOF_Core.WideStrings.CharSize));
-	
-	_MessageBuffer.RemoveAt(0);
-	
-	_RecordsPerFile := _RecordsPerFile + 1;
-	
-	IF _RecordsPerFile >= _MaxRecordsPerFile THEN
-		EXIT;
-	END_IF
-END_WHILE
-
-_WriteBytesTask.Reset();
-_WriteBytesTask.SourceBuffer := _SendBuffer.DataAddress;
-_WriteBytesTask.BytesCountToWrite := TO_UDINT(_SendBuffer.Length);
-
-_FileContentManager.Enqueue(_WriteBytesTask);]]></ST>
       </Implementation>
     </Method>
   </POU>

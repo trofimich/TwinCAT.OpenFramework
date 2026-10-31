@@ -1,5 +1,5 @@
-<?xml version="1.0" encoding="utf-8"?>
-<TcPlcObject Version="1.1.0.1" ProductVersion="3.1.4026.20">
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1" ProductVersion="3.1.4026.21">
   <POU Name="LoggerTest" Id="{46a5aaeb-be18-4d0f-8490-9efb1449dd48}" SpecialFunc="None">
     <Declaration><![CDATA[(*
 SPDX-FileCopyrightText: © 2026 Oleksandr Tiutyk <trofimich@gmail.com>
@@ -33,10 +33,13 @@ VAR
 		TC_EVENTS.OpenFrameworkLoggerEventClass.ErrorEvent,
 		TC_EVENTS.OpenFrameworkLoggerEventClass.CriticalErrorEvent
 	);
+
+	_QueuedLogger : TOF_Loggers.QueuedLogger;
 END_VAR]]></Declaration>
     <Implementation>
       <ST><![CDATA[CreateTextFileLogs();
-CreateEventLoggerLogs();]]></ST>
+CreateEventLoggerLogs();
+TestQueuedLogger();]]></ST>
     </Implementation>
     <Property Name="ClassName" Id="{587aefa6-4f40-4285-972e-2f0b6234ea1a}">
       <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
@@ -144,5 +147,83 @@ PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
         </Implementation>
       </Get>
     </Property>
+    <Method Name="TestQueuedLogger" Id="{f5d90100-3026-4444-a123-9efb14490001}">
+      <Declaration><![CDATA[(*!
+<summary>Exercises QueuedLogger configuration, bounded queuing, overflow rejection and delivery.</summary>
+*)
+METHOD TestQueuedLogger
+VAR_INST
+	testFinished : BOOL;
+	logMessageNumber : ULINT := 1;
+	error : TOF_Core.ERROR;
+END_VAR
+VAR
+	i : UINT;
+	exceptionCode : __SYSTEM.ExceptionCode;
+	caughtException : TOF_Core.IException;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN
+	RETURN;
+END_IF
+
+TEST('QueuedLogger_Lifecycle_And_Forwarding');
+
+// 1. Check initial state before configuration
+AssertEquals_DINT(0, _QueuedLogger.PendingMessageCount, 'PendingMessageCount must start at 0');
+AssertEquals_ULINT(0, _QueuedLogger.FailedDeliveryCount, 'FailedDeliveryCount must start at 0');
+
+// 2. Configure validation
+AssertFalse(_QueuedLogger.Configure(0), 'Configure must reject null backend');
+AssertFalse(_QueuedLogger.Configure(_QueuedLogger), 'Configure must reject self backend');
+AssertTrue(_QueuedLogger.Configure(_EventLogger), 'Configure must succeed with valid backend');
+AssertFalse(_QueuedLogger.Configure(_EventLogger), 'Configure must reject repeated configuration');
+
+// 3. PendingMessageCount after configuration
+AssertEquals_DINT(0, _QueuedLogger.PendingMessageCount, 'PendingMessageCount must be 0 after configuration');
+
+// 4. Enqueueing messages
+AssertTrue(_QueuedLogger.TryLogMessage(TOF_Core.LOG_CATEGORY.DEBUG, "Queued debug message 1"), 'Must enqueue message without number');
+AssertEquals_DINT(1, _QueuedLogger.PendingMessageCount, 'PendingMessageCount must be 1 after first message');
+
+AssertTrue(_QueuedLogger.TryLogMessage(TOF_Core.LOG_CATEGORY.INFORMATION, "Queued info message 2", logMessageNumber), 'Must enqueue message with number');
+AssertEquals_DINT(2, _QueuedLogger.PendingMessageCount, 'PendingMessageCount must be 2 after second message');
+
+// 5. Enqueueing error via TryLogError
+__TRY
+	TOF_Core.Exceptions.ThrowStandard(NamespaceName, ClassName, __POUNAME(), __POSITION(), "Test queued error");
+__CATCH(exceptionCode)
+	caughtException := TOF_Core.ExceptionManager.GetLastException(exceptionCode, NamespaceName, __POUNAME(), __POSITION());
+	IF caughtException <> 0 THEN
+		caughtException.ToError(error, TOF_Core.ERROR_SEVERITY.ERROR);
+	END_IF
+__ENDTRY
+AssertTrue(_QueuedLogger.TryLogError(error, logMessageNumber), 'Must enqueue error via TryLogError');
+AssertEquals_DINT(3, _QueuedLogger.PendingMessageCount, 'PendingMessageCount must be 3 after error');
+
+// 6. Execute from owner task delivers messages to backend
+_QueuedLogger.Execute();
+AssertEquals_DINT(0, _QueuedLogger.PendingMessageCount, 'PendingMessageCount must be 0 after Execute drains queue');
+AssertEquals_ULINT(0, _QueuedLogger.FailedDeliveryCount, 'FailedDeliveryCount must be 0 after successful delivery');
+
+// 7. Verify capacity overflow rejection
+FOR i := 1 TO TOF_Loggers.Parameters.QUEUED_LOGGER_CAPACITY DO
+	AssertTrue(_QueuedLogger.TryLogMessage(TOF_Core.LOG_CATEGORY.DEBUG, "Filling queue"), 'Must accept messages up to capacity');
+END_FOR
+
+AssertEquals_DINT(TO_DINT(TOF_Loggers.Parameters.QUEUED_LOGGER_CAPACITY), _QueuedLogger.PendingMessageCount, 'Queue must be at capacity');
+
+// The next message must be rejected without discarding existing messages
+AssertFalse(_QueuedLogger.TryLogMessage(TOF_Core.LOG_CATEGORY.CRITICAL_ERROR, "Overflow message"), 'Must reject message when queue is full');
+AssertEquals_DINT(TO_DINT(TOF_Loggers.Parameters.QUEUED_LOGGER_CAPACITY), _QueuedLogger.PendingMessageCount, 'Queue count must remain at capacity');
+
+// Drain the full queue
+_QueuedLogger.Execute();
+AssertEquals_DINT(0, _QueuedLogger.PendingMessageCount, 'Queue must be drained after Execute');
+
+testFinished := TRUE;
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
   </POU>
 </TcPlcObject>

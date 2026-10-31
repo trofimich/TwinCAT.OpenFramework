@@ -24,13 +24,6 @@ VAR
 	_ClassName : STRING := __POUNAME();
 
     _CreateDirectory : Tc2_System.FB_CreateDir;
-
-	{attribute 'hide'} 
-	_DirectoryPathNotSpecifiedException :	TOF_Core.DataMemberNotSpecifiedException;
-	{attribute 'hide'} 
-	_InvalidPathException : InvalidPathException;	
-	{attribute 'hide'} 
-	_CreateDirectoryException : TOF_Core.StandardException;
 END_VAR]]></Declaration>
     <Implementation>
       <ST><![CDATA[]]></ST>
@@ -136,8 +129,7 @@ METHOD PROTECTED OnReset ]]></Declaration>
     <Method Name="OnRunning" Id="{6bd810fa-872b-4e47-b2bc-32ff3c16f403}" FolderPath="Members to override\">
       <Declaration><![CDATA[(*!
 <summary>Validates the configured path and advances the native directory-create request.</summary>
-<description>Computed diagnostic strings are held in local buffers for the duration of the receiving call.
-The local diagnostic builder is released after copying its message and before raising the operation exception.</description>
+<description>Computed diagnostic strings are held in local buffers for the duration of the receiving call without dynamic string-builder allocations.</description>
 *)
 METHOD PROTECTED OnRunning
 VAR_OUTPUT
@@ -148,36 +140,29 @@ VAR_IN_OUT
 END_VAR
 VAR	
 	pathErrorMessage : WSTRING(255);
-	errorMessageBuilder : TOF_Core.WideStringBuilder;
-END_VAR
-VAR
-	formattedExceptionMessage : WSTRING(255);
+	formattedExceptionMessage : TOF_Core.ERROR_MESSAGE;
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[IF NOT _CreateDirectory.bExecute THEN 
 	IF TOF_Core.Strings.IsNullOrWhiteSpace(_CreateDirectory.sPathName) THEN
-		_DirectoryPathNotSpecifiedException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), 'DirectoryPath');		
+		TOF_Core.Exceptions.ThrowDataMemberNotSpecified(NamespaceName, ClassName, __POUNAME(), __POSITION(), 'DirectoryPath');		
 	END_IF
 	
 	IF NOT PathHelper.IsValidDirectoryPath(_CreateDirectory.sPathName, errorMessage => pathErrorMessage) THEN
-		_InvalidPathException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), _CreateDirectory.sPathName, pathErrorMessage);
+		FileSystemExceptions.ThrowInvalidPath(NamespaceName, ClassName, __POUNAME(), __POSITION(), _CreateDirectory.sPathName, pathErrorMessage);
 	END_IF
 END_IF
 
 _CreateDirectory(bExecute := TRUE);
 
 IF _CreateDirectory.bError THEN
-	errorMessageBuilder
-		.AppendString("Error while creating directory '")
-		.Append(_CreateDirectory.sPathName)
-		.AppendString("'");
+	TOF_Core.WideStrings.Append255(
+		formattedExceptionMessage,
+		"Error while creating directory '",
+		TO_WSTRING(_CreateDirectory.sPathName),
+		"'");
 
-	formattedExceptionMessage := errorMessageBuilder.ToString255();
-
-	(* An exception skips FB_exit for this local builder; release its buffer before Throw. *)
-	errorMessageBuilder.Clear(releaseMemory := TRUE);
-
-	_CreateDirectoryException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), formattedExceptionMessage, errorCode := _CreateDirectory.nErrId);
+	FileSystemExceptions.ThrowFileSystem(NamespaceName, ClassName, __POUNAME(), __POSITION(), formattedExceptionMessage, errorCode := _CreateDirectory.nErrId);
 ELSIF NOT _CreateDirectory.bBusy THEN
 	processingState := TOF_Tasks.TASK_PROCESSING_STATE.DONE;
 END_IF]]></ST>

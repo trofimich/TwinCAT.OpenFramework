@@ -86,7 +86,7 @@ PROPERTY SelfSize : ULINT]]></Declaration>
     <Method Name="Throw" Id="{5feec76b-4654-49c9-b2bc-8cf052990d28}">
       <Declaration><![CDATA[(*!
 <summary>Formats the rejected argument and propagates the exception with source metadata.</summary>
-<description>Call in the owning cyclic task, not during FB_init. Reads the supplied value only during this call and retains its formatted text. Long STRING and WSTRING values use a 254-character prefix followed by an ellipsis; exactly 255 characters are kept unchanged. Other types use the shared ANY formatter. Sets error code to zero and has no inner cause. Builder or exception allocation failure uses the terminal memory mechanism.</description>
+<description>Call in the owning cyclic task, not during FB_init. Reads the supplied value only during this call and retains its formatted text without heap allocation during message preparation. Long STRING and WSTRING values use a 254-character prefix followed by an ellipsis; exactly 255 characters are kept unchanged. Other types use the shared ANY formatter. Sets error code to zero and has no inner cause. Exception clone allocation failure uses the terminal memory mechanism.</description>
 <param name="argumentName">Name of the argument rejected by the caller.</param>
 <param name="argumentValue">Live value to describe; string inputs must be null-terminated.</param>
 *)
@@ -101,30 +101,20 @@ VAR_INPUT
 END_VAR
 VAR
 	valueAsString : WSTRING(255);
-	stringBuilder : WideStringBuilder;
 	message : ERROR_MESSAGE;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[valueAsString := WideStrings.InternalAnyToString255(argumentValue);
+        <ST><![CDATA[valueAsString := WideStrings.AnyToStringFit255(argumentValue);
 
-IF (argumentValue.TypeClass = __SYSTEM.TYPE_CLASS.TYPE_STRING
-	AND_THEN Strings.InternalGetLength(argumentValue.pValue) > 255)
-	OR_ELSE (argumentValue.TypeClass = __SYSTEM.TYPE_CLASS.TYPE_WSTRING
-	AND_THEN WideStrings.InternalGetLength(argumentValue.pValue) > 255) THEN
-	valueAsString := Tc2_Standard.WCONCAT(Tc2_Standard.WLEFT(valueAsString, 254), "…");
-END_IF
-
-stringBuilder
-	.AppendString("Argument '")
-	.Append(argumentName)
-	.AppendString("' has invalid value '")
-	.AppendString(valueAsString)
-	.AppendString("' in '")
-	.AppendString255(TO_WSTRING(GetFullPouName(sourceNamespaceName, sourceClassName, sourcePOUName)))
-	.AppendString("'")
-	.AssignToString(message);
-	
-stringBuilder.Clear(TRUE);
+WideStrings.Append255(
+	message,
+	"Argument '",
+	TO_WSTRING(argumentName),
+	"' has invalid value '",
+	valueAsString,
+	"' in '",
+	TO_WSTRING(GetFullPOUName(sourceNamespaceName, sourceClassName, sourcePOUName)),
+	"'");
 
 InternalThrow(sourceNamespaceName, sourceClassName, sourcePOUName, sourcePosition, message, 0, 0);]]></ST>
       </Implementation>

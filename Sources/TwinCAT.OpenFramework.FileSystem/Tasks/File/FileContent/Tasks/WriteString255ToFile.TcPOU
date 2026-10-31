@@ -1,4 +1,4 @@
-<?xml version="1.0" encoding="utf-8"?>
+﻿<?xml version="1.0" encoding="utf-8"?>
 <TcPlcObject Version="1.1.0.1">
   <POU Name="WriteString255ToFile" Id="{23227cf9-4814-43fa-8811-d02015e181a4}" SpecialFunc="None">
     <Declaration><![CDATA[(*
@@ -25,11 +25,6 @@ VAR
 	_ClassName : STRING := __POUNAME();
 
     _PutString : Tc2_System.FB_FilePuts;
-
-	{attribute 'hide'} 
-	_FileHandleNotSpecifiedException :	TOF_Core.DataMemberNotSpecifiedException;
-	{attribute 'hide'} 
-	_PutStringException : TOF_Core.StandardException;
 END_VAR]]></Declaration>
     <Implementation>
       <ST><![CDATA[]]></ST>
@@ -66,6 +61,20 @@ PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
         </Implementation>
       </Get>
     </Property>
+    <Property Name="FileOperationInProgress" Id="{9a4f50bd-e8ba-4c13-b2dd-c6414f00704f}">
+      <Declaration><![CDATA[(*!
+<summary>Reports whether the underlying native file operation is busy.</summary>
+<description>Observes native I/O, including work drained during stopping. FALSE is not a task-success result and does not independently permit the resource owner to close or destroy the file.</description>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY FileOperationInProgress : BOOL]]></Declaration>
+      <Get Name="Get" Id="{dc4659a9-b8c9-4fc8-886e-de37577198bb}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[FileOperationInProgress := _PutString.bBusy;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
     <Property Name="NamespaceName" Id="{a4029f55-09ae-4261-a0a0-19bf834f2266}">
       <Declaration><![CDATA[(*!
 <summary>Provides the library namespace used in diagnostics.</summary>
@@ -80,6 +89,64 @@ PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
         </Implementation>
       </Get>
     </Property>
+    <Method Name="OnReset" Id="{53dca5b9-de6b-4a90-95fd-1f0e061e0d5c}" FolderPath="Overriden methods\">
+      <Declaration><![CDATA[(*!
+<summary>Clears the borrowed binding and native request state after stopping.</summary>
+<description>Preserves StringToWrite and Timeout. Does not cancel pending I/O; stopping must finish first.</description>
+*)
+METHOD PROTECTED OnReset]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[SUPER^.OnReset();
+
+_PutString(bExecute := FALSE);]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="OnRunning" Id="{5cd407a7-8a02-494d-a158-94f807a2f78d}" FolderPath="Overriden methods\">
+      <Declaration><![CDATA[(*!
+<summary>Submits the configured text using the acquired resource and advances the write.</summary>
+<description>Missing binding raises a required-property exception before native submission.
+Native write errors raise an operation exception without dynamic string-builder allocations for Task to record as FAILURE and finish stopping;
+an unsuccessful write does not guarantee that the file is unchanged.</description>
+<param name="processingState">DONE on native completion without an error; otherwise retains the pending state.</param>
+<param name="stopReasonMessage">Not changed; failures are passed through exceptions.</param>
+*)
+METHOD PROTECTED OnRunning
+VAR_OUTPUT
+	processingState : TOF_Tasks.TASK_PROCESSING_STATE;
+END_VAR
+VAR_IN_OUT
+	stopReasonMessage : TOF_Core.ERROR_MESSAGE;
+END_VAR
+VAR
+	errorMessage : TOF_Core.ERROR_MESSAGE;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF NOT _PutString.bExecute THEN 
+	IF NOT __ISVALIDREF(_FileHandleResource) THEN
+		TOF_Core.Exceptions.ThrowDataMemberNotSpecified(NamespaceName, ClassName, __POUNAME(), __POSITION(), 'FileHandleResource');		
+	END_IF
+	
+	_PutString.sNetId := _FileHandleResource.AmsNetId;
+	_PutString.hFile := FileHandle;
+END_IF
+
+_PutString(bExecute := TRUE);
+
+IF _PutString.bError THEN
+	TOF_Core.WideStrings.Append255(
+		errorMessage,
+		"An error occurred whole writing string to file ",
+		TO_WSTRING(FilePath),
+		"'");
+
+	FileSystemExceptions.ThrowFileSystem(NamespaceName, ClassName, __POUNAME(), __POSITION(), errorMessage, errorCode := _PutString.nErrId);
+END_IF
+
+IF NOT _PutString.bBusy THEN
+	processingState := TOF_Tasks.TASK_PROCESSING_STATE.DONE;
+END_IF]]></ST>
+      </Implementation>
+    </Method>
     <Method Name="OnStopping" Id="{44b50953-bd58-493c-b48a-1e6d4b051a24}" FolderPath="Overriden methods\">
       <Declaration><![CDATA[(*!
 <summary>Wait for an already submitted file operation before allowing handle release.</summary>
@@ -100,67 +167,6 @@ END_VAR]]></Declaration>
 END_IF
 
 readyToRelease := NOT _PutString.bBusy;]]></ST>
-      </Implementation>
-    </Method>
-    <Method Name="OnReset" Id="{53dca5b9-de6b-4a90-95fd-1f0e061e0d5c}" FolderPath="Overriden methods\">
-      <Declaration><![CDATA[(*!
-<summary>Clears the borrowed binding and native request state after stopping.</summary>
-<description>Preserves StringToWrite and Timeout. Does not cancel pending I/O; stopping must finish first.</description>
-*)
-METHOD PROTECTED OnReset]]></Declaration>
-      <Implementation>
-        <ST><![CDATA[SUPER^.OnReset();
-
-_PutString(bExecute := FALSE);]]></ST>
-      </Implementation>
-    </Method>
-    <Method Name="OnRunning" Id="{5cd407a7-8a02-494d-a158-94f807a2f78d}" FolderPath="Overriden methods\">
-      <Declaration><![CDATA[(*!
-<summary>Submits the configured text using the acquired resource and advances the write.</summary>
-<description>Missing binding raises a required-property exception before native submission.
-Native write errors raise an operation exception for Task to record as FAILURE and finish stopping;
-an unsuccessful write does not guarantee that the file is unchanged.</description>
-<param name="processingState">DONE on native completion without an error; otherwise retains the pending state.</param>
-<param name="stopReasonMessage">Not changed; failures are passed through exceptions.</param>
-*)
-METHOD PROTECTED OnRunning
-VAR_OUTPUT
-	processingState : TOF_Tasks.TASK_PROCESSING_STATE;
-END_VAR
-VAR_IN_OUT
-	stopReasonMessage : TOF_Core.ERROR_MESSAGE;
-END_VAR
-VAR
-	errorMessageBuilder : TOF_Core.WideStringBuilder;
-	errorMessage : TOF_Core.ERROR_MESSAGE;
-END_VAR]]></Declaration>
-      <Implementation>
-        <ST><![CDATA[IF NOT _PutString.bExecute THEN 
-	IF NOT __ISVALIDREF(_FileHandleResource) THEN
-		_FileHandleNotSpecifiedException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), 'FileHandleResource');		
-	END_IF
-	
-	_PutString.sNetId := _FileHandleResource.AmsNetId;
-	_PutString.hFile := FileHandle;
-END_IF
-
-_PutString(bExecute := TRUE);
-
-IF _PutString.bError THEN
-	errorMessageBuilder
-		.AppendString("An error occurred whole writing string to file ")
-		.AppendString255(STRING_TO_WSTRING(FilePath))
-		.AppendString("'")
-		.AssignToString(errorMessage);
-
-	errorMessageBuilder.Clear(releaseMemory := TRUE);
-
-	_PutStringException.Throw(NamespaceName, ClassName, __POUNAME(), __POSITION(), errorMessage, errorCode := _PutString.nErrId);
-END_IF
-
-IF NOT _PutString.bBusy THEN
-	processingState := TOF_Tasks.TASK_PROCESSING_STATE.DONE;
-END_IF]]></ST>
       </Implementation>
     </Method>
     <Property Name="SelfSize" Id="{4f9b0242-f34c-4887-bddd-793a928f18fd}">
@@ -216,20 +222,6 @@ PROPERTY Timeout : TIME]]></Declaration>
           <ST><![CDATA[_PutString.tTimeout := Timeout;]]></ST>
         </Implementation>
       </Set>
-    </Property>
-    <Property Name="FileOperationInProgress" Id="{9a4f50bd-e8ba-4c13-b2dd-c6414f00704f}">
-      <Declaration><![CDATA[(*!
-<summary>Reports whether the underlying native file operation is busy.</summary>
-<description>Observes native I/O, including work drained during stopping. FALSE is not a task-success result and does not independently permit the resource owner to close or destroy the file.</description>
-*)
-{attribute 'monitoring' := 'call'}
-PROPERTY FileOperationInProgress : BOOL]]></Declaration>
-      <Get Name="Get" Id="{dc4659a9-b8c9-4fc8-886e-de37577198bb}">
-        <Declaration><![CDATA[]]></Declaration>
-        <Implementation>
-          <ST><![CDATA[FileOperationInProgress := _PutString.bBusy;]]></ST>
-        </Implementation>
-      </Get>
     </Property>
   </POU>
 </TcPlcObject>
