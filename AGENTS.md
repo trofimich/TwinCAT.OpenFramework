@@ -155,9 +155,13 @@ be reflected in Beckhoff documentation; do not override it based on documentatio
 
 ### Memory and Ownership
 
-- On normal exit from a method, `FB_exit` of a local FB instance is invoked; on exit via an exception, it is NOT.
-  Release local resources before `Throw` after copying the required result; do not rely on `FB_exit` for exception
-  paths. For builders, use `Clear(TRUE)` and document the rationale with a standard ST comment.
+- TwinCAT does not perform stack unwinding upon exceptions (CODESYS CDS-94841): the runtime resets the stack
+  pointer directly to the `__CATCH` frame without calling `FB_exit` for intermediate stack-allocated instances.
+  Never declare local FBs (`VAR` in `METHOD`) that rely on `FB_exit` for cleanup (e.g. freeing heap memory or closing
+  handles) in call paths that can raise or propagate exceptions. Such FBs may only be instantiated on the heap under
+  lifecycle management, as persistent instance fields (`VAR` of an FB/`PROGRAM`), or locally within the method
+  hosting `__TRY/__CATCH` that intercepts the exception and completes via normal exit. Throwing paths must strictly
+  use passive types, plain strings (`ERROR_MESSAGE`), or FBs with trivial/empty `FB_exit`.
 - `__DELETE(ptr)` automatically invokes `FB_exit` only when the pointer is typed as a concrete function block
   (`POINTER TO FB_Type`). When deleting through `PVOID` or an interface, the runtime only frees memory, and `FB_exit`
   is NOT invoked (risk of resource and handle leaks).
