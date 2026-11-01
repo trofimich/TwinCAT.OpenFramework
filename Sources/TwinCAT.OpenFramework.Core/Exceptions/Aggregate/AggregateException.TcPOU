@@ -70,7 +70,7 @@ END_VAR]]></Declaration>
 	RETURN;
 END_IF
 
-IF NOT Exceptions.CanAttachInnerException(THIS^, innerException) THEN
+IF NOT Exceptions.CanAttachInnerException(ownerException := THIS^, innerException := innerException) THEN
 	Exceptions.ThrowStandard(
 		sourceNamespaceName := CurrentNamespace.Name,
 		sourceClassName := 'AggregateException',
@@ -81,7 +81,7 @@ END_IF
 
 IF __QUERYINTERFACE(innerException, aggregateException) THEN
 	FOR i := 0 TO TO_DINT(aggregateException.InnerExceptionCount) - 1 DO
-		AddInnerException(aggregateException.GetInnerException(i));
+		AddInnerException(innerException := aggregateException.GetInnerException(index := i));
 	END_FOR
 ELSE
 	IF _InnerExceptionCount >= MAX_INNER_EXCEPTION_COUNT THEN
@@ -101,7 +101,11 @@ ELSE
 	END_IF
 		
 	IF _InnerExceptionCount > 0 THEN
-		Tc2_System.MEMCPY(newInnerExceptionArray, _InnerExceptions, TO_UDINT(XSIZEOF(POINTER TO IReadOnlyException) * _InnerExceptionCount));	
+		Tc2_System.MEMCPY(
+			destAddr := newInnerExceptionArray,
+			srcAddr := _InnerExceptions,
+			n := TO_UDINT(XSIZEOF(POINTER TO IReadOnlyException) * _InnerExceptionCount)
+		);	
 	
 		__DELETE(_InnerExceptions);
 	END_IF
@@ -170,9 +174,9 @@ IF exceptionClone = 0 THEN
 	DynamicMemoryManager.RaiseAllocationFailure();
 END_IF
 
-DynamicMemoryManager.RegisterAutoDisposedObject(exceptionClone^);
+DynamicMemoryManager.RegisterAutoDisposedObject(autoDisposedObject := exceptionClone^);
 
-exceptionClone^.CopyFields(THIS^);
+exceptionClone^.CopyFields(sourceException := THIS^);
 
 Clone := exceptionClone^;]]></ST>
       </Implementation>
@@ -202,7 +206,7 @@ _LocalTimestamp := sourceException.LocalTimestamp;
 _UtcTimestamp := sourceException.UtcTimestamp;	
 
 FOR i := 0 TO TO_DINT(sourceException.InnerExceptionCount) - 1 DO
-	AddInnerException(sourceException.GetInnerException(i));
+	AddInnerException(innerException := sourceException.GetInnerException(index := i));
 END_FOR
 ]]></ST>
       </Implementation>
@@ -292,12 +296,23 @@ END_VAR]]></Declaration>
 
 IF timestampDisplayMode <> TIMESTAMP_DISPLAY_MODE.HIDDEN THEN
 	WideStrings.AppendFit255(GetMessage, Exceptions.TIME_PREFIX);
-	AppendTimestampDescription(GetMessage, timestampDisplayMode, _LocalTimestamp, _UtcTimestamp);
+	AppendTimestampDescription(
+		targetMessage := GetMessage,
+		timestampDisplayMode := timestampDisplayMode,
+		localTimestamp := _LocalTimestamp,
+		utcTimestamp := _UtcTimestamp
+	);
 END_IF
 
 IF showSource THEN
 	IF sourcePosition <> '' THEN
-		WideStrings.AppendFit255(GetMessage, Exceptions.SOURCE_PREFIX, TO_WSTRING(_SourceFullPOUName), Exceptions.SOURCE_POSITION_PREFIX, TO_WSTRING(sourcePosition));
+		WideStrings.AppendFit255(
+			GetMessage,
+			Exceptions.SOURCE_PREFIX,
+			TO_WSTRING(_SourceFullPOUName),
+			Exceptions.SOURCE_POSITION_PREFIX,
+			TO_WSTRING(sourcePosition)
+		);
 	ELSE
 		WideStrings.AppendFit255(GetMessage, Exceptions.SOURCE_PREFIX, TO_WSTRING(_SourceFullPOUName));
 	END_IF
@@ -306,11 +321,11 @@ END_IF
 FOR i := 0 TO TO_DINT(_InnerExceptionCount) - 1 DO
 	innerException := _InnerExceptions[i];
 	
-	innerExceptionMessage := innerException.GetMessage(showSource, timestampDisplayMode);
+	innerExceptionMessage := innerException.GetMessage(showSource := showSource, timestampDisplayMode := timestampDisplayMode);
 	itemIndexText := TO_WSTRING(i);
 	
 	WideStrings.AppendFit255(GetMessage, WideStrings.NewLine, itemIndexText, Exceptions.MESSAGE_NUMBER_SUFFIX, " ");
-	WideStrings.AppendFit(GetMessage, innerExceptionMessage);
+	WideStrings.AppendFit(targetString := GetMessage, sourceString := innerExceptionMessage);
 END_FOR]]></ST>
       </Implementation>
     </Method>
@@ -326,7 +341,7 @@ does not expose Clear.
 METHOD FINAL GetRootException : IReadOnlyException]]></Declaration>
       <Implementation>
         <ST><![CDATA[IF _InnerExceptionCount > 0 THEN
-	GetRootException := GetInnerException(0);
+	GetRootException := GetInnerException(index := 0);
 	
 	GetRootException := GetRootException.GetRootException();
 ELSE
@@ -402,12 +417,16 @@ VAR_INPUT
 	sourcePosition : STRING;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[_SourceFullPOUName := GetFullPOUName(sourceNamespaceName, sourceClassName, sourcePOUName);
+        <ST><![CDATA[_SourceFullPOUName := GetFullPOUName(
+	sourceNamespaceName := sourceNamespaceName,
+	sourceClassName := sourceClassName,
+	sourcePOUName := sourcePOUName
+);
 _SourcePosition := sourcePosition;
 _LocalTimestamp := System.SystemLocalDateTime;
 _UtcTimestamp := System.SystemUtcDateTime;
 
-ExceptionManager.Throw(THIS^);]]></ST>
+ExceptionManager.Throw(exception := THIS^);]]></ST>
       </Implementation>
     </Method>
     <Method Name="ToError" Id="{d4ff76fe-085d-4302-a17b-b20e40bfa8ce}">
@@ -448,13 +467,13 @@ IF _InnerExceptionCount <= 0 THEN
 	rootSourceText := Exceptions.UNSPECIFIED_SOURCE;
 
 	targetError.Fill(
-		severity,
-		topSourceText,
-		rootSourceText,
-		"Empty aggregate exception (zero inner exceptions)",
-		"",
-		LocalTimestamp,
-		UtcTimestamp
+		severity := severity,
+		topSource := topSourceText,
+		rootSource := rootSourceText,
+		topMessage := "Empty aggregate exception (zero inner exceptions)",
+		rootMessage := "",
+		localTimestamp := LocalTimestamp,
+		utcTimestamp := UtcTimestamp
 	);
 	
 	RETURN;
@@ -468,13 +487,13 @@ topMessageText := GetMessage();
 rootMessageText := rootException.GetMessage();
 
 targetError.Fill(
-	severity,
-	topSourceText,
-	rootSourceText,
-	topMessageText,
-	rootMessageText,
-	LocalTimestamp,
-	UtcTimestamp
+	severity := severity,
+	topSource := topSourceText,
+	rootSource := rootSourceText,
+	topMessage := topMessageText,
+	rootMessage := rootMessageText,
+	localTimestamp := LocalTimestamp,
+	utcTimestamp := UtcTimestamp
 );]]></ST>
       </Implementation>
     </Method>

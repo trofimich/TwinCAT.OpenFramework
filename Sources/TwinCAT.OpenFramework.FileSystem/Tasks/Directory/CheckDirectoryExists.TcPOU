@@ -123,51 +123,6 @@ PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
         </Implementation>
       </Get>
     </Property>
-    <Method Name="OnStopping" Id="{3f5e6d21-6c7f-4e76-a89e-10f3fb296d85}" FolderPath="Members to override\">
-      <Declaration><![CDATA[(*!
-<summary>Advances directory stop actions before reporting termination.</summary>
-<description>
-Used for every stop reason. Drains a pending search before deciding whether its native enumeration must be
-aborted. An unfinished search receives one abort command with a rising bExecute edge; readiness waits for that
-command to complete. End-of-enumeration and search errors need no explicit abort. No new search starts. An
-abort error is logged once with its native code and path, without retrying abort or replacing the task stop
-reason. Readiness means this cleanup attempt ended, not that server resources were proven released. The log
-attempt is made after clearing pending enumeration state; logger failure does not restart cleanup.
-</description>
-<param name="readyToRelease">TRUE when the directory FBs have finished their pending requests.</param>
-*)
-METHOD PROTECTED OnStopping
-VAR_OUTPUT
-	readyToRelease : BOOL;
-END_VAR
-VAR
-	enumerationAbortMessage : WSTRING(255);
-END_VAR]]></Declaration>
-      <Implementation>
-        <ST><![CDATA[IF _EnumerationStarted THEN
-	_EnumFindFile(bExecute := FALSE);
-
-	IF NOT _EnumFindFile.bBusy THEN
-		IF _EnumFindFile.bEOE OR_ELSE _EnumFindFile.bError THEN
-			_EnumerationStarted := FALSE;
-
-			(* End this attempt before reporting its error so logging cannot cause repeated aborts. *)
-			IF _EnumerationAbortIssued AND_THEN _EnumFindFile.bError THEN
-				enumerationAbortMessage := TOF_Core.WideStrings.Concat255("Directory enumeration abort failed (native error code ", TO_WSTRING(_EnumFindFile.nErrId), "): ", TO_WSTRING(_EnumFindFile.sPathName));
-				TOF_Core.LogManager.TryLogMessage(enumerationAbortMessage, TOF_Core.LOG_CATEGORY.ERROR, TO_WSTRING(__POUNAME()));
-			END_IF
-		ELSIF NOT _EnumerationAbortIssued THEN
-			_EnumFindFile(bExecute := TRUE, eCmd := Tc2_Utilities.E_EnumCmdType.eEnumCmd_Abort);
-			_EnumerationAbortIssued := TRUE;
-		ELSE
-			_EnumerationStarted := FALSE;
-		END_IF
-	END_IF
-END_IF
-
-readyToRelease := NOT _EnumerationStarted;]]></ST>
-      </Implementation>
-    </Method>
     <Method Name="OnReset" Id="{fe840260-57c7-49f3-acb3-979b08331a03}" FolderPath="Members to override\">
       <Declaration><![CDATA[(*!
 <summary>Clears the completed search and its per-run cleanup state for reuse.</summary>
@@ -207,12 +162,25 @@ VAR
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[IF NOT _EnumFindFile.bExecute THEN 
-	IF TOF_Core.Strings.IsNullOrWhiteSpace(_EnumFindFile.sPathName) THEN
-		TOF_Core.Exceptions.ThrowDataMemberNotSpecified(NamespaceName, ClassName, __POUNAME(), __POSITION(), 'DirectoryPath');		
+	IF TOF_Core.Strings.IsNullOrWhiteSpace(stringToCheck := _EnumFindFile.sPathName) THEN
+		TOF_Core.Exceptions.ThrowDataMemberNotSpecified(
+			sourceNamespaceName := NamespaceName,
+			sourceClassName := ClassName,
+			sourcePOUName := __POUNAME(),
+			sourcePosition := __POSITION(),
+			dataMemberName := 'DirectoryPath'
+		);		
 	END_IF
 	
-	IF NOT PathHelper.IsValidDirectoryPath(_EnumFindFile.sPathName, errorMessage => pathErrorMessage) THEN
-		FileSystemExceptions.ThrowInvalidPath(NamespaceName, ClassName, __POUNAME(), __POSITION(), _EnumFindFile.sPathName, pathErrorMessage);
+	IF NOT PathHelper.IsValidDirectoryPath(directoryPath := _EnumFindFile.sPathName, errorMessage => pathErrorMessage) THEN
+		FileSystemExceptions.ThrowInvalidPath(
+			sourceNamespaceName := NamespaceName,
+			sourceClassName := ClassName,
+			sourcePOUName := __POUNAME(),
+			sourcePosition := __POSITION(),
+			path := _EnumFindFile.sPathName,
+			errorMessage := pathErrorMessage
+		);
 	END_IF
 	
 	_EnumFindFile.eCmd := Tc2_Utilities.E_EnumCmdType.eEnumCmd_First;
@@ -228,7 +196,14 @@ IF _EnumFindFile.bError THEN
 		TO_WSTRING(_EnumFindFile.sPathName),
 		"'");
 
-	FileSystemExceptions.ThrowFileSystem(NamespaceName, ClassName, __POUNAME(), __POSITION(), formattedExceptionMessage, errorCode := _EnumFindFile.nErrId);
+	FileSystemExceptions.ThrowFileSystem(
+		sourceNamespaceName := NamespaceName,
+		sourceClassName := ClassName,
+		sourcePOUName := __POUNAME(),
+		sourcePosition := __POSITION(),
+		message := formattedExceptionMessage,
+		errorCode := _EnumFindFile.nErrId
+	);
 ELSIF NOT _EnumFindFile.bBusy THEN	
 	IF NOT _EnumFindFile.bEOE THEN
 		_DirectoryExists := _EnumFindFile.stFindFile.fileAttributes.bDirectory;		
@@ -236,6 +211,60 @@ ELSIF NOT _EnumFindFile.bBusy THEN
 
 	processingState := TOF_Tasks.TASK_PROCESSING_STATE.DONE;
 END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="OnStopping" Id="{3f5e6d21-6c7f-4e76-a89e-10f3fb296d85}" FolderPath="Members to override\">
+      <Declaration><![CDATA[(*!
+<summary>Advances directory stop actions before reporting termination.</summary>
+<description>
+Used for every stop reason. Drains a pending search before deciding whether its native enumeration must be
+aborted. An unfinished search receives one abort command with a rising bExecute edge; readiness waits for that
+command to complete. End-of-enumeration and search errors need no explicit abort. No new search starts. An
+abort error is logged once with its native code and path, without retrying abort or replacing the task stop
+reason. Readiness means this cleanup attempt ended, not that server resources were proven released. The log
+attempt is made after clearing pending enumeration state; logger failure does not restart cleanup.
+</description>
+<param name="readyToRelease">TRUE when the directory FBs have finished their pending requests.</param>
+*)
+METHOD PROTECTED OnStopping
+VAR_OUTPUT
+	readyToRelease : BOOL;
+END_VAR
+VAR
+	enumerationAbortMessage : WSTRING(255);
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF _EnumerationStarted THEN
+	_EnumFindFile(bExecute := FALSE);
+
+	IF NOT _EnumFindFile.bBusy THEN
+		IF _EnumFindFile.bEOE OR_ELSE _EnumFindFile.bError THEN
+			_EnumerationStarted := FALSE;
+
+			(* End this attempt before reporting its error so logging cannot cause repeated aborts. *)
+			IF _EnumerationAbortIssued AND_THEN _EnumFindFile.bError THEN
+				enumerationAbortMessage := TOF_Core.WideStrings.Concat255(
+					"Directory enumeration abort failed (native error code ",
+					TO_WSTRING(_EnumFindFile.nErrId),
+					"): ",
+					TO_WSTRING(_EnumFindFile.sPathName)
+				);
+				TOF_Core.LogManager.TryLogMessage(
+					message := enumerationAbortMessage,
+					category := TOF_Core.LOG_CATEGORY.ERROR,
+					topic1 := TO_WSTRING(__POUNAME())
+				);
+			END_IF
+		ELSIF NOT _EnumerationAbortIssued THEN
+			_EnumFindFile(bExecute := TRUE, eCmd := Tc2_Utilities.E_EnumCmdType.eEnumCmd_Abort);
+			_EnumerationAbortIssued := TRUE;
+		ELSE
+			_EnumerationStarted := FALSE;
+		END_IF
+	END_IF
+END_IF
+
+readyToRelease := NOT _EnumerationStarted;]]></ST>
       </Implementation>
     </Method>
     <Property Name="PathType" Id="{9772faee-bff2-418a-bc6a-dee866cc52c7}" FolderPath="Inputs\">

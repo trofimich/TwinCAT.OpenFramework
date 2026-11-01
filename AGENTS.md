@@ -96,9 +96,12 @@ be reflected in Beckhoff documentation; do not override it based on documentatio
   many parameters, format it across multiple lines: place each argument on its own indented line, and place
   the closing parenthesis `);` on a separate line indented to match the level of the call.
 - Method, function, and function block calls must explicitly specify parameter names using `:=`
-  (e.g. `fb.Method(param1 := val1, param2 := val2)`). Exceptions:
-  - Built-in single-argument type conversions and standard operators (`ADR`, `SIZEOF`, `TO_*`, `__QUERYINTERFACE`,
-    `__ISVALIDREF`).
+  (e.g. `fb.Method(param1 := val1, param2 := val2)`), including calls to Beckhoff (`Tc2_*`, `Tc3_*`) and third-party
+  libraries (`TcUnit`). Use exact parameter names from library signatures (e.g. `CONCAT(STR1 := ..., STR2 := ...)`,
+  `MEMCPY(destAddr := ..., srcAddr := ..., n := ...)`, `TEST(TestName := ...)`). Exceptions:
+  - Built-in operators and single-argument conversions without named parameter support (`ADR`, `SIZEOF`, `XSIZEOF`,
+    `TO_*`, `__QUERYINTERFACE`, `__QUERYPOINTER`, `__ISVALIDREF`, `__NEW`, `__DELETE`, `SEL`, `LIMIT`, `MIN`, `MAX`,
+    `MUX`, `SHL`, `SHR`, `ROL`, `ROR`, `LOWER_BOUND`, `UPPER_BOUND`).
   - Variadic-style string helper functions designed for concise multi-fragment concatenation (`Concat255`,
     `ConcatFit255`, `Append255`, `AppendFit255` when passing sequential text fragments).
 
