@@ -36,12 +36,13 @@ END_VAR]]></Declaration>
     <Folder Name="Service members" Id="{a47a20ca-4953-4e09-8f4d-fc2e8d3ac96e}" />
     <Method Name="AppendTimestampDescription" Id="{a316d3b4-0094-41d5-a4cb-9fba6e2a6883}" FolderPath="Service members\">
       <Declaration><![CDATA[(*!
-<summary>Appends the selected timestamp to an existing diagnostic builder.</summary>
-<description>Hidden mode leaves the builder unchanged; otherwise appends the supplied local or UTC timestamp, with a UTC suffix for UTC mode. Does not clear existing text. Buffer growth follows the builder allocation-failure contract. Descendants cannot replace this shared metadata formatter; custom diagnostic payload formatting belongs in GetMessage or ToError.</description>
+<summary>Appends the selected timestamp description to a target string buffer.</summary>
+<description>Hidden mode leaves the target unchanged; otherwise appends the supplied local or UTC timestamp, with a UTC suffix for UTC mode. Formats without dynamic memory allocation; target capacity is respected with fitting truncation where applicable. Descendants cannot replace this shared metadata formatter; custom diagnostic payload formatting belongs in GetMessage or ToError.</description>
+<param name="targetMessage">Writable target string buffer to append to.</param>
 *)
 METHOD PROTECTED FINAL AppendTimestampDescription
-VAR_IN_OUT CONSTANT
-	stringBuilder : WideStringBuilder;
+VAR_IN_OUT
+	targetMessage : ERROR_MESSAGE;	
 END_VAR
 VAR_INPUT
 	timestampDisplayMode : TIMESTAMP_DISPLAY_MODE := TIMESTAMP_DISPLAY_MODE.HIDDEN;
@@ -49,6 +50,8 @@ VAR_INPUT
 	utcTimestamp : LDATE_AND_TIME;	
 END_VAR
 VAR
+	targetMessagePointer : POINTER TO ERROR_MESSAGE;
+	
 	timeStampString : WSTRING(40);
 END_VAR]]></Declaration>
       <Implementation>
@@ -66,9 +69,12 @@ END_CASE
 
 timeStampString := Tc2_Standard.WLEFT(Tc2_Standard.WDELETE(timeStampString, 4, 1), 22);
 
-stringBuilder.AppendString(timeStampString);
+targetMessagePointer := ADR(targetMessage);
+
 IF timestampDisplayMode = TIMESTAMP_DISPLAY_MODE.UTC THEN
-	stringBuilder.AppendString("UTC");
+	WideStrings.AppendFit255(targetMessagePointer^, timeStampString, "UTC");
+ELSE
+	WideStrings.AppendFit255(targetMessagePointer^, timeStampString);
 END_IF]]></ST>
       </Implementation>
     </Method>
@@ -115,43 +121,69 @@ PROPERTY ABSTRACT Empty : BOOL]]></Declaration>
     <Method Name="ExtractClassName" Id="{2741f852-3263-48be-9dbc-ba747f8558d6}" FolderPath="Service members\">
       <Declaration><![CDATA[(*!
 <summary>Extracts the first component yielded by splitting a POU name on dots.</summary>
-<description>Returns a bounded independent string. Temporary splitter storage is released at method exit; fragment allocation follows the normal allocation-failure policy. Descendants cannot replace this shared metadata formatter; custom diagnostic payload formatting belongs in GetMessage or ToError.</description>
+<description>Returns a bounded independent string extracted by in-place character scanning without dynamic memory allocation or splitters. Descendants cannot replace this shared metadata formatter; custom diagnostic payload formatting belongs in GetMessage or ToError.</description>
 *)
 METHOD PROTECTED FINAL ExtractClassName : STRING
 VAR_IN_OUT CONSTANT
 	sourcePOUName : STRING;
 END_VAR
 VAR
-	splitter : StringSplittingEnumerator;
+	i : INT;
+	length : INT;
+	stringPointer : POINTER TO BYTE;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[splitter := Strings.CreateSplitter(sourcePOUName, '.', 0, TRUE, TRUE);
+        <ST><![CDATA[length := TO_INT(Tc2_Standard.LEN(sourcePOUName));
 
-WHILE splitter.MoveNext() DO		
-	ExtractClassName := splitter.CurrentEntry;
-	
+IF length = 0 THEN
+	ExtractClassName := '';
 	RETURN;
-END_WHILE]]></ST>
+END_IF
+
+stringPointer := ADR(sourcePOUName);
+
+FOR i := 0 TO length - 1 DO
+	IF stringPointer[i] = 16#2E THEN
+		ExtractClassName := Tc2_Standard.LEFT(sourcePOUName, i);
+		RETURN;
+	END_IF
+END_FOR
+
+ExtractClassName := sourcePOUName;]]></ST>
       </Implementation>
     </Method>
     <Method Name="ExtractMethodName" Id="{be44e9a6-255a-48b7-a062-fbf15488833a}" FolderPath="Service members\">
       <Declaration><![CDATA[(*!
 <summary>Extracts the last component yielded by splitting a POU name on dots.</summary>
-<description>Returns a bounded independent string. Temporary splitter storage is released at method exit; fragment allocation follows the normal allocation-failure policy. Descendants cannot replace this shared metadata formatter; custom diagnostic payload formatting belongs in GetMessage or ToError.</description>
+<description>Returns a bounded independent string extracted by in-place character scanning without dynamic memory allocation or splitters. Descendants cannot replace this shared metadata formatter; custom diagnostic payload formatting belongs in GetMessage or ToError.</description>
 *)
 METHOD PROTECTED FINAL ExtractMethodName : STRING
 VAR_IN_OUT CONSTANT
 	sourcePOUName : STRING;
 END_VAR
 VAR
-	splitter : StringSplittingEnumerator;
+	i : INT;
+	length : INT;
+	strngPointer : POINTER TO BYTE;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[splitter := Strings.CreateSplitter(sourcePOUName, '.', 0, TRUE, TRUE);
+        <ST><![CDATA[length := TO_INT(Tc2_Standard.LEN(sourcePOUName));
 
-WHILE splitter.MoveNext() DO
-	ExtractMethodName := splitter.CurrentEntry;
-END_WHILE]]></ST>
+IF length = 0 THEN
+	ExtractMethodName := '';
+	RETURN;
+END_IF
+
+strngPointer := ADR(sourcePOUName);
+
+FOR i := length - 1 TO 0 BY -1 DO
+	IF strngPointer[i] = 16#2E THEN
+		ExtractMethodName := Tc2_Standard.RIGHT(sourcePOUName, length - 1 - i);
+		RETURN;
+	END_IF
+END_FOR
+
+ExtractMethodName := sourcePOUName;]]></ST>
       </Implementation>
     </Method>
     <Method Name="FB_exit" Id="{11857425-e8b4-42f5-9cda-87a6242433d1}">

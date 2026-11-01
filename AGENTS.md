@@ -51,6 +51,9 @@ be reflected in Beckhoff documentation; do not override it based on documentatio
   required contract tags, then a blank line, then attributes, followed immediately by the `FUNCTION_BLOCK` declaration.
   Place all block attributes, including `{attribute 'no_explicit_call' := 'do not call this function block directly'}`,
   together after DocGen, not before it or between comment blocks.
+- Keep line length of comments and DocGen blocks within 120 characters (maximum 140 when breaking degrades readability).
+  Wrap long sentences in `<summary>`, `<description>`, and implementation comments across multiple lines indented
+  with the surrounding block.
 
 ## Architecture & Design
 
@@ -89,6 +92,15 @@ be reflected in Beckhoff documentation; do not override it based on documentatio
   patterns; condensed agent constructions are not the reference standard.
 - In property getters, an early `RETURN` without assigning a result returns the default/initial value of the type.
   Do not add local `defaultValue` variables and assignments purely to duplicate this default initialization.
+- Limit line length of ST statements to 120-140 characters. When a call or expression exceeds this boundary or has
+  many parameters, format it across multiple lines: place each argument on its own indented line, and place
+  the closing parenthesis `);` on a separate line indented to match the level of the call.
+- Method, function, and function block calls must explicitly specify parameter names using `:=`
+  (e.g. `fb.Method(param1 := val1, param2 := val2)`). Exceptions:
+  - Built-in single-argument type conversions and standard operators (`ADR`, `SIZEOF`, `TO_*`, `__QUERYINTERFACE`,
+    `__ISVALIDREF`).
+  - Variadic-style string helper functions designed for concise multi-fragment concatenation (`Concat255`,
+    `ConcatFit255`, `Append255`, `AppendFit255` when passing sequential text fragments).
 
 ### Naming Conventions
 
@@ -101,6 +113,12 @@ be reflected in Beckhoff documentation; do not override it based on documentatio
   (`cleanupTaskMemory`).
 - Private fields of classes/FBs use the `_` prefix with PascalCase (`_AllocationFailed`); local variables and
   parameters use camelCase without the prefix.
+- Do not use Hungarian notation or type-denoting prefixes (`p`, `b`, `s`, `str`, `n`, `i`, `a`, etc.) for variables,
+  parameters, or pointers. Use clear semantic names describing purpose: `data`, `targetWords`, `currentLength`,
+  `newMemory` (not `pData`, `pWords`, `nLen`, `pNewMemory`).
+  - Short single-letter variables are permitted exclusively as simple integer loop counters (`i`, `j`, `k`).
+  - The only permitted exception with type prefixes is standard TwinCAT runtime system parameters in `FB_init`
+    (`bInitRetains`, `bInCopyCode`).
 - Do not rename third-party APIs.
 
 ## Exceptions and Lifecycle

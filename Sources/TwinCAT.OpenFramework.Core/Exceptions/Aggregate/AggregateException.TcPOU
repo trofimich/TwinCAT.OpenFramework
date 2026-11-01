@@ -237,7 +237,7 @@ END_IF]]></ST>
     <Method Name="GetMessage" Id="{76c9ffdd-6b67-4a44-aa6c-571f736f1a93}">
       <Declaration><![CDATA[(*!
 <summary>With default options an empty aggregate returns "0 aggregated exceptions".</summary>
-<description>Formats entries in their stored order. If the result exceeds ERROR_MESSAGE capacity, preserves the prefix and ends with an ellipsis; later entries may be omitted. Copying the final message does not raise a size-overflow exception. Builder allocation failures remain terminal.</description>
+<description>Formats entries in their stored order. If the result exceeds ERROR_MESSAGE capacity, preserves the prefix and ends with an ellipsis; later entries may be omitted. Formats directly into the result without heap allocation or builders.</description>
 *)
 
 METHOD GetMessage : ERROR_MESSAGE
@@ -246,44 +246,36 @@ VAR_INPUT
 	timestampDisplayMode : TIMESTAMP_DISPLAY_MODE := TIMESTAMP_DISPLAY_MODE.HIDDEN;
 END_VAR
 VAR
-	stringBuilder : WideStringBuilder;
-	
 	i : DINT;
 	innerException : IReadOnlyException;
 	innerExceptionMessage : ERROR_MESSAGE;
+	itemIndexText : WSTRING(16);
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[stringBuilder
-	.Append(_InnerExceptionCount)
-	.AppendString(Exceptions.AGGREGATE_EXCEPTION_SUFFIX);
+        <ST><![CDATA[WideStrings.AppendFit255(GetMessage, TO_WSTRING(_InnerExceptionCount), Exceptions.AGGREGATE_EXCEPTION_SUFFIX);
 
 IF timestampDisplayMode <> TIMESTAMP_DISPLAY_MODE.HIDDEN THEN
-	stringBuilder.AppendString(Exceptions.TIME_PREFIX);
-	AppendTimestampDescription(stringBuilder, timestampDisplayMode, _LocalTimestamp, _UtcTimestamp);
+	WideStrings.AppendFit255(GetMessage, Exceptions.TIME_PREFIX);
+	AppendTimestampDescription(GetMessage, timestampDisplayMode, _LocalTimestamp, _UtcTimestamp);
 END_IF
 
 IF showSource THEN
-	stringBuilder
-		.AppendString(Exceptions.SOURCE_PREFIX)
-		.AppendString255(TO_WSTRING(_SourceFullPOUName))
-		.AppendStringIf(Exceptions.SOURCE_POSITION_PREFIX, sourcePosition <> '')
-		.AppendString255If(TO_WSTRING(sourcePosition), sourcePosition <> '');
+	IF sourcePosition <> '' THEN
+		WideStrings.AppendFit255(GetMessage, Exceptions.SOURCE_PREFIX, TO_WSTRING(_SourceFullPOUName), Exceptions.SOURCE_POSITION_PREFIX, TO_WSTRING(sourcePosition));
+	ELSE
+		WideStrings.AppendFit255(GetMessage, Exceptions.SOURCE_PREFIX, TO_WSTRING(_SourceFullPOUName));
+	END_IF
 END_IF
 
 FOR i := 0 TO TO_DINT(_InnerExceptionCount) - 1 DO
 	innerException := _InnerExceptions[i];
 	
 	innerExceptionMessage := innerException.GetMessage(showSource, timestampDisplayMode);
+	itemIndexText := TO_WSTRING(i);
 	
-	stringBuilder
-		.AppendString255(WideStrings.NewLine)
-		.Append(i)
-		.AppendString(Exceptions.MESSAGE_NUMBER_SUFFIX)	
-		.AppendString(" ")
-		.Append(innerExceptionMessage);
-END_FOR		
-
-GetMessage := Exceptions.CopyMessage(stringBuilder);]]></ST>
+	WideStrings.AppendFit255(GetMessage, WideStrings.NewLine, itemIndexText, Exceptions.MESSAGE_NUMBER_SUFFIX, " ");
+	WideStrings.AppendFit(GetMessage, innerExceptionMessage);
+END_FOR]]></ST>
       </Implementation>
     </Method>
     <Method Name="GetRootException" Id="{3947d49e-1dd5-493f-96aa-4bb6602d0186}">

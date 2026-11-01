@@ -51,29 +51,32 @@ END_VAR]]></Declaration>
     <Folder Name="Service methods" Id="{e40f07a0-bb69-43d2-9344-558beb521327}" />
     <Method Name="appendTimestampDescription" Id="{dcf3179b-315e-43cb-bffb-a9cc08face8f}" FolderPath="Service methods\">
       <Declaration><![CDATA[(*!
-<summary>Appends the selected timestamp to an existing diagnostic builder.</summary>
-<description>Hidden mode leaves the builder unchanged; otherwise appends the supplied local or UTC timestamp, with a UTC suffix for UTC mode. Does not clear existing text. Buffer growth follows the builder allocation-failure contract.</description>
+<summary>Appends the selected timestamp to an existing diagnostic target.</summary>
+<description>Hidden mode leaves the target unchanged; otherwise appends the supplied local or UTC timestamp, with a UTC suffix for UTC mode. Formats without dynamic memory allocation.</description>
 *)
 METHOD PRIVATE appendTimestampDescription
-VAR_IN_OUT CONSTANT
-	stringBuilder : WideStringBuilder;
-END_VAR
 VAR_INPUT
+	targetMessage : ANY_STRING;
 	timestampDisplayMode : TIMESTAMP_DISPLAY_MODE := TIMESTAMP_DISPLAY_MODE.HIDDEN;
 	localTimestamp : LDATE_AND_TIME;	
 	utcTimestamp : LDATE_AND_TIME;	
+END_VAR
+VAR
+	targetMessagePointer : POINTER TO ERROR_MESSAGE;
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[IF timestampDisplayMode = TIMESTAMP_DISPLAY_MODE.HIDDEN THEN
 	RETURN;
 END_IF
 
+targetMessagePointer := ADR(targetMessage);
+
 CASE timestampDisplayMode OF
 	TIMESTAMP_DISPLAY_MODE.LOCAL:
-		stringBuilder.Append(localTimestamp);
+		WideStrings.AppendFit255(targetMessagePointer^, TO_WSTRING(localTimestamp));
 	
 	TIMESTAMP_DISPLAY_MODE.UTC:
-		stringBuilder.Append(utcTimestamp).AppendString("UTC");
+		WideStrings.AppendFit255(targetMessagePointer^, TO_WSTRING(utcTimestamp), "UTC");
 END_CASE]]></ST>
       </Implementation>
     </Method>
@@ -205,7 +208,7 @@ _UnspecifiedPosition := Exceptions.UNSPECIFIED_SOURCE;]]></ST>
     <Method Name="GetMessage" Id="{a88a8b1a-9f6a-4c9d-9ec5-e6c280a6e922}">
       <Declaration><![CDATA[(*!
 <summary>Describes the captured native code and the location where it was caught.</summary>
-<description>Returns an empty message for RTSEXCPT_NOEXCEPTION. Otherwise always includes the catch point, which does not identify the unknown native throw source. Formatting does not change the captured timestamps. A result exceeding ERROR_MESSAGE capacity retains its prefix and ends with an ellipsis instead of raising a size-overflow exception.</description>
+<description>Returns an empty message for RTSEXCPT_NOEXCEPTION. Otherwise always includes the catch point, which does not identify the unknown native throw source. Formatting does not change the captured timestamps. A result exceeding ERROR_MESSAGE capacity retains its prefix and ends with an ellipsis instead of raising a size-overflow exception. Formats directly into the result without heap allocation or builders.</description>
 <param name="showSource">Has no effect: the native throw source is unavailable. The catch point remains part of the message.</param>
 <param name="timestampDisplayMode">Selects whether the captured local or UTC timestamp is appended, or hidden.</param>
 *)
@@ -214,28 +217,24 @@ METHOD FINAL GetMessage : ERROR_MESSAGE
 VAR_INPUT
 	showSource : BOOL := FALSE;
 	timestampDisplayMode : TIMESTAMP_DISPLAY_MODE := TIMESTAMP_DISPLAY_MODE.HIDDEN;
-END_VAR
-VAR
-	stringBuilder : WideStringBuilder;
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[IF _ExceptionCode <> __SYSTEM.ExceptionCode.RTSEXCPT_NOEXCEPTION THEN
-	stringBuilder
-		.AppendString("System exception ")
-		.AppendString255(TO_WSTRING(_ExceptionCode))
-		.AppendString(" occured. Caught in ")
-		.AppendString255(TO_WSTRING(_CatchPointNamespaceName))
-		.AppendString(".")
-		.AppendString255(TO_WSTRING(_CatchPointPOUName))
-		.AppendString(" at ")
-		.AppendString255(TO_WSTRING(_CatchPointPosition));
+	WideStrings.AppendFit255(
+		GetMessage,
+		"System exception ",
+		TO_WSTRING(_ExceptionCode),
+		" occured. Caught in ",
+		TO_WSTRING(_CatchPointNamespaceName),
+		".",
+		TO_WSTRING(_CatchPointPOUName),
+		" at ",
+		TO_WSTRING(_CatchPointPosition));
 			
 	IF timestampDisplayMode <> TIMESTAMP_DISPLAY_MODE.HIDDEN THEN
-		stringBuilder.AppendString(Exceptions.TIME_PREFIX);
-		AppendTimestampDescription(stringBuilder, timestampDisplayMode, LocalTimestamp, UtcTimestamp);
+		WideStrings.AppendFit255(GetMessage, Exceptions.TIME_PREFIX);
+		appendTimestampDescription(GetMessage, timestampDisplayMode, LocalTimestamp, UtcTimestamp);
 	END_IF
-
-	GetMessage := Exceptions.CopyMessage(stringBuilder);
 ELSE
 	GetMessage := "";
 END_IF]]></ST>
