@@ -9,7 +9,23 @@ License: https://opensource.org/license/mit
 
 (*!
 <summary>Wraps another ILogger and forwards diagnostics from multiple tasks through a bounded queue.</summary>
-<description>Configure once from the cyclic task that will service this instance, before publishing it to logging callers. Configuration binds Execute to that task; other tasks may enqueue but their Execute calls do nothing. Backend and wrapper lifetimes must cover all calls and pending processing. Backend is borrowed, not deleted or configured here; do not call it independently from other tasks or create routing cycles. Queue storage is fixed by Parameters.QUEUED_LOGGER_CAPACITY. Ordinary text admission does not allocate heap memory; error and exception formatting may allocate through their existing implementations. A full or unconfigured queue returns FALSE. TRUE means queued, not written. Errors and exceptions are formatted in the sending task, including source and local timestamp; aggregate causes become separate records and can interleave with other callers. Structured backend source fields and backend-specific aggregate markers are not preserved. Plain messages retain their supplied text. Execute attempts each dequeued record once without retry, even after backend FALSE or exception. FailedDeliveryCount records those failed attempts, not confirmed message loss or durable-write failures. No callback runs under the queue lock. Queue lock contention may block briefly. All TryLog methods and Execute contain exceptions and preserve terminal allocation state. PendingMessageCount exposes queued records only, excluding active delivery and backend work. Stop callers and finish backend processing before destruction; destruction does not flush pending records. Online-change behavior has not been established.</description>
+<description>
+Configure once from the cyclic task that will service this instance, before publishing it to logging callers.
+Configuration binds Execute to that task; other tasks may enqueue but their Execute calls do nothing. Backend
+and wrapper lifetimes must cover all calls and pending processing. Backend is borrowed, not deleted or
+configured here; do not call it independently from other tasks or create routing cycles. Queue storage is
+fixed by Parameters.QUEUED_LOGGER_CAPACITY. Ordinary text admission does not allocate heap memory; error and
+exception formatting may allocate through their existing implementations. A full or unconfigured queue returns
+FALSE. TRUE means queued, not written. Errors and exceptions are formatted in the sending task, including
+source and local timestamp; aggregate causes become separate records and can interleave with other callers.
+Structured backend source fields and backend-specific aggregate markers are not preserved. Plain messages
+retain their supplied text. Execute attempts each dequeued record once without retry, even after backend FALSE
+or exception. FailedDeliveryCount records those failed attempts, not confirmed message loss or durable-write
+failures. No callback runs under the queue lock. Queue lock contention may block briefly. All TryLog methods
+and Execute contain exceptions and preserve terminal allocation state. PendingMessageCount exposes queued
+records only, excluding active delivery and backend work. Stop callers and finish backend processing before
+destruction; destruction does not flush pending records. Online-change behavior has not been established.
+</description>
 *)
 
 {attribute 'no_explicit_call' := 'Use Configure, TryLog methods and Execute'}
@@ -46,7 +62,11 @@ PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
     <Method Name="Configure" Id="{4c6d20a1-6e26-4434-ad62-03f30ea395d6}">
       <Declaration><![CDATA[(*!
 <summary>Assigns the backend and binds processing to the calling cyclic task.</summary>
-<description>Call once before publishing the wrapper. Returns FALSE for null or self backend, non-cyclic context, an already configured instance or lock failure. No allocation, exception creation or ownership transfer. Does not initialize the backend or replace an existing configuration.</description>
+<description>
+Call once before publishing the wrapper. Returns FALSE for null or self backend, non-cyclic context, an
+already configured instance or lock failure. No allocation, exception creation or ownership transfer. Does not
+initialize the backend or replace an existing configuration.
+</description>
 <param name="backend">Live logger serviced exclusively through this wrapper; must outlive its use.</param>
 *)
 METHOD Configure : BOOL
@@ -86,7 +106,15 @@ _QueueLock.Leave();]]></ST>
     <Method Name="Execute" Id="{e5b8db30-d739-411c-a177-18119bf27053}">
       <Declaration><![CDATA[(*!
 <summary>Services the backend and forwards a bounded batch from the owner task.</summary>
-<description>Other tasks and unconfigured instances do no work. Snapshots the initial queue length and processes at most that many records, bounded by queue capacity. Calls backend Execute once before forwarding, allowing it to advance prior work. Each record is removed under the lock and copied into owner-only storage, then forwarded without the lock. Backend FALSE or exception increments FailedDeliveryCount once without retrying the record or logging another error. Backend Execute failures and enqueue rejections are excluded. Backend must borrow the record only for the call and must not reenter this wrapper. Concurrent producers may refill released slots. Does not guarantee durable output or a fixed execution time; backend and lock latency still apply.</description>
+<description>
+Other tasks and unconfigured instances do no work. Snapshots the initial queue length and processes at most
+that many records, bounded by queue capacity. Calls backend Execute once before forwarding, allowing it to
+advance prior work. Each record is removed under the lock and copied into owner-only storage, then forwarded
+without the lock. Backend FALSE or exception increments FailedDeliveryCount once without retrying the record
+or logging another error. Backend Execute failures and enqueue rejections are excluded. Backend must borrow
+the record only for the call and must not reenter this wrapper. Concurrent producers may refill released
+slots. Does not guarantee durable output or a fixed execution time; backend and lock latency still apply.
+</description>
 *)
 METHOD Execute
 VAR
@@ -163,7 +191,12 @@ __ENDTRY]]></ST>
     <Property Name="FailedDeliveryCount" Id="{e941ff7a-fc15-4ef1-9c3b-f0b926f0c9ca}">
       <Declaration><![CDATA[(*!
 <summary>Counts dequeued records whose single delivery attempt returned FALSE or raised an exception.</summary>
-<description>Read from the owner task, or with application-level synchronization against Execute. Updated only by owner-task Execute. Starts at zero and saturates at UnsignedInt64.MAX_VALUE; no reset is provided. Excludes enqueue rejection and backend Execute errors. A failed attempt may have produced partial output; successful acceptance does not guarantee durable storage.</description>
+<description>
+Read from the owner task, or with application-level synchronization against Execute. Updated only by
+owner-task Execute. Starts at zero and saturates at UnsignedInt64.MAX_VALUE; no reset is provided. Excludes
+enqueue rejection and backend Execute errors. A failed attempt may have produced partial output; successful
+acceptance does not guarantee durable storage.
+</description>
 *)
 {attribute 'monitoring' := 'call'}
 PROPERTY FailedDeliveryCount : ULINT]]></Declaration>
@@ -191,7 +224,13 @@ PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
     <Property Name="PendingMessageCount" Id="{f7763125-25b8-4f4e-b66b-d42b753b0d4c}">
       <Declaration><![CDATA[(*!
 <summary>Returns a synchronized snapshot of the number of records waiting in the queue.</summary>
-<description>Returns -1 if the queue lock cannot be acquired; zero means no queued records at the snapshot instant. Lock contention may block. Excludes the record currently being forwarded and any work buffered by the backend. Concurrent producers may change the count immediately after reading. For draining, stop producers and read from the owner task after Execute returns. Zero does not guarantee successful delivery, completed file I/O or a closed file. This property does not flush or stop either logger.</description>
+<description>
+Returns -1 if the queue lock cannot be acquired; zero means no queued records at the snapshot instant. Lock
+contention may block. Excludes the record currently being forwarded and any work buffered by the backend.
+Concurrent producers may change the count immediately after reading. For draining, stop producers and read
+from the owner task after Execute returns. Zero does not guarantee successful delivery, completed file I/O or
+a closed file. This property does not flush or stop either logger.
+</description>
 *)
 {attribute 'monitoring' := 'call'}
 PROPERTY PendingMessageCount : DINT]]></Declaration>
@@ -224,7 +263,11 @@ PROPERTY SelfSize : ULINT]]></Declaration>
     <Method Name="TryLogError" Id="{f7511d49-baae-40f0-a9e5-84c752870033}">
       <Declaration><![CDATA[(*!
 <summary>Formats a borrowed error in the sending task and queues its text.</summary>
-<description>Copies source and local timestamp into the text using ERROR.ToString. Retains no reference to ERROR. Returns FALSE for an invalid reference, failed admission or caught formatting exception. Does not clear terminal allocation state.</description>
+<description>
+Copies source and local timestamp into the text using ERROR.ToString. Retains no reference to ERROR. Returns
+FALSE for an invalid reference, failed admission or caught formatting exception. Does not clear terminal
+allocation state.
+</description>
 <param name="error">Live error formatted during this call.</param>
 <param name="messageNumber">Optional number copied with the formatted message.</param>
 *)
@@ -252,7 +295,13 @@ __ENDTRY]]></ST>
     <Method Name="TryLogException" Id="{7110670c-336b-4b80-aa5f-381540f0d63f}">
       <Declaration><![CDATA[(*!
 <summary>Queues text snapshots of a live exception or its aggregate causes.</summary>
-<description>Formats source and local timestamp before task cleanup. Aggregate causes are visited in stored order and share the supplied optional request number. Stops on the first failure; already accepted records remain queued and FALSE may mean partial admission. Concurrent callers may interleave aggregate entries. Empty aggregates are formatted as ordinary exceptions. Input graphs must be valid and acyclic. No exception reference or clone is retained; terminal allocation state is preserved.</description>
+<description>
+Formats source and local timestamp before task cleanup. Aggregate causes are visited in stored order and share
+the supplied optional request number. Stops on the first failure; already accepted records remain queued and
+FALSE may mean partial admission. Concurrent callers may interleave aggregate entries. Empty aggregates are
+formatted as ordinary exceptions. Input graphs must be valid and acyclic. No exception reference or clone is
+retained; terminal allocation state is preserved.
+</description>
 <param name="exception">Live, acyclic exception graph borrowed for formatting.</param>
 <param name="severity">Severity used to choose the queued category.</param>
 <param name="messageNumber">Optional request number copied to each accepted cause record.</param>
@@ -294,7 +343,11 @@ __ENDTRY]]></ST>
     <Method Name="TryLogMessage" Id="{d1cab8b8-026e-4345-b782-1bb6899ce79b}">
       <Declaration><![CDATA[(*!
 <summary>Copies one message and its optional number into the bounded queue.</summary>
-<description>Borrows inputs only for this call; the caller must keep them stable while copied. Returns FALSE before configuration, at capacity, on lock failure or on a caught exception. Commits the entry only after copying its contents. Does not call the backend or allocate text storage.</description>
+<description>
+Borrows inputs only for this call; the caller must keep them stable while copied. Returns FALSE before
+configuration, at capacity, on lock failure or on a caught exception. Commits the entry only after copying its
+contents. Does not call the backend or allocate text storage.
+</description>
 <param name="category">Category copied into the queued record.</param>
 <param name="message">Text copied into owned queue storage.</param>
 <param name="messageNumber">Optional borrowed number copied by value.</param>
