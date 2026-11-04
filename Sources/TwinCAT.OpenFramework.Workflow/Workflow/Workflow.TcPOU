@@ -22,11 +22,11 @@ logged via LogManager. Terminal allocation failures are propagated.
 
 {attribute 'no_explicit_call' := 'do not call this function block directly'}
 {attribute 'enable_dynamic_creation'}
-FUNCTION_BLOCK ABSTRACT Workflow 
-VAR_GENERIC CONSTANT
-    VariableCount : INT(0..10000) := 0;
+FUNCTION_BLOCK Workflow EXTENDS TOF_Core.Object IMPLEMENTS IWorkflow
+VAR_STAT
+	{attribute 'hide'}
+	_ClassName : STRING := __POUNAME();
 END_VAR
-EXTENDS TOF_Core.Object IMPLEMENTS IWorkflow
 VAR
 	{attribute 'hide'} 
 	_Name : WSTRING;
@@ -39,7 +39,7 @@ VAR
 	
 	_RootActivity : IActivity;
 	
-	_DynamicChildren : TOF_Collections.List<0>(0);
+	_DynamicChildren : TOF_Collections.List<0>(valueValidator := 0);
 END_VAR]]></Declaration>
     <Implementation>
       <ST><![CDATA[]]></ST>
@@ -48,6 +48,7 @@ END_VAR]]></Declaration>
     <Property Name="Busy" Id="{bab15e3d-0210-4a1d-9bb4-41a96adad825}">
       <Declaration><![CDATA[(*!
 <summary>Indicates whether the root activity is currently in an active state.</summary>
+<description>FALSE reflects the root state and does not certify nested resource release after failure.</description>
 *)
 {attribute 'monitoring' := 'call'}
 PROPERTY FINAL Busy : BOOL]]></Declaration>
@@ -98,26 +99,34 @@ END_IF]]></ST>
         </Implementation>
       </Get>
     </Property>
-    <Method Name="CreateVariables" Id="{77b0e16c-37a3-4b71-b6b3-d4ba31e98e52}" FolderPath="Members to override\">
+    <Property Name="ClassName" Id="{74686342-960c-43da-a108-c5309407514a}">
       <Declaration><![CDATA[(*!
-<summary>Returns the descriptors of variables exposed in this workflow container.</summary>
+<summary>Borrows the initialized class name used in diagnostics.</summary>
 <description>
-Called once during the first SetRootActivity when VariableCount &gt; 0. Each descriptor must have a unique
-non-empty name.
+Returns initialized metadata storage without allocation. Callers must not modify the returned string.
+Derived function blocks must use distinct initialized static storage when overriding this metadata.
 </description>
 *)
-METHOD PROTECTED ABSTRACT CreateVariables : ARRAY [0..VariableCount - 1] OF VARIABLE_DESCRIPTOR
-]]></Declaration>
-      <Implementation>
-        <ST><![CDATA[]]></ST>
-      </Implementation>
-    </Method>
+{attribute 'monitoring' := 'call'}
+PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{8f28a369-1d8e-439e-b04d-afcb361b776d}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ClassName REF= _ClassName;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
     <Method Name="DisposeDynamicChildren" Id="{6b69ccba-15f0-48cc-974c-9c24c24bc45d}">
       <Declaration><![CDATA[(*!
 <summary>Detaches workflow state and releases all registered dynamic workflow elements.</summary>
 <description>
-Clears RootActivity, variable bindings and FailError before releasing owned dynamic children so no dangling
-references remain on the workflow instance.
+Clears RootActivity, variable bindings and FailError before releasing owned registry entries. Disposal does
+not request cancellation, execute asynchronous cleanup or prove physical resource release. Normal return
+does not certify successful deallocation by every child destructor. Dynamic child destructors must obey
+their no-throw lifecycle contract; disposal must not run concurrently or reenter this workflow.
+Old tree nodes and external aliases are not repaired or cleared. Do not execute or reuse the disposed
+graph, including static containers that borrowed deleted descendants. Build and register a fresh graph for
+SetRootActivity instead. Disposal does not clear the application-wide fatal allocation latch.
 </description>
 *)
 METHOD DisposeDynamicChildren]]></Declaration>
@@ -183,10 +192,15 @@ END_IF]]></ST>
       </Get>
     </Property>
     <Method Name="FB_exit" Id="{8a118ccc-cf33-4895-aaa4-ec240e9f2ff6}">
-      <Declaration><![CDATA[
-//! <param name="bInCopyCode">
-//! if TRUE, the exit method is called for exiting an instance that is copied afterwards (online change).
-//! </param>
+      <Declaration><![CDATA[(*!
+<summary>Detaches the workflow and disposes its registered dynamic children during destruction.</summary>
+<description>
+Uses DisposeDynamicChildren under the no-throw lifecycle contract. Does not perform cooperative stopping
+or establish physical resource-release or online-change preservation guarantees. Old borrowed tree aliases
+must not be used after destruction. The bInCopyCode flag does not implement a separate relocation protocol.
+</description>
+<param name="bInCopyCode">TwinCAT copy-code exit marker; this member does not implement relocation.</param>
+*)
 
 METHOD FB_exit : BOOL
 VAR_INPUT
@@ -222,7 +236,10 @@ END_IF]]></ST>
 <summary>Records and logs an uncaught non-terminal exception at the workflow boundary.</summary>
 <description>
 Propagates terminal allocation failures via RaiseIfAllocationFailed. Stabilizes native exceptions via Clone,
-populates FailError and logs the exception through LogManager.TryLogException.
+populates FailError and logs the exception through LogManager.TryLogException. Ordinary failures from
+exception retrieval, cloning or conversion produce a fixed ERROR fallback instead of escaping this boundary.
+The fallback has epoch timestamps and identifies this boundary; it does not claim to preserve unavailable payload.
+Terminal allocation failure always propagates before after-hooks or further normal execution.
 </description>
 <param name="exceptionCode">System exception code captured by __CATCH.</param>
 <param name="catchPointPOUName">Name of the catching workflow method.</param>
@@ -238,38 +255,84 @@ VAR
 	exception : TOF_Core.IException;
 	clonedObject : TOF_Core.IObject;
 	stabilizedException : TOF_Core.IException;
+	snapshotAvailable : BOOL;
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[TOF_Core.DynamicMemoryManager.RaiseIfAllocationFailed();
 
-exception := TOF_Core.ExceptionManager.GetLastException(
-	exceptionCode := exceptionCode,
-	catchPointNamespaceName := NamespaceName,
-	catchPointPOUName := catchPointPOUName,
-	catchPointPosition := catchPointPosition);
-
-IF exception <> 0 AND_THEN NOT exception.IsDynamicInstance THEN
-	clonedObject := exception.Clone();
-
-	IF clonedObject <> 0 AND_THEN __QUERYINTERFACE(clonedObject, stabilizedException) THEN
-		exception := stabilizedException;
-	END_IF
-END_IF
-
 _FailError.Clear();
 
-IF exception <> 0 THEN
-	exception.ToError(targetError := _FailError, severity := TOF_Core.ERROR_SEVERITY.ERROR);
+// Diagnostic callbacks may fail; the workflow boundary must still complete.
+
+__TRY
+	exception := TOF_Core.ExceptionManager.GetLastException(
+		exceptionCode := exceptionCode,
+		catchPointNamespaceName := NamespaceName,
+		catchPointPOUName := catchPointPOUName,
+		catchPointPosition := catchPointPosition
+	);
+
+	IF exception <> 0 AND_THEN NOT exception.IsDynamicInstance THEN
+		clonedObject := exception.Clone();
+
+		IF clonedObject <> 0 AND_THEN __QUERYINTERFACE(clonedObject, stabilizedException) THEN
+			exception := stabilizedException;
+		END_IF
+	END_IF
+
+	IF exception <> 0 THEN
+		exception.ToError(targetError := _FailError, severity := TOF_Core.ERROR_SEVERITY.ERROR);
+		snapshotAvailable := TRUE;
+	END_IF
+__CATCH
+	// Replace partial diagnostic state without creating another exception.
+	snapshotAvailable := FALSE;
+__ENDTRY
+
+TOF_Core.DynamicMemoryManager.RaiseIfAllocationFailed();
+
+IF snapshotAvailable THEN
+	TOF_Core.LogManager.TryLogException(
+		exception := exception,
+		severity := TOF_Core.ERROR_SEVERITY.ERROR,
+		topic1 := "Workflow",
+		topic2 := TO_WSTRING(catchPointPOUName)
+	);
+ELSE
+	_FailError.Clear();
+	_FailError.SetMessage(message := "Workflow exception diagnostics are unavailable");
+	_FailError.SetSource(
+		sourceNamespaceName := CurrentNamespace.Name,
+		sourceClassName := 'Workflow',
+		sourcePOUName := catchPointPOUName
+	);
+
+	TOF_Core.LogManager.TryLogMessage(
+		message := _FailError.TopMessage,
+		category := TOF_Core.LOG_CATEGORY.ERROR,
+		topic1 := "Workflow",
+		topic2 := TO_WSTRING(catchPointPOUName)
+	);
 END_IF
 
-TOF_Core.LogManager.TryLogException(
-	exception := exception,
-	severity := TOF_Core.ERROR_SEVERITY.ERROR,
-	topic1 := TO_WSTRING(ClassName),
-	topic2 := TO_WSTRING(catchPointPOUName)
-);
-
 TOF_Core.DynamicMemoryManager.RaiseIfAllocationFailed();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="InitializeVariables" Id="{dd857de1-a9f7-4039-9560-281d3c9e9711}" FolderPath="Members to override\">
+      <Declaration><![CDATA[(*!
+<summary>Hook for subclasses to register their initial workflow variables.</summary>
+<description>
+Invoked once during the first SetRootActivity before root activity execution.
+Derived classes override this method to register variables via RegisterVariable. If the hook raises, only
+its appended bindings are removed; preexisting bindings remain available and the next assignment retries.
+Do not reenter SetRootActivity, dispose this workflow or retain aliases to keys added by a failed attempt.
+Other subclass side effects are not transactional and must support retry.
+</description>
+*)
+METHOD PROTECTED InitializeVariables
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[]]></ST>
       </Implementation>
     </Method>
     <Property Name="Name" Id="{7260c51c-949e-4411-88e2-fdf1b44dbbf3}">
@@ -290,6 +353,23 @@ PROPERTY FINAL Name : WSTRING]]></Declaration>
           <ST><![CDATA[_Name := Name;]]></ST>
         </Implementation>
       </Set>
+    </Property>
+    <Property Name="NamespaceName" Id="{556d9f39-ce40-4931-99f4-9b47c3d967a0}">
+      <Declaration><![CDATA[(*!
+<summary>Borrows the compiler-initialized library namespace.</summary>
+<description>
+Borrows storage from the live internal namespace provider. Reacquire references after application
+reinitialization or relocation. Treat the reference as read-only; no ownership or synchronization is provided.
+</description>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{0067a9e1-ebf4-4b39-809e-932261087b8e}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[NamespaceName REF= CurrentNamespace.Name;]]></ST>
+        </Implementation>
+      </Get>
     </Property>
     <Method Name="OnAfterRootActivityExecute" Id="{dea40369-d161-4fc1-bc15-7686100c5bae}" FolderPath="Members to override\">
       <Declaration><![CDATA[(*!
@@ -408,7 +488,7 @@ __TRY
 	END_FOR
 
 	_DynamicChildren.AppendGeneric(
-		TOF_Core.GenericValueFactory.FromParts(
+		value := TOF_Core.GenericValueFactory.FromParts(
 			genericTypeClass := TOF_Core.GENERIC_TYPE_CLASS.OBJECT,
 			address := childAddress,
 			size := child.SelfSize,
@@ -446,6 +526,131 @@ __CATCH
 __ENDTRY]]></ST>
       </Implementation>
     </Method>
+    <Method Name="RegisterVariable" Id="{91b4e5dd-851f-425c-b552-6daef13aed33}">
+      <Declaration><![CDATA[(*!
+<summary>Registers a named PLC variable reference in this workflow.</summary>
+<description>
+Stores a borrowed reference to the supplied PLC variable in the workflow variable dictionary under a unique name.
+Fails if the workflow is busy, the name is empty, the name already exists, or the variable resides in stack memory.
+Type mapping precedes allocation of the owned name key. Failure before dictionary acceptance releases
+that key and propagates the exception; successful registration transfers key ownership to the dictionary.
+The variable storage remains borrowed and must outlive its binding.
+</description>
+<param name="name">Unique non-empty variable name.</param>
+<param name="plcVariable">PLC variable to bind (instance field or global variable).</param>
+<param name="plcVariableIsObject">TRUE if the variable is an FB instance implementing IObject.</param>
+*)
+METHOD RegisterVariable : BOOL
+VAR_INPUT
+	name : STRING;
+	plcVariable : ANY;
+	plcVariableIsObject : BOOL := FALSE;
+END_VAR
+VAR
+	formattedExceptionMessage : TOF_Core.ERROR_MESSAGE;
+	variableKey : TOF_Core.GENERIC_VALUE;
+	variableValue : TOF_Core.GENERIC_VALUE;
+	existingVariable : TOF_Core.GENERIC_VALUE;
+	exceptionCode : __SYSTEM.ExceptionCode;
+END_VAR
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF name = '' THEN
+	WorkflowExceptions.ThrowWorkflowConfiguration(
+		sourceNamespaceName := NamespaceName,
+		sourceClassName := ClassName,
+		sourcePOUName := __POUNAME(),
+		sourcePosition := __POSITION(),
+		message := "Variable name cannot be empty"
+	);
+END_IF
+
+IF Busy THEN
+	formattedExceptionMessage := TOF_Core.WideStrings.Concat255(
+		"Unable to register variable '",
+		TO_WSTRING(name),
+		"' in workflow '",
+		THIS^.Name,
+		"': workflow is busy"
+	);
+
+	WorkflowExceptions.ThrowWorkflowConfiguration(
+		sourceNamespaceName := NamespaceName,
+		sourceClassName := ClassName,
+		sourcePOUName := __POUNAME(),
+		sourcePosition := __POSITION(),
+		message := formattedExceptionMessage
+	);
+END_IF
+
+IF TOF_Core.Memory.IsStackData(dataAddress := plcVariable.pValue, dataSize := TO_UDINT(plcVariable.diSize)) THEN
+	formattedExceptionMessage := TOF_Core.WideStrings.Concat255(
+		"Unable to register variable '",
+		TO_WSTRING(name),
+		"' in workflow '",
+		THIS^.Name,
+		"': variable resides in stack memory"
+	);
+
+	WorkflowExceptions.ThrowWorkflowConfiguration(
+		sourceNamespaceName := NamespaceName,
+		sourceClassName := ClassName,
+		sourcePOUName := __POUNAME(),
+		sourcePosition := __POSITION(),
+		message := formattedExceptionMessage
+	);
+END_IF
+
+IF _Variables.TryGetValueByKey(key := name, value => existingVariable) THEN
+	formattedExceptionMessage := TOF_Core.WideStrings.Concat255(
+		"Variable with name '",
+		TO_WSTRING(name),
+		"' is already registered in workflow '",
+		THIS^.Name,
+		"'"
+	);
+
+	WorkflowExceptions.ThrowWorkflowConfiguration(
+		sourceNamespaceName := NamespaceName,
+		sourceClassName := ClassName,
+		sourcePOUName := __POUNAME(),
+		sourcePosition := __POSITION(),
+		message := formattedExceptionMessage
+	);
+END_IF
+
+variableValue := TOF_Core.GenericValueFactory.FromParts(
+	genericTypeClass := TOF_Core.GenericTypeClassConvertor.GetGenericTypeClassBySystemAnyType(
+		systemAnyType := plcVariable,
+		isObject := plcVariableIsObject
+	),
+	address := plcVariable.pValue,
+	size := TO_ULINT(plcVariable.diSize),
+	memoryManagementBehavior := TOF_Core.GENERIC_MEMORY_MANAGEMENT_BEHAVIOR.STORE_ORIGINAL_REFERENCE_AND_NOT_OWNS_MEMORY
+);
+
+variableKey := TOF_Core.GenericValueFactory.FromStringValue(value := name);
+
+// The dictionary accepts key ownership only after validation and storage growth succeed.
+
+__TRY
+	_Variables.SetGeneric(key := variableKey, value := variableValue);
+__CATCH(exceptionCode)
+	variableKey.Release();
+
+	TOF_Core.ExceptionManager.ReThrowLastException(
+		exceptionCode := exceptionCode,
+		catchPointNamespaceName := NamespaceName,
+		catchPointPOUName := __POUNAME(),
+		catchPointPosition := __POSITION()
+	);
+__ENDTRY
+
+variableKey.Reset();
+
+RegisterVariable := TRUE;]]></ST>
+      </Implementation>
+    </Method>
     <Method Name="RequestCancel" Id="{e9e3f3d2-fd31-4599-91c9-ed64362dfc36}">
       <Declaration><![CDATA[(*!
 <summary>Requests cancellation of the root activity when permitted in the current state.</summary>
@@ -480,10 +685,10 @@ IF _RootActivity <> 0 THEN
 	IF Workflows.ValidateTransition(currentState := State, newState := WORKFLOW_ELEMENT_STATE.ACTIVE_CANCELLING) THEN
 		__TRY
 			OnRootActivityRequestCancel(cancelRequest => cancelRequest);
-			
+
 			IF NOT cancelRequest THEN
 				_RootActivity.RequestCancel(reason := reason);
-			
+
 				RequestCancel := TRUE;
 			ELSE
 				formattedLogMessage := TOF_Core.WideStrings.Concat255("Request cancel for workflow '", Name, "' was cancelled");
@@ -494,10 +699,14 @@ IF _RootActivity <> 0 THEN
 					topic1 := TO_WSTRING(ClassName),
 					topic2 := TO_WSTRING(__POUNAME()),
 					topic3 := "Cancelled"
-				);	
+				);
 			END_IF
 		__CATCH(exceptionCode)
-			handleException(exceptionCode := exceptionCode, catchPointPOUName := __POUNAME(), catchPointPosition := __POSITION());
+			handleException(
+				exceptionCode := exceptionCode,
+				catchPointPOUName := __POUNAME(),
+				catchPointPosition := __POSITION()
+			);
 		__ENDTRY
 	END_IF
 ELSE
@@ -543,11 +752,11 @@ IF _RootActivity <> 0 THEN
 	IF Workflows.ValidateTransition(currentState := State, newState := WORKFLOW_ELEMENT_STATE.ACTIVE_RESETTING) THEN
 		__TRY
 			OnRootActivityRequestReset(cancelRequest => cancelRequest);
-			
+
 			IF NOT cancelRequest THEN
 				_FailError.Clear();
 				_RootActivity.RequestReset();
-			
+
 				RequestReset := TRUE;
 			ELSE
 				formattedLogMessage := TOF_Core.WideStrings.Concat255("Request reset for workflow '", Name, "' was cancelled");
@@ -558,10 +767,14 @@ IF _RootActivity <> 0 THEN
 					topic1 := TO_WSTRING(ClassName),
 					topic2 := TO_WSTRING(__POUNAME()),
 					topic3 := "Cancelled"
-				);	
+				);
 			END_IF
 		__CATCH(exceptionCode)
-			handleException(exceptionCode := exceptionCode, catchPointPOUName := __POUNAME(), catchPointPosition := __POSITION());
+			handleException(
+				exceptionCode := exceptionCode,
+				catchPointPOUName := __POUNAME(),
+				catchPointPosition := __POSITION()
+			);
 		__ENDTRY
 	END_IF
 ELSE
@@ -605,11 +818,11 @@ IF _RootActivity <> 0 THEN
 	IF Workflows.ValidateTransition(currentState := State, newState := WORKFLOW_ELEMENT_STATE.ACTIVE_RUNNING) THEN
 		__TRY
 			OnRootActivityRequestStart(cancelRequest => cancelRequest);
-			
+
 			IF NOT cancelRequest THEN
 				_FailError.Clear();
 				_RootActivity.RequestStart();
-			
+
 				RequestStart := TRUE;
 			ELSE
 				formattedLogMessage := TOF_Core.WideStrings.Concat255("Request start for workflow '", Name, "' was cancelled");
@@ -623,7 +836,11 @@ IF _RootActivity <> 0 THEN
 				);
 			END_IF
 		__CATCH(exceptionCode)
-			handleException(exceptionCode := exceptionCode, catchPointPOUName := __POUNAME(), catchPointPosition := __POSITION());
+			handleException(
+				exceptionCode := exceptionCode,
+				catchPointPOUName := __POUNAME(),
+				catchPointPosition := __POSITION()
+			);
 		__ENDTRY
 	END_IF
 ELSE
@@ -667,10 +884,10 @@ IF _RootActivity <> 0 THEN
 	IF Workflows.ValidateTransition(currentState := State, newState := WORKFLOW_ELEMENT_STATE.ACTIVE_SUSPENDING) THEN
 		__TRY
 			OnRootActivityRequestSuspend(cancelRequest => cancelRequest);
-			
+
 			IF NOT cancelRequest THEN
 				_RootActivity.RequestSuspend();
-			
+
 				RequestSuspend := TRUE;
 			ELSE
 				formattedLogMessage := TOF_Core.WideStrings.Concat255("Request suspend for workflow '", Name, "' was cancelled");
@@ -684,7 +901,11 @@ IF _RootActivity <> 0 THEN
 				);
 			END_IF
 		__CATCH(exceptionCode)
-			handleException(exceptionCode := exceptionCode, catchPointPOUName := __POUNAME(), catchPointPosition := __POSITION());
+			handleException(
+				exceptionCode := exceptionCode,
+				catchPointPOUName := __POUNAME(),
+				catchPointPosition := __POSITION()
+			);
 		__ENDTRY
 	END_IF
 ELSE
@@ -727,14 +948,32 @@ PROPERTY FINAL RootActivity : IActivity]]></Declaration>
         </Implementation>
       </Get>
     </Property>
+    <Property Name="SelfSize" Id="{86d2dfd7-cfc5-4359-abaf-2eb402cadcf3}">
+      <Declaration><![CDATA[(*!
+<summary>Reports the size of this concrete function block instance in bytes.</summary>
+<description>
+Reports the instance layout rather than dynamic allocations owned by its fields. A derived function block
+with a different layout must override this property; the value does not grant disposal rights.
+</description>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY SelfSize : ULINT]]></Declaration>
+      <Get Name="Get" Id="{61772ecc-c835-4cc5-8f8d-109d1d9f49e3}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[SelfSize := XSIZEOF(THIS^);]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
     <Method Name="SetRootActivity" Id="{c98e2b1c-fc8c-4d20-ba30-5596dcd42dcd}">
       <Declaration><![CDATA[(*!
 <summary>Assigns the root activity of the workflow and initializes workflow variables on first assignment.</summary>
 <description>
-Throws WorkflowConfigurationException when the workflow is busy, or when CreateVariables returns an empty or
-duplicate variable name; throws WorkflowAttachmentException when rootActivity already has a parent or belongs
-to another workflow. On variable initialization failure, releases any unaccepted key and clears partial
-dictionary state before propagating the exception.
+Throws WorkflowConfigurationException when the workflow is busy; throws WorkflowAttachmentException when
+rootActivity already has a parent, has no workflow association or belongs to another workflow. Invokes
+InitializeVariables on first assignment. A failed hook removes only bindings appended during that
+attempt, preserves earlier bindings and the previous root, and allows a later retry. Custom hook side effects
+are not rolled back; the hook must not reenter configuration or dispose this workflow.
 </description>
 <param name="rootActivity">Root activity to assign, or zero to detach.</param>
 *)
@@ -744,14 +983,8 @@ VAR_INPUT
 END_VAR
 VAR
 	formattedExceptionMessage : TOF_Core.ERROR_MESSAGE;
- 
-
-	variables : ARRAY [0..VariableCount - 1] OF VARIABLE_DESCRIPTOR;
-	variableKey : TOF_Core.GENERIC_VALUE;
-	variableValue : TOF_Core.GENERIC_VALUE;
+	initialVariableCount : DINT;
 	exceptionCode : __SYSTEM.ExceptionCode;
-	
-	i : DINT;
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[IF _RootActivity = rootActivity THEN
@@ -759,7 +992,11 @@ END_VAR]]></Declaration>
 END_IF
 
 IF Busy THEN
-	formattedExceptionMessage := TOF_Core.WideStrings.Concat255("Unable to change root activity for workflow '", Name, "': workflow is busy");
+	formattedExceptionMessage := TOF_Core.WideStrings.Concat255(
+		"Unable to change root activity for workflow '",
+		Name,
+		"': workflow is busy"
+	);
 
 	WorkflowExceptions.ThrowWorkflowConfiguration(
 		sourceNamespaceName := NamespaceName,
@@ -787,11 +1024,11 @@ IF rootActivity <> 0 THEN
 		);
 	END_IF
 
-	IF rootActivity.Workflow <> 0 AND_THEN rootActivity.Workflow.SelfAddress <> SelfAddress THEN
+	IF rootActivity.Workflow = 0 OR_ELSE rootActivity.Workflow.SelfAddress <> SelfAddress THEN
 		formattedExceptionMessage := TOF_Core.WideStrings.Concat255(
 			"Unable to set root activity for workflow '",
 			Name,
-			"': activity belongs to another workflow"
+			"': root activity must already belong to this workflow"
 		);
 
 		WorkflowExceptions.ThrowWorkflowAttachment(
@@ -805,64 +1042,26 @@ IF rootActivity <> 0 THEN
 END_IF
 
 IF NOT _Initialized THEN
-	IF VariableCount > 0 THEN
-		variables := CreateVariables();
-		
-		__TRY
-			FOR i := 0 TO VariableCount - 1 DO
-				IF variables[i].Name = '' THEN
-					WorkflowExceptions.ThrowWorkflowConfiguration(
-						sourceNamespaceName := NamespaceName,
-						sourceClassName := ClassName,
-						sourcePOUName := __POUNAME(),
-						sourcePosition := __POSITION(),
-						message := "Method CreateVariables returned workflow variable with empty name"
-					);
-				END_IF
-				
-				variableKey := TOF_Core.GenericValueFactory.FromStringValue(value := variables[i].Name);
-				variableValue := TOF_Core.GenericValueFactory.FromParts(
-					genericTypeClass := variables[i].TypeClass,
-					address := variables[i].Address,
-					size := variables[i].Size,
-					memoryManagementBehavior := TOF_Core.GENERIC_MEMORY_MANAGEMENT_BEHAVIOR.STORE_ORIGINAL_REFERENCE_AND_NOT_OWNS_MEMORY
-				);
-				
-				_Variables.SetGeneric(key := variableKey, value := variableValue);
-				variableKey.Reset();
-			END_FOR
-			
-			IF _Variables.Length <> VariableCount THEN
-				formattedExceptionMessage := TOF_Core.WideStrings.Concat255(
-					"Invalid number of unique workflow variables ",
-					TO_WSTRING(_Variables.Length),
-					" instead of ",
-					TO_WSTRING(VariableCount),
-					". Check for duplicated names"
-				);
+	initialVariableCount := _Variables.Length;
 
-				WorkflowExceptions.ThrowWorkflowConfiguration(
-					sourceNamespaceName := NamespaceName,
-					sourceClassName := ClassName,
-					sourcePOUName := __POUNAME(),
-					sourcePosition := __POSITION(),
-					message := formattedExceptionMessage
-				);		
-			END_IF
-		__CATCH(exceptionCode)
-			// Release unaccepted key and partial dictionary entries before propagating the exception.
-			variableKey.Release();
-			_Variables.Clear();
+	// Registration appends unique bindings; remove only this attempt's additions on failure.
 
-			TOF_Core.ExceptionManager.ReThrowLastException(
-				exceptionCode := exceptionCode,
-				catchPointNamespaceName := NamespaceName,
-				catchPointPOUName := __POUNAME(),
-				catchPointPosition := __POSITION()
-			);
-		__ENDTRY
-	END_IF
-	
+	__TRY
+		InitializeVariables();
+	__CATCH(exceptionCode)
+
+		WHILE _Variables.Length > initialVariableCount DO
+			_Variables.RemoveAt(index := _Variables.Length - 1);
+		END_WHILE
+
+		TOF_Core.ExceptionManager.ReThrowLastException(
+			exceptionCode := exceptionCode,
+			catchPointNamespaceName := NamespaceName,
+			catchPointPOUName := __POUNAME(),
+			catchPointPosition := __POSITION()
+		);
+	__ENDTRY
+
 	_Initialized := TRUE;
 END_IF
 
@@ -923,7 +1122,8 @@ SuspendingAllowed := _RootActivity <> 0
 <summary>Attempts to resolve a named variable from the workflow variable dictionary.</summary>
 <description>
 Returns FALSE when resolution fails or a nested call raises an exception. Use the output only when TRUE is
-returned. Does not propagate exceptions or clear terminal allocation state.
+returned. Does not propagate exceptions or clear terminal allocation state. A latched allocation failure returns FALSE
+without entering further lookup callbacks, including when a nested callback contained the allocation exception.
 </description>
 <param name="name">Name of the variable to resolve.</param>
 <param name="variable">Resolved variable descriptor when TRUE is returned.</param>
@@ -937,11 +1137,19 @@ VAR_OUTPUT
 END_VAR
 ]]></Declaration>
       <Implementation>
-        <ST><![CDATA[__TRY
+        <ST><![CDATA[IF TOF_Core.DynamicMemoryManager.HasAllocationFailed THEN
+	RETURN;
+END_IF
+
+__TRY
 	TryGetVariable := _Variables.TryGetValueByKey(key := name, value => variable);
 __CATCH
 	TryGetVariable := FALSE;
-__ENDTRY]]></ST>
+__ENDTRY
+
+IF TOF_Core.DynamicMemoryManager.HasAllocationFailed THEN
+	TryGetVariable := FALSE;
+END_IF]]></ST>
       </Implementation>
     </Method>
   </POU>

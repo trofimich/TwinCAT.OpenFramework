@@ -26,10 +26,10 @@ VAR_STAT
 END_VAR
 VAR
 	{attribute 'OPC.UA.DA' := '0'}
-	_Children : TOF_Collections.List<0>(0);
+	_Children : TOF_Collections.List<0>(valueValidator := 0);
 
 	{attribute 'OPC.UA.DA' := '0'}
-	_CurrentActivityIndex : DINT := -1;
+	_CurrentActivityIndex : DINT := Workflows.NO_SELECTED_ACTIVITY_INDEX;
 
 	{attribute 'OPC.UA.DA' := '0'}
 	_CurrentActivityStartPending : BOOL;
@@ -43,6 +43,10 @@ END_VAR]]></Declaration>
 <summary>Appends a child activity to the sequence and assigns this sequence as its ParentActivity.</summary>
 <description>
 Requires PASSIVE_READY. Rejects null, self/ancestor cycles and children already attached elsewhere.
+The child must be unattached, including to this parent; duplicate slots are rejected before insertion.
+The parent chain and owning workflow must be PASSIVE_READY. Fixed workflow association is validated.
+Storage allocation precedes parent callbacks; callback exceptions may leave a partial configuration.
+Child references remain borrowed and must outlive the tree. No implicit detach or ownership transfer occurs.
 </description>
 <param name="activity">Child activity to append.</param>
 *)
@@ -53,8 +57,18 @@ END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[ValidateChildActivityAttachment(childActivity := activity, argumentName := 'activity');
 
+IF activity.Parent <> 0 THEN
+	WorkflowExceptions.ThrowWorkflowAttachment(
+		sourceNamespaceName := NamespaceName,
+		sourceClassName := ClassName,
+		sourcePOUName := __POUNAME(),
+		sourcePosition := __POSITION(),
+		message := "Child element already occupies a parent slot"
+	);
+END_IF
+
 _Children.AppendGeneric(
-	TOF_Core.GenericValueFactory.FromParts(
+	value := TOF_Core.GenericValueFactory.FromParts(
 		genericTypeClass := TOF_Core.GENERIC_TYPE_CLASS.OBJECT,
 		address := activity.SelfAddress,
 		size := activity.SelfSize,
@@ -66,7 +80,14 @@ activity.ParentActivity := THIS^;]]></ST>
       </Implementation>
     </Method>
     <Property Name="ClassName" Id="{72010df4-c4eb-4a27-acd3-c42588cae27a}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Borrows the initialized class name used in diagnostics.</summary>
+<description>
+Returns initialized metadata storage without allocation. Callers must not modify the returned string.
+Derived function blocks must use distinct initialized static storage when overriding this metadata.
+</description>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
       <Get Name="Get" Id="{d41e15da-8455-40c4-82b6-9574b0fe558a}">
         <Declaration><![CDATA[]]></Declaration>
@@ -84,8 +105,11 @@ PROPERTY FINAL CurrentActivity : IActivity]]></Declaration>
       <Get Name="Get" Id="{3a9f72bd-ef17-4fe7-b05f-5afb314fb2fe}">
         <Declaration><![CDATA[]]></Declaration>
         <Implementation>
-          <ST><![CDATA[IF _Children.Length > 0 AND_THEN _CurrentActivityIndex >= 0 AND_THEN _CurrentActivityIndex < _Children.Length THEN
-	__QUERYINTERFACE(_Children.Get(_CurrentActivityIndex).AsObject(), CurrentActivity);
+          <ST><![CDATA[IF _Children.Length > TOF_Core.SignedInt32.ZERO
+	AND_THEN _CurrentActivityIndex >= TOF_Core.SignedInt32.ZERO
+	AND_THEN _CurrentActivityIndex < _Children.Length
+THEN
+	__QUERYINTERFACE(_Children.Get(index := _CurrentActivityIndex).AsObject(), CurrentActivity);
 END_IF]]></ST>
         </Implementation>
       </Get>
@@ -104,7 +128,14 @@ PROPERTY FINAL CurrentActivityIndex : DINT]]></Declaration>
       </Get>
     </Property>
     <Property Name="NamespaceName" Id="{1771b04b-38be-4416-9a7e-972d57af0862}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Borrows the compiler-initialized library namespace.</summary>
+<description>
+Borrows storage from the live internal namespace provider. Reacquire references after application
+reinitialization or relocation. Treat the reference as read-only; no ownership or synchronization is provided.
+</description>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
       <Get Name="Get" Id="{d41be4b9-0e62-4695-98dc-b4b063425079}">
         <Declaration><![CDATA[]]></Declaration>
@@ -128,7 +159,7 @@ VAR
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[FOR i := 0 TO _Children.Length - 1 DO
-	__QUERYINTERFACE(_Children.Get(i).AsObject(), childActivity);
+	__QUERYINTERFACE(_Children.Get(index := i).AsObject(), childActivity);
 
 	IF childActivity <> 0 AND_THEN childActivity.State <> WORKFLOW_ELEMENT_STATE.PASSIVE_READY THEN
 		IF ResetChildActivity(childActivity := childActivity) = ACTIVITY_RESETTING_STATE.WORK_IN_PROGRESS THEN
@@ -138,7 +169,7 @@ END_VAR]]></Declaration>
 	END_IF
 END_FOR
 
-_CurrentActivityIndex := -1;
+_CurrentActivityIndex := Workflows.NO_SELECTED_ACTIVITY_INDEX;
 _CurrentActivityStartPending := FALSE;
 OnResetting := ACTIVITY_RESETTING_STATE.WORK_RESET;]]></ST>
       </Implementation>
@@ -163,15 +194,15 @@ VAR
 	
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[IF _Children.Length < 1 THEN
-	_CurrentActivityIndex := -1;
+        <ST><![CDATA[IF _Children.Length = TOF_Core.SignedInt32.ZERO THEN
+	_CurrentActivityIndex := Workflows.NO_SELECTED_ACTIVITY_INDEX;
 	_CurrentActivityStartPending := FALSE;
 	OnRunning := ACTIVITY_RUNNING_STATE.WORK_COMPLETED;
 	RETURN;
 END_IF
 
-IF startRunning OR_ELSE (startResuming AND_THEN _CurrentActivityIndex < 0) THEN
-	_CurrentActivityIndex := 0;
+IF startRunning OR_ELSE (startResuming AND_THEN _CurrentActivityIndex < TOF_Core.SignedInt32.ZERO) THEN
+	_CurrentActivityIndex := TOF_Core.SignedInt32.ZERO;
 	_CurrentActivityStartPending := TRUE;
 END_IF
 
@@ -200,8 +231,8 @@ IF OnRunning = ACTIVITY_RUNNING_STATE.WORK_HALTED THEN
 	haltReason := activity.HaltReason;
 ELSIF OnRunning = ACTIVITY_RUNNING_STATE.WORK_COMPLETED THEN
 	selectNextTask();
-	
-	IF _CurrentActivityIndex >= 0 THEN
+
+	IF _CurrentActivityIndex >= TOF_Core.SignedInt32.ZERO THEN
 		OnRunning := ACTIVITY_RUNNING_STATE.WORK_IN_PROGRESS;
 	END_IF
 END_IF]]></ST>
@@ -226,7 +257,7 @@ VAR
 	activity : IActivity;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[IF _Children.Length < 1 THEN
+        <ST><![CDATA[IF _Children.Length = TOF_Core.SignedInt32.ZERO THEN
 	OnStopping := ACTIVITY_STOPPING_STATE.WORK_COMPLETED;
 	RETURN;
 END_IF
@@ -237,7 +268,7 @@ IF activity = 0 THEN
 	IF startCancelling OR_ELSE startSuspending THEN
 		OnStopping := ACTIVITY_STOPPING_STATE.WORK_STOPPED;
 	ELSE
-		OnStopping := ACTIVITY_STOPPING_STATE.WORK_COMPLETED;		
+		OnStopping := ACTIVITY_STOPPING_STATE.WORK_COMPLETED;
 	END_IF
 
 	RETURN;
@@ -286,14 +317,21 @@ METHOD PRIVATE selectNextTask]]></Declaration>
         <ST><![CDATA[IF _CurrentActivityIndex < _Children.Length - 1 THEN
 	_CurrentActivityIndex := _CurrentActivityIndex + 1;
 	_CurrentActivityStartPending := TRUE;
-ELSE	
-	_CurrentActivityIndex := -1;
+ELSE
+	_CurrentActivityIndex := Workflows.NO_SELECTED_ACTIVITY_INDEX;
 	_CurrentActivityStartPending := FALSE;
 END_IF]]></ST>
       </Implementation>
     </Method>
     <Property Name="SelfSize" Id="{41f1ba7d-873e-4cab-8142-5d65c440edef}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Reports the size of this concrete function block instance in bytes.</summary>
+<description>
+Reports the instance layout rather than dynamic allocations owned by its fields. A derived function block
+with a different layout must override this property; the value does not grant disposal rights.
+</description>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY SelfSize : ULINT]]></Declaration>
       <Get Name="Get" Id="{3d49e29e-d473-48e0-b330-20e133f0a344}">
         <Declaration><![CDATA[]]></Declaration>

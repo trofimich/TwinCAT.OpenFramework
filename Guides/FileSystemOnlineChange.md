@@ -103,5 +103,12 @@ backend state: draining the wrapper is not a guarantee of successful delivery.
 This ordering covers file shutdown; it does not establish migration of the
 wrapper's synchronization objects across online change.
 
+`SimpleTextFileLogger` routes its embedded task and file-resource diagnostics directly
+to an owned `AdsLogger`. They bypass `LogManager` filters and counters, so servicing
+this backend does not feed its own file-operation diagnostics back into the wrapper.
+Standalone tasks retain normal `LogManager` routing unless their optional borrowed
+`DiagnosticLogger` is configured. Keep an explicit destination alive and unchanged
+through task stopping and reset; it must not return to the active logging chain.
+
 This guide records the supported usage contract. It is not a report of a
 successful compilation, runtime test or online-change experiment.

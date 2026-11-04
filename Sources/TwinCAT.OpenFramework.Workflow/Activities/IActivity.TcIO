@@ -15,6 +15,9 @@ cancel via RequestCancel, and return from finished passive states (PASSIVE_COMPL
 PASSIVE_CANCELLED, PASSIVE_FAILED) to PASSIVE_READY via RequestReset. While Busy is TRUE, the owner advances
 the active state by calling Execute cyclically. Uncaught exceptions transition the activity to PASSIVE_FAILED,
 populate FailError and propagate to the caller.
+PASSIVE_FAILED ends ordinary execution without certifying completion of child or resource cleanup.
+Failure handling invokes only synchronous local cleanup. Resource owners must explicitly complete pending
+cleanup before sharing or reusing affected resources; resetting may advance that work through OnResetting.
 </description>
 *)
 
@@ -24,6 +27,7 @@ INTERFACE IActivity EXTENDS TOF_Core.IExecutable, IWorkflowElement]]></Declarati
 <summary>Reports whether the activity is currently in an active state requiring cyclic Execute calls.</summary>
 <description>
 Returns TRUE in ACTIVE_RUNNING, ACTIVE_CANCELLING, ACTIVE_SUSPENDING and ACTIVE_RESETTING.
+FALSE does not certify nested resource release after failure.
 </description>
 *)
 {attribute 'monitoring' := 'call'}
@@ -56,7 +60,8 @@ PROPERTY CancelReason : REFERENCE TO WSTRING(255)
 <summary>Returns a borrowed read-only view of the durable error snapshot captured when the activity failed.</summary>
 <description>
 Populated when an exception transitions the activity to PASSIVE_FAILED and cleared when resetting completes or
-a new run starts. Callers must not mutate the returned ERROR instance.
+a new run starts. If diagnostic conversion fails, contains fixed fallback text with epoch timestamps instead of partial data.
+Callers must not mutate the returned ERROR instance.
 </description>
 *)
 {attribute 'monitoring' := 'call'}
@@ -88,7 +93,10 @@ PROPERTY HaltReason : REFERENCE TO WSTRING(255)
       <Declaration><![CDATA[(*!
 <summary>Gets or sets the borrowed parent composite activity in the workflow tree.</summary>
 <description>
-Zero when this activity is the root of a workflow or not yet attached to a composite parent.
+The standard implementation validates cycles, fixed workflow association and PASSIVE_READY before a new
+link is stored. Existing parent links cannot be detached or replaced; an unchanged link is a no-op.
+Parents are borrowed for the tree lifetime and do not transfer ownership. Configuration is single-task
+without reentry; a child with a known owner requires a parent from that same known workflow.
 </description>
 *)
 {attribute 'monitoring' := 'call'}

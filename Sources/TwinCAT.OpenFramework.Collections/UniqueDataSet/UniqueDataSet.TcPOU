@@ -34,6 +34,8 @@ lifetime. No internal locking is implemented. Concurrent access involving mutati
 coordination; this implementation does not provide a concurrent-container guarantee. Generic lookup with
 requested query release also attempts cleanup on lookup failure before propagating the captured exception;
 terminal OOM takes precedence.
+Instances cannot be assigned by value: copying backing pointers or disposal responsibility would create
+unsafe aliases. Interface references still borrow this instance; copying an interface does not clone storage.
 </description>
 *)
 
@@ -41,17 +43,20 @@ terminal OOM takes precedence.
 FUNCTION_BLOCK UniqueDataSet
 VAR_GENERIC CONSTANT
 	{attribute 'hide'}
-    _StaticCapacity : TOF_Core.DINT_LENGTH := 0;
+	//! <summary>Inline capacity; zero selects dynamic backing storage.</summary>
+	_StaticCapacity : TOF_Core.DINT_LENGTH := 0;
 END_VAR
 EXTENDS TOF_Core.Object IMPLEMENTS IUniqueDataSet
 VAR_INPUT
 	//! <summary>Number of slots added when dynamic storage is full; must be positive when growth is required.</summary>
 	DefaultDynamicAllocationElementCount : BYTE := 10;
 END_VAR
-VAR
+VAR_STAT
+	//! <summary>Class name shared by all instances of this function block.</summary>
 	{attribute 'hide'}
 	_ClassName : STRING := __POUNAME();
-
+END_VAR
+VAR
 	{attribute 'hide'}
 	_ValueValidator : TOF_Core.IGenericValueValidator;
 	{attribute 'hide'}
@@ -102,6 +107,7 @@ VAR_INPUT
 	elementCount : TOF_Core.DINT_LENGTH;
 END_VAR
 VAR CONSTANT
+	//! <summary>Bytes per capacity slot, including descriptor storage and any hash-index arrays.</summary>
 	ENTRY_ALLOCATION_SIZE : ULINT := XSIZEOF(TOF_Core.GENERIC_VALUE) + XSIZEOF(UDINT) + 2 * XSIZEOF(DINT);
 END_VAR
 VAR
@@ -127,6 +133,7 @@ IF elementCount <= TOF_Core.SignedInt32.ZERO THEN
 END_IF
 
 newCapacity := TO_ULINT(_DynamicCapacity) + TO_ULINT(elementCount);
+
 IF newCapacity > TO_ULINT(TOF_Core.SignedInt32.MAX_VALUE)
 	OR_ELSE newCapacity > TO_ULINT(TOF_Core.UnsignedInt32.MAX_VALUE) / ENTRY_ALLOCATION_SIZE
 THEN
@@ -141,11 +148,13 @@ THEN
 END_IF
 
 newMemory := __NEW(BYTE, TO_UDINT(ENTRY_ALLOCATION_SIZE * newCapacity));
+
 IF newMemory = 0 THEN
 	TOF_Core.DynamicMemoryManager.RaiseAllocationFailure();
 END_IF
 
 newHashes := newMemory + TO_UDINT(XSIZEOF(TOF_Core.GENERIC_VALUE) * newCapacity);
+
 IF _Length > TOF_Core.SignedInt32.ZERO THEN
 	Tc2_System.MEMCPY(
 		destAddr := newMemory,
@@ -165,7 +174,7 @@ _Buckets := newMemory + TO_UDINT((XSIZEOF(TOF_Core.GENERIC_VALUE) + XSIZEOF(UDIN
 _NextIndices := newMemory + TO_UDINT((XSIZEOF(TOF_Core.GENERIC_VALUE) + XSIZEOF(UDINT) + XSIZEOF(DINT)) * newCapacity);
 _DynamicCapacity := TO_DINT(newCapacity);
 
-RebuildIndex();]]></ST>
+rebuildIndex();]]></ST>
       </Implementation>
     </Method>
     <Property Name="Capacity" Id="{442fc8a6-b0bb-403e-8549-1172e75c9349}">
@@ -186,7 +195,10 @@ PROPERTY FINAL Capacity : TOF_Core.DINT_LENGTH]]></Declaration>
       </Get>
     </Property>
     <Property Name="ClassName" Id="{467d00f1-7abe-4a3f-b6cd-fe49b224e254}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Borrows the concrete collection class name without transferring storage ownership.</summary>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
       <Get Name="Get" Id="{252ee1d7-9d51-4251-a289-595ab545aa2e}">
         <Declaration><![CDATA[]]></Declaration>
@@ -231,7 +243,7 @@ IF Dynamic THEN
 	_NextIndices := 0;
 	_DynamicCapacity := 0;
 ELSE
-	RebuildIndex();
+	rebuildIndex();
 END_IF]]></ST>
       </Implementation>
     </Method>
@@ -306,6 +318,7 @@ __ENDTRY
 IF releaseValue THEN
 	IF caughtException <> 0 AND_THEN NOT caughtException.IsDynamicInstance THEN
 		__TRY
+			TOF_Core.DynamicMemoryManager.RaiseIfAllocationFailed();
 			__QUERYINTERFACE(caughtException.Clone(), caughtException);
 		__CATCH(exceptionCode)
 			value.Release();
@@ -417,7 +430,7 @@ calling validators, comparers or other throwing paths.
 METHOD FB_init : BOOL
 VAR_INPUT
 	bInitRetains : BOOL; // TRUE: the retain variables are initialized (reset warm / reset cold)
-	bInCopyCode : BOOL;  // TRUE: the instance will be copied to the copy code afterward (online change)
+	bInCopyCode : BOOL; // TRUE: the instance will be copied to the copy code afterward (online change)
 
 	valueValidator : TOF_Core.IGenericValueValidator;
 	valueEqualityComparer : TOF_Core.IEqualityComparer;
@@ -468,6 +481,7 @@ IF _Length = TOF_Core.SignedInt32.ZERO THEN
 END_IF
 
 entryLink := _Buckets[TO_DINT(hashCode MOD TO_UDINT(Capacity))];
+
 WHILE entryLink <> TOF_Core.SignedInt32.ZERO DO
 	entryIndex := entryLink - 1;
 
@@ -481,33 +495,6 @@ WHILE entryLink <> TOF_Core.SignedInt32.ZERO DO
 
 	entryLink := _NextIndices[entryIndex];
 END_WHILE]]></ST>
-      </Implementation>
-    </Method>
-    <Method Name="RebuildIndex" Id="{780840c7-2bff-4fd3-b769-ff107364e1db}" FolderPath="Service members\">
-      <Declaration><![CDATA[(*!
-<summary>Rebuilds bucket chains from cached hashes after entry relocation or capacity changes.</summary>
-<description>
-Requires bound index storage for positive capacity and valid hashes for every live entry. Does not allocate,
-access payload or invoke callbacks. This only rebuilds links; it does not recompute hashes after
-equality-relevant payload or address changes.
-</description>
-*)
-METHOD PRIVATE RebuildIndex
-VAR
-	index : DINT;
-	bucketIndex : DINT;
-END_VAR]]></Declaration>
-      <Implementation>
-        <ST><![CDATA[IF Capacity = TOF_Core.SignedInt32.ZERO THEN
-	RETURN;
-END_IF
-
-Tc2_System.MEMSET(destAddr := _Buckets, fillByte := 0, n := TO_UDINT(XSIZEOF(DINT) * TO_ULINT(Capacity)));
-FOR index := 0 TO _Length - 1 DO
-	bucketIndex := TO_DINT(_Hashes[index] MOD TO_UDINT(Capacity));
-	_NextIndices[index] := _Buckets[bucketIndex];
-	_Buckets[bucketIndex] := index + 1;
-END_FOR]]></ST>
       </Implementation>
     </Method>
     <Property Name="Full" Id="{c3e7f9e9-491d-47ed-b5be-e34cce8561b4}">
@@ -601,6 +588,7 @@ __ENDTRY
 IF releaseValue THEN
 	IF caughtException <> 0 AND_THEN NOT caughtException.IsDynamicInstance THEN
 		__TRY
+			TOF_Core.DynamicMemoryManager.RaiseIfAllocationFailed();
 			__QUERYINTERFACE(caughtException.Clone(), caughtException);
 		__CATCH(exceptionCode)
 			value.Release();
@@ -688,6 +676,34 @@ PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
         </Implementation>
       </Get>
     </Property>
+    <Method Name="rebuildIndex" Id="{780840c7-2bff-4fd3-b769-ff107364e1db}" FolderPath="Service members\">
+      <Declaration><![CDATA[(*!
+<summary>Rebuilds bucket chains from cached hashes after entry relocation or capacity changes.</summary>
+<description>
+Requires bound index storage for positive capacity and valid hashes for every live entry. Does not allocate,
+access payload or invoke callbacks. This only rebuilds links; it does not recompute hashes after
+equality-relevant payload or address changes.
+</description>
+*)
+METHOD PRIVATE rebuildIndex
+VAR
+	index : DINT;
+	bucketIndex : DINT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF Capacity = TOF_Core.SignedInt32.ZERO THEN
+	RETURN;
+END_IF
+
+Tc2_System.MEMSET(destAddr := _Buckets, fillByte := 0, n := TO_UDINT(XSIZEOF(DINT) * TO_ULINT(Capacity)));
+
+FOR index := 0 TO _Length - 1 DO
+	bucketIndex := TO_DINT(_Hashes[index] MOD TO_UDINT(Capacity));
+	_NextIndices[index] := _Buckets[bucketIndex];
+	_Buckets[bucketIndex] := index + 1;
+END_FOR]]></ST>
+      </Implementation>
+    </Method>
     <Method Name="RemoveAt" Id="{560da408-7178-47ba-9120-b01c5ed8fd70}">
       <Declaration><![CDATA[(*!
 <summary>Removes the entry at a current storage position.</summary>
@@ -737,7 +753,7 @@ END_IF
 
 _Array[_Length - 1].Reset();
 _Length := _Length - 1;
-RebuildIndex();
+rebuildIndex();
 
 removedValue.Release();]]></ST>
       </Implementation>
@@ -767,6 +783,9 @@ ICloneable; other data is copied as bytes without recursively cloning references
 if insertion fails before acceptance; exceptions propagate. Engine-managed exception objects are unsupported.
 Any index output is meaningful only on success. Descendants cannot override this storage operation; capacity,
 indexing and disposal remain governed by this collection implementation.
+The original failure is captured before cleanup so nested cleanup handling cannot replace its payload.
+A static native wrapper is cloned before cleanup; failure to capture still attempts prepared-copy disposal.
+Terminal allocation failure takes precedence and no exception clone is allocated after its latch is set.
 </description>
 *)
 METHOD FINAL SetCopy : IUniqueDataSet
@@ -779,6 +798,7 @@ VAR_OUTPUT
 END_VAR
 VAR
 	exceptionCode : __SYSTEM.ExceptionCode;
+	caughtException : TOF_Core.IException;
 	genericValue : TOF_Core.GENERIC_VALUE;
 END_VAR]]></Declaration>
       <Implementation>
@@ -792,15 +812,36 @@ genericValue := TOF_Core.GenericValueFactory.FromAnyType(
 __TRY
 	SetCopy := SetGeneric(value := genericValue, index => index);
 __CATCH(exceptionCode)
-	genericValue.Release();
-
-	TOF_Core.ExceptionManager.ReThrowLastException(
+	caughtException := TOF_Core.ExceptionManager.GetLastException(
 		exceptionCode := exceptionCode,
 		catchPointNamespaceName := NamespaceName,
 		catchPointPOUName := __POUNAME(),
 		catchPointPosition := __POSITION()
 	);
-__ENDTRY]]></ST>
+__ENDTRY
+
+IF caughtException <> 0 THEN
+	__TRY
+		TOF_Core.DynamicMemoryManager.RaiseIfAllocationFailed();
+
+		IF NOT caughtException.IsDynamicInstance THEN
+			__QUERYINTERFACE(caughtException.Clone(), caughtException);
+		END_IF
+	__CATCH(exceptionCode)
+		genericValue.Release();
+
+		TOF_Core.ExceptionManager.ReThrowLastException(
+			exceptionCode := exceptionCode,
+			catchPointNamespaceName := NamespaceName,
+			catchPointPOUName := __POUNAME(),
+			catchPointPosition := __POSITION()
+		);
+	__ENDTRY
+
+	genericValue.Release();
+
+	TOF_Core.ExceptionManager.Throw(exception := caughtException);
+END_IF]]></ST>
       </Implementation>
     </Method>
     <Method Name="SetGeneric" Id="{e49ee7f0-ea9d-45ea-8ca1-9435721d8384}">
@@ -845,6 +886,7 @@ SetGeneric := THIS^;
 
 IF FindIndex(value := value, supposedIndex => supposedIndex, hashCode => hashCode) THEN
 	displacedValue := _Array[supposedIndex];
+
 	IF displacedValue.Address = value.Address THEN
 		IF displacedValue.IsMemoryOwner AND_THEN NOT value.IsMemoryOwner THEN
 			value := TOF_Core.GenericValueFactory.FromParts(
@@ -901,6 +943,8 @@ transfer. isObject = TRUE requires a live Object function-block instance, not a 
 FALSE uses ordinary runtime type mapping. The caller keeps the query storage alive for the call. Descendants
 cannot override this storage operation; capacity, indexing and disposal remain governed by this collection
 implementation.
+After nested calls and requested cleanup, a fatal allocation state forces the reported outcome to failure.
+This does not roll back completed removal or reset the application-wide fatal latch.
 </description>
 *)
 //!<param name="isObject">Explicitly interprets the raw argument as a live Object instance.</param>
@@ -934,7 +978,11 @@ __TRY
 	END_IF
 __CATCH
 	removed := FALSE;
-__ENDTRY]]></ST>
+__ENDTRY
+
+IF TOF_Core.DynamicMemoryManager.HasAllocationFailed THEN
+	removed := FALSE;
+END_IF]]></ST>
       </Implementation>
     </Method>
     <Method Name="TryRemoveGeneric" Id="{509dc21b-c80c-4a35-ad86-96721cdf54e6}">
@@ -949,6 +997,8 @@ TRUE, attempts to release the supplied generic argument after lookup/removal eve
 have disposal rights and must not reuse aliases of an owned argument after release. Descendants cannot
 override this storage operation; capacity, indexing and disposal remain governed by this collection
 implementation.
+After nested calls and requested cleanup, a fatal allocation state forces the reported outcome to failure.
+This does not roll back completed removal or reset the application-wide fatal latch.
 </description>
 *)
 METHOD FINAL TryRemoveGeneric : IUniqueDataSet
@@ -981,6 +1031,10 @@ IF releaseValue THEN
 	__CATCH
 		removed := FALSE;
 	__ENDTRY
+END_IF
+
+IF TOF_Core.DynamicMemoryManager.HasAllocationFailed THEN
+	removed := FALSE;
 END_IF]]></ST>
       </Implementation>
     </Method>

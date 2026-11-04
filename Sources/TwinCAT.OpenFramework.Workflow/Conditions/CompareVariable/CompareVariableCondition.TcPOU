@@ -10,10 +10,22 @@ License: https://opensource.org/license/mit
 (*!
 <summary>Evaluates relational or equality comparisons on workflow variables.</summary>
 <description>
-Supports evaluating a workflow variable against a literal reference value, or comparing two workflow
-variables. Operands are ordered using a custom IComparer or automatically via
-TOF_Comparison.StandardComparers. Raises an exception when evaluated before configuration or when a referenced
-variable cannot be resolved.
+Standard elements resolve condition-local and ancestor bindings first, then evaluating activity/ancestor
+bindings, then workflow fallback. The condition-associated workflow precedes a distinct context workflow.
+Custom elements expose direct bindings through ILocalVariableContainer; legacy opaque lookups run after
+discoverable local scopes and before workflow fallback.
+Supports evaluating a workflow variable against a copied reference value, or comparing two workflow variables.
+Without a custom comparer, numeric pairs use GENERIC_VALUE.CompareTo across widths and signedness, including
+exact mixed integer/floating-point ordering. STRING/WSTRING pairs use its complete terminated-text ordering
+across capacities and encodings. Other pairs require equal generic type categories before dispatch through
+TOF_Comparison.StandardComparers; unequal categories raise GenericConversionNotSupportedException before
+payload comparison. Equal categories retain their concrete comparer rules, including byte ordering for
+USER_DEFINED, storage-address ordering for POINTER_TO and natural OBJECT ordering through IComparable.
+A custom comparer receives both descriptors unchanged and defines its own supported representations.
+Descriptors must describe live readable storage matching their categories; strings must be terminated within
+their storage. Operands remain borrowed during evaluation. Comparer and conversion exceptions propagate
+without fallback. Evaluation does not update configuration or acquire or release operand ownership.
+Raises an exception when evaluated before configuration or when a referenced variable cannot be resolved.
 </description>
 *)
 
@@ -48,7 +60,14 @@ END_VAR]]></Declaration>
     </Implementation>
     <Folder Name="Internal members" Id="{58dd9158-ea44-441f-ae30-1e47152182db}" />
     <Property Name="ClassName" Id="{fab625c7-99bf-4544-8456-04904e433ff5}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Borrows the initialized class name used in diagnostics.</summary>
+<description>
+Returns initialized metadata storage without allocation. Callers must not modify the returned string.
+Derived function blocks must use distinct initialized static storage when overriding this metadata.
+</description>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
       <Get Name="Get" Id="{a77c592c-ae7e-4fb4-900b-6ab3303cd63c}">
         <Declaration><![CDATA[]]></Declaration>
@@ -59,7 +78,12 @@ PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
     </Property>
     <Property Name="Comparer" Id="{c5cee58f-97b1-4e3b-b4c0-30a32d650a18}">
       <Declaration><![CDATA[(*!
-<summary>Gets or sets the custom comparer used for comparison, or 0 to use standard type-based comparers.</summary>
+<summary>Gets or sets the borrowed custom ordering strategy, or zero to select automatic pair dispatch.</summary>
+<description>
+A non-null comparer must remain alive while used and accept the resolved operand representations. It receives
+both descriptors unchanged, bypassing automatic numeric/text ordering and equal-category validation. Its
+exceptions propagate without fallback; replacing the comparer does not alter the configured operands.
+</description>
 *)
 {attribute 'monitoring' := 'call'}
 PROPERTY Comparer : TOF_Core.IComparer]]></Declaration>
@@ -93,6 +117,11 @@ PROPERTY Configured : BOOL]]></Declaration>
     <Method Name="Configure" Id="{807ed91f-00e7-440c-9ac7-14b98571059f}">
       <Declaration><![CDATA[(*!
 <summary>Configures the condition to compare a workflow variable with a literal reference value.</summary>
+<description>
+Operand compatibility is checked during evaluation, when both descriptors are resolved. Automatic numeric
+and text pairs use GENERIC_VALUE.CompareTo; other automatic pairs require equal generic categories. A custom
+comparer defines its own supported pairs. Evaluation does not update the configured operands or operator.
+</description>
 <param name="variableName">Non-empty name of the workflow variable to evaluate.</param>
 <param name="comparisonOperator">Relational or equality operator to apply.</param>
 <param name="referenceValue">Literal reference value to compare against.</param>
@@ -115,7 +144,7 @@ END_VAR]]></Declaration>
 	);
 END_IF
 
-IF referenceValue.pValue = 0 OR_ELSE referenceValue.diSize = 0 THEN
+IF referenceValue.pValue = TOF_Core.Memory.NULL_ADDRESS OR_ELSE referenceValue.diSize = TOF_Core.SignedInt32.ZERO THEN
 	TOF_Core.Exceptions.ThrowArgumentNotSpecified(
 		sourceNamespaceName := NamespaceName,
 		sourceClassName := ClassName,
@@ -144,6 +173,11 @@ _Configured := TRUE;]]></ST>
     <Method Name="ConfigureVariable" Id="{63fdf89f-287b-4c38-9b3b-f718981db849}">
       <Declaration><![CDATA[(*!
 <summary>Configures the condition to compare two workflow variables.</summary>
+<description>
+Operand compatibility is checked during evaluation, when both descriptors are resolved. Automatic numeric
+and text pairs use GENERIC_VALUE.CompareTo; other automatic pairs require equal generic categories. A custom
+comparer defines its own supported pairs. Evaluation does not update the configured operands or operator.
+</description>
 <param name="firstVariableName">Non-empty name of the first (left-hand) workflow variable.</param>
 <param name="comparisonOperator">Relational or equality operator to apply.</param>
 <param name="secondVariableName">Non-empty name of the second (right-hand) workflow variable.</param>
@@ -189,7 +223,15 @@ _Configured := TRUE;]]></ST>
       </Implementation>
     </Method>
     <Method Name="FB_exit" Id="{a6ce3e19-6f11-4f34-a7c3-4b9eff5768e5}" FolderPath="Internal members\">
-      <Declaration><![CDATA[METHOD FB_exit : BOOL
+      <Declaration><![CDATA[(*!
+<summary>Releases the owned comparison reference snapshot during destruction.</summary>
+<description>
+Uses GENERIC_VALUE.Release and completes without exceptions under its cleanup contract. Borrowed aliases
+to the released snapshot become invalid. This destructor does not establish an online-change relocation
+protocol or preserve aliases across copy-code destruction; use an explicitly supported owner procedure.
+</description>
+*)
+METHOD FB_exit : BOOL
 VAR_INPUT
 	bInCopyCode : BOOL; // TRUE: the instance will be copied to the copy code afterward (online change)
 END_VAR]]></Declaration>
@@ -211,7 +253,14 @@ PROPERTY FirstVariableName : STRING]]></Declaration>
       </Get>
     </Property>
     <Property Name="NamespaceName" Id="{9a3dab93-7a16-4fd2-abd7-f3283f20b0f4}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Borrows the compiler-initialized library namespace.</summary>
+<description>
+Borrows storage from the live internal namespace provider. Reacquire references after application
+reinitialization or relocation. Treat the reference as read-only; no ownership or synchronization is provided.
+</description>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
       <Get Name="Get" Id="{aa5b9ecb-ffd5-4d38-92ed-b439a0e2537a}">
         <Declaration><![CDATA[]]></Declaration>
@@ -222,7 +271,13 @@ PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
     </Property>
     <Method Name="OnEvaluate" Id="{d1e7db02-9592-4e74-af2f-447ec2bae63f}" FolderPath="Internal members\">
       <Declaration><![CDATA[(*!
-<summary>Resolves operands and evaluates the comparison operator using the active comparer.</summary>
+<summary>Resolves operands, selects a compatible ordering strategy and evaluates the comparison operator.</summary>
+<description>
+Custom comparers receive the original descriptors. Automatic dispatch uses GENERIC_VALUE.CompareTo for
+numeric or text pairs and requires equal categories for other standard comparers. Incompatible pairs raise
+GenericConversionNotSupportedException before typed payload comparison. Exceptions propagate to the caller.
+The implementation does not update configuration, stored reference ownership or operand data during evaluation.
+</description>
 <param name="activity">Activity context for variable lookup.</param>
 *)
 METHOD PROTECTED OnEvaluate : BOOL
@@ -250,11 +305,7 @@ END_VAR]]></Declaration>
 	);
 END_IF
 
-variableFound := TryGetVariable(name := _FirstVariableName, variable => firstVal);
-
-IF NOT variableFound AND_THEN activity <> 0 THEN
-	variableFound := activity.TryGetVariable(name := _FirstVariableName, variable => firstVal);
-END_IF
+variableFound := TryResolveVariable(name := _FirstVariableName, activity := activity, variable => firstVal);
 
 IF NOT variableFound THEN
 	formattedExceptionMessage := TOF_Core.WideStrings.Concat255(
@@ -275,11 +326,7 @@ IF NOT variableFound THEN
 END_IF
 
 IF _SecondVariableName <> '' THEN
-	variableFound := TryGetVariable(name := _SecondVariableName, variable => secondVal);
-
-	IF NOT variableFound AND_THEN activity <> 0 THEN
-		variableFound := activity.TryGetVariable(name := _SecondVariableName, variable => secondVal);
-	END_IF
+	variableFound := TryResolveVariable(name := _SecondVariableName, activity := activity, variable => secondVal);
 
 	IF NOT variableFound THEN
 		formattedExceptionMessage := TOF_Core.WideStrings.Concat255(
@@ -303,12 +350,37 @@ ELSE
 END_IF
 
 IF _Comparer <> 0 THEN
-	activeComparer := _Comparer;
+	cmpResult := _Comparer.Compare(first := firstVal, second := secondVal);
+ELSIF (
+		firstVal.TypeClass >= TOF_Core.GENERIC_TYPE_CLASS.BOOLEAN
+		AND_THEN firstVal.TypeClass <= TOF_Core.GENERIC_TYPE_CLASS.REAL_64
+		AND_THEN secondVal.TypeClass >= TOF_Core.GENERIC_TYPE_CLASS.BOOLEAN
+		AND_THEN secondVal.TypeClass <= TOF_Core.GENERIC_TYPE_CLASS.REAL_64
+	)
+	OR_ELSE (
+		(firstVal.TypeClass = TOF_Core.GENERIC_TYPE_CLASS.STRING_ASCII
+			OR_ELSE firstVal.TypeClass = TOF_Core.GENERIC_TYPE_CLASS.STRING_UTF16)
+		AND_THEN (secondVal.TypeClass = TOF_Core.GENERIC_TYPE_CLASS.STRING_ASCII
+			OR_ELSE secondVal.TypeClass = TOF_Core.GENERIC_TYPE_CLASS.STRING_UTF16)
+	)
+THEN
+	cmpResult := firstVal.CompareTo(otherValue := secondVal);
 ELSE
-	activeComparer := TOF_Comparison.StandardComparers.GetForTypeClass(typeClass := firstVal.TypeClass);
-END_IF
 
-cmpResult := activeComparer.Compare(first := firstVal, second := secondVal);
+	IF firstVal.TypeClass <> secondVal.TypeClass THEN
+		TOF_Core.Exceptions.ThrowGenericConversionNotSupported(
+			sourceNamespaceName := NamespaceName,
+			sourceClassName := ClassName,
+			sourcePOUName := __POUNAME(),
+			sourcePosition := __POSITION(),
+			sourceDataType := firstVal.TypeClass,
+			targetDataType := secondVal.TypeClass
+		);
+	END_IF
+
+	activeComparer := TOF_Comparison.StandardComparers.GetForTypeClass(typeClass := firstVal.TypeClass);
+	cmpResult := activeComparer.Compare(first := firstVal, second := secondVal);
+END_IF
 
 CASE _Operator OF
 	COMPARISON_OPERATOR.EQUAL:
@@ -367,7 +439,14 @@ PROPERTY SecondVariableName : STRING]]></Declaration>
       </Get>
     </Property>
     <Property Name="SelfSize" Id="{3814306b-ab0b-4a8a-a1bb-4cae5a4f72c6}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Reports the size of this concrete function block instance in bytes.</summary>
+<description>
+Reports the instance layout rather than dynamic allocations owned by its fields. A derived function block
+with a different layout must override this property; the value does not grant disposal rights.
+</description>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY SelfSize : ULINT]]></Declaration>
       <Get Name="Get" Id="{b335a7a9-3ed6-4e9c-bbe2-2b4d0ca44dc5}">
         <Declaration><![CDATA[]]></Declaration>

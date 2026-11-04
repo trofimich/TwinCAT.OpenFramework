@@ -12,8 +12,8 @@ License: https://opensource.org/license/mit
 <description>
 CreateEnumerator allocates an independent cursor owned by its caller. The collection must remain alive while
 that cursor is used. Dynamic growth preserves the existing buffer on allocation failure and invokes the
-terminal allocation-failure mechanism. Sort passes generic descriptors directly to its borrowed ordering
-strategy, preserving OBJECT and USER_DEFINED categories. Successful insertion transfers disposal
+terminal allocation-failure mechanism. Sort uses GENERIC_VALUE.CompareTo unless an explicit borrowed comparer
+is supplied; descriptors preserve OBJECT and USER_DEFINED categories. Successful insertion transfers disposal
 responsibility for owned payload; borrowed payload must remain alive while stored. The caller-side descriptor
 copy is not reset and must not be released again after transfer. Independent owning aliases and overlapping
 owned allocations are unsupported. Entries retain order and duplicates. Same-allocation replacement preserves
@@ -22,6 +22,8 @@ ContainsGeneric defaults to releasing its query. Validators are borrowed for the
 locking or mutation-version checks are implemented; callbacks that mutate the collection can invalidate
 in-progress operations. Generic lookup with requested query release also attempts cleanup on lookup failure
 before propagating the captured exception; terminal OOM takes precedence.
+Instances cannot be assigned by value: copying backing pointers or disposal responsibility would create
+unsafe aliases. Interface references still borrow this instance; copying an interface does not clone storage.
 </description>
 *)
 
@@ -29,17 +31,20 @@ before propagating the captured exception; terminal OOM takes precedence.
 FUNCTION_BLOCK List 
 VAR_GENERIC CONSTANT
  	{attribute 'hide'} 
-   _StaticCapacity : TOF_Core.DINT_LENGTH := 0;
+	//! <summary>Inline capacity; zero selects dynamic backing storage.</summary>
+	_StaticCapacity : TOF_Core.DINT_LENGTH := 0;
 END_VAR
 EXTENDS TOF_Core.Object IMPLEMENTS IList
 VAR_INPUT
 	//! <summary>Number of slots added when dynamic storage is full; must be positive when growth is required.</summary>
 	DefaultDynamicAllocationElementCount : BYTE := 10;	
 END_VAR
-VAR
+VAR_STAT
+	//! <summary>Class name shared by all instances of this function block.</summary>
 	{attribute 'hide'} 
 	_ClassName : STRING := __POUNAME();
-
+END_VAR
+VAR
 	{attribute 'hide'} 
 	_ValueValidator : TOF_Core.IGenericValueValidator;
 
@@ -74,6 +79,7 @@ VAR_INPUT
 	elementCount : TOF_Core.DINT_LENGTH;
 END_VAR
 VAR CONSTANT
+	//! <summary>Bytes per capacity slot, including descriptor storage and any hash-index arrays.</summary>
 	ENTRY_ALLOCATION_SIZE : ULINT := XSIZEOF(TOF_Core.GENERIC_VALUE);
 END_VAR
 VAR
@@ -98,6 +104,7 @@ IF elementCount <= TOF_Core.SignedInt32.ZERO THEN
 END_IF
 
 newCapacity := TO_ULINT(_DynamicCapacity) + TO_ULINT(elementCount);
+
 IF newCapacity > TO_ULINT(TOF_Core.SignedInt32.MAX_VALUE)
 	OR_ELSE newCapacity > TO_ULINT(TOF_Core.UnsignedInt32.MAX_VALUE) / ENTRY_ALLOCATION_SIZE
 THEN
@@ -112,6 +119,7 @@ THEN
 END_IF
 
 newMemory := __NEW(BYTE, TO_UDINT(ENTRY_ALLOCATION_SIZE * newCapacity));
+
 IF newMemory = 0 THEN
 	TOF_Core.DynamicMemoryManager.RaiseAllocationFailure();
 END_IF
@@ -137,6 +145,9 @@ ICloneable; other data is copied as bytes without recursively cloning references
 if insertion fails before acceptance; exceptions propagate. Engine-managed exception objects are unsupported.
 index is meaningful only on success. Descendants cannot override this storage operation; capacity, indexing
 and disposal remain governed by this collection implementation.
+The original failure is captured before cleanup so nested cleanup handling cannot replace its payload.
+A static native wrapper is cloned before cleanup; failure to capture still attempts prepared-copy disposal.
+Terminal allocation failure takes precedence and no exception clone is allocated after its latch is set.
 </description>
 *)
 METHOD FINAL AppendCopy : IList
@@ -149,6 +160,7 @@ VAR_OUTPUT
 END_VAR
 VAR
 	exceptionCode : __SYSTEM.ExceptionCode;
+	caughtException : TOF_Core.IException;
 	genericValue : TOF_Core.GENERIC_VALUE;
 END_VAR]]></Declaration>
       <Implementation>
@@ -162,15 +174,36 @@ genericValue := TOF_Core.GenericValueFactory.FromAnyType(
 __TRY
 	AppendCopy := AppendGeneric(value := genericValue, index => index);
 __CATCH(exceptionCode)
-	genericValue.Release();
-	
-	TOF_Core.ExceptionManager.ReThrowLastException(
+	caughtException := TOF_Core.ExceptionManager.GetLastException(
 		exceptionCode := exceptionCode,
 		catchPointNamespaceName := NamespaceName,
 		catchPointPOUName := __POUNAME(),
 		catchPointPosition := __POSITION()
 	);
-__ENDTRY]]></ST>
+__ENDTRY
+
+IF caughtException <> 0 THEN
+	__TRY
+		TOF_Core.DynamicMemoryManager.RaiseIfAllocationFailed();
+
+		IF NOT caughtException.IsDynamicInstance THEN
+			__QUERYINTERFACE(caughtException.Clone(), caughtException);
+		END_IF
+	__CATCH(exceptionCode)
+		genericValue.Release();
+
+		TOF_Core.ExceptionManager.ReThrowLastException(
+			exceptionCode := exceptionCode,
+			catchPointNamespaceName := NamespaceName,
+			catchPointPOUName := __POUNAME(),
+			catchPointPosition := __POSITION()
+		);
+	__ENDTRY
+
+	genericValue.Release();
+
+	TOF_Core.ExceptionManager.Throw(exception := caughtException);
+END_IF]]></ST>
       </Implementation>
     </Method>
     <Method Name="AppendGeneric" Id="{f1ff6a71-50a0-45d9-ae86-164a44b67bf8}">
@@ -215,7 +248,10 @@ PROPERTY FINAL Capacity : TOF_Core.DINT_LENGTH]]></Declaration>
       </Get>
     </Property>
     <Property Name="ClassName" Id="{33e07dae-fed5-4e1d-8f43-eee6214a3816}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Borrows the concrete collection class name without transferring storage ownership.</summary>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
       <Get Name="Get" Id="{f6501ffd-91a8-433d-945c-613d26b30c47}">
         <Declaration><![CDATA[]]></Declaration>
@@ -336,6 +372,7 @@ __ENDTRY
 IF releaseValue THEN
 	IF caughtException <> 0 AND_THEN NOT caughtException.IsDynamicInstance THEN
 		__TRY
+			TOF_Core.DynamicMemoryManager.RaiseIfAllocationFailed();
 			__QUERYINTERFACE(caughtException.Clone(), caughtException);
 		__CATCH(exceptionCode)
 			value.Release();
@@ -443,7 +480,7 @@ is implemented.
 METHOD FB_init : BOOL
 VAR_INPUT
 	bInitRetains : BOOL; // TRUE: the retain variables are initialized (reset warm / reset cold)
-	bInCopyCode : BOOL;  // TRUE: the instance will be copied to the copy code afterward (online change)
+	bInCopyCode : BOOL; // TRUE: the instance will be copied to the copy code afterward (online change)
 	valueValidator : TOF_Core.IGenericValueValidator;
 END_VAR
 ]]></Declaration>
@@ -570,6 +607,9 @@ ICloneable; other data is copied as bytes without recursively cloning references
 if insertion fails before acceptance; exceptions propagate. Engine-managed exception objects are unsupported.
 The position may range from zero through Length inclusive. Descendants cannot override this storage operation;
 capacity, indexing and disposal remain governed by this collection implementation.
+The original failure is captured before cleanup so nested cleanup handling cannot replace its payload.
+A static native wrapper is cloned before cleanup; failure to capture still attempts prepared-copy disposal.
+Terminal allocation failure takes precedence and no exception clone is allocated after its latch is set.
 </description>
 *)
 METHOD FINAL InsertCopy : IList
@@ -580,6 +620,7 @@ VAR_INPUT
 END_VAR
 VAR
 	exceptionCode : __SYSTEM.ExceptionCode;
+	caughtException : TOF_Core.IException;
 	genericValue : TOF_Core.GENERIC_VALUE;
 END_VAR]]></Declaration>
       <Implementation>
@@ -593,15 +634,36 @@ genericValue := TOF_Core.GenericValueFactory.FromAnyType(
 __TRY
 	InsertCopy := InsertGeneric(index := index, value := genericValue);
 __CATCH(exceptionCode)
-	genericValue.Release();
-	
-	TOF_Core.ExceptionManager.ReThrowLastException(
+	caughtException := TOF_Core.ExceptionManager.GetLastException(
 		exceptionCode := exceptionCode,
 		catchPointNamespaceName := NamespaceName,
 		catchPointPOUName := __POUNAME(),
 		catchPointPosition := __POSITION()
 	);
-__ENDTRY]]></ST>
+__ENDTRY
+
+IF caughtException <> 0 THEN
+	__TRY
+		TOF_Core.DynamicMemoryManager.RaiseIfAllocationFailed();
+
+		IF NOT caughtException.IsDynamicInstance THEN
+			__QUERYINTERFACE(caughtException.Clone(), caughtException);
+		END_IF
+	__CATCH(exceptionCode)
+		genericValue.Release();
+
+		TOF_Core.ExceptionManager.ReThrowLastException(
+			exceptionCode := exceptionCode,
+			catchPointNamespaceName := NamespaceName,
+			catchPointPOUName := __POUNAME(),
+			catchPointPosition := __POSITION()
+		);
+	__ENDTRY
+
+	genericValue.Release();
+
+	TOF_Core.ExceptionManager.Throw(exception := caughtException);
+END_IF]]></ST>
       </Implementation>
     </Method>
     <Method Name="InsertGeneric" Id="{2dcf43ab-5d4d-40f0-ba4f-54f191c32509}">
@@ -718,10 +780,7 @@ METHOD FINAL RemoveAt : IList
 VAR_INPUT
 	index : TOF_Core.DINT_INDEX;
 END_VAR
-VAR
-
-	i : DINT;
-END_VAR]]></Declaration>
+]]></Declaration>
       <Implementation>
         <ST><![CDATA[IF index < 0 OR_ELSE index >= _Length THEN
 	TOF_Core.Exceptions.ThrowArgumentOutOfRange(
@@ -745,10 +804,6 @@ IF index < _Length - 1 THEN
 		n := TO_UDINT(SIZEOF(TOF_Core.GENERIC_VALUE) * (_Length - index - 1))
 	);
 END_IF
-
-(*FOR	i := index TO _Length - 2 DO
-	_Array[i] := _Array[i + 1];
-END_FOR*)			
 
 _Array[_Length - 1].Reset();	
 
@@ -854,73 +909,81 @@ END_FOR]]></ST>
       <Declaration><![CDATA[(*!
 <summary>Restores the heap order below a root within the active sort range.</summary>
 <description>
-Requires valid indices and the same live comparer used by Sort. Addresses complete GENERIC_VALUE entries
-through typed array indexing, compares their descriptors without converting categories and swaps entries in
-place. Comparer exceptions propagate; completed swaps are not rolled back.
+Requires valid indices and the same ordering selection used by Sort. A null comparer selects
+GENERIC_VALUE.CompareTo; an explicit comparer takes precedence. Uses typed entry addresses and swaps
+complete descriptors in place. Comparison exceptions propagate without rolling back completed swaps.
 </description>
 *)
 METHOD PRIVATE restoreHeapFrom
 VAR_INPUT
-    rootIndex : DINT;
-    heapSize : DINT;
-    comparer : TOF_Core.IComparer;
-    direction : TOF_Core.SORT_DIRECTION;
+	rootIndex : DINT;
+	heapSize : DINT;
+	comparer : TOF_Core.IComparer;
+	direction : TOF_Core.SORT_DIRECTION;
 END_VAR
 VAR
-    currentIndex : DINT;
-    childIndex : DINT;
-    selectedIndex : DINT;
+	currentIndex : DINT;
+	childIndex : DINT;
+	selectedIndex : DINT;
 
-    comparisonResult : TOF_Core.COMPARISON_RESULT;
+	comparisonResult : TOF_Core.COMPARISON_RESULT;
 
-    value1, value2 : POINTER TO TOF_Core.GENERIC_VALUE;
+	value1, value2 : POINTER TO TOF_Core.GENERIC_VALUE;
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[currentIndex := rootIndex;
 
 WHILE (currentIndex * 2 + 1) < heapSize DO
-    childIndex := currentIndex * 2 + 1;
-    selectedIndex := currentIndex;
+	childIndex := currentIndex * 2 + 1;
+	selectedIndex := currentIndex;
 
-    value1 := ADR(_Array[selectedIndex]);
-    value2 := ADR(_Array[childIndex]);
+	value1 := ADR(_Array[selectedIndex]);
+	value2 := ADR(_Array[childIndex]);
 
-    comparisonResult := comparer.Compare(first := value1^, second := value2^);
+	IF comparer = 0 THEN
+		comparisonResult := value1^.CompareTo(otherValue := value2^);
+	ELSE
+		comparisonResult := comparer.Compare(first := value1^, second := value2^);
+	END_IF
 
-    IF direction = TOF_Core.SORT_DIRECTION.ASCENDING THEN
-        IF comparisonResult = TOF_Core.COMPARISON_RESULT.FIRST_LESS_THAN_SECOND THEN
-            selectedIndex := childIndex;
-        END_IF
-    ELSE
-        IF comparisonResult = TOF_Core.COMPARISON_RESULT.FIRST_GREATER_THAN_SECOND THEN
-            selectedIndex := childIndex;
-        END_IF
-    END_IF
+	IF direction = TOF_Core.SORT_DIRECTION.ASCENDING THEN
+		IF comparisonResult = TOF_Core.COMPARISON_RESULT.FIRST_LESS_THAN_SECOND THEN
+			selectedIndex := childIndex;
+		END_IF
+	ELSE
+		IF comparisonResult = TOF_Core.COMPARISON_RESULT.FIRST_GREATER_THAN_SECOND THEN
+			selectedIndex := childIndex;
+		END_IF
+	END_IF
 
-    IF (childIndex + 1) < heapSize THEN
-        value1 := ADR(_Array[selectedIndex]);
-        value2 := ADR(_Array[childIndex + 1]);
+	IF (childIndex + 1) < heapSize THEN
+		value1 := ADR(_Array[selectedIndex]);
+		value2 := ADR(_Array[childIndex + 1]);
 
-        comparisonResult := comparer.Compare(first := value1^, second := value2^);
+		IF comparer = 0 THEN
+			comparisonResult := value1^.CompareTo(otherValue := value2^);
+		ELSE
+			comparisonResult := comparer.Compare(first := value1^, second := value2^);
+		END_IF
 
-        IF direction = TOF_Core.SORT_DIRECTION.ASCENDING THEN
-            IF comparisonResult = TOF_Core.COMPARISON_RESULT.FIRST_LESS_THAN_SECOND THEN
-                selectedIndex := childIndex + 1;
-            END_IF
-        ELSE
-            IF comparisonResult = TOF_Core.COMPARISON_RESULT.FIRST_GREATER_THAN_SECOND THEN
-                selectedIndex := childIndex + 1;
-            END_IF
-        END_IF
-    END_IF
+		IF direction = TOF_Core.SORT_DIRECTION.ASCENDING THEN
+			IF comparisonResult = TOF_Core.COMPARISON_RESULT.FIRST_LESS_THAN_SECOND THEN
+				selectedIndex := childIndex + 1;
+			END_IF
+		ELSE
+			IF comparisonResult = TOF_Core.COMPARISON_RESULT.FIRST_GREATER_THAN_SECOND THEN
+				selectedIndex := childIndex + 1;
+			END_IF
+		END_IF
+	END_IF
 
-    IF selectedIndex = currentIndex THEN
-        RETURN;
-    END_IF
+	IF selectedIndex = currentIndex THEN
+		RETURN;
+	END_IF
 
-    Swap(index1 := currentIndex, index2 := selectedIndex);
+	Swap(index1 := currentIndex, index2 := selectedIndex);
 	
-    currentIndex := selectedIndex;
+	currentIndex := selectedIndex;
 END_WHILE]]></ST>
       </Implementation>
     </Method>
@@ -949,6 +1012,9 @@ ICloneable; other data is copied as bytes without recursively cloning references
 if insertion fails before acceptance; exceptions propagate. Engine-managed exception objects are unsupported.
 Any index output is meaningful only on success. Descendants cannot override this storage operation; capacity,
 indexing and disposal remain governed by this collection implementation.
+The original failure is captured before cleanup so nested cleanup handling cannot replace its payload.
+A static native wrapper is cloned before cleanup; failure to capture still attempts prepared-copy disposal.
+Terminal allocation failure takes precedence and no exception clone is allocated after its latch is set.
 </description>
 *)
 METHOD FINAL SetCopy : IList
@@ -959,6 +1025,7 @@ VAR_INPUT
 END_VAR
 VAR
 	exceptionCode : __SYSTEM.ExceptionCode;
+	caughtException : TOF_Core.IException;
 	genericValue : TOF_Core.GENERIC_VALUE;
 END_VAR]]></Declaration>
       <Implementation>
@@ -972,15 +1039,36 @@ genericValue := TOF_Core.GenericValueFactory.FromAnyType(
 __TRY
 	SetCopy := SetGeneric(index := index, value := genericValue);
 __CATCH(exceptionCode)
-	genericValue.Release();
-	
-	TOF_Core.ExceptionManager.ReThrowLastException(
+	caughtException := TOF_Core.ExceptionManager.GetLastException(
 		exceptionCode := exceptionCode,
 		catchPointNamespaceName := NamespaceName,
 		catchPointPOUName := __POUNAME(),
 		catchPointPosition := __POSITION()
 	);
-__ENDTRY]]></ST>
+__ENDTRY
+
+IF caughtException <> 0 THEN
+	__TRY
+		TOF_Core.DynamicMemoryManager.RaiseIfAllocationFailed();
+
+		IF NOT caughtException.IsDynamicInstance THEN
+			__QUERYINTERFACE(caughtException.Clone(), caughtException);
+		END_IF
+	__CATCH(exceptionCode)
+		genericValue.Release();
+
+		TOF_Core.ExceptionManager.ReThrowLastException(
+			exceptionCode := exceptionCode,
+			catchPointNamespaceName := NamespaceName,
+			catchPointPOUName := __POUNAME(),
+			catchPointPosition := __POSITION()
+		);
+	__ENDTRY
+
+	genericValue.Release();
+
+	TOF_Core.ExceptionManager.Throw(exception := caughtException);
+END_IF]]></ST>
       </Implementation>
     </Method>
     <Method Name="SetGeneric" Id="{28fb4746-7d53-4b08-a432-54d437f989bb}">
@@ -1025,6 +1113,7 @@ END_IF
 SetGeneric := THIS^;
 
 displacedValue := _Array[index];
+
 IF displacedValue.Address = value.Address THEN
 	IF displacedValue.IsMemoryOwner AND_THEN NOT value.IsMemoryOwner THEN
 		value := TOF_Core.GenericValueFactory.FromParts(
@@ -1046,86 +1135,96 @@ displacedValue.Release();]]></ST>
       <Declaration><![CDATA[(*!
 <summary>Reorders entries in place using the supplied generic-value ordering strategy.</summary>
 <description>
-The comparer and payload are borrowed. For two or more entries, the caller must supply a live, compatible
-comparer with a consistent order. Descriptors retain their type categories, including OBJECT. Comparer
-callbacks must not modify operands or the collection. Exceptions propagate and completed swaps are not rolled
-back. Returns this list; ownership of entries is unchanged. Descendants cannot override this storage
-operation; capacity, indexing and disposal remain governed by this collection implementation.
+A null or omitted comparer selects GENERIC_VALUE.CompareTo for each pair. An explicit comparer takes
+precedence and must provide a consistent order for the stored representations. Payload and comparer are
+borrowed. The default order supports Core numeric, text, temporal and OBJECT comparison rules; incompatible
+pairs raise GenericConversionNotSupportedException and OBJECT values require IComparable. Empty and singleton
+lists return without invoking comparisons. Callbacks must not modify operands or the collection. Exceptions
+propagate without rolling back completed swaps; every descriptor and its ownership remain in the list.
+Returns this list. Descendants cannot override the storage operation.
 </description>
 *)
-//!<param name="comparer">Borrowed ordering strategy for the stored generic values.</param>
+//!<param name="comparer">Optional borrowed ordering strategy; zero selects GENERIC_VALUE.CompareTo.</param>
 //!<param name="direction">Requested ordering direction.</param>
 METHOD FINAL Sort : IList
 VAR_INPUT
-	comparer : TOF_Core.IComparer;
+	comparer : TOF_Core.IComparer := 0;
 	direction : TOF_Core.SORT_DIRECTION := TOF_Core.SORT_DIRECTION.ASCENDING;
+END_VAR
+VAR CONSTANT
+	//! <summary>Largest entry count using insertion sort; larger lists use in-place heap sort.</summary>
+	SMALL_LIST_SORT_LIMIT : DINT := 16;
 END_VAR
 VAR
 
-    i : DINT;
-    j : DINT;
-    startIndex : DINT;
-    endIndex : DINT;
+	i : DINT;
+	j : DINT;
+	startIndex : DINT;
+	endIndex : DINT;
 
-    comparisonResult : TOF_Core.COMPARISON_RESULT;
+	comparisonResult : TOF_Core.COMPARISON_RESULT;
 
-    value1, value2 : TOF_Core.GENERIC_VALUE;
+	value1, value2 : TOF_Core.GENERIC_VALUE;
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[Sort := THIS^;
 
 IF _Length <= 1 THEN
-    RETURN;
+	RETURN;
 END_IF
 
 // Insertion sort is faster for small lists, otherwise use heap sort
-IF _Length <= 16 THEN
-    FOR i := 1 TO _Length - 1 DO
-        j := i;
+IF _Length <= SMALL_LIST_SORT_LIMIT THEN
+	FOR i := 1 TO _Length - 1 DO
+		j := i;
 
-        WHILE j > 0 DO
-            value1 := _Array[j - 1];
-            value2 := _Array[j];
+		WHILE j > 0 DO
+			value1 := _Array[j - 1];
+			value2 := _Array[j];
 
-            comparisonResult := comparer.Compare(first := value1, second := value2);
+			IF comparer = 0 THEN
+				comparisonResult := value1.CompareTo(otherValue := value2);
+			ELSE
+				comparisonResult := comparer.Compare(first := value1, second := value2);
+			END_IF
 
-            IF direction = TOF_Core.SORT_DIRECTION.ASCENDING THEN
-                IF comparisonResult <> TOF_Core.COMPARISON_RESULT.FIRST_GREATER_THAN_SECOND THEN
-                    EXIT;
-                END_IF
-            ELSE
-                IF comparisonResult <> TOF_Core.COMPARISON_RESULT.FIRST_LESS_THAN_SECOND THEN
-                    EXIT;
-                END_IF
-            END_IF
+			IF direction = TOF_Core.SORT_DIRECTION.ASCENDING THEN
+				IF comparisonResult <> TOF_Core.COMPARISON_RESULT.FIRST_GREATER_THAN_SECOND THEN
+					EXIT;
+				END_IF
+			ELSE
+				IF comparisonResult <> TOF_Core.COMPARISON_RESULT.FIRST_LESS_THAN_SECOND THEN
+					EXIT;
+				END_IF
+			END_IF
 
-            Swap(index1 := j - 1, index2 := j);
+			Swap(index1 := j - 1, index2 := j);
 			
-            j := j - 1;
-        END_WHILE
-    END_FOR
+			j := j - 1;
+		END_WHILE
+	END_FOR
 
-    RETURN;
+	RETURN;
 END_IF
 
 // Build heap
 startIndex := (_Length / 2) - 1;
 
 WHILE startIndex >= 0 DO
-    restoreHeapFrom(rootIndex := startIndex, heapSize := _Length, comparer := comparer, direction := direction);
+	restoreHeapFrom(rootIndex := startIndex, heapSize := _Length, comparer := comparer, direction := direction);
 	
-    startIndex := startIndex - 1;
+	startIndex := startIndex - 1;
 END_WHILE
 
 // Extract heap root into the final sorted position
 endIndex := _Length - 1;
 
 WHILE endIndex > 0 DO
-    Swap(index1 := 0, index2 := endIndex);
+	Swap(index1 := 0, index2 := endIndex);
 	
-    restoreHeapFrom(rootIndex := 0, heapSize := endIndex, comparer := comparer, direction := direction);
+	restoreHeapFrom(rootIndex := 0, heapSize := endIndex, comparer := comparer, direction := direction);
 	
-    endIndex := endIndex - 1;
+	endIndex := endIndex - 1;
 END_WHILE]]></ST>
       </Implementation>
     </Method>

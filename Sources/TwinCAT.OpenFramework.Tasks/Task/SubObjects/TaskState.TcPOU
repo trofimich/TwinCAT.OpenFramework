@@ -2,7 +2,7 @@
 <TcPlcObject Version="1.1.0.1">
   <POU Name="TaskState" Id="{29e45909-ad82-4112-87e1-9792e16e3a41}" SpecialFunc="None">
     <Declaration><![CDATA[(*
-SPDX-FileCopyrightText: © 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+SPDX-FileCopyrightText: Â© 2026 Oleksandr Tiutyk <trofimich@gmail.com>
 SPDX-License-Identifier: MIT
 License: https://opensource.org/license/mit
 *)
@@ -10,9 +10,9 @@ License: https://opensource.org/license/mit
 (*!
 <summary>Exposes the task lifecycle and transition indicator for observation.</summary>
 <description>
-Borrows live backing variables supplied at initialization. They must remain valid for the entire view
-lifetime; getters do not check for unbound references. Treat the view and returned references as read-only.
-Copy values when a snapshot is required.
+Borrows live backing variables supplied at initialization or rebound after online change. Getters safely guard
+against unbound references and return default values if references are not valid. Treat the view and returned
+references as read-only. Copy values when a snapshot is required.
 </description>
 *)
 
@@ -26,12 +26,13 @@ END_VAR]]></Declaration>
     <Implementation>
       <ST><![CDATA[]]></ST>
     </Implementation>
+    <Folder Name="Service methods" Id="{c2ed99d1-9e97-4383-ae73-425083121bc7}" />
     <Method Name="FB_Init" Id="{e5fa551c-3e84-40be-8ef7-9f3599da79cc}">
       <Declaration><![CDATA[(*!
 <summary>Binds the view to its owner's live state.</summary>
 <description>
-Stores references without copying their current values or changing the owner. All supplied references must be
-valid and outlive the view. Does not allocate or raise framework exceptions.
+Stores references without copying their current values or changing the owner. Valid supplied references are
+bound; skipped during online change copy code. Does not allocate or raise framework exceptions.
 </description>
 <param name="taskState">Live lifecycle state owned by the task.</param>
 <param name="taskStateChanged">Live transition indicator owned by the task.</param>
@@ -44,15 +45,19 @@ VAR_INPUT
 	taskStateChanged : REFERENCE TO BOOL;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[_TaskState REF= taskState;
-_TaskStateChanged REF= taskStateChanged;]]></ST>
+        <ST><![CDATA[IF NOT bInCopyCode THEN
+	Rebind(
+		taskState := taskState,
+		taskStateChanged := taskStateChanged
+	);
+END_IF]]></ST>
       </Implementation>
     </Method>
     <Property Name="Ready" Id="{752972e5-29e8-4d66-9b9b-bacbd95bc807}">
       <Declaration><![CDATA[(*!
 <summary>Reports whether the task is READY.</summary>
 <description>
-READY permits Start; it does not imply a completed previous run.
+READY permits Start; it does not imply a completed previous run. Returns FALSE if unbound.
 </description>
 *)
 {attribute 'monitoring' := 'call'}
@@ -61,15 +66,42 @@ PROPERTY FINAL Ready : BOOL
       <Get Name="Get" Id="{be7b15e3-99cc-422a-a1f5-1bf7586205fb}">
         <Declaration><![CDATA[]]></Declaration>
         <Implementation>
-          <ST><![CDATA[Ready := _TaskState = TASK_STATE.READY;]]></ST>
+          <ST><![CDATA[IF __ISVALIDREF(_TaskState) THEN
+	Ready := _TaskState = TASK_STATE.READY;
+END_IF]]></ST>
         </Implementation>
       </Get>
     </Property>
+    <Method Name="Rebind" Id="{fa710b05-7cba-440f-9985-f97003992ddf}" FolderPath="Service methods\">
+      <Declaration><![CDATA[(*!
+<summary>Rebinds the view to its owner's live state variables.</summary>
+<description>
+Updates internal references when valid variables are supplied. Used during initialization and
+subsequent online-change reinitialization.
+</description>
+<param name="taskState">Live lifecycle state owned by the task.</param>
+<param name="taskStateChanged">Live transition indicator owned by the task.</param>
+*)
+METHOD INTERNAL Rebind
+VAR_INPUT
+	taskState : REFERENCE TO TASK_STATE;
+	taskStateChanged : REFERENCE TO BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF __ISVALIDREF(taskState) THEN
+	_TaskState REF= taskState;
+END_IF
+
+IF __ISVALIDREF(taskStateChanged) THEN
+	_TaskStateChanged REF= taskStateChanged;
+END_IF]]></ST>
+      </Implementation>
+    </Method>
     <Property Name="Running" Id="{d518eb01-4363-42cc-ba1f-054fa911674c}">
       <Declaration><![CDATA[(*!
 <summary>Reports whether the task is RUNNING.</summary>
 <description>
-Includes acquisition, processing, stopping and resource release.
+Includes acquisition, processing, stopping and resource release. Returns FALSE if unbound.
 </description>
 *)
 {attribute 'monitoring' := 'call'}
@@ -78,7 +110,9 @@ PROPERTY FINAL Running : BOOL
       <Get Name="Get" Id="{ec791bbc-65ee-464b-aed3-27af2a7e3b0d}">
         <Declaration><![CDATA[]]></Declaration>
         <Implementation>
-          <ST><![CDATA[Running := _TaskState = TASK_STATE.RUNNING;]]></ST>
+          <ST><![CDATA[IF __ISVALIDREF(_TaskState) THEN
+	Running := _TaskState = TASK_STATE.RUNNING;
+END_IF]]></ST>
         </Implementation>
       </Get>
     </Property>
@@ -87,7 +121,7 @@ PROPERTY FINAL Running : BOOL
 <summary>Reports a lifecycle transition since the last Execute began.</summary>
 <description>
 Task.Execute clears this flag on entry, including when not running. Start, stopping and successful reset from
-STOPPED can set it. It is not a count or a pulse tied to all PLC cycles.
+STOPPED can set it. It is not a count or a pulse tied to all PLC cycles. Returns FALSE if unbound.
 </description>
 *)
 {attribute 'monitoring' := 'call'}
@@ -95,7 +129,9 @@ PROPERTY FINAL StateChanged : BOOL]]></Declaration>
       <Get Name="Get" Id="{a6557db5-61fd-4ccb-85a4-b417b3791f73}">
         <Declaration><![CDATA[]]></Declaration>
         <Implementation>
-          <ST><![CDATA[StateChanged := _TaskStateChanged;]]></ST>
+          <ST><![CDATA[IF __ISVALIDREF(_TaskStateChanged) THEN
+	StateChanged := _TaskStateChanged;
+END_IF]]></ST>
         </Implementation>
       </Get>
     </Property>
@@ -103,7 +139,7 @@ PROPERTY FINAL StateChanged : BOOL]]></Declaration>
       <Declaration><![CDATA[(*!
 <summary>Reports whether the task is STOPPED.</summary>
 <description>
-Read FinalStopReason for the result; stopping does not prove physical release.
+Read FinalStopReason for the result; stopping does not prove physical release. Returns FALSE if unbound.
 </description>
 *)
 {attribute 'monitoring' := 'call'}
@@ -112,7 +148,9 @@ PROPERTY FINAL Stopped : BOOL
       <Get Name="Get" Id="{746f2357-c572-4244-992a-04736fd48af0}">
         <Declaration><![CDATA[]]></Declaration>
         <Implementation>
-          <ST><![CDATA[Stopped := _TaskState = TASK_STATE.STOPPED;]]></ST>
+          <ST><![CDATA[IF __ISVALIDREF(_TaskState) THEN
+	Stopped := _TaskState = TASK_STATE.STOPPED;
+END_IF]]></ST>
         </Implementation>
       </Get>
     </Property>
@@ -120,7 +158,7 @@ PROPERTY FINAL Stopped : BOOL
       <Declaration><![CDATA[(*!
 <summary>Returns the current lifecycle state by value.</summary>
 <description>
-The returned enum is a snapshot of the borrowed backing state at this read.
+The returned enum is a snapshot of the borrowed backing state at this read. Returns READY if unbound.
 </description>
 *)
 {attribute 'monitoring' := 'call'}
@@ -129,7 +167,9 @@ PROPERTY FINAL Value : TASK_STATE
       <Get Name="Get" Id="{41100485-bb0e-4be9-be0c-0ed2f158a278}">
         <Declaration><![CDATA[]]></Declaration>
         <Implementation>
-          <ST><![CDATA[Value := _TaskState;]]></ST>
+          <ST><![CDATA[IF __ISVALIDREF(_TaskState) THEN
+	Value := _TaskState;
+END_IF]]></ST>
         </Implementation>
       </Get>
     </Property>

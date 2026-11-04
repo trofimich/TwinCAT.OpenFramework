@@ -1,0 +1,848 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="FileSystemContractTest" Id="{1f364cb0-3732-4469-9988-69c3aa23c910}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+SPDX-FileCopyrightText: © 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+SPDX-License-Identifier: MIT
+License: https://opensource.org/license/mit
+*)
+
+(*!
+<summary>Checks filesystem metadata, lexical paths, configuration failures and exception payloads.</summary>
+<description>
+Uses persistent task instances and no native filesystem I/O. Cancellation is requested before the first Execute
+when testing lifecycle reuse. Invalid buffers or missing bindings fail before native submission. Exception
+references and clones are inspected within one test call; AutomationRunner owns their cleanup and fatal
+allocation boundary. This suite does not inject terminal OOM or certify native handle release.
+</description>
+*)
+
+FUNCTION_BLOCK FileSystemContractTest EXTENDS TcUnit.FB_TestSuite]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[DefaultNamesAndReuse();
+LexicalPathMatrix();
+UnboundContentFailures();
+LoadBufferPreconditions();
+QueueBindingRules();
+ExceptionClonePayloads();
+ManagerStartRefusal();]]></ST>
+    </Implementation>
+    <Method Name="DefaultNamesAndReuse" Id="{cf293949-f696-4d74-9b21-9fdb7ecb0a0f}">
+      <Declaration><![CDATA[(*!
+<summary>Checks all sixteen default names and cancellation/reset stability without starting native I/O.</summary>
+*)
+METHOD DefaultNamesAndReuse
+VAR
+	tasks : ARRAY [0..15] OF TOF_Tasks.ITask;
+	expectedTypes : ARRAY [0..15] OF STRING(80) := [
+		'CheckDirectoryExists',
+		'CreateDirectory',
+		'CreateDirectoryIfNotExists',
+		'RemoveEmptyDirectory',
+		'RemoveEmptyDirectoryIfExists',
+		'DeleteFile',
+		'RenameFile',
+		'LoadFile',
+		'FileContentManager',
+		'CheckEndOfFile',
+		'GetPositionInFile',
+		'SetPositionInFile',
+		'ReadBytesFromFile',
+		'ReadString255FromFile',
+		'WriteBytesToFile',
+		'WriteString255ToFile'
+	];
+	expectedName : WSTRING;
+	i : DINT;
+	exceptionEscaped : BOOL;
+END_VAR
+VAR_INST
+	testFinished : BOOL;
+	checkDirectory : TOF_FileSystem.CheckDirectoryExists(name := "");
+	createDirectory : TOF_FileSystem.CreateDirectory(name := "");
+	createIfAbsent : TOF_FileSystem.CreateDirectoryIfNotExists(name := "");
+	removeDirectory : TOF_FileSystem.RemoveEmptyDirectory(name := "");
+	removeIfPresent : TOF_FileSystem.RemoveEmptyDirectoryIfExists(name := "");
+	deleteFile : TOF_FileSystem.DeleteFile(name := "");
+	renameFile : TOF_FileSystem.RenameFile(name := "");
+	loadFile : TOF_FileSystem.LoadFile(name := "");
+	manager : TOF_FileSystem.FileContentManager(name := "");
+	checkEof : TOF_FileSystem.CheckEndOfFile(name := "");
+	getPosition : TOF_FileSystem.GetPositionInFile(name := "");
+	setPosition : TOF_FileSystem.SetPositionInFile(name := "");
+	readBytes : TOF_FileSystem.ReadBytesFromFile(name := "");
+	readString : TOF_FileSystem.ReadString255FromFile(name := "");
+	writeBytes : TOF_FileSystem.WriteBytesToFile(name := "");
+	writeString : TOF_FileSystem.WriteString255ToFile(name := "");
+	explicitDirectory : TOF_FileSystem.CreateDirectory(name := "Explicit directory");
+	explicitManager : TOF_FileSystem.FileContentManager(name := "Explicit manager");
+	explicitRead : TOF_FileSystem.ReadBytesFromFile(name := "Explicit read");
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN
+	RETURN;
+END_IF
+
+TEST(TestName := __POUNAME());
+
+__TRY
+	tasks[0] := checkDirectory;
+	tasks[1] := createDirectory;
+	tasks[2] := createIfAbsent;
+	tasks[3] := removeDirectory;
+	tasks[4] := removeIfPresent;
+	tasks[5] := deleteFile;
+	tasks[6] := renameFile;
+	tasks[7] := loadFile;
+	tasks[8] := manager;
+	tasks[9] := checkEof;
+	tasks[10] := getPosition;
+	tasks[11] := setPosition;
+	tasks[12] := readBytes;
+	tasks[13] := readString;
+	tasks[14] := writeBytes;
+	tasks[15] := writeString;
+
+	FOR i := LOWER_BOUND(tasks, 1) TO UPPER_BOUND(tasks, 1) DO
+		expectedName := TO_WSTRING(TOF_Core.Strings.Concat255(
+			expectedTypes[i],
+			' (0x',
+			Tc2_Utilities.LWORD_TO_HEXSTR(in := TO_LWORD(tasks[i].SelfAddress), iPrecision := 16, bLoCase := FALSE),
+			')'
+		));
+		AssertTrue(
+			Condition := tasks[i].Name = expectedName,
+			Message := 'Default name must include the concrete type and address'
+		);
+		AssertTrue(
+			Condition := tasks[i].ClassName = expectedTypes[i],
+			Message := 'ClassName must identify the concrete task'
+		);
+		AssertTrue(
+			Condition := tasks[i].NamespaceName = 'TOF_FileSystem',
+			Message := 'Task namespace must identify FileSystem'
+		);
+		AssertTrue(Condition := tasks[i].State.Ready, Message := 'Metadata must not start native work');
+		AssertTrue(Condition := tasks[i].Start(), Message := 'Fresh task must accept Start before cancellation');
+		AssertTrue(Condition := tasks[i].Cancel(), Message := 'Cancel before the first Execute must be accepted');
+		tasks[i].Execute();
+		AssertTrue(
+			Condition := tasks[i].State.Stopped,
+			Message := 'Cancellation before submission must stop without native I/O'
+		);
+		AssertTrue(
+			Condition := tasks[i].FinalStopReason.ExternalCancel,
+			Message := 'Pre-submission cancellation must retain its reason'
+		);
+		AssertTrue(Condition := tasks[i].Reset(), Message := 'Stopped task must accept Reset');
+		AssertTrue(Condition := tasks[i].Name = expectedName, Message := 'Reset must preserve the stored default name');
+	END_FOR
+
+	AssertTrue(
+		Condition := explicitDirectory.Name = "Explicit directory",
+		Message := 'Directory explicit name must be copied'
+	);
+	AssertTrue(Condition := explicitManager.Name = "Explicit manager", Message := 'Manager explicit name must be copied');
+	AssertTrue(Condition := explicitRead.Name = "Explicit read", Message := 'Content task explicit name must be copied');
+__CATCH
+	exceptionEscaped := TRUE;
+__ENDTRY
+
+AssertFalse(Condition := exceptionEscaped, Message := 'Filesystem contract test must not leak an exception to TcUnit');
+testFinished := TRUE;
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="LexicalPathMatrix" Id="{f9607d69-db1e-41ff-bdbd-791db138a7fc}">
+      <Declaration><![CDATA[(*!
+<summary>Checks documented lexical outcomes, file trailing separators and the 255-byte boundary.</summary>
+<description>
+Expected outcomes are fixed test data. Reserved names and dot components intentionally pass this lexical
+filter; the assertions do not claim acceptance by any target filesystem.
+The boundary fixture contains ASCII bytes; offset 254 replaces its last payload byte, preserving the terminator.
+</description>
+*)
+METHOD LexicalPathMatrix
+VAR
+	paths : ARRAY [0..22] OF STRING(255) := [
+		'',
+		'C:\file.txt',
+		'C:\',
+		'/',
+		'\',
+		'file/',
+		'file\',
+		'\\server\share\file',
+		'//server/share/file',
+		'a//b',
+		'C:relative',
+		'1:\file',
+		'file^name',
+		'.',
+		'..',
+		'CON',
+		'file ',
+		'file.',
+		'file?x',
+		'file$01',
+		'C:/file',
+		'\\',
+		'a\\b'
+	];
+	directoryExpected : ARRAY [0..22] OF BOOL := [
+		FALSE,
+		TRUE,
+		TRUE,
+		TRUE,
+		TRUE,
+		TRUE,
+		TRUE,
+		TRUE,
+		TRUE,
+		FALSE,
+		FALSE,
+		FALSE,
+		FALSE,
+		TRUE,
+		TRUE,
+		TRUE,
+		TRUE,
+		TRUE,
+		FALSE,
+		FALSE,
+		TRUE,
+		TRUE,
+		FALSE
+	];
+	fileExpected : ARRAY [0..22] OF BOOL := [
+		FALSE,
+		TRUE,
+		FALSE,
+		FALSE,
+		FALSE,
+		FALSE,
+		FALSE,
+		TRUE,
+		TRUE,
+		FALSE,
+		FALSE,
+		FALSE,
+		FALSE,
+		TRUE,
+		TRUE,
+		TRUE,
+		TRUE,
+		TRUE,
+		FALSE,
+		FALSE,
+		TRUE,
+		FALSE,
+		FALSE
+	];
+	path : STRING(255);
+	errorMessage : WSTRING(255);
+	result : BOOL;
+	i, j : DINT;
+	exceptionEscaped : BOOL;
+END_VAR
+VAR_INST
+	testFinished : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN
+	RETURN;
+END_IF
+
+TEST(TestName := __POUNAME());
+
+__TRY
+
+	FOR i := LOWER_BOUND(paths, 1) TO UPPER_BOUND(paths, 1) DO
+		result := TOF_FileSystem.PathHelper.IsValidDirectoryPath(directoryPath := paths[i], errorMessage => errorMessage);
+		AssertTrue(
+			Condition := result = directoryExpected[i],
+			Message := 'Directory lexical result must match the documented filter'
+		);
+
+		IF NOT result THEN
+			AssertTrue(
+				Condition := errorMessage <> TOF_Core.WideStrings.Empty,
+				Message := 'Rejected directory path needs a diagnostic'
+			);
+		END_IF
+
+		result := TOF_FileSystem.PathHelper.IsValidFilePath(filePath := paths[i], errorMessage => errorMessage);
+		AssertTrue(Condition := result = fileExpected[i], Message := 'File lexical result must match the documented filter');
+
+		IF NOT result THEN
+			AssertTrue(
+				Condition := errorMessage <> TOF_Core.WideStrings.Empty,
+				Message := 'Rejected file path needs a diagnostic'
+			);
+		END_IF
+
+	END_FOR
+
+	FOR j := 1 TO 255 DO
+		path := Tc2_Standard.CONCAT(STR1 := path, STR2 := 'a');
+	END_FOR
+
+	AssertTrue(
+		Condition := TOF_FileSystem.PathHelper.IsValidFilePath(filePath := path, errorMessage => errorMessage),
+		Message := 'A 255-byte lexical filename must pass'
+	);
+	// SA0175: Replace the last byte of a 255-byte ASCII filename; the existing terminator remains intact.
+	{analysis -175}
+	path[254] := Tc2_System.F_ToASC(str := '/');
+	{analysis +175}
+	AssertFalse(
+		Condition := TOF_FileSystem.PathHelper.IsValidFilePath(filePath := path, errorMessage => errorMessage),
+		Message := 'A separator at the last byte must be rejected for a file'
+	);
+	AssertTrue(
+		Condition := TOF_FileSystem.PathHelper.IsValidDirectoryPath(directoryPath := path, errorMessage => errorMessage),
+		Message := 'A trailing directory separator is permitted lexically'
+	);
+__CATCH
+	exceptionEscaped := TRUE;
+__ENDTRY
+
+AssertFalse(Condition := exceptionEscaped, Message := 'Filesystem contract test must not leak an exception to TcUnit');
+testFinished := TRUE;
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="UnboundContentFailures" Id="{beaf76ab-75d1-4eb3-aca9-c725f93cccde}">
+      <Declaration><![CDATA[(*!
+<summary>Checks all seven unbound content operations and their guarded failure/reset results.</summary>
+<description>Matches the ASCII resource name without depending on diagnostic character offsets.</description>
+*)
+METHOD UnboundContentFailures
+VAR
+	tasks : ARRAY [0..6] OF TOF_Tasks.ITask;
+	i : DINT;
+	message : STRING(255);
+	exceptionEscaped : BOOL;
+END_VAR
+VAR_INST
+	testFinished : BOOL;
+	checkEof : TOF_FileSystem.CheckEndOfFile(name := "unbound CheckEndOfFile");
+	getPosition : TOF_FileSystem.GetPositionInFile(name := "unbound GetPositionInFile");
+	setPosition : TOF_FileSystem.SetPositionInFile(name := "unbound SetPositionInFile");
+	readBytes : TOF_FileSystem.ReadBytesFromFile(name := "unbound ReadBytesFromFile");
+	readString : TOF_FileSystem.ReadString255FromFile(name := "unbound ReadString255FromFile");
+	writeBytes : TOF_FileSystem.WriteBytesToFile(name := "unbound WriteBytesToFile");
+	writeString : TOF_FileSystem.WriteString255ToFile(name := "unbound WriteString255ToFile");
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN
+	RETURN;
+END_IF
+
+TEST(TestName := __POUNAME());
+
+__TRY
+	tasks[0] := checkEof;
+	tasks[1] := getPosition;
+	tasks[2] := setPosition;
+	tasks[3] := readBytes;
+	tasks[4] := readString;
+	tasks[5] := writeBytes;
+	tasks[6] := writeString;
+
+	AssertFalse(Condition := checkEof.IsEndOfFile, Message := 'Unsuccessful EOF query must expose FALSE');
+	AssertTrue(
+		Condition := getPosition.Position = TOF_Core.SignedInt32.ZERO,
+		Message := 'Unsuccessful tell must expose zero'
+	);
+	AssertTrue(
+		Condition := readBytes.ActuallyReadBytes = TOF_Core.UnsignedInt32.ZERO,
+		Message := 'Unsuccessful read count must be zero'
+	);
+	AssertFalse(Condition := readBytes.IsEndOfFile, Message := 'Unsuccessful read must not expose EOF');
+	AssertTrue(Condition := readString.ReadString = '', Message := 'Unsuccessful string read must expose an empty buffer');
+	AssertFalse(Condition := readString.IsEndOfFile, Message := 'Unsuccessful string read must not expose EOF');
+	AssertTrue(
+		Condition := writeBytes.ActuallyWrittenBytes = TOF_Core.UnsignedInt32.ZERO,
+		Message := 'Unsuccessful write count must be zero'
+	);
+
+	FOR i := LOWER_BOUND(tasks, 1) TO UPPER_BOUND(tasks, 1) DO
+		AssertTrue(Condition := tasks[i].Start(), Message := 'Unbound task configuration is checked during execution');
+		tasks[i].Execute();
+		tasks[i].Execute();
+		AssertTrue(Condition := tasks[i].State.Stopped, Message := 'Unbound operation must finish failure cleanup');
+		AssertTrue(Condition := tasks[i].FinalStopReason.Failure, Message := 'Unbound operation must fail');
+		message := TO_STRING(tasks[i].FinalStopReason.Message);
+		AssertTrue(
+			Condition := TOF_Core.Strings.Contains(
+				stringToSearchIn := message,
+				stringToFind := 'FileHandleResource'
+			),
+			Message := 'Unbound failure must identify the missing resource'
+		);
+	END_FOR
+
+	AssertFalse(Condition := checkEof.IsEndOfFile, Message := 'Unsuccessful EOF query must expose FALSE');
+	AssertTrue(
+		Condition := getPosition.Position = TOF_Core.SignedInt32.ZERO,
+		Message := 'Unsuccessful tell must expose zero'
+	);
+	AssertTrue(
+		Condition := readBytes.ActuallyReadBytes = TOF_Core.UnsignedInt32.ZERO,
+		Message := 'Unsuccessful read count must be zero'
+	);
+	AssertFalse(Condition := readBytes.IsEndOfFile, Message := 'Unsuccessful read must not expose EOF');
+	AssertTrue(Condition := readString.ReadString = '', Message := 'Unsuccessful string read must expose an empty buffer');
+	AssertFalse(Condition := readString.IsEndOfFile, Message := 'Unsuccessful string read must not expose EOF');
+	AssertTrue(
+		Condition := writeBytes.ActuallyWrittenBytes = TOF_Core.UnsignedInt32.ZERO,
+		Message := 'Unsuccessful write count must be zero'
+	);
+
+	FOR i := LOWER_BOUND(tasks, 1) TO UPPER_BOUND(tasks, 1) DO
+		AssertTrue(Condition := tasks[i].Reset(), Message := 'Failed content operation must be reusable after Reset');
+	END_FOR
+
+	AssertFalse(Condition := checkEof.IsEndOfFile, Message := 'Unsuccessful EOF query must expose FALSE');
+	AssertTrue(
+		Condition := getPosition.Position = TOF_Core.SignedInt32.ZERO,
+		Message := 'Unsuccessful tell must expose zero'
+	);
+	AssertTrue(
+		Condition := readBytes.ActuallyReadBytes = TOF_Core.UnsignedInt32.ZERO,
+		Message := 'Unsuccessful read count must be zero'
+	);
+	AssertFalse(Condition := readBytes.IsEndOfFile, Message := 'Unsuccessful read must not expose EOF');
+	AssertTrue(Condition := readString.ReadString = '', Message := 'Unsuccessful string read must expose an empty buffer');
+	AssertFalse(Condition := readString.IsEndOfFile, Message := 'Unsuccessful string read must not expose EOF');
+	AssertTrue(
+		Condition := writeBytes.ActuallyWrittenBytes = TOF_Core.UnsignedInt32.ZERO,
+		Message := 'Unsuccessful write count must be zero'
+	);
+__CATCH
+	exceptionEscaped := TRUE;
+__ENDTRY
+
+AssertFalse(Condition := exceptionEscaped, Message := 'Filesystem contract test must not leak an exception to TcUnit');
+testFinished := TRUE;
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="LoadBufferPreconditions" Id="{989b4177-e873-45fc-96dd-0241cf571f8f}">
+      <Declaration><![CDATA[(*!
+<summary>Checks null/zero load buffers and the corrected TargetBufferSize diagnostic without native I/O.</summary>
+<description>Matches ASCII property identifiers without depending on diagnostic character offsets.</description>
+*)
+METHOD LoadBufferPreconditions
+VAR
+	i : DINT;
+	message : STRING(255);
+	expectedProperty : STRING(32);
+	exceptionEscaped : BOOL;
+END_VAR
+VAR_INST
+	testFinished : BOOL;
+	load : TOF_FileSystem.LoadFile(name := "load preconditions");
+	buffer : BYTE := BYTE#16#A5;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN
+	RETURN;
+END_IF
+
+TEST(TestName := __POUNAME());
+
+__TRY
+	load.FilePath := 'unused.bin';
+
+	FOR i := 0 TO 2 DO
+		load.TargetBuffer := TOF_Core.Memory.NULL_ADDRESS;
+		load.TargetBufferSize := TOF_Core.UnsignedInt32.ZERO;
+		expectedProperty := 'TargetBuffer';
+
+		CASE i OF
+			0:
+				load.TargetBufferSize := 1;
+			1:
+				load.TargetBuffer := ADR(buffer);
+				expectedProperty := 'TargetBufferSize';
+		END_CASE
+
+		AssertTrue(Condition := load.Start(), Message := 'Load must validate its buffer during execution');
+		load.Execute();
+		load.Execute();
+		AssertTrue(Condition := load.State.Stopped, Message := 'Invalid load must finish stopping');
+		AssertTrue(Condition := load.FinalStopReason.Failure, Message := 'Null or zero load must fail');
+		message := TO_STRING(load.FinalStopReason.Message);
+		AssertTrue(
+			Condition := TOF_Core.Strings.Contains(
+				stringToSearchIn := message,
+				stringToFind := expectedProperty
+			),
+			Message := 'Load diagnostic must identify the public configuration property'
+		);
+		AssertTrue(
+			Condition := NOT TOF_Core.Strings.Contains(
+				stringToSearchIn := message,
+				stringToFind := 'TargetBufferLength'
+			),
+			Message := 'Load must not report the obsolete property name'
+		);
+		AssertTrue(
+			Condition := load.LoadedBytesCount = TOF_Core.UnsignedInt32.ZERO,
+			Message := 'Failed load exposes no byte count'
+		);
+		AssertTrue(Condition := buffer = BYTE#16#A5, Message := 'Invalid load must leave the caller buffer unchanged');
+		AssertTrue(Condition := load.Reset(), Message := 'Invalid load must accept Reset');
+	END_FOR
+
+	load.TargetBuffer := ADR(buffer);
+	load.TargetBufferSize := 1;
+	AssertTrue(Condition := load.Start(), Message := 'Reconfigured load must accept Start');
+	AssertTrue(Condition := load.Cancel(), Message := 'Reconfigured load can cancel before native submission');
+	load.Execute();
+	AssertTrue(
+		Condition := load.FinalStopReason.ExternalCancel,
+		Message := 'Pre-submission load cancellation preserves its reason'
+	);
+	AssertTrue(
+		Condition := load.LoadedBytesCount = TOF_Core.UnsignedInt32.ZERO,
+		Message := 'Cancelled load exposes no byte count'
+	);
+__CATCH
+	exceptionEscaped := TRUE;
+__ENDTRY
+
+AssertFalse(Condition := exceptionEscaped, Message := 'Filesystem contract test must not leak an exception to TcUnit');
+testFinished := TRUE;
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="QueueBindingRules" Id="{ada1f42c-970d-46f6-8ca9-e251ff11a646}">
+      <Declaration><![CDATA[(*!
+<summary>Checks null enqueue, borrowed binding and READY/RUNNING/STOPPED rebinding rules without opening a file.</summary>
+*)
+METHOD QueueBindingRules
+VAR
+	exceptionCode : __SYSTEM.ExceptionCode;
+	caught : TOF_Core.IException;
+	missingArgument : TOF_Core.IArgumentNotSpecifiedException;
+	standard : TOF_Core.IStandardException;
+	thrown : BOOL;
+	exceptionEscaped : BOOL;
+END_VAR
+VAR_INST
+	testFinished : BOOL;
+	manager : TOF_FileSystem.FileContentManager(name := "binding manager");
+	read : TOF_FileSystem.ReadBytesFromFile(name := "bound read");
+	unbound : TOF_FileSystem.ReadBytesFromFile(name := "unbound view");
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN
+	RETURN;
+END_IF
+
+TEST(TestName := __POUNAME());
+
+__TRY
+
+	__TRY
+		manager.Enqueue(fileHandleTask := 0);
+	__CATCH(exceptionCode)
+		thrown := TRUE;
+		caught := TOF_Core.ExceptionManager.GetLastException(
+			exceptionCode := exceptionCode,
+			catchPointNamespaceName := 'Tests',
+			catchPointPOUName := __POUNAME(),
+			catchPointPosition := __POSITION()
+		);
+		AssertTrue(
+			Condition := __QUERYINTERFACE(caught, missingArgument),
+			Message := 'Null enqueue must raise ArgumentNotSpecified'
+		);
+	__ENDTRY
+
+	AssertTrue(Condition := thrown, Message := 'Null enqueue must not succeed');
+	manager.Enqueue(fileHandleTask := read);
+	AssertTrue(
+		Condition := __ISVALIDREF(read.FileHandleResource),
+		Message := 'Enqueue must bind the manager-owned resource'
+	);
+	manager.ClearWaitingTasks();
+	AssertTrue(
+		Condition := __ISVALIDREF(read.FileHandleResource),
+		Message := 'Queue removal must retain the borrowed binding'
+	);
+	AssertTrue(Condition := read.Reset(), Message := 'READY Reset is allowed');
+	AssertTrue(Condition := __ISVALIDREF(read.FileHandleResource), Message := 'READY Reset must not clear the binding');
+	read.SetFileHandleResource(fileHandleResource := unbound.FileHandleResource);
+	AssertFalse(
+		Condition := __ISVALIDREF(read.FileHandleResource),
+		Message := 'Invalid resource view must clear a READY binding'
+	);
+	AssertTrue(Condition := read.Start(), Message := 'Unbound read must accept Start before validation');
+	thrown := FALSE;
+
+	__TRY
+		read.SetFileHandleResource(fileHandleResource := unbound.FileHandleResource);
+	__CATCH(exceptionCode)
+		thrown := TRUE;
+		caught := TOF_Core.ExceptionManager.GetLastException(
+			exceptionCode := exceptionCode,
+			catchPointNamespaceName := 'Tests',
+			catchPointPOUName := __POUNAME(),
+			catchPointPosition := __POSITION()
+		);
+		AssertTrue(
+			Condition := __QUERYINTERFACE(caught, standard),
+			Message := 'RUNNING rebinding must raise StandardException'
+		);
+	__ENDTRY
+
+	AssertTrue(Condition := thrown, Message := 'RUNNING rebinding must be rejected');
+	read.Execute();
+	read.Execute();
+	thrown := FALSE;
+
+	__TRY
+		read.SetFileHandleResource(fileHandleResource := unbound.FileHandleResource);
+	__CATCH(exceptionCode)
+		thrown := TRUE;
+		caught := TOF_Core.ExceptionManager.GetLastException(
+			exceptionCode := exceptionCode,
+			catchPointNamespaceName := 'Tests',
+			catchPointPOUName := __POUNAME(),
+			catchPointPosition := __POSITION()
+		);
+		AssertTrue(
+			Condition := __QUERYINTERFACE(caught, standard),
+			Message := 'STOPPED rebinding must raise StandardException'
+		);
+	__ENDTRY
+
+	AssertTrue(Condition := thrown, Message := 'STOPPED rebinding must require Reset');
+	AssertTrue(Condition := read.Reset(), Message := 'Stopped read must accept Reset');
+	manager.Enqueue(fileHandleTask := read);
+	manager.ClearWaitingTasks();
+	AssertTrue(Condition := read.Start(), Message := 'Prepared child can be cancelled before submission');
+	AssertTrue(Condition := read.Cancel(), Message := 'Prepared child accepts cancellation');
+	read.Execute();
+	AssertTrue(Condition := read.Reset(), Message := 'Cancelled child must accept Reset');
+	AssertFalse(
+		Condition := __ISVALIDREF(read.FileHandleResource),
+		Message := 'STOPPED Reset must clear the resource binding'
+	);
+__CATCH
+	exceptionEscaped := TRUE;
+__ENDTRY
+
+AssertFalse(Condition := exceptionEscaped, Message := 'Filesystem contract test must not leak an exception to TcUnit');
+testFinished := TRUE;
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="ExceptionClonePayloads" Id="{5af72c75-a6d3-4f59-aa6f-e220aa32231f}">
+      <Declaration><![CDATA[(*!
+<summary>Checks concrete filesystem exception clones and complete copied diagnostics within one task call.</summary>
+*)
+METHOD ExceptionClonePayloads
+VAR
+	i : DINT;
+	exceptionCode : __SYSTEM.ExceptionCode;
+	caught : TOF_Core.IException;
+	caughtFile : TOF_FileSystem.IFileSystemException;
+	caughtPath : TOF_FileSystem.IInvalidPathException;
+	cloned : TOF_Core.IObject;
+	fileClone : TOF_FileSystem.IFileSystemException;
+	pathClone : TOF_FileSystem.IInvalidPathException;
+	message : TOF_Core.ERROR_MESSAGE;
+	path : STRING(255) := 'C:\invalid|path';
+	thrown : BOOL;
+	exceptionEscaped : BOOL;
+END_VAR
+VAR_INST
+	testFinished : BOOL;
+	fileTemplate : TOF_FileSystem.FileSystemException;
+	pathTemplate : TOF_FileSystem.InvalidPathException;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN
+	RETURN;
+END_IF
+
+TEST(TestName := __POUNAME());
+
+__TRY
+	message := "Native filesystem failure payload: ";
+
+	FOR i := 1 TO 6 DO
+		TOF_Core.WideStrings.Append255(
+			message,
+			"Long diagnostic fragment preserving data beyond the 255-character string boundary. "
+		);
+	END_FOR
+
+	TOF_Core.WideStrings.Append255(message, "Payload suffix");
+
+	__TRY
+		fileTemplate.Throw(
+			sourceNamespaceName := 'Tests',
+			sourceClassName := 'FileSystemContractTest',
+			sourcePOUName := 'FileFailure',
+			sourcePosition := 'PositionA',
+			message := message,
+			errorCode := UDINT#16#70C
+		);
+	__CATCH(exceptionCode)
+		thrown := TRUE;
+		caught := TOF_Core.ExceptionManager.GetLastException(
+			exceptionCode := exceptionCode,
+			catchPointNamespaceName := 'Tests',
+			catchPointPOUName := __POUNAME(),
+			catchPointPosition := __POSITION()
+		);
+		AssertTrue(
+			Condition := __QUERYINTERFACE(caught, caughtFile),
+			Message := 'Throw must retain the concrete filesystem exception'
+		);
+	__ENDTRY
+
+	AssertTrue(Condition := thrown, Message := 'Filesystem Throw must propagate');
+	cloned := fileTemplate.Clone();
+	AssertTrue(Condition := __QUERYINTERFACE(cloned, fileClone), Message := 'Clone must implement IFileSystemException');
+
+	IF fileClone <> 0 THEN
+		AssertTrue(Condition := fileClone.IsDynamicInstance, Message := 'Clone must be a dynamic task-owned instance');
+		AssertTrue(
+			Condition := fileClone.SelfAddress <> fileTemplate.SelfAddress,
+			Message := 'Clone must be distinct from its template'
+		);
+		AssertTrue(Condition := fileClone.SourceMessage = message, Message := 'Clone must preserve message payload');
+		AssertTrue(Condition := fileClone.ErrorCode = UDINT#16#70C, Message := 'Clone must preserve native error code');
+		AssertTrue(
+			Condition := fileClone.SourceFullPOUName = fileTemplate.SourceFullPOUName,
+			Message := 'Clone must preserve source POU'
+		);
+		AssertTrue(Condition := fileClone.SourcePosition = 'PositionA', Message := 'Clone must preserve source position');
+		AssertTrue(
+			Condition := fileClone.LocalTimestamp = fileTemplate.LocalTimestamp,
+			Message := 'Clone must preserve local timestamp'
+		);
+		AssertTrue(
+			Condition := fileClone.UtcTimestamp = fileTemplate.UtcTimestamp,
+			Message := 'Clone must preserve UTC timestamp'
+		);
+	END_IF
+
+	thrown := FALSE;
+
+	__TRY
+		pathTemplate.Throw(
+			sourceNamespaceName := 'Tests',
+			sourceClassName := 'FileSystemContractTest',
+			sourcePOUName := 'PathFailure',
+			sourcePosition := 'PositionB',
+			path := path,
+			errorMessage := "Forbidden character"
+		);
+	__CATCH(exceptionCode)
+		thrown := TRUE;
+		caught := TOF_Core.ExceptionManager.GetLastException(
+			exceptionCode := exceptionCode,
+			catchPointNamespaceName := 'Tests',
+			catchPointPOUName := __POUNAME(),
+			catchPointPosition := __POSITION()
+		);
+		AssertTrue(
+			Condition := __QUERYINTERFACE(caught, caughtPath),
+			Message := 'Throw must retain the concrete invalid-path exception'
+		);
+	__ENDTRY
+
+	AssertTrue(Condition := thrown, Message := 'Invalid-path Throw must propagate');
+	cloned := pathTemplate.Clone();
+	AssertTrue(Condition := __QUERYINTERFACE(cloned, pathClone), Message := 'Clone must implement IInvalidPathException');
+
+	IF pathClone <> 0 THEN
+		AssertTrue(
+			Condition := pathClone.SourceMessage = pathTemplate.SourceMessage,
+			Message := 'Path clone must preserve formatted payload'
+		);
+		AssertTrue(
+			Condition := pathClone.ErrorCode = pathTemplate.ErrorCode,
+			Message := 'Path clone must preserve error code'
+		);
+		AssertTrue(
+			Condition := pathClone.SourceFullPOUName = pathTemplate.SourceFullPOUName,
+			Message := 'Path clone must preserve source POU'
+		);
+		AssertTrue(
+			Condition := pathClone.SourcePosition = 'PositionB',
+			Message := 'Path clone must preserve source position'
+		);
+		AssertTrue(
+			Condition := pathClone.LocalTimestamp = pathTemplate.LocalTimestamp,
+			Message := 'Path clone must preserve local timestamp'
+		);
+		AssertTrue(
+			Condition := pathClone.UtcTimestamp = pathTemplate.UtcTimestamp,
+			Message := 'Path clone must preserve UTC timestamp'
+		);
+	END_IF
+__CATCH
+	exceptionEscaped := TRUE;
+__ENDTRY
+
+AssertFalse(Condition := exceptionEscaped, Message := 'Filesystem contract test must not leak an exception to TcUnit');
+testFinished := TRUE;
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="ManagerStartRefusal" Id="{2818e623-52ef-4123-bbb3-c058ab85232b}">
+      <Declaration><![CDATA[(*!
+<summary>Checks contained Start refusal before acquisition and safe handling by a file-scenario caller.</summary>
+*)
+METHOD ManagerStartRefusal
+VAR
+	exceptionEscaped : BOOL;
+	accepted : BOOL;
+	refuseReason : TOF_Core.ERROR_MESSAGE;
+END_VAR
+VAR_INST
+	testFinished : BOOL;
+	manager : FileManagerStartRefusalProbe(name := "refused file manager");
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN
+	RETURN;
+END_IF
+
+TEST(TestName := __POUNAME());
+
+__TRY
+	manager.FilePath := 'unused.bin';
+	accepted := manager.Start(refuseReason => refuseReason);
+	AssertFalse(Condition := accepted, Message := 'Preparation exception must refuse Start');
+	AssertTrue(Condition := manager.State.Ready, Message := 'Refused Start must leave the manager READY');
+	AssertTrue(
+		Condition := refuseReason <> TOF_Core.WideStrings.Empty,
+		Message := 'Refused Start must supply diagnostics'
+	);
+	AssertFalse(
+		Condition := manager.ResourceManager.ResourceAcquired,
+		Message := 'Refused Start must acquire no resource'
+	);
+	manager.Execute();
+	AssertTrue(Condition := manager.State.Ready, Message := 'Execute after refusal must not initiate acquisition');
+__CATCH
+	exceptionEscaped := TRUE;
+__ENDTRY
+
+AssertFalse(Condition := exceptionEscaped, Message := 'Start refusal must not escape to the scenario controller');
+testFinished := TRUE;
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+  </POU>
+</TcPlcObject>

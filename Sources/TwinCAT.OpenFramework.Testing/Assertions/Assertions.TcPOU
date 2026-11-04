@@ -1,0 +1,791 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="Assertions" Id="{c5c66080-dd7b-4c29-a18b-311b570421e8}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+SPDX-FileCopyrightText: © 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+SPDX-License-Identifier: MIT
+License: https://opensource.org/license/mit
+*)
+
+(*!
+<summary>Provides fluent test assertion entry points on values, variables, and objects.</summary>
+<description>
+TestCase owns and binds this instance before its first callback.
+Typed That methods copy actual values into independent persistent contexts; generic That borrows a live variable.
+Contexts do not call one another; shared services only report failures and implement floating value policy.
+Finish one immediate chain before starting another, regardless of operand type. Do not retain a returned
+context or use this provider across tasks or reentrantly. Every entry verifies that its owning case is running.
+An optional copied message prefixes every assertion failure in the chain and is replaced on the next entry.
+Typed contexts apply ordinary IEC input conversions; select the entry matching the intended operand type.
+Do not copy this provider by value: its contexts retain borrowed links to the owning test case and actual storage.
+</description>
+*)
+
+{attribute 'no_explicit_call' := 'do not call this function block directly'}
+FUNCTION_BLOCK Assertions EXTENDS TOF_Core.Object
+VAR_STAT
+	{attribute 'hide'} 
+	_ClassName : STRING := __POUNAME();	
+END_VAR
+VAR	
+	_AssertionContext : AssertionContext;
+	
+	_BoolContext : BoolAssertionContext;
+	_SIntContext : SIntAssertionContext;
+	_IntContext : IntAssertionContext;
+	_DIntContext : DIntAssertionContext;
+	_LIntContext : LIntAssertionContext;
+	_USIntContext : USIntAssertionContext;
+	_UIntContext : UIntAssertionContext;
+	_UDIntContext : UDIntAssertionContext;
+	_ULIntContext : ULIntAssertionContext;
+	_ByteContext : ByteAssertionContext;
+	_WordContext : WordAssertionContext;
+	_DWordContext : DWordAssertionContext;
+	_LWordContext : LWordAssertionContext;
+	_RealContext : RealAssertionContext;
+	_LongRealContext : LongRealAssertionContext;
+	_StringContext : StringAssertionContext;
+	_WideStringContext : WideStringAssertionContext;
+	_TimeContext : TimeAssertionContext;
+	_LongTimeContext : LongTimeAssertionContext;
+	_DateContext : DateAssertionContext;
+	_LongDateContext : LongDateAssertionContext;
+	_DateTimeContext : DateTimeAssertionContext;
+	_LongDateTimeContext : LongDateTimeAssertionContext;
+	_TimeOfDayContext : TimeOfDayAssertionContext;
+	_LongTimeOfDayContext : LongTimeOfDayAssertionContext;
+	_PointerContext : PointerAssertionContext;
+	
+	_TestCase : ITestCase;
+END_VAR
+]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[]]></ST>
+    </Implementation>
+    <Folder Name="Service methods" Id="{aff23fec-d37f-4bc7-96c2-5daacbaa23fd}" />
+    <Method Name="Bind" Id="{1913e0b8-2c8b-43b6-8306-497c1e985bff}" FolderPath="Service methods\">
+      <Declaration><![CDATA[//! <summary>Borrows the owning test case for assertion failure reporting throughout the run.</summary>
+METHOD INTERNAL FINAL Bind
+VAR_INPUT
+	testCase : ITestCase;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_TestCase := testCase;]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="ClassName" Id="{cedffaae-8285-44cb-bcfe-0800716d4289}">
+      <Declaration><![CDATA[//! <summary>Provides assertion-provider metadata.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{3bbc52bc-acd6-497c-89cc-695cade470a5}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ClassName REF= _ClassName;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="NamespaceName" Id="{c7f12d6c-b6aa-4761-9b18-ee3561c92802}">
+      <Declaration><![CDATA[(*!
+<summary>Returns the namespace name of this assertion provider.</summary>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{e644b974-2ba7-41f2-80ec-99ae442f8b8a}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[NamespaceName REF= CurrentNamespace.Name;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="requireRunningCase" Id="{e679a173-3157-4879-950f-0cc9d7dd7207}" FolderPath="Service methods\">
+      <Declaration><![CDATA[(*!
+<summary>Rejects assertion entry outside a running owning case before context mutation.</summary>
+<description>
+Raises DataMemberNotSpecifiedException when no running test case is bound.
+</description>
+*)
+METHOD PRIVATE requireRunningCase]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF _TestCase = 0 OR_ELSE NOT _TestCase.IsRunning THEN
+	TOF_Core.Exceptions.ThrowDataMemberNotSpecified(
+		sourceNamespaceName := NamespaceName,
+		sourceClassName := ClassName,
+		sourcePOUName := __POUNAME(),
+		sourcePosition := __POSITION(),
+		dataMemberName := '_TestCase'
+	);
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="SelfSize" Id="{28eb59cc-ef59-4b98-aa57-665d8ddd68a2}">
+      <Declaration><![CDATA[(*!
+<summary>Reports the byte size of this concrete instance.</summary>
+<description>
+Uses XSIZEOF on the instance. Does not include separately allocated payloads or prove that an arbitrary
+address is valid.
+</description>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY SelfSize : ULINT]]></Declaration>
+      <Get Name="Get" Id="{86a31974-0b8b-46fb-9bf1-fc591abf2b82}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[SelfSize := XSIZEOF(THIS^);]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="That" Id="{22cd1d79-b8bb-472f-b99d-fbbc46d0167c}">
+      <Declaration><![CDATA[(*!
+<summary>Begins a fluent assertion chain on the provided actual value.</summary>
+<description>
+Borrows actual storage for this expression; actual must be a variable. Use typed entry points for literals
+and expression results. Starting another chain replaces that entry's operand and message.
+Calling That without a running owning case raises DataMemberNotSpecifiedException.
+Equality follows GENERIC_VALUE byte/value semantics; FB operands do not invoke Object.Equals.
+For object equality, use ThatBool on the Boolean result of its explicit Equals call.
+</description>
+<param name="actual">Live variable borrowed through the immediate chain.</param>
+<param name="message">Optional copied prefix for every failure in this chain; default empty.</param>
+*)
+METHOD That : REFERENCE TO AssertionContext
+VAR_INPUT
+	actual : ANY;
+	message : WSTRING(255) := "";
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[requireRunningCase();
+
+_AssertionContext.Prepare(actual := actual, testCase := _TestCase, message := message);
+
+That REF= _AssertionContext;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="ThatBool" Id="{d6ee4e28-cb94-42d5-9f84-888d1e16a02e}">
+      <Declaration><![CDATA[(*!
+<summary>Begins a fluent chain on a copied BOOL value.</summary>
+<description>
+Accepts literals, variables and expression results through a concrete IEC input type.
+Requires a running owning case; otherwise raises DataMemberNotSpecifiedException.
+Finish this chain before starting another. The message applies to every assertion in the chain.
+</description>
+<param name="actual">Value copied after ordinary IEC conversion to BOOL.</param>
+<param name="message">Optional copied diagnostic prefix; default empty replaces the previous prefix.</param>
+*)
+METHOD ThatBool : REFERENCE TO BoolAssertionContext
+VAR_INPUT
+	actual : BOOL;
+	message : WSTRING(255) := "";
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[requireRunningCase();
+
+_BoolContext.Prepare(actual := actual, testCase := _TestCase, message := message);
+
+ThatBool REF= _BoolContext;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="ThatByte" Id="{0d0759ef-c39e-4a9b-8dd3-57bc2a9d7936}">
+      <Declaration><![CDATA[(*!
+<summary>Begins a fluent chain on a copied BYTE value.</summary>
+<description>
+Accepts literals, variables and expression results through a concrete IEC input type.
+Requires a running owning case; otherwise raises DataMemberNotSpecifiedException.
+Finish this chain before starting another. The message applies to every assertion in the chain.
+</description>
+<param name="actual">Value copied after ordinary IEC conversion to BYTE.</param>
+<param name="message">Optional copied diagnostic prefix; default empty replaces the previous prefix.</param>
+*)
+METHOD ThatByte : REFERENCE TO ByteAssertionContext
+VAR_INPUT
+	actual : BYTE;
+	message : WSTRING(255) := "";
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[requireRunningCase();
+
+_ByteContext.Prepare(actual := actual, testCase := _TestCase, message := message);
+
+ThatByte REF= _ByteContext;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="ThatDate" Id="{54c3a2cc-e591-4089-bad4-65b872800222}">
+      <Declaration><![CDATA[(*!
+<summary>Begins a fluent chain on a copied DATE value.</summary>
+<description>
+Accepts literals, variables and expression results through a concrete IEC input type.
+Requires a running owning case; otherwise raises DataMemberNotSpecifiedException.
+Finish this chain before starting another. The message applies to every assertion in the chain.
+</description>
+<param name="actual">Value copied after ordinary IEC conversion to DATE.</param>
+<param name="message">Optional copied diagnostic prefix; default empty replaces the previous prefix.</param>
+*)
+METHOD ThatDate : REFERENCE TO DateAssertionContext
+VAR_INPUT
+	actual : DATE;
+	message : WSTRING(255) := "";
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[requireRunningCase();
+
+_DateContext.Prepare(actual := actual, testCase := _TestCase, message := message);
+
+ThatDate REF= _DateContext;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="ThatDateTime" Id="{ff09c0c9-9722-42c7-8b22-d2875ba987b3}">
+      <Declaration><![CDATA[(*!
+<summary>Begins a fluent chain on a copied DATE_AND_TIME value.</summary>
+<description>
+Accepts literals, variables and expression results through a concrete IEC input type.
+Requires a running owning case; otherwise raises DataMemberNotSpecifiedException.
+Finish this chain before starting another. The message applies to every assertion in the chain.
+</description>
+<param name="actual">Value copied after ordinary IEC conversion to DATE_AND_TIME.</param>
+<param name="message">Optional copied diagnostic prefix; default empty replaces the previous prefix.</param>
+*)
+METHOD ThatDateTime : REFERENCE TO DateTimeAssertionContext
+VAR_INPUT
+	actual : DATE_AND_TIME;
+	message : WSTRING(255) := "";
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[requireRunningCase();
+
+_DateTimeContext.Prepare(actual := actual, testCase := _TestCase, message := message);
+
+ThatDateTime REF= _DateTimeContext;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="ThatDInt" Id="{5874a1b1-19cf-431a-be9b-b0b8e8924bd9}">
+      <Declaration><![CDATA[(*!
+<summary>Begins a fluent chain on a copied DINT value.</summary>
+<description>
+Accepts literals, variables and expression results through a concrete IEC input type.
+Requires a running owning case; otherwise raises DataMemberNotSpecifiedException.
+Finish this chain before starting another. The message applies to every assertion in the chain.
+</description>
+<param name="actual">Value copied after ordinary IEC conversion to DINT.</param>
+<param name="message">Optional copied diagnostic prefix; default empty replaces the previous prefix.</param>
+*)
+METHOD ThatDInt : REFERENCE TO DIntAssertionContext
+VAR_INPUT
+	actual : DINT;
+	message : WSTRING(255) := "";
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[requireRunningCase();
+
+_DIntContext.Prepare(actual := actual, testCase := _TestCase, message := message);
+
+ThatDInt REF= _DIntContext;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="ThatDWord" Id="{37315929-b45b-42c1-b041-840abd355599}">
+      <Declaration><![CDATA[(*!
+<summary>Begins a fluent chain on a copied DWORD value.</summary>
+<description>
+Accepts literals, variables and expression results through a concrete IEC input type.
+Requires a running owning case; otherwise raises DataMemberNotSpecifiedException.
+Finish this chain before starting another. The message applies to every assertion in the chain.
+</description>
+<param name="actual">Value copied after ordinary IEC conversion to DWORD.</param>
+<param name="message">Optional copied diagnostic prefix; default empty replaces the previous prefix.</param>
+*)
+METHOD ThatDWord : REFERENCE TO DWordAssertionContext
+VAR_INPUT
+	actual : DWORD;
+	message : WSTRING(255) := "";
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[requireRunningCase();
+
+_DWordContext.Prepare(actual := actual, testCase := _TestCase, message := message);
+
+ThatDWord REF= _DWordContext;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="ThatInt" Id="{dad0e05e-8d54-4301-9f0b-58a5d87283ec}">
+      <Declaration><![CDATA[(*!
+<summary>Begins a fluent chain on a copied INT value.</summary>
+<description>
+Accepts literals, variables and expression results through a concrete IEC input type.
+Requires a running owning case; otherwise raises DataMemberNotSpecifiedException.
+Finish this chain before starting another. The message applies to every assertion in the chain.
+</description>
+<param name="actual">Value copied after ordinary IEC conversion to INT.</param>
+<param name="message">Optional copied diagnostic prefix; default empty replaces the previous prefix.</param>
+*)
+METHOD ThatInt : REFERENCE TO IntAssertionContext
+VAR_INPUT
+	actual : INT;
+	message : WSTRING(255) := "";
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[requireRunningCase();
+
+_IntContext.Prepare(actual := actual, testCase := _TestCase, message := message);
+
+ThatInt REF= _IntContext;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="ThatLInt" Id="{341d153b-d8d4-4baf-9e21-85b5e52ead3d}">
+      <Declaration><![CDATA[(*!
+<summary>Begins a fluent chain on a copied LINT value.</summary>
+<description>
+Accepts literals, variables and expression results through a concrete IEC input type.
+Requires a running owning case; otherwise raises DataMemberNotSpecifiedException.
+Finish this chain before starting another. The message applies to every assertion in the chain.
+</description>
+<param name="actual">Value copied after ordinary IEC conversion to LINT.</param>
+<param name="message">Optional copied diagnostic prefix; default empty replaces the previous prefix.</param>
+*)
+METHOD ThatLInt : REFERENCE TO LIntAssertionContext
+VAR_INPUT
+	actual : LINT;
+	message : WSTRING(255) := "";
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[requireRunningCase();
+
+_LIntContext.Prepare(actual := actual, testCase := _TestCase, message := message);
+
+ThatLInt REF= _LIntContext;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="ThatLongDate" Id="{61c052a0-f0ac-40fe-935e-44469a346663}">
+      <Declaration><![CDATA[(*!
+<summary>Begins a fluent chain on a copied LDATE value.</summary>
+<description>
+Accepts literals, variables and expression results through a concrete IEC input type.
+Requires a running owning case; otherwise raises DataMemberNotSpecifiedException.
+Finish this chain before starting another. The message applies to every assertion in the chain.
+</description>
+<param name="actual">Value copied after ordinary IEC conversion to LDATE.</param>
+<param name="message">Optional copied diagnostic prefix; default empty replaces the previous prefix.</param>
+*)
+METHOD ThatLongDate : REFERENCE TO LongDateAssertionContext
+VAR_INPUT
+	actual : LDATE;
+	message : WSTRING(255) := "";
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[requireRunningCase();
+
+_LongDateContext.Prepare(actual := actual, testCase := _TestCase, message := message);
+
+ThatLongDate REF= _LongDateContext;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="ThatLongDateTime" Id="{7b7cf75c-f636-4551-a56d-07847d83bdd8}">
+      <Declaration><![CDATA[(*!
+<summary>Begins a fluent chain on a copied LDATE_AND_TIME value.</summary>
+<description>
+Accepts literals, variables and expression results through a concrete IEC input type.
+Requires a running owning case; otherwise raises DataMemberNotSpecifiedException.
+Finish this chain before starting another. The message applies to every assertion in the chain.
+</description>
+<param name="actual">Value copied after ordinary IEC conversion to LDATE_AND_TIME.</param>
+<param name="message">Optional copied diagnostic prefix; default empty replaces the previous prefix.</param>
+*)
+METHOD ThatLongDateTime : REFERENCE TO LongDateTimeAssertionContext
+VAR_INPUT
+	actual : LDATE_AND_TIME;
+	message : WSTRING(255) := "";
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[requireRunningCase();
+
+_LongDateTimeContext.Prepare(actual := actual, testCase := _TestCase, message := message);
+
+ThatLongDateTime REF= _LongDateTimeContext;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="ThatLongReal" Id="{b5286d9a-93d3-4a47-9834-cfee5dfa1bc6}">
+      <Declaration><![CDATA[(*!
+<summary>Begins a fluent chain on a copied LREAL value.</summary>
+<description>
+Accepts literals, variables and expression results through a concrete IEC input type.
+Requires a running owning case; otherwise raises DataMemberNotSpecifiedException.
+Finish this chain before starting another. The message applies to every assertion in the chain.
+</description>
+<param name="actual">Value copied after ordinary IEC conversion to LREAL.</param>
+<param name="message">Optional copied diagnostic prefix; default empty replaces the previous prefix.</param>
+*)
+METHOD ThatLongReal : REFERENCE TO LongRealAssertionContext
+VAR_INPUT
+	actual : LREAL;
+	message : WSTRING(255) := "";
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[requireRunningCase();
+
+_LongRealContext.Prepare(actual := actual, testCase := _TestCase, message := message);
+
+ThatLongReal REF= _LongRealContext;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="ThatLongTime" Id="{f3978568-dcc1-4491-b175-cc01013aff29}">
+      <Declaration><![CDATA[(*!
+<summary>Begins a fluent chain on a copied LTIME value.</summary>
+<description>
+Accepts literals, variables and expression results through a concrete IEC input type.
+Requires a running owning case; otherwise raises DataMemberNotSpecifiedException.
+Finish this chain before starting another. The message applies to every assertion in the chain.
+</description>
+<param name="actual">Value copied after ordinary IEC conversion to LTIME.</param>
+<param name="message">Optional copied diagnostic prefix; default empty replaces the previous prefix.</param>
+*)
+METHOD ThatLongTime : REFERENCE TO LongTimeAssertionContext
+VAR_INPUT
+	actual : LTIME;
+	message : WSTRING(255) := "";
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[requireRunningCase();
+
+_LongTimeContext.Prepare(actual := actual, testCase := _TestCase, message := message);
+
+ThatLongTime REF= _LongTimeContext;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="ThatLongTimeOfDay" Id="{d9088388-7542-4faa-a4aa-a71d9ca75eb4}">
+      <Declaration><![CDATA[(*!
+<summary>Begins a fluent chain on a copied LTIME_OF_DAY value.</summary>
+<description>
+Accepts literals, variables and expression results through a concrete IEC input type.
+Requires a running owning case; otherwise raises DataMemberNotSpecifiedException.
+Finish this chain before starting another. The message applies to every assertion in the chain.
+</description>
+<param name="actual">Value copied after ordinary IEC conversion to LTIME_OF_DAY.</param>
+<param name="message">Optional copied diagnostic prefix; default empty replaces the previous prefix.</param>
+*)
+METHOD ThatLongTimeOfDay : REFERENCE TO LongTimeOfDayAssertionContext
+VAR_INPUT
+	actual : LTIME_OF_DAY;
+	message : WSTRING(255) := "";
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[requireRunningCase();
+
+_LongTimeOfDayContext.Prepare(actual := actual, testCase := _TestCase, message := message);
+
+ThatLongTimeOfDay REF= _LongTimeOfDayContext;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="ThatLWord" Id="{66d8189f-2ec5-4eda-b5cb-123da20db317}">
+      <Declaration><![CDATA[(*!
+<summary>Begins a fluent chain on a copied LWORD value.</summary>
+<description>
+Accepts literals, variables and expression results through a concrete IEC input type.
+Requires a running owning case; otherwise raises DataMemberNotSpecifiedException.
+Finish this chain before starting another. The message applies to every assertion in the chain.
+</description>
+<param name="actual">Value copied after ordinary IEC conversion to LWORD.</param>
+<param name="message">Optional copied diagnostic prefix; default empty replaces the previous prefix.</param>
+*)
+METHOD ThatLWord : REFERENCE TO LWordAssertionContext
+VAR_INPUT
+	actual : LWORD;
+	message : WSTRING(255) := "";
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[requireRunningCase();
+
+_LWordContext.Prepare(actual := actual, testCase := _TestCase, message := message);
+
+ThatLWord REF= _LWordContext;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="ThatPointer" Id="{94bb2ddb-7450-4d3b-b47e-e0feb0adf9ac}">
+      <Declaration><![CDATA[(*!
+<summary>Begins a fluent chain on a copied PVOID value.</summary>
+<description>
+Accepts literals, variables and expression results through a concrete IEC input type.
+Requires a running owning case; otherwise raises DataMemberNotSpecifiedException.
+Finish this chain before starting another. The message applies to every assertion in the chain.
+</description>
+<param name="actual">Value copied after ordinary IEC conversion to PVOID.</param>
+<param name="message">Optional copied diagnostic prefix; default empty replaces the previous prefix.</param>
+*)
+METHOD ThatPointer : REFERENCE TO PointerAssertionContext
+VAR_INPUT
+	actual : PVOID;
+	message : WSTRING(255) := "";
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[requireRunningCase();
+
+_PointerContext.Prepare(actual := actual, testCase := _TestCase, message := message);
+
+ThatPointer REF= _PointerContext;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="ThatReal" Id="{76a7664d-73cc-45e7-97ab-a0135161c7a0}">
+      <Declaration><![CDATA[(*!
+<summary>Begins a fluent chain on a copied REAL value.</summary>
+<description>
+Accepts literals, variables and expression results through a concrete IEC input type.
+Requires a running owning case; otherwise raises DataMemberNotSpecifiedException.
+Finish this chain before starting another. The message applies to every assertion in the chain.
+</description>
+<param name="actual">Value copied after ordinary IEC conversion to REAL.</param>
+<param name="message">Optional copied diagnostic prefix; default empty replaces the previous prefix.</param>
+*)
+METHOD ThatReal : REFERENCE TO RealAssertionContext
+VAR_INPUT
+	actual : REAL;
+	message : WSTRING(255) := "";
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[requireRunningCase();
+
+_RealContext.Prepare(actual := actual, testCase := _TestCase, message := message);
+
+ThatReal REF= _RealContext;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="ThatSInt" Id="{f0d5961c-9b05-48f0-915a-bd8ef8f5b414}">
+      <Declaration><![CDATA[(*!
+<summary>Begins a fluent chain on a copied SINT value.</summary>
+<description>
+Accepts literals, variables and expression results through a concrete IEC input type.
+Requires a running owning case; otherwise raises DataMemberNotSpecifiedException.
+Finish this chain before starting another. The message applies to every assertion in the chain.
+</description>
+<param name="actual">Value copied after ordinary IEC conversion to SINT.</param>
+<param name="message">Optional copied diagnostic prefix; default empty replaces the previous prefix.</param>
+*)
+METHOD ThatSInt : REFERENCE TO SIntAssertionContext
+VAR_INPUT
+	actual : SINT;
+	message : WSTRING(255) := "";
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[requireRunningCase();
+
+_SIntContext.Prepare(actual := actual, testCase := _TestCase, message := message);
+
+ThatSInt REF= _SIntContext;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="ThatString" Id="{fee16fe5-b8d2-42b5-861b-a8ffe568b009}">
+      <Declaration><![CDATA[(*!
+<summary>Begins a fluent chain on a copied STRING(255) value.</summary>
+<description>
+Accepts literals, variables and expression results through a concrete IEC input type.
+Requires a running owning case; otherwise raises DataMemberNotSpecifiedException.
+Inputs are bounded to 255 characters. Finish this chain before starting another.
+The message applies to every assertion in the chain.
+</description>
+<param name="actual">Value copied after ordinary IEC conversion to STRING(255).</param>
+<param name="message">Optional copied diagnostic prefix; default empty replaces the previous prefix.</param>
+*)
+METHOD ThatString : REFERENCE TO StringAssertionContext
+VAR_INPUT
+	actual : STRING(255);
+	message : WSTRING(255) := "";
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[requireRunningCase();
+
+_StringContext.Prepare(actual := actual, testCase := _TestCase, message := message);
+
+ThatString REF= _StringContext;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="ThatTime" Id="{be4d22b4-53df-4d0f-8db9-774638e39229}">
+      <Declaration><![CDATA[(*!
+<summary>Begins a fluent chain on a copied TIME value.</summary>
+<description>
+Accepts literals, variables and expression results through a concrete IEC input type.
+Requires a running owning case; otherwise raises DataMemberNotSpecifiedException.
+Finish this chain before starting another. The message applies to every assertion in the chain.
+</description>
+<param name="actual">Value copied after ordinary IEC conversion to TIME.</param>
+<param name="message">Optional copied diagnostic prefix; default empty replaces the previous prefix.</param>
+*)
+METHOD ThatTime : REFERENCE TO TimeAssertionContext
+VAR_INPUT
+	actual : TIME;
+	message : WSTRING(255) := "";
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[requireRunningCase();
+
+_TimeContext.Prepare(actual := actual, testCase := _TestCase, message := message);
+
+ThatTime REF= _TimeContext;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="ThatTimeOfDay" Id="{e1c6e82b-d7f7-42ff-b709-f09124264461}">
+      <Declaration><![CDATA[(*!
+<summary>Begins a fluent chain on a copied TIME_OF_DAY value.</summary>
+<description>
+Accepts literals, variables and expression results through a concrete IEC input type.
+Requires a running owning case; otherwise raises DataMemberNotSpecifiedException.
+Finish this chain before starting another. The message applies to every assertion in the chain.
+</description>
+<param name="actual">Value copied after ordinary IEC conversion to TIME_OF_DAY.</param>
+<param name="message">Optional copied diagnostic prefix; default empty replaces the previous prefix.</param>
+*)
+METHOD ThatTimeOfDay : REFERENCE TO TimeOfDayAssertionContext
+VAR_INPUT
+	actual : TIME_OF_DAY;
+	message : WSTRING(255) := "";
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[requireRunningCase();
+
+_TimeOfDayContext.Prepare(actual := actual, testCase := _TestCase, message := message);
+
+ThatTimeOfDay REF= _TimeOfDayContext;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="ThatUDInt" Id="{09a6db20-1bdd-4f24-b4d2-ef89d2f5ea0d}">
+      <Declaration><![CDATA[(*!
+<summary>Begins a fluent chain on a copied UDINT value.</summary>
+<description>
+Accepts literals, variables and expression results through a concrete IEC input type.
+Requires a running owning case; otherwise raises DataMemberNotSpecifiedException.
+Finish this chain before starting another. The message applies to every assertion in the chain.
+</description>
+<param name="actual">Value copied after ordinary IEC conversion to UDINT.</param>
+<param name="message">Optional copied diagnostic prefix; default empty replaces the previous prefix.</param>
+*)
+METHOD ThatUDInt : REFERENCE TO UDIntAssertionContext
+VAR_INPUT
+	actual : UDINT;
+	message : WSTRING(255) := "";
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[requireRunningCase();
+
+_UDIntContext.Prepare(actual := actual, testCase := _TestCase, message := message);
+
+ThatUDInt REF= _UDIntContext;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="ThatUInt" Id="{cd0c4bdf-7117-4c73-8c81-7259b8acfdaf}">
+      <Declaration><![CDATA[(*!
+<summary>Begins a fluent chain on a copied UINT value.</summary>
+<description>
+Accepts literals, variables and expression results through a concrete IEC input type.
+Requires a running owning case; otherwise raises DataMemberNotSpecifiedException.
+Finish this chain before starting another. The message applies to every assertion in the chain.
+</description>
+<param name="actual">Value copied after ordinary IEC conversion to UINT.</param>
+<param name="message">Optional copied diagnostic prefix; default empty replaces the previous prefix.</param>
+*)
+METHOD ThatUInt : REFERENCE TO UIntAssertionContext
+VAR_INPUT
+	actual : UINT;
+	message : WSTRING(255) := "";
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[requireRunningCase();
+
+_UIntContext.Prepare(actual := actual, testCase := _TestCase, message := message);
+
+ThatUInt REF= _UIntContext;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="ThatULInt" Id="{ef089c48-ef8a-4fbf-9a3f-028585a96dc4}">
+      <Declaration><![CDATA[(*!
+<summary>Begins a fluent chain on a copied ULINT value.</summary>
+<description>
+Accepts literals, variables and expression results through a concrete IEC input type.
+Requires a running owning case; otherwise raises DataMemberNotSpecifiedException.
+Finish this chain before starting another. The message applies to every assertion in the chain.
+</description>
+<param name="actual">Value copied after ordinary IEC conversion to ULINT.</param>
+<param name="message">Optional copied diagnostic prefix; default empty replaces the previous prefix.</param>
+*)
+METHOD ThatULInt : REFERENCE TO ULIntAssertionContext
+VAR_INPUT
+	actual : ULINT;
+	message : WSTRING(255) := "";
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[requireRunningCase();
+
+_ULIntContext.Prepare(actual := actual, testCase := _TestCase, message := message);
+
+ThatULInt REF= _ULIntContext;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="ThatUSInt" Id="{4020c684-0dc0-4784-adcb-656aff1b84af}">
+      <Declaration><![CDATA[(*!
+<summary>Begins a fluent chain on a copied USINT value.</summary>
+<description>
+Accepts literals, variables and expression results through a concrete IEC input type.
+Requires a running owning case; otherwise raises DataMemberNotSpecifiedException.
+Finish this chain before starting another. The message applies to every assertion in the chain.
+</description>
+<param name="actual">Value copied after ordinary IEC conversion to USINT.</param>
+<param name="message">Optional copied diagnostic prefix; default empty replaces the previous prefix.</param>
+*)
+METHOD ThatUSInt : REFERENCE TO USIntAssertionContext
+VAR_INPUT
+	actual : USINT;
+	message : WSTRING(255) := "";
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[requireRunningCase();
+
+_USIntContext.Prepare(actual := actual, testCase := _TestCase, message := message);
+
+ThatUSInt REF= _USIntContext;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="ThatWideString" Id="{c7e967e0-82ce-44d7-b744-53fbcf0ae47e}">
+      <Declaration><![CDATA[(*!
+<summary>Begins a fluent chain on a copied WSTRING(255) value.</summary>
+<description>
+Accepts literals, variables and expression results through a concrete IEC input type.
+Requires a running owning case; otherwise raises DataMemberNotSpecifiedException.
+Inputs are bounded to 255 characters. Finish this chain before starting another.
+The message applies to every assertion in the chain.
+</description>
+<param name="actual">Value copied after ordinary IEC conversion to WSTRING(255).</param>
+<param name="message">Optional copied diagnostic prefix; default empty replaces the previous prefix.</param>
+*)
+METHOD ThatWideString : REFERENCE TO WideStringAssertionContext
+VAR_INPUT
+	actual : WSTRING(255);
+	message : WSTRING(255) := "";
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[requireRunningCase();
+
+_WideStringContext.Prepare(actual := actual, testCase := _TestCase, message := message);
+
+ThatWideString REF= _WideStringContext;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="ThatWord" Id="{27a853e3-fc94-4578-a0ff-6c8ce322b1ad}">
+      <Declaration><![CDATA[(*!
+<summary>Begins a fluent chain on a copied WORD value.</summary>
+<description>
+Accepts literals, variables and expression results through a concrete IEC input type.
+Requires a running owning case; otherwise raises DataMemberNotSpecifiedException.
+Finish this chain before starting another. The message applies to every assertion in the chain.
+</description>
+<param name="actual">Value copied after ordinary IEC conversion to WORD.</param>
+<param name="message">Optional copied diagnostic prefix; default empty replaces the previous prefix.</param>
+*)
+METHOD ThatWord : REFERENCE TO WordAssertionContext
+VAR_INPUT
+	actual : WORD;
+	message : WSTRING(255) := "";
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[requireRunningCase();
+
+_WordContext.Prepare(actual := actual, testCase := _TestCase, message := message);
+
+ThatWord REF= _WordContext;]]></ST>
+      </Implementation>
+    </Method>
+  </POU>
+</TcPlcObject>

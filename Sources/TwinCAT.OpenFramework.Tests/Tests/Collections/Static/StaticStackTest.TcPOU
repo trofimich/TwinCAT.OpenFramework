@@ -10,23 +10,37 @@ License: https://opensource.org/license/mit
 (*!
 <summary>Exercises static stack storage, LIFO order, borrowed views and ownership.</summary>
 <description>
-Runs each scenario once through TcUnit. Fixtures are cleared before returning; dynamic allocations use the
-framework terminal OOM mechanism.
+Runs each scenario once through TcUnit. Persistent fixtures retain cursors, probes and borrowed storage after
+an aborted call. Explicit cleanup and FB_exit release them; dynamic allocation failures are terminal.
 </description>
 *)
 
 FUNCTION_BLOCK StaticStackTest EXTENDS TcUnit.FB_TestSuite
-VAR
+VAR_STAT
+	//! <summary>Class name shared by all instances of this function block.</summary>
 	{attribute 'hide'} 
 	_ClassName : STRING := __POUNAME();
+END_VAR
+VAR
+	_Stack : TOF_Collections.Stack<3>(valueValidator := 0);
 
-	_Stack : TOF_Collections.Stack<3>(0);
+	_ValueValidator : TOF_Core.GenericValueTypeValidator(typeClass := TOF_Core.GENERIC_TYPE_CLASS.INT_16);
+	_ValidatedStack : TOF_Collections.Stack<3>(valueValidator := _ValueValidator);
 
-	_ValueValidator : TOF_Core.GenericValueTypeValidator(TOF_Core.GENERIC_TYPE_CLASS.INT_16);
-	_ValidatedStack : TOF_Collections.Stack<3>(_ValueValidator);
+	//! <summary>Owns cursors and unaccepted probes across aborted test calls.</summary>
+	_Enumerator : TOF_Core.IEnumerator;
+	_SecondEnumerator : TOF_Core.IEnumerator;
+	_OwnedEnumerator : TOF_Core.IObject;
+	_Probe : POINTER TO ObjectExitProbe;
+
+	//! <summary>Remains alive for every retained probe until suite cleanup.</summary>
+	_ExitCount : UDINT;
+
 END_VAR]]></Declaration>
     <Implementation>
-      <ST><![CDATA[OwnedObjectCleanup();
+      <ST><![CDATA[cleanupFixtures();
+
+OwnedObjectCleanup();
 ValidatorRejection();
 IndexedAccessAndEnumeration();
 EmptyAndIndexBounds();
@@ -103,9 +117,9 @@ _Stack
 	.PushCopy(value := values[2])
 	.PushCopy(value := values[3]);
 
-AssertEquals_BOOL(Expected := TRUE, Actual := _Stack.Contains(values[1]), Message := 'Value not found');
-AssertEquals_BOOL(Expected := TRUE, Actual := _Stack.Contains(values[3]), Message := 'Value not found');
-AssertEquals_BOOL(Expected := FALSE, Actual := _Stack.Contains(values[5]), Message := 'Value found');
+AssertEquals_BOOL(Expected := TRUE, Actual := _Stack.Contains(value := values[1]), Message := 'Value not found');
+AssertEquals_BOOL(Expected := TRUE, Actual := _Stack.Contains(value := values[3]), Message := 'Value not found');
+AssertEquals_BOOL(Expected := FALSE, Actual := _Stack.Contains(value := values[5]), Message := 'Value found');
  
 _Stack.Clear();
 
@@ -205,8 +219,16 @@ PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
     </Property>
     <Method Name="Overflow" Id="{f7e41f20-479a-489d-954b-1db5c8705878}">
       <Declaration><![CDATA[
-//!<summary>Checks that fixed storage rejects an extra entry without changing the top.</summary>
+(*!
+<summary>Requires StaticCollectionFullException without accepting an extra entry.</summary>
+<description>Checks the exception category and a positive caught flag outside the protected call.</description>
+*)
 METHOD Overflow
+VAR
+	exceptionCode : __SYSTEM.ExceptionCode;
+	caughtException : TOF_Core.IException;
+	expectedException : TOF_Core.IStaticCollectionFullException;
+END_VAR
 VAR
 	rejected : BOOL;
 	values : ARRAY [1..4] OF INT := [1, 2, 3, 4];
@@ -230,7 +252,17 @@ _Stack
 __TRY
 	_Stack.PushCopy(value := values[4]);
 
-__CATCH
+__CATCH(exceptionCode)
+	caughtException := TOF_Core.ExceptionManager.GetLastException(
+		exceptionCode := exceptionCode,
+		catchPointNamespaceName := NamespaceName,
+		catchPointPOUName := __POUNAME(),
+		catchPointPosition := __POSITION()
+	);
+	AssertTrue(
+		Condition := __QUERYINTERFACE(caughtException, expectedException),
+		Message := 'Static overflow must raise StaticCollectionFullException'
+	);
 	rejected := TRUE;
 __ENDTRY
 
@@ -295,15 +327,12 @@ TEST_FINISHED();]]></ST>
     <Method Name="IndexedAccessAndEnumeration" Id="{1bf71186-d27c-4ce0-b07d-e23f9c850445}">
       <Declaration><![CDATA[(*!
 <summary>Checks top-first indexing, independent cursors, reset and repeated exhaustion.</summary>
-<description>Runs once and clears all entries before local fixture storage expires.</description>
+<description>Runs once. Persistent fixtures keep ownership and borrowed storage valid after an aborted call.</description>
 *)
 METHOD IndexedAccessAndEnumeration
 VAR
 	values : ARRAY [1..3] OF INT := [11, 22, 33];
 	i : DINT;
-	enumerator : TOF_Core.IEnumerator;
-	secondEnumerator : TOF_Core.IEnumerator;
-	ownedEnumerator : TOF_Core.IObject;
 END_VAR
 VAR_INST
 	testFinished : BOOL;
@@ -329,65 +358,67 @@ FOR i := 0 TO 2 DO
 	);
 END_FOR
 
-enumerator := _Stack.CreateEnumerator();
-secondEnumerator := _Stack.CreateEnumerator();
+_Enumerator := _Stack.CreateEnumerator();
+_SecondEnumerator := _Stack.CreateEnumerator();
 AssertTrue(
-		Condition := enumerator.Current.TypeClass = TOF_Core.GENERIC_TYPE_CLASS.UNSPECIFIED,
+		Condition := _Enumerator.Current.TypeClass = TOF_Core.GENERIC_TYPE_CLASS.UNSPECIFIED,
 		Message := 'Current before MoveNext must be empty'
 	);
+
 FOR i := 3 TO 1 BY -1 DO
-	AssertTrue(Condition := enumerator.MoveNext(), Message := 'Enumerator must visit each entry');
+	AssertTrue(Condition := _Enumerator.MoveNext(), Message := 'Enumerator must visit each entry');
 	AssertEquals_INT(
 		Expected := values[i],
-		Actual := enumerator.Current.AsInt(),
+		Actual := _Enumerator.Current.AsInt(),
 		Message := 'Enumerator must follow LIFO order'
 	);
 END_FOR
-AssertFalse(Condition := enumerator.MoveNext(), Message := 'Enumerator must stop at end');
-AssertFalse(Condition := enumerator.MoveNext(), Message := 'Exhausted enumerator must stay exhausted');
+
+AssertFalse(Condition := _Enumerator.MoveNext(), Message := 'Enumerator must stop at end');
+AssertFalse(Condition := _Enumerator.MoveNext(), Message := 'Exhausted enumerator must stay exhausted');
 AssertTrue(
-		Condition := enumerator.Current.TypeClass = TOF_Core.GENERIC_TYPE_CLASS.UNSPECIFIED,
+		Condition := _Enumerator.Current.TypeClass = TOF_Core.GENERIC_TYPE_CLASS.UNSPECIFIED,
 		Message := 'Current after exhaustion must be empty'
 	);
-AssertTrue(Condition := secondEnumerator.MoveNext(), Message := 'Second cursor must be independent');
+AssertTrue(Condition := _SecondEnumerator.MoveNext(), Message := 'Second cursor must be independent');
 AssertEquals_INT(
 		Expected := values[3],
-		Actual := secondEnumerator.Current.AsInt(),
+		Actual := _SecondEnumerator.Current.AsInt(),
 		Message := 'Second cursor must start at top'
 	);
-enumerator.Reset();
+_Enumerator.Reset();
 AssertTrue(
-		Condition := enumerator.Current.TypeClass = TOF_Core.GENERIC_TYPE_CLASS.UNSPECIFIED,
+		Condition := _Enumerator.Current.TypeClass = TOF_Core.GENERIC_TYPE_CLASS.UNSPECIFIED,
 		Message := 'Current after Reset must be empty'
 	);
-AssertTrue(Condition := enumerator.MoveNext(), Message := 'Reset must restart traversal');
-AssertEquals_INT(Expected := values[3], Actual := enumerator.Current.AsInt(), Message := 'Reset must restart at top');
+AssertTrue(Condition := _Enumerator.MoveNext(), Message := 'Reset must restart traversal');
+AssertEquals_INT(Expected := values[3], Actual := _Enumerator.Current.AsInt(), Message := 'Reset must restart at top');
 
-ownedEnumerator := enumerator;
-enumerator := 0;
+_OwnedEnumerator := _Enumerator;
+_Enumerator := 0;
 AssertTrue(
-		Condition := TOF_Core.Memory.TryReleaseDynamicObject(instance := ownedEnumerator),
+		Condition := TOF_Core.Memory.TryReleaseDynamicObject(instance := _OwnedEnumerator),
 		Message := 'Enumerator must be released'
 	);
-ownedEnumerator := secondEnumerator;
-secondEnumerator := 0;
+_OwnedEnumerator := _SecondEnumerator;
+_SecondEnumerator := 0;
 AssertTrue(
-		Condition := TOF_Core.Memory.TryReleaseDynamicObject(instance := ownedEnumerator),
+		Condition := TOF_Core.Memory.TryReleaseDynamicObject(instance := _OwnedEnumerator),
 		Message := 'Second enumerator must be released'
 	);
 
 _Stack.Clear();
-enumerator := _Stack.CreateEnumerator();
-AssertFalse(Condition := enumerator.MoveNext(), Message := 'Empty stack must have no current entry');
-AssertFalse(Condition := enumerator.MoveNext(), Message := 'Empty cursor must stay exhausted');
+_Enumerator := _Stack.CreateEnumerator();
+AssertFalse(Condition := _Enumerator.MoveNext(), Message := 'Empty stack must have no current entry');
+AssertFalse(Condition := _Enumerator.MoveNext(), Message := 'Empty cursor must stay exhausted');
 AssertTrue(
-		Condition := enumerator.Current.TypeClass = TOF_Core.GENERIC_TYPE_CLASS.UNSPECIFIED,
+		Condition := _Enumerator.Current.TypeClass = TOF_Core.GENERIC_TYPE_CLASS.UNSPECIFIED,
 		Message := 'Empty cursor must expose an empty descriptor'
 	);
-ownedEnumerator := enumerator;
-enumerator := 0;
+_OwnedEnumerator := _Enumerator;
+_Enumerator := 0;
 AssertTrue(
-		Condition := TOF_Core.Memory.TryReleaseDynamicObject(instance := ownedEnumerator),
+		Condition := TOF_Core.Memory.TryReleaseDynamicObject(instance := _OwnedEnumerator),
 		Message := 'Empty enumerator must be released'
 	);
 _Stack.Clear();
@@ -399,7 +430,7 @@ TEST_FINISHED();]]></ST>
     <Method Name="EmptyAndIndexBounds" Id="{1d08d5d4-fa7a-4722-a73f-a21324b0e037}">
       <Declaration><![CDATA[(*!
 <summary>Checks empty access and invalid index rejection without changing entries.</summary>
-<description>Runs once and clears all entries before local fixture storage expires.</description>
+<description>Runs once. Persistent fixtures keep ownership and borrowed storage valid after an aborted call.</description>
 *)
 METHOD EmptyAndIndexBounds
 VAR
@@ -408,6 +439,10 @@ VAR
 	peekRejected : BOOL;
 	removeRejected : BOOL;
 	indexRejected : BOOL;
+	exceptionCode : __SYSTEM.ExceptionCode;
+	caughtException : TOF_Core.IException;
+	expectedEmptyException : TOF_Core.ICollectionEmptyException;
+	expectedIndexException : TOF_Core.IArgumentOutOfRangeException;
 END_VAR
 VAR_INST
 	testFinished : BOOL;
@@ -420,26 +455,61 @@ END_IF
 TEST(TestName := __POUNAME());
 
 _Stack.Clear();
+
 __TRY
 	result := _Stack.Peek();
-__CATCH
+__CATCH(exceptionCode)
+	caughtException := TOF_Core.ExceptionManager.GetLastException(
+		exceptionCode := exceptionCode,
+		catchPointNamespaceName := NamespaceName,
+		catchPointPOUName := __POUNAME(),
+		catchPointPosition := __POSITION()
+	);
+	AssertTrue(
+		Condition := __QUERYINTERFACE(caughtException, expectedEmptyException),
+		Message := 'Rejected stack access must report its expected exception category'
+	);
 	peekRejected := TRUE;
 __ENDTRY
+
 __TRY
 	_Stack.RemoveLast();
-__CATCH
+__CATCH(exceptionCode)
+	caughtException := TOF_Core.ExceptionManager.GetLastException(
+		exceptionCode := exceptionCode,
+		catchPointNamespaceName := NamespaceName,
+		catchPointPOUName := __POUNAME(),
+		catchPointPosition := __POSITION()
+	);
+	AssertTrue(
+		Condition := __QUERYINTERFACE(caughtException, expectedEmptyException),
+		Message := 'Rejected stack access must report its expected exception category'
+	);
 	removeRejected := TRUE;
 __ENDTRY
+
 AssertTrue(Condition := peekRejected, Message := 'Peek on empty stack must raise');
 AssertTrue(Condition := removeRejected, Message := 'RemoveLast on empty stack must raise');
 AssertTrue(Condition := _Stack.Empty, Message := 'Rejected operations must preserve empty stack');
 
 _Stack.PushCopy(value := value);
+
 __TRY
 	result := _Stack.GetByIndex(index := _Stack.Length);
-__CATCH
+__CATCH(exceptionCode)
+	caughtException := TOF_Core.ExceptionManager.GetLastException(
+		exceptionCode := exceptionCode,
+		catchPointNamespaceName := NamespaceName,
+		catchPointPOUName := __POUNAME(),
+		catchPointPosition := __POSITION()
+	);
+	AssertTrue(
+		Condition := __QUERYINTERFACE(caughtException, expectedIndexException),
+		Message := 'Rejected stack access must report its expected exception category'
+	);
 	indexRejected := TRUE;
 __ENDTRY
+
 AssertTrue(Condition := indexRejected, Message := 'Index equal to Length must be rejected');
 AssertEquals_DINT(Expected := 1, Actual := _Stack.Length, Message := 'Rejected access must preserve Length');
 AssertEquals_INT(Expected := value, Actual := _Stack.Peek().AsInt(), Message := 'Rejected access must preserve top');
@@ -452,14 +522,15 @@ TEST_FINISHED();]]></ST>
     <Method Name="CopiedAndBorrowedValues" Id="{c9aaae9d-9160-4b7a-9a31-e04855ba98c5}">
       <Declaration><![CDATA[(*!
 <summary>Checks copy isolation and borrowed descriptor lifetime without ownership transfer.</summary>
-<description>Runs once and clears all entries before local fixture storage expires.</description>
+<description>Runs once. Persistent fixtures keep ownership and borrowed storage valid after an aborted call.</description>
 *)
 METHOD CopiedAndBorrowedValues
 VAR
-	value : INT := 7;
 	borrowedValue : TOF_Core.GENERIC_VALUE;
 END_VAR
 VAR_INST
+	//! <summary>Keeps borrowed payload alive after an aborted testcase.</summary>
+	value : INT := 7;
 	testFinished : BOOL;
 END_VAR]]></Declaration>
       <Implementation>
@@ -470,6 +541,7 @@ END_IF
 TEST(TestName := __POUNAME());
 
 _Stack.Clear();
+value := 7;
 _Stack.PushCopy(value := value);
 value := 9;
 AssertEquals_INT(Expected := 7, Actual := _Stack.Peek().AsInt(), Message := 'PushCopy must isolate the stored value');
@@ -486,7 +558,7 @@ AssertEquals_INT(
 		Message := 'PushGeneric must retain borrowed storage'
 	);
 AssertFalse(Condition := _Stack.Peek().IsMemoryOwner, Message := 'Borrowed entry must remain borrowed');
-AssertTrue(_Stack.ContainsGeneric(value := borrowedValue, releaseValue := FALSE), Message := 'Borrowed query must find the top');
+AssertTrue(Condition := _Stack.ContainsGeneric(value := borrowedValue, releaseValue := FALSE), Message := 'Borrowed query must find the top');
 _Stack.RemoveLast();
 AssertEquals_INT(Expected := 11, Actual := value, Message := 'Removing borrowed entry must preserve source');
 AssertEquals_INT(
@@ -503,13 +575,11 @@ TEST_FINISHED();]]></ST>
     <Method Name="OwnedObjectCleanup" Id="{c7756be1-c3b0-4a10-859b-c10a01b24114}">
       <Declaration><![CDATA[(*!
 <summary>Checks exactly-once destruction on RemoveLast and Clear.</summary>
-<description>Runs once; owned fixtures are released and borrowed fixtures are removed before returning.</description>
+<description>Runs once. The suite retains probes and their counter across aborted calls until cleanup.</description>
 *)
 METHOD OwnedObjectCleanup
 VAR
-	probe : POINTER TO ObjectExitProbe;
 	value : TOF_Core.GENERIC_VALUE;
-	exitCount : UDINT;
 	i : DINT;
 END_VAR
 VAR_INST
@@ -523,28 +593,33 @@ END_IF
 TEST(TestName := __POUNAME());
 
 _Stack.Clear();
+_ExitCount := TOF_Core.UnsignedInt32.ZERO;
+
 FOR i := 1 TO 2 DO
-	probe := __NEW(ObjectExitProbe);
-	IF probe = 0 THEN
+	_Probe := __NEW(ObjectExitProbe);
+
+	IF _Probe = 0 THEN
 		TOF_Core.DynamicMemoryManager.RaiseAllocationFailure();
 	END_IF
-	probe^.ObserveExit(counter := exitCount);
+
+	_Probe^.ObserveExit(counter := _ExitCount);
 	value := TOF_Core.GenericValueFactory.FromAnyType(
-		value := probe^,
+		value := _Probe^,
 		isObject := TRUE,
 		memoryManagementBehavior := TOF_Core.GENERIC_MEMORY_MANAGEMENT_BEHAVIOR.STORE_ORIGINAL_REFERENCE_AND_OWNS_MEMORY
 	);
 	_Stack.PushGeneric(value := value);
 	value.Reset();
-	probe := 0;
+	_Probe := 0;
 END_FOR
-AssertEquals_UDINT(Expected := 0, Actual := exitCount, Message := 'Insertion must retain owned objects');
+
+AssertEquals_UDINT(Expected := 0, Actual := _ExitCount, Message := 'Insertion must retain owned objects');
 _Stack.RemoveLast();
-AssertEquals_UDINT(Expected := 1, Actual := exitCount, Message := 'RemoveLast must destroy only the top object');
+AssertEquals_UDINT(Expected := 1, Actual := _ExitCount, Message := 'RemoveLast must destroy only the top object');
 _Stack.Clear();
-AssertEquals_UDINT(Expected := 2, Actual := exitCount, Message := 'Clear must destroy the remaining object');
+AssertEquals_UDINT(Expected := 2, Actual := _ExitCount, Message := 'Clear must destroy the remaining object');
 _Stack.Clear();
-AssertEquals_UDINT(Expected := 2, Actual := exitCount, Message := 'Repeated Clear must not destroy objects twice');
+AssertEquals_UDINT(Expected := 2, Actual := _ExitCount, Message := 'Repeated Clear must not destroy objects twice');
 
 testFinished := TRUE;
 TEST_FINISHED();]]></ST>
@@ -553,15 +628,16 @@ TEST_FINISHED();]]></ST>
     <Method Name="ValidatorRejection" Id="{6af418ba-4c57-4a20-92af-b7bebeacd977}">
       <Declaration><![CDATA[(*!
 <summary>Checks that validator rejection preserves storage and caller ownership.</summary>
-<description>Runs once; owned fixtures are released and borrowed fixtures are removed before returning.</description>
+<description>Runs once. The suite retains probes and their counter across aborted calls until cleanup.</description>
 *)
 METHOD ValidatorRejection
 VAR
-	probe : POINTER TO ObjectExitProbe;
 	value : TOF_Core.GENERIC_VALUE;
-	exitCount : UDINT;
 	originalCapacity : DINT;
 	rejected : BOOL;
+	exceptionCode : __SYSTEM.ExceptionCode;
+	caughtException : TOF_Core.IException;
+	expectedException : TOF_Core.IIncompatibleGenericValueTypeException;
 END_VAR
 VAR_INST
 	testFinished : BOOL;
@@ -575,22 +651,37 @@ TEST(TestName := __POUNAME());
 
 _Stack.Clear();
 _ValidatedStack.Clear();
+_ExitCount := TOF_Core.UnsignedInt32.ZERO;
 originalCapacity := _ValidatedStack.Capacity;
-probe := __NEW(ObjectExitProbe);
-IF probe = 0 THEN
+_Probe := __NEW(ObjectExitProbe);
+
+IF _Probe = 0 THEN
 	TOF_Core.DynamicMemoryManager.RaiseAllocationFailure();
 END_IF
-probe^.ObserveExit(counter := exitCount);
+
+_Probe^.ObserveExit(counter := _ExitCount);
 	value := TOF_Core.GenericValueFactory.FromAnyType(
-		value := probe^,
+		value := _Probe^,
 		isObject := TRUE,
 		memoryManagementBehavior := TOF_Core.GENERIC_MEMORY_MANAGEMENT_BEHAVIOR.STORE_ORIGINAL_REFERENCE_AND_OWNS_MEMORY
 	);
+
 __TRY
 	_ValidatedStack.PushGeneric(value := value);
-__CATCH
+__CATCH(exceptionCode)
+	caughtException := TOF_Core.ExceptionManager.GetLastException(
+		exceptionCode := exceptionCode,
+		catchPointNamespaceName := NamespaceName,
+		catchPointPOUName := __POUNAME(),
+		catchPointPosition := __POSITION()
+	);
+	AssertTrue(
+		Condition := __QUERYINTERFACE(caughtException, expectedException),
+		Message := 'Validator must report an incompatible generic value type'
+	);
 	rejected := TRUE;
 __ENDTRY
+
 AssertTrue(Condition := rejected, Message := 'Validator must reject an object when INT is required');
 AssertEquals_DINT(
 		Expected := originalCapacity,
@@ -598,19 +689,64 @@ AssertEquals_DINT(
 		Message := 'Validation must run before growth'
 	);
 AssertTrue(Condition := _ValidatedStack.Empty, Message := 'Validation failure must not insert an entry');
-AssertEquals_UDINT(Expected := 0, Actual := exitCount, Message := 'Rejected owned payload must remain alive');
+AssertEquals_UDINT(Expected := 0, Actual := _ExitCount, Message := 'Rejected owned payload must remain alive');
+
 IF rejected THEN
 	value.Release();
 ELSE
 	value.Reset();
 END_IF
-probe := 0;
+
+_Probe := 0;
 _ValidatedStack.Clear();
-AssertEquals_UDINT(Expected := 1, Actual := exitCount, Message := 'Rejected payload must remain releasable by caller');
+AssertEquals_UDINT(Expected := 1, Actual := _ExitCount, Message := 'Rejected payload must remain releasable by caller');
 _Stack.Clear();
 
 testFinished := TRUE;
 TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="cleanupFixtures" Id="{f21d45a3-65b1-43a8-8ab3-e51aa4a03237}">
+      <Declaration><![CDATA[(*!
+<summary>Releases persistent fixtures after normal execution or an aborted call.</summary>
+<description>
+Releases cursors before source storage. Unaccepted probes remain suite-owned and the exit counter remains
+alive. Uses non-throwing disposal without allocation or exception registration.
+</description>
+*)
+METHOD PRIVATE cleanupFixtures]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF _Enumerator <> 0 THEN
+	_OwnedEnumerator := _Enumerator;
+	_Enumerator := 0;
+	TOF_Core.Memory.TryReleaseDynamicObject(instance := _OwnedEnumerator);
+END_IF
+
+IF _SecondEnumerator <> 0 THEN
+	_OwnedEnumerator := _SecondEnumerator;
+	_SecondEnumerator := 0;
+	TOF_Core.Memory.TryReleaseDynamicObject(instance := _OwnedEnumerator);
+END_IF
+
+_Stack.Clear();
+_ValidatedStack.Clear();
+
+IF _Probe <> 0 THEN
+	__DELETE(_Probe);
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="FB_exit" Id="{b8ea2a76-a950-43e5-9ced-78f41e33a199}">
+      <Declaration><![CDATA[(*!
+<summary>Releases suite-owned cursors, entries and unaccepted probes during destruction.</summary>
+<description>Uses the non-allocating cleanup path shared with ordinary suite execution.</description>
+*)
+METHOD FB_exit : BOOL
+VAR_INPUT
+	bInCopyCode : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[cleanupFixtures();]]></ST>
       </Implementation>
     </Method>
   </POU>

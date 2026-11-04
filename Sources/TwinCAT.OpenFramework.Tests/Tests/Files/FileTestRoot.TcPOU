@@ -1,0 +1,134 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="FileTestRoot" Id="{39fd3ed6-2729-477f-b94c-a9dade152177}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+SPDX-FileCopyrightText: © 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+SPDX-License-Identifier: MIT
+License: https://opensource.org/license/mit
+*)
+
+(*!
+<summary>Prepares the shared filesystem test root once before TcUnit suites execute.</summary>
+<description>
+The test controller calls Execute once per cycle from its owner task before TcUnit.RUN. All filesystem suites
+borrow the resulting readiness; they must not create the root independently. The root is reserved for tests
+and is never removed. A deadline reports failure and subsequent calls continue cancelling and draining the
+pending native task. Prepared does not certify physical resource release after a native abort error.
+</description>
+*)
+
+{attribute 'no_explicit_call' := 'Use Execute from the test controller'}
+PROGRAM FileTestRoot
+VAR CONSTANT
+	//! <summary>Root reserved for independently owned filesystem scenario directories.</summary>
+	_RootPath : STRING(255) := 'C:\OpenFrameworkTests';
+END_VAR
+VAR
+	_CreateRoot : TOF_FileSystem.CreateDirectoryIfNotExists(name := "prepareFileTestRoot");
+	_Started : BOOL;
+	_Prepared : BOOL;
+	_FailureMessage : STRING(255);
+	_Deadline : Tc2_Standard.TON;
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[]]></ST>
+    </Implementation>
+    <Method Name="Execute" Id="{8689f294-684c-4259-a96f-d2036ace796f}">
+      <Declaration><![CDATA[(*!
+<summary>Advances root preparation or its failure cleanup without abandoning pending I/O.</summary>
+*)
+METHOD Execute]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF _Prepared THEN
+	RETURN;
+END_IF
+
+__TRY
+
+	IF _FailureMessage <> TOF_Core.Strings.Empty THEN
+
+		IF _CreateRoot.State.Running THEN
+			_CreateRoot.Cancel();
+			_CreateRoot.Execute();
+		END_IF
+
+		RETURN;
+	END_IF
+
+	_Deadline(IN := TRUE, PT := T#10S);
+
+	IF NOT _Started THEN
+		_CreateRoot.DirectoryPath := _RootPath;
+		_CreateRoot.PathType := Tc2_System.E_OpenPath.PATH_GENERIC;
+		_CreateRoot.Timeout := T#2S;
+
+		IF NOT _CreateRoot.Start() THEN
+			_FailureMessage := 'Filesystem test root: Start refused';
+			RETURN;
+		END_IF
+
+		_Started := TRUE;
+	END_IF
+
+	_CreateRoot.Execute();
+
+	IF _CreateRoot.State.Stopped THEN
+
+		IF _CreateRoot.FinalStopReason.WorkDone THEN
+			_Prepared := TRUE;
+		ELSE
+			_FailureMessage := TOF_Core.Strings.Concat255(
+				'Filesystem test root: ',
+				TO_STRING(_CreateRoot.FinalStopReason.Message)
+			);
+		END_IF
+
+	ELSIF _Deadline.Q THEN
+		_FailureMessage := 'Filesystem test root preparation exceeded 10 seconds';
+		_CreateRoot.Cancel();
+	END_IF
+
+__CATCH
+	(* Record failure without diagnostic callbacks; later cycles still drain the persistent task. *)
+	_FailureMessage := 'Exception interrupted filesystem test root preparation';
+__ENDTRY]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="Prepared" Id="{4ae1c7ac-f5f5-4757-862f-ac10c8901c80}">
+      <Declaration><![CDATA[(*!
+<summary>Reports successful completion of shared root preparation.</summary>
+*)
+PROPERTY Prepared : BOOL]]></Declaration>
+      <Get Name="Get" Id="{ed1d14b4-0174-4e97-924f-047a3d3201db}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[Prepared := _Prepared;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="FailureMessage" Id="{2ccd63c2-c107-4973-a535-1354ff0e762f}">
+      <Declaration><![CDATA[(*!
+<summary>Copies the retained preparation failure; empty while pending or successful.</summary>
+*)
+PROPERTY FailureMessage : STRING(255)]]></Declaration>
+      <Get Name="Get" Id="{c118f08a-c1ee-469e-9bfc-c874145430b9}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[FailureMessage := _FailureMessage;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="Running" Id="{9c000c8b-03b0-48ec-b536-493f2c6c3783}">
+      <Declaration><![CDATA[(*!
+<summary>Reports pending root preparation or stopping that still requires cyclic Execute.</summary>
+*)
+PROPERTY Running : BOOL]]></Declaration>
+      <Get Name="Get" Id="{c855f97c-996a-4c26-8a79-36a1ff293527}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[Running := _CreateRoot.State.Running;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+  </POU>
+</TcPlcObject>

@@ -41,6 +41,8 @@ lifetime. No internal locking is implemented. Concurrent access involving mutati
 coordination; this implementation does not provide a concurrent-container guarantee. Generic lookup with
 requested query release also attempts cleanup on lookup failure before propagating the captured exception;
 terminal OOM takes precedence.
+Instances cannot be assigned by value: copying backing pointers or disposal responsibility would create
+unsafe aliases. Interface references still borrow this instance; copying an interface does not clone storage.
 </description>
 *)
 
@@ -48,17 +50,20 @@ terminal OOM takes precedence.
 FUNCTION_BLOCK Dictionary
 VAR_GENERIC CONSTANT
  	{attribute 'hide'}
-   _StaticCapacity : TOF_Core.DINT_LENGTH := 0;
+	//! <summary>Inline capacity; zero selects dynamic backing storage.</summary>
+	_StaticCapacity : TOF_Core.DINT_LENGTH := 0;
 END_VAR
 EXTENDS TOF_Core.Object IMPLEMENTS IDictionary
 VAR_INPUT
 	//! <summary>Number of slots added when dynamic storage is full; must be positive when growth is required.</summary>
 	DefaultDynamicAllocationElementCount : BYTE := 10;
 END_VAR
-VAR
+VAR_STAT
+	//! <summary>Class name shared by all instances of this function block.</summary>
 	{attribute 'hide'}
 	_ClassName : STRING := __POUNAME();
-
+END_VAR
+VAR
 	{attribute 'hide'}
 	_KeyValidator : TOF_Core.IGenericValueValidator;
 	{attribute 'hide'}
@@ -111,6 +116,7 @@ VAR_INPUT
 	elementCount : TOF_Core.DINT_LENGTH;
 END_VAR
 VAR CONSTANT
+	//! <summary>Bytes per capacity slot, including descriptor storage and any hash-index arrays.</summary>
 	ENTRY_ALLOCATION_SIZE : ULINT := XSIZEOF(TOF_Core.GENERIC_KEY_VALUE_PAIR) + XSIZEOF(UDINT) + 2 * XSIZEOF(DINT);
 END_VAR
 VAR
@@ -136,6 +142,7 @@ IF elementCount <= TOF_Core.SignedInt32.ZERO THEN
 END_IF
 
 newCapacity := TO_ULINT(_DynamicCapacity) + TO_ULINT(elementCount);
+
 IF newCapacity > TO_ULINT(TOF_Core.SignedInt32.MAX_VALUE)
 	OR_ELSE newCapacity > TO_ULINT(TOF_Core.UnsignedInt32.MAX_VALUE) / ENTRY_ALLOCATION_SIZE
 THEN
@@ -150,11 +157,13 @@ THEN
 END_IF
 
 newMemory := __NEW(BYTE, TO_UDINT(ENTRY_ALLOCATION_SIZE * newCapacity));
+
 IF newMemory = 0 THEN
 	TOF_Core.DynamicMemoryManager.RaiseAllocationFailure();
 END_IF
 
 newHashes := newMemory + TO_UDINT(XSIZEOF(TOF_Core.GENERIC_KEY_VALUE_PAIR) * newCapacity);
+
 IF _Length > TOF_Core.SignedInt32.ZERO THEN
 	Tc2_System.MEMCPY(
 		destAddr := newMemory,
@@ -174,7 +183,7 @@ _Buckets := newMemory + TO_UDINT((XSIZEOF(TOF_Core.GENERIC_KEY_VALUE_PAIR) + XSI
 _NextIndices := newMemory + TO_UDINT((XSIZEOF(TOF_Core.GENERIC_KEY_VALUE_PAIR) + XSIZEOF(UDINT) + XSIZEOF(DINT)) * newCapacity);
 _DynamicCapacity := TO_DINT(newCapacity);
 
-RebuildIndex();]]></ST>
+rebuildIndex();]]></ST>
       </Implementation>
     </Method>
     <Property Name="Capacity" Id="{4579ce74-1fcb-413c-9ce9-78988f96faab}">
@@ -195,7 +204,10 @@ PROPERTY FINAL Capacity : TOF_Core.DINT_LENGTH]]></Declaration>
       </Get>
     </Property>
     <Property Name="ClassName" Id="{2ba03c75-6849-4d3f-be0a-7ec3bb3723e7}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Borrows the concrete collection class name without transferring storage ownership.</summary>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
       <Get Name="Get" Id="{16dbbed6-7d92-472a-aa65-fa307ed9f2d6}">
         <Declaration><![CDATA[]]></Declaration>
@@ -241,7 +253,7 @@ IF Dynamic THEN
 	_NextIndices := 0;
 	_DynamicCapacity := 0;
 ELSE
-	RebuildIndex();
+	rebuildIndex();
 END_IF]]></ST>
       </Implementation>
     </Method>
@@ -286,6 +298,7 @@ __ENDTRY
 IF releaseKey THEN
 	IF caughtException <> 0 AND_THEN NOT caughtException.IsDynamicInstance THEN
 		__TRY
+			TOF_Core.DynamicMemoryManager.RaiseIfAllocationFailed();
 			__QUERYINTERFACE(caughtException.Clone(), caughtException);
 		__CATCH(exceptionCode)
 			key.Release();
@@ -427,7 +440,7 @@ calling validators, comparers or other throwing paths.
 METHOD FB_init : BOOL
 VAR_INPUT
 	bInitRetains : BOOL; // TRUE: the retain variables are initialized (reset warm / reset cold)
-	bInCopyCode : BOOL;  // TRUE: the instance will be copied to the copy code afterward (online change)
+	bInCopyCode : BOOL; // TRUE: the instance will be copied to the copy code afterward (online change)
 
 	keyValidator : TOF_Core.IGenericValueValidator;
 	valueValidator : TOF_Core.IGenericValueValidator;
@@ -480,6 +493,7 @@ IF _Length = TOF_Core.SignedInt32.ZERO THEN
 END_IF
 
 entryLink := _Buckets[TO_DINT(hashCode MOD TO_UDINT(Capacity))];
+
 WHILE entryLink <> TOF_Core.SignedInt32.ZERO DO
 	entryIndex := entryLink - 1;
 
@@ -556,6 +570,7 @@ __ENDTRY
 IF releaseKey THEN
 	IF caughtException <> 0 AND_THEN NOT caughtException.IsDynamicInstance THEN
 		__TRY
+			TOF_Core.DynamicMemoryManager.RaiseIfAllocationFailed();
 			__QUERYINTERFACE(caughtException.Clone(), caughtException);
 		__CATCH(exceptionCode)
 			key.Release();
@@ -690,7 +705,7 @@ PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
         </Implementation>
       </Get>
     </Property>
-    <Method Name="RebuildIndex" Id="{c8924d9e-dfa9-49f6-8af7-39afa616fca7}" FolderPath="Service members\">
+    <Method Name="rebuildIndex" Id="{c8924d9e-dfa9-49f6-8af7-39afa616fca7}" FolderPath="Service members\">
       <Declaration><![CDATA[(*!
 <summary>Rebuilds bucket chains from cached hashes after entry relocation or capacity changes.</summary>
 <description>
@@ -699,7 +714,7 @@ access payload or invoke callbacks. This only rebuilds links; it does not recomp
 equality-relevant payload or address changes.
 </description>
 *)
-METHOD PRIVATE RebuildIndex
+METHOD PRIVATE rebuildIndex
 VAR
 	index : DINT;
 	bucketIndex : DINT;
@@ -710,6 +725,7 @@ END_VAR]]></Declaration>
 END_IF
 
 Tc2_System.MEMSET(destAddr := _Buckets, fillByte := 0, n := TO_UDINT(XSIZEOF(DINT) * TO_ULINT(Capacity)));
+
 FOR index := 0 TO _Length - 1 DO
 	bucketIndex := TO_DINT(_Hashes[index] MOD TO_UDINT(Capacity));
 	_NextIndices[index] := _Buckets[bucketIndex];
@@ -767,7 +783,7 @@ END_IF
 _Array[_Length - 1].Key.Reset();
 _Array[_Length - 1].Value.Reset();
 _Length := _Length - 1;
-RebuildIndex();
+rebuildIndex();
 
 removedPair.Key.Release();
 removedPair.Value.Release();]]></ST>
@@ -799,6 +815,9 @@ accepting ownership. Cleanup does not release the original arguments. Exceptions
 terminal allocation state is not cleared. The returned index is meaningful only on success. Descendants cannot
 override this storage operation; capacity, indexing and disposal remain governed by this collection
 implementation.
+The original failure is captured before cleanup so nested cleanup handling cannot replace its payload.
+A static native wrapper is cloned before cleanup; failure to capture still attempts prepared-copy disposal.
+Terminal allocation failure takes precedence and no exception clone is allocated after its latch is set.
 </description>
 *)
 //!<param name="key">Source key storage, borrowed during copying.</param>
@@ -817,6 +836,7 @@ VAR_OUTPUT
 END_VAR
 VAR
 	exceptionCode : __SYSTEM.ExceptionCode;
+	caughtException : TOF_Core.IException;
 	genericKeyValue : TOF_Core.GENERIC_VALUE;
 	genericValueValue : TOF_Core.GENERIC_VALUE;
 END_VAR]]></Declaration>
@@ -835,16 +855,38 @@ END_VAR]]></Declaration>
 
 	SetCopy := SetGeneric(key := genericKeyValue, value := genericValueValue, index => index);
 __CATCH(exceptionCode)
-	genericKeyValue.Release();
-	genericValueValue.Release();
-
-	TOF_Core.ExceptionManager.ReThrowLastException(
+	caughtException := TOF_Core.ExceptionManager.GetLastException(
 		exceptionCode := exceptionCode,
 		catchPointNamespaceName := NamespaceName,
 		catchPointPOUName := __POUNAME(),
 		catchPointPosition := __POSITION()
 	);
-__ENDTRY]]></ST>
+__ENDTRY
+
+IF caughtException <> 0 THEN
+	__TRY
+		TOF_Core.DynamicMemoryManager.RaiseIfAllocationFailed();
+
+		IF NOT caughtException.IsDynamicInstance THEN
+			__QUERYINTERFACE(caughtException.Clone(), caughtException);
+		END_IF
+	__CATCH(exceptionCode)
+		genericKeyValue.Release();
+		genericValueValue.Release();
+
+		TOF_Core.ExceptionManager.ReThrowLastException(
+			exceptionCode := exceptionCode,
+			catchPointNamespaceName := NamespaceName,
+			catchPointPOUName := __POUNAME(),
+			catchPointPosition := __POSITION()
+		);
+	__ENDTRY
+
+	genericKeyValue.Release();
+	genericValueValue.Release();
+
+	TOF_Core.ExceptionManager.Throw(exception := caughtException);
+END_IF]]></ST>
       </Implementation>
     </Method>
     <Method Name="SetGeneric" Id="{94cffa05-38c9-49b3-9002-78aa4f07bd4c}">
@@ -1023,6 +1065,8 @@ owned argument after release. A successful output is a borrowed descriptor copy;
 transfer disposal rights to the caller. Stored payload must not be released through the output. Descendants
 cannot override this storage operation; capacity, indexing and disposal remain governed by this collection
 implementation.
+After nested calls and requested cleanup, a fatal allocation state forces the reported outcome to failure.
+This does not roll back completed removal or reset the application-wide fatal latch.
 </description>
 *)
 METHOD FINAL TryGetValueByGenericKey : BOOL
@@ -1053,6 +1097,10 @@ IF releaseKey THEN
 	__CATCH
 		TryGetValueByGenericKey := FALSE;
 	__ENDTRY
+END_IF
+
+IF TOF_Core.DynamicMemoryManager.HasAllocationFailed THEN
+	TryGetValueByGenericKey := FALSE;
 END_IF]]></ST>
       </Implementation>
     </Method>
@@ -1068,6 +1116,8 @@ caller keeps the query storage alive for the call. A successful output is a borr
 IsMemoryOwner does not transfer disposal rights to the caller. Stored payload must not be released through the
 output. Descendants cannot override this storage operation; capacity, indexing and disposal remain governed by
 this collection implementation.
+After nested calls and requested cleanup, a fatal allocation state forces the reported outcome to failure.
+This does not roll back completed removal or reset the application-wide fatal latch.
 </description>
 *)
 //!<param name="keyIsObject">Explicitly interprets the raw argument as a live Object instance.</param>
@@ -1098,7 +1148,11 @@ END_VAR]]></Declaration>
 	END_IF
 __CATCH
 	TryGetValueByKey := FALSE;
-__ENDTRY]]></ST>
+__ENDTRY
+
+IF TOF_Core.DynamicMemoryManager.HasAllocationFailed THEN
+	TryGetValueByKey := FALSE;
+END_IF]]></ST>
       </Implementation>
     </Method>
     <Method Name="TryRemoveByGenericKey" Id="{10b34f7a-b8be-47f1-a4a7-3163f5be0125}">
@@ -1113,6 +1167,8 @@ TRUE, attempts to release the supplied generic argument after lookup/removal eve
 have disposal rights and must not reuse aliases of an owned argument after release. Descendants cannot
 override this storage operation; capacity, indexing and disposal remain governed by this collection
 implementation.
+After nested calls and requested cleanup, a fatal allocation state forces the reported outcome to failure.
+This does not roll back completed removal or reset the application-wide fatal latch.
 </description>
 *)
 METHOD FINAL TryRemoveByGenericKey : IDictionary
@@ -1145,6 +1201,10 @@ IF releaseKey THEN
 	__CATCH
 		removed := FALSE;
 	__ENDTRY
+END_IF
+
+IF TOF_Core.DynamicMemoryManager.HasAllocationFailed THEN
+	removed := FALSE;
 END_IF]]></ST>
       </Implementation>
     </Method>
@@ -1160,6 +1220,8 @@ transfer. keyIsObject = TRUE requires a live Object function-block instance, not
 variable. FALSE uses ordinary runtime type mapping. The caller keeps the query storage alive for the call.
 Descendants cannot override this storage operation; capacity, indexing and disposal remain governed by this
 collection implementation.
+After nested calls and requested cleanup, a fatal allocation state forces the reported outcome to failure.
+This does not roll back completed removal or reset the application-wide fatal latch.
 </description>
 *)
 //!<param name="keyIsObject">Explicitly interprets the raw argument as a live Object instance.</param>
@@ -1192,7 +1254,11 @@ __TRY
 	END_IF
 __CATCH
 	removed := FALSE;
-__ENDTRY]]></ST>
+__ENDTRY
+
+IF TOF_Core.DynamicMemoryManager.HasAllocationFailed THEN
+	removed := FALSE;
+END_IF]]></ST>
       </Implementation>
     </Method>
     <Property Name="ValueValidator" Id="{831db6d3-dee8-4415-ad30-71b123ae4207}">

@@ -1,0 +1,155 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="WorkflowContractActivity" Id="{fc48c35f-b3fe-48fc-a3b8-9fa46130ab61}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+SPDX-FileCopyrightText: © 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+SPDX-License-Identifier: MIT
+License: https://opensource.org/license/mit
+*)
+
+(*!
+<summary>Provides controlled execution and formatter failures for workflow contract tests.</summary>
+<description>
+Persistent test instances own their borrowed configuration and exception template. No hardware effects or
+terminal allocation injection are performed. Configure flags before starting; all observations are task-local.
+</description>
+*)
+
+{attribute 'no_explicit_call' := 'do not call this function block directly'}
+{attribute 'no_assign'}
+FUNCTION_BLOCK WorkflowContractActivity EXTENDS TOF_Workflow.Activity
+VAR_INPUT
+	//! <summary>Raises an ordinary work exception on every running call while enabled.</summary>
+	throwOrdinaryFailure : BOOL;
+	//! <summary>Raises a concrete exception whose message formatter itself raises.</summary>
+	throwMessageFailure : BOOL;
+	//! <summary>Completes running immediately when no injected failure is enabled.</summary>
+	completeRunning : BOOL;
+END_VAR
+VAR_OUTPUT
+	//! <summary>Number of fresh or resumed start callbacks.</summary>
+	startCount : DINT;
+	//! <summary>Number of running callbacks, including entry calls.</summary>
+	runningCount : DINT;
+	//! <summary>Number of stopping callbacks.</summary>
+	stopCount : DINT;
+END_VAR
+VAR_STAT
+	//! <summary>Initialized static metadata available during inherited base initialization.</summary>
+	_ClassName : STRING := __POUNAME();
+END_VAR
+VAR
+	_MessageFailure : ThrowingGetMessageException;
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[]]></ST>
+    </Implementation>
+    <Property Name="ClassName" Id="{f324e79c-1990-48c9-baa5-591f4b13816e}">
+      <Declaration><![CDATA[(*!
+<summary>Returns the initialized static name of this concrete fixture.</summary>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{c772a3d1-61fa-48f7-8e2d-80699270d09e}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ClassName REF= _ClassName;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="NamespaceName" Id="{1316c653-00dc-4db5-a8d4-854599c3b4db}">
+      <Declaration><![CDATA[(*!
+<summary>Borrows the test project namespace without changing it.</summary>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{ebf46ea7-60ac-4aca-a424-bf25c22d5a7b}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[NamespaceName REF= CurrentNamespace.Name;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="SelfSize" Id="{1ecd69e7-5167-4854-9308-7818ee34a490}">
+      <Declaration><![CDATA[(*!
+<summary>Reports the size of this concrete fixture in bytes.</summary>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY SelfSize : ULINT]]></Declaration>
+      <Get Name="Get" Id="{fcb80205-decd-46c4-9d6a-69cdf69f1579}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[SelfSize := XSIZEOF(THIS^);]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="OnRunning" Id="{b0d50bd3-956d-412d-91cd-614ac6032d67}">
+      <Declaration><![CDATA[(*!
+<summary>Counts execution and produces the selected ordinary result or exception.</summary>
+<param name="startRunning">Marks a fresh start for the entry counter.</param>
+<param name="startResuming">Marks a resumed start for the entry counter.</param>
+<param name="haltReason">Unused because this probe does not halt.</param>
+*)
+METHOD PROTECTED OnRunning : TOF_Workflow.ACTIVITY_RUNNING_STATE
+VAR_INPUT
+	startRunning : BOOL;
+	startResuming : BOOL;
+END_VAR
+VAR_OUTPUT
+	haltReason : WSTRING(255);
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[runningCount := runningCount + 1;
+
+IF startRunning OR_ELSE startResuming THEN
+	startCount := startCount + 1;
+END_IF
+
+IF throwMessageFailure THEN
+	_MessageFailure.Throw(
+		sourceNamespaceName := NamespaceName,
+		sourceClassName := ClassName,
+		sourcePOUName := __POUNAME(),
+		sourcePosition := __POSITION(),
+		message := "Controlled original workflow failure"
+	);
+END_IF
+
+IF throwOrdinaryFailure THEN
+	TOF_Core.Exceptions.ThrowStandard(
+		sourceNamespaceName := NamespaceName,
+		sourceClassName := ClassName,
+		sourcePOUName := __POUNAME(),
+		sourcePosition := __POSITION(),
+		message := "Controlled workflow work failure"
+	);
+END_IF
+
+IF completeRunning THEN
+	OnRunning := TOF_Workflow.ACTIVITY_RUNNING_STATE.WORK_COMPLETED;
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="OnStopping" Id="{4142d322-abe0-496d-8c39-359c8a0bb792}">
+      <Declaration><![CDATA[(*!
+<summary>Counts a cooperative stopping step and finishes it immediately.</summary>
+<param name="startCancelling">Unused cancellation-entry marker; stopping is immediate.</param>
+<param name="startSuspending">Unused suspension-entry marker; stopping is immediate.</param>
+<param name="haltReason">Unused because this probe does not halt.</param>
+*)
+METHOD PROTECTED OnStopping : TOF_Workflow.ACTIVITY_STOPPING_STATE
+VAR_INPUT
+	startCancelling : BOOL;
+	startSuspending : BOOL;
+END_VAR
+VAR_OUTPUT
+	haltReason : WSTRING(255);
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[stopCount := stopCount + 1;
+
+OnStopping := TOF_Workflow.ACTIVITY_STOPPING_STATE.WORK_STOPPED;]]></ST>
+      </Implementation>
+    </Method>
+  </POU>
+</TcPlcObject>

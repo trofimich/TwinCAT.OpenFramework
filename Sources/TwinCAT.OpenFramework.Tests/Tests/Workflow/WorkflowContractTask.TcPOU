@@ -1,0 +1,149 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="WorkflowContractTask" Id="{fa91e07b-b98d-4b6c-92b9-1726520a3cac}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+SPDX-FileCopyrightText: © 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+SPDX-License-Identifier: MIT
+License: https://opensource.org/license/mit
+*)
+
+(*!
+<summary>Provides controlled processing and delayed stopping for the workflow task adapter.</summary>
+<description>
+The test owns this task and any injected resource manager. Cancel with an injected manager only after
+acquisition completes. No native I/O or terminal allocation injection is performed. Observations are task-local.
+</description>
+*)
+
+{attribute 'no_explicit_call' := 'do not call this function block directly'}
+{attribute 'no_assign'}
+FUNCTION_BLOCK WorkflowContractTask EXTENDS TOF_Tasks.Task
+VAR_INPUT
+	//! <summary>Result returned by each processing callback.</summary>
+	processingResult : TOF_Tasks.TASK_PROCESSING_STATE;
+	//! <summary>Number of stopping callbacks required before resource release.</summary>
+	requiredStopCalls : DINT := 1;
+	//! <summary>Optional persistent synthetic resource manager; stable until task stopping completes.</summary>
+	resource : TOF_Core.IResourceManager;
+END_VAR
+VAR_OUTPUT
+	//! <summary>Number of processing callbacks since reset.</summary>
+	processingCount : DINT;
+	//! <summary>Number of stopping callbacks since reset.</summary>
+	stopCount : DINT;
+END_VAR
+VAR_STAT
+	//! <summary>Initialized static metadata available during inherited base initialization.</summary>
+	_ClassName : STRING := __POUNAME();
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[]]></ST>
+    </Implementation>
+    <Property Name="ClassName" Id="{847b111e-0e3a-457b-a6a6-e4a01735bed7}">
+      <Declaration><![CDATA[(*!
+<summary>Returns the initialized static name of this concrete fixture.</summary>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{94fe089b-d0ed-47f1-aa0d-fd10e27b343a}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ClassName REF= _ClassName;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="NamespaceName" Id="{89825ac6-ef3a-4a08-91bb-9f1377836c0e}">
+      <Declaration><![CDATA[(*!
+<summary>Borrows the test project namespace without changing it.</summary>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{0b38b6f5-f7c1-4aaa-976b-e8d7376266bb}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[NamespaceName REF= CurrentNamespace.Name;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="SelfSize" Id="{aa962378-b51d-42fa-afa3-f156cb40724a}">
+      <Declaration><![CDATA[(*!
+<summary>Reports the size of this concrete fixture in bytes.</summary>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY SelfSize : ULINT]]></Declaration>
+      <Get Name="Get" Id="{2ceb11fa-a80a-4456-85cf-9cdc58be2b2c}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[SelfSize := XSIZEOF(THIS^);]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="ResourceManager" Id="{33c85b69-99e6-4ef9-bea1-21d07ee5d07c}">
+      <Declaration><![CDATA[(*!
+<summary>Returns the optional synthetic resource borrowed by this test task.</summary>
+*)
+PROPERTY ResourceManager : TOF_Core.IResourceManager]]></Declaration>
+      <Get Name="Get" Id="{113c53ff-fbb5-4fa7-b8d9-cf343ece447e}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ResourceManager := resource;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="OnRunning" Id="{c4b59eba-6d76-4917-b188-98a85f4f2382}">
+      <Declaration><![CDATA[(*!
+<summary>Records a processing callback and returns its configured outcome.</summary>
+<param name="processingState">Receives the configured synthetic outcome.</param>
+<param name="stopReasonMessage">Receives the synthetic failure or internal-abort diagnostic.</param>
+*)
+METHOD PROTECTED OnRunning
+VAR_OUTPUT
+	processingState : TOF_Tasks.TASK_PROCESSING_STATE;
+END_VAR
+VAR_IN_OUT
+	stopReasonMessage : TOF_Core.ERROR_MESSAGE;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[processingCount := processingCount + 1;
+processingState := processingResult;
+
+IF processingResult = TOF_Tasks.TASK_PROCESSING_STATE.ERROR THEN
+	stopReasonMessage := "Controlled task processing failure";
+ELSIF processingResult = TOF_Tasks.TASK_PROCESSING_STATE.ABORTED THEN
+	stopReasonMessage := "Controlled task internal abort";
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="OnStopping" Id="{3df800bd-d02a-483f-a27c-011b4520aa01}">
+      <Declaration><![CDATA[(*!
+<summary>Waits for the configured number of stopping callbacks without repeating work.</summary>
+<param name="readyToRelease">Combines inherited readiness with the configured synthetic stopping delay.</param>
+*)
+METHOD PROTECTED OnStopping
+VAR_OUTPUT
+	readyToRelease : BOOL;
+END_VAR
+VAR
+	baseReady : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[SUPER^.OnStopping(readyToRelease => baseReady);
+
+stopCount := stopCount + 1;
+readyToRelease := baseReady AND_THEN stopCount >= requiredStopCalls;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="OnReset" Id="{ef0f6ab4-d209-4495-b284-f88cd4589aa3}">
+      <Declaration><![CDATA[(*!
+<summary>Clears per-run counters while preserving the configured failure and resource inputs.</summary>
+*)
+METHOD PROTECTED OnReset]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[SUPER^.OnReset();
+
+processingCount := 0;
+stopCount := 0;]]></ST>
+      </Implementation>
+    </Method>
+  </POU>
+</TcPlcObject>

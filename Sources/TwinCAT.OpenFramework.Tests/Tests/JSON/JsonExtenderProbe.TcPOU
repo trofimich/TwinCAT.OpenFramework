@@ -1,0 +1,172 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="JsonExtenderProbe" Id="{b3f09c3a-4678-47d4-b114-4cdf52d21c53}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+SPDX-FileCopyrightText: © 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+SPDX-License-Identifier: MIT
+License: https://opensource.org/license/mit
+*)
+
+(*!
+<summary>Wraps the structure in an array and injects recoverable callback exceptions.</summary>
+<description>
+Used only by the owner task of the serializer under test. Does not retain the borrowed writer or raise
+terminal allocation failures; such failures require isolated owner verification.
+</description>
+*)
+
+FUNCTION_BLOCK JsonExtenderProbe EXTENDS TOF_Core.Object IMPLEMENTS TOF_JSON.IJsonExtender
+VAR_INPUT
+	//! <summary>Raises a framework exception before writing the array prefix.</summary>
+	ThrowAtStart : BOOL;
+	//! <summary>Raises a framework exception before writing the array suffix.</summary>
+	ThrowAtFinish : BOOL;
+END_VAR
+VAR_OUTPUT
+	//! <summary>Observed start hooks since Reset.</summary>
+	StartCount : UDINT;
+	//! <summary>Observed finish hooks since Reset.</summary>
+	FinishCount : UDINT;
+END_VAR
+VAR_STAT
+	_ClassName : STRING := __POUNAME();
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[]]></ST>
+    </Implementation>
+    <Property Name="ClassName" Id="{e563566d-8b1f-4e53-8cec-a81022a9b9d3}">
+      <Declaration><![CDATA[(*!
+<summary>Borrows the immutable fixture class name for its lifetime.</summary>
+*)
+PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{dd0b8bb4-b435-4c99-aeaa-a4a611e55b26}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ClassName REF= _ClassName;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="NamespaceName" Id="{1a9eab57-f736-4485-8071-746a11c76f39}">
+      <Declaration><![CDATA[(*!
+<summary>Borrows read-only compiler-initialized test namespace storage.</summary>
+*)
+PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{79ddfe54-3685-4b02-8fea-db9efcb8e28c}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[NamespaceName REF= CurrentNamespace.Name;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="SelfSize" Id="{59396a6e-a3b7-4d5c-a931-f0b01fc52b5c}">
+      <Declaration><![CDATA[(*!
+<summary>Reports the complete fixture instance size in bytes.</summary>
+*)
+PROPERTY SelfSize : ULINT]]></Declaration>
+      <Get Name="Get" Id="{cc26d7c6-417c-4548-af09-ede34626531c}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[SelfSize := XSIZEOF(THIS^);]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="Reset" Id="{ff503b71-4b2c-4055-b1d3-79ff03a1f90a}">
+      <Declaration><![CDATA[(*!
+<summary>Clears callback observations and disables both exception injections.</summary>
+*)
+METHOD Reset]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[StartCount := TOF_Core.UnsignedInt32.ZERO;
+FinishCount := TOF_Core.UnsignedInt32.ZERO;
+ThrowAtStart := FALSE;
+ThrowAtFinish := FALSE;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="ExtendAtStart" Id="{405fb0d2-8e60-4e4a-a5d3-9f9ee534af0a}">
+      <Declaration><![CDATA[(*!
+<summary>Counts this hook and writes its array boundary unless configured to raise.</summary>
+<description>
+Borrows the writer only for this synchronous call and retains no reference. Native failures raise a
+framework exception so the serializer can exercise its throwing or Try boundary.
+</description>
+*)
+//! <param name="jsonSaxWriter">Borrowed writer owned by the active serializer.</param>
+METHOD ExtendAtStart
+VAR_IN_OUT CONSTANT
+	jsonSaxWriter : Tc3_JsonXml.FB_JsonSaxWriter;
+END_VAR
+VAR
+	errorCode : HRESULT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[StartCount := StartCount + 1;
+
+IF ThrowAtStart THEN
+	TOF_Core.Exceptions.ThrowStandard(
+		sourceNamespaceName := NamespaceName,
+		sourceClassName := ClassName,
+		sourcePOUName := __POUNAME(),
+		sourcePosition := __POSITION(),
+		message := "JSON extender injected failure"
+	);
+END_IF
+
+errorCode := jsonSaxWriter.StartArray();
+
+IF errorCode <> TOF_Core.SignedInt32.ZERO THEN
+	TOF_Core.Exceptions.ThrowStandard(
+		sourceNamespaceName := NamespaceName,
+		sourceClassName := ClassName,
+		sourcePOUName := __POUNAME(),
+		sourcePosition := __POSITION(),
+		message := "JSON extender could not write its array boundary",
+		errorCode := TO_UDINT(errorCode)
+	);
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="ExtendAtFinish" Id="{05c77897-7b7e-4718-b4b1-e6506c123f02}">
+      <Declaration><![CDATA[(*!
+<summary>Counts this hook and writes its array boundary unless configured to raise.</summary>
+<description>
+Borrows the writer only for this synchronous call and retains no reference. Native failures raise a
+framework exception so the serializer can exercise its throwing or Try boundary.
+</description>
+*)
+//! <param name="jsonSaxWriter">Borrowed writer owned by the active serializer.</param>
+METHOD ExtendAtFinish
+VAR_IN_OUT CONSTANT
+	jsonSaxWriter : Tc3_JsonXml.FB_JsonSaxWriter;
+END_VAR
+VAR
+	errorCode : HRESULT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[FinishCount := FinishCount + 1;
+
+IF ThrowAtFinish THEN
+	TOF_Core.Exceptions.ThrowStandard(
+		sourceNamespaceName := NamespaceName,
+		sourceClassName := ClassName,
+		sourcePOUName := __POUNAME(),
+		sourcePosition := __POSITION(),
+		message := "JSON extender injected failure"
+	);
+END_IF
+
+errorCode := jsonSaxWriter.EndArray();
+
+IF errorCode <> TOF_Core.SignedInt32.ZERO THEN
+	TOF_Core.Exceptions.ThrowStandard(
+		sourceNamespaceName := NamespaceName,
+		sourceClassName := ClassName,
+		sourcePOUName := __POUNAME(),
+		sourcePosition := __POSITION(),
+		message := "JSON extender could not write its array boundary",
+		errorCode := TO_UDINT(errorCode)
+	);
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+  </POU>
+</TcPlcObject>

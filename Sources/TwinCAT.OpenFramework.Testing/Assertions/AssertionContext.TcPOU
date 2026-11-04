@@ -1,0 +1,564 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="AssertionContext" Id="{bcb06298-6d98-429b-b1e9-46eae3e46110}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+SPDX-FileCopyrightText: © 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+SPDX-License-Identifier: MIT
+License: https://opensource.org/license/mit
+*)
+
+(*!
+<summary>Provides a fluent assertion builder for polymorphic value and reference assertions.</summary>
+<description>
+Borrows actual storage for one immediate assertion chain on one task. Use inside a running test callback.
+ANY operands must be variables; use the typed That methods for literals, expressions and property results.
+The copied message prefixes every failure in this chain until Prepare starts another chain.
+The test case retains the first failure without interrupting the callback.
+Equality uses GENERIC_VALUE.Equals: integer widths/signedness compare by value; floating values use canonical
+equality; unlike type categories remain distinct. USER_DEFINED/FB values compare stored bytes, including
+padding and aliases, not Object.Equals. Use ThatBool on an explicit Equals result for object equality.
+Pointer equality compares pointer values, not pointed-to contents. Public generic comparisons are exact;
+only the independent typed REAL/LREAL contexts expose absolute tolerance arguments.
+Unsupported conversions may raise framework exceptions. No cross-task use or same-instance reentry is supported.
+</description>
+*)
+
+{attribute 'no_explicit_call' := 'do not call this function block directly'}
+FUNCTION_BLOCK AssertionContext EXTENDS TOF_Core.Object
+VAR_STAT
+	{attribute 'hide'} 
+	_ClassName : STRING := __POUNAME();
+END_VAR
+VAR
+	_TestCase : ITestCase;
+	_Actual : TOF_Core.GENERIC_VALUE;	
+	_Message : WSTRING(255);
+END_VAR
+]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[]]></ST>
+    </Implementation>
+    <Folder Name="Service methods" Id="{8ea0add4-764e-4c6e-8afb-9a66272ece8b}" />
+    <Property Name="ClassName" Id="{3fa44e30-7fe0-4330-b62a-2538a33ff738}">
+      <Declaration><![CDATA[//! <summary>Provides assertion-context metadata.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{bb77e9de-b4a9-49ae-8f3c-f50f1fe7f31f}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ClassName REF= _ClassName;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="fail" Id="{f789350b-1cd7-4deb-aafa-b9c53560e7df}" FolderPath="Service methods\">
+      <Declaration><![CDATA[(*!
+<summary>Reports to the bound test case with the current chain message.</summary>
+<description>
+A missing receiver raises DataMemberNotSpecifiedException. Shared reporting retains no context state;
+receiver exceptions propagate to the enclosing test callback handler.
+</description>
+<param name="defaultMessage">Diagnostic borrowed only during reporting.</param>
+*)
+METHOD PRIVATE fail
+VAR_IN_OUT CONSTANT
+	defaultMessage : TOF_Core.ERROR_MESSAGE;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[TestServices.ReportAssertionFailure(
+	testCase := _TestCase,
+	message := _Message,
+	sourceClassName := ClassName,
+	defaultMessage := defaultMessage
+);]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="IsFalse" Id="{2e19a2aa-409a-4d0e-8a29-9eb7efbdb64e}">
+      <Declaration><![CDATA[(*!
+<summary>Asserts that the actual value is a boolean equal to FALSE.</summary>
+<description>
+A non-Boolean operand or TRUE records failure; the chain message remains available.
+</description>
+*)
+METHOD FINAL IsFalse : REFERENCE TO AssertionContext
+VAR
+	diagnostic : TOF_Core.ERROR_MESSAGE;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF _Actual.TypeClass <> TOF_Core.GENERIC_TYPE_CLASS.BOOLEAN OR_ELSE _Actual.AsBool() THEN
+	diagnostic := TOF_Core.WideStrings.Concat255(
+		"Expected: FALSE, but was: ",
+		_Actual.AsWString255()
+	);
+	fail(defaultMessage := diagnostic);
+END_IF
+
+IsFalse REF= THIS^;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="IsGreaterThan" Id="{1da8b9cf-073f-4181-8d06-c3a9aa1b768a}">
+      <Declaration><![CDATA[(*!
+<summary>Asserts that the actual value is strictly greater than the expected variable.</summary>
+<description>
+Uses Core ordering without tolerance. Comparison exceptions record an assertion failure.
+The chain message remains available to subsequent assertions.
+</description>
+<param name="expected">Live variable to compare; ANY does not accept literals or expression results.</param>
+*)
+METHOD FINAL IsGreaterThan : REFERENCE TO AssertionContext
+VAR_INPUT
+	expected : ANY;
+END_VAR
+VAR
+	diagnostic : TOF_Core.ERROR_MESSAGE;
+	expectedGeneric : TOF_Core.GENERIC_VALUE;
+	comparison : TOF_Core.COMPARISON_RESULT;
+	isOrdered : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[expectedGeneric := TOF_Core.GenericValueFactory.FromAny(
+	value := expected,
+	isObject := FALSE,
+	memoryManagementBehavior := TOF_Core.GENERIC_MEMORY_MANAGEMENT_BEHAVIOR.STORE_ORIGINAL_REFERENCE_AND_NOT_OWNS_MEMORY
+);
+
+__TRY
+	comparison := _Actual.CompareTo(otherValue := expectedGeneric);
+	isOrdered := (comparison = TOF_Core.COMPARISON_RESULT.FIRST_GREATER_THAN_SECOND);
+__CATCH
+	isOrdered := FALSE;
+__ENDTRY
+
+IF NOT isOrdered THEN
+	diagnostic := TOF_Core.WideStrings.Concat255(
+		"Expected value > ",
+		expectedGeneric.AsWString255(),
+		", but was: ",
+		_Actual.AsWString255()
+	);
+	fail(defaultMessage := diagnostic);
+END_IF
+
+IsGreaterThan REF= THIS^;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="IsGreaterThanOrEquals" Id="{00d7928e-285f-4756-81fe-a4c0aec5b695}">
+      <Declaration><![CDATA[(*!
+<summary>Asserts that the actual value meets the inclusive lower boundary.</summary>
+<description>
+Uses Core ordering without tolerance. Comparison exceptions record an assertion failure.
+The chain message remains available to subsequent assertions.
+</description>
+<param name="expected">Live variable to compare; ANY does not accept literals or expression results.</param>
+*)
+METHOD FINAL IsGreaterThanOrEquals : REFERENCE TO AssertionContext
+VAR_INPUT
+	expected : ANY;
+END_VAR
+VAR
+	diagnostic : TOF_Core.ERROR_MESSAGE;
+	expectedGeneric : TOF_Core.GENERIC_VALUE;
+	comparison : TOF_Core.COMPARISON_RESULT;
+	isOrdered : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[expectedGeneric := TOF_Core.GenericValueFactory.FromAny(
+	value := expected,
+	isObject := FALSE,
+	memoryManagementBehavior := TOF_Core.GENERIC_MEMORY_MANAGEMENT_BEHAVIOR.STORE_ORIGINAL_REFERENCE_AND_NOT_OWNS_MEMORY
+);
+
+__TRY
+	comparison := _Actual.CompareTo(otherValue := expectedGeneric);
+	isOrdered := (comparison = TOF_Core.COMPARISON_RESULT.FIRST_GREATER_THAN_SECOND)
+		OR_ELSE (comparison = TOF_Core.COMPARISON_RESULT.FIRST_EQUAL_TO_SECOND);
+__CATCH
+	isOrdered := FALSE;
+__ENDTRY
+
+IF NOT isOrdered THEN
+	diagnostic := TOF_Core.WideStrings.Concat255(
+		"Expected value >= ",
+		expectedGeneric.AsWString255(),
+		", but was: ",
+		_Actual.AsWString255()
+	);
+	fail(defaultMessage := diagnostic);
+END_IF
+
+IsGreaterThanOrEquals REF= THIS^;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="IsLessThan" Id="{4d597cbf-bbbb-4229-8302-c1c071e6d868}">
+      <Declaration><![CDATA[(*!
+<summary>Asserts that the actual value is strictly less than the expected variable.</summary>
+<description>
+Uses Core ordering without tolerance. Comparison exceptions record an assertion failure.
+The chain message remains available to subsequent assertions.
+</description>
+<param name="expected">Live variable to compare; ANY does not accept literals or expression results.</param>
+*)
+METHOD FINAL IsLessThan : REFERENCE TO AssertionContext
+VAR_INPUT
+	expected : ANY;
+END_VAR
+VAR
+	diagnostic : TOF_Core.ERROR_MESSAGE;
+	expectedGeneric : TOF_Core.GENERIC_VALUE;
+	comparison : TOF_Core.COMPARISON_RESULT;
+	isOrdered : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[expectedGeneric := TOF_Core.GenericValueFactory.FromAny(
+	value := expected,
+	isObject := FALSE,
+	memoryManagementBehavior := TOF_Core.GENERIC_MEMORY_MANAGEMENT_BEHAVIOR.STORE_ORIGINAL_REFERENCE_AND_NOT_OWNS_MEMORY
+);
+
+__TRY
+	comparison := _Actual.CompareTo(otherValue := expectedGeneric);
+	isOrdered := (comparison = TOF_Core.COMPARISON_RESULT.FIRST_LESS_THAN_SECOND);
+__CATCH
+	isOrdered := FALSE;
+__ENDTRY
+
+IF NOT isOrdered THEN
+	diagnostic := TOF_Core.WideStrings.Concat255(
+		"Expected value < ",
+		expectedGeneric.AsWString255(),
+		", but was: ",
+		_Actual.AsWString255()
+	);
+	fail(defaultMessage := diagnostic);
+END_IF
+
+IsLessThan REF= THIS^;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="IsLessThanOrEquals" Id="{55c4e5f5-304b-49bf-b065-050ab6fa3d56}">
+      <Declaration><![CDATA[(*!
+<summary>Asserts that the actual value meets the inclusive upper boundary.</summary>
+<description>
+Uses Core ordering without tolerance. Comparison exceptions record an assertion failure.
+The chain message remains available to subsequent assertions.
+</description>
+<param name="expected">Live variable to compare; ANY does not accept literals or expression results.</param>
+*)
+METHOD FINAL IsLessThanOrEquals : REFERENCE TO AssertionContext
+VAR_INPUT
+	expected : ANY;
+END_VAR
+VAR
+	diagnostic : TOF_Core.ERROR_MESSAGE;
+	expectedGeneric : TOF_Core.GENERIC_VALUE;
+	comparison : TOF_Core.COMPARISON_RESULT;
+	isOrdered : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[expectedGeneric := TOF_Core.GenericValueFactory.FromAny(
+	value := expected,
+	isObject := FALSE,
+	memoryManagementBehavior := TOF_Core.GENERIC_MEMORY_MANAGEMENT_BEHAVIOR.STORE_ORIGINAL_REFERENCE_AND_NOT_OWNS_MEMORY
+);
+
+__TRY
+	comparison := _Actual.CompareTo(otherValue := expectedGeneric);
+	isOrdered := (comparison = TOF_Core.COMPARISON_RESULT.FIRST_LESS_THAN_SECOND)
+		OR_ELSE (comparison = TOF_Core.COMPARISON_RESULT.FIRST_EQUAL_TO_SECOND);
+__CATCH
+	isOrdered := FALSE;
+__ENDTRY
+
+IF NOT isOrdered THEN
+	diagnostic := TOF_Core.WideStrings.Concat255(
+		"Expected value <= ",
+		expectedGeneric.AsWString255(),
+		", but was: ",
+		_Actual.AsWString255()
+	);
+	fail(defaultMessage := diagnostic);
+END_IF
+
+IsLessThanOrEquals REF= THIS^;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="IsNotNull" Id="{b8bc5d70-29f7-4ca4-9fc7-1557e85878a7}">
+      <Declaration><![CDATA[(*!
+<summary>Asserts that a typed pointer is non-null. For references assert __ISVALIDREF explicitly.</summary>
+<description>
+A null pointer or unsupported operand records failure; the chain message remains available.
+</description>
+*)
+METHOD FINAL IsNotNull : REFERENCE TO AssertionContext]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF isNullPointerOrReference() THEN
+	fail(defaultMessage := "Expected: non-null object/pointer, but was null (0)");
+END_IF
+
+IsNotNull REF= THIS^;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="IsNull" Id="{d30d7489-6521-4c6c-93a6-0daf1bfd2087}">
+      <Declaration><![CDATA[(*!
+<summary>Asserts that a typed pointer is null. For interfaces assert the comparison to zero explicitly.</summary>
+<description>
+A non-null pointer or unsupported operand records failure; the chain message remains available.
+</description>
+*)
+METHOD FINAL IsNull : REFERENCE TO AssertionContext]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF NOT isNullPointerOrReference() THEN
+	fail(defaultMessage := "Expected: null (0), but was non-zero address");
+END_IF
+
+IsNull REF= THIS^;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="isNullPointerOrReference" Id="{ad958555-2858-4f3c-947b-1c6948e402b4}" FolderPath="Service methods\">
+      <Declaration><![CDATA[//! <summary>Reads a typed pointer slot and records unsupported operands as assertion failures.</summary>
+METHOD PRIVATE isNullPointerOrReference : BOOL
+VAR
+	pointerValue : POINTER TO PVOID;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF _Actual.Address = 0 THEN
+	isNullPointerOrReference := TRUE;
+	RETURN;
+END_IF
+
+IF _Actual.TypeClass = TOF_Core.GENERIC_TYPE_CLASS.POINTER_TO THEN
+	pointerValue := _Actual.Address;
+	isNullPointerOrReference := (pointerValue^ = 0);
+ELSE
+	fail(defaultMessage := "Expected a typed pointer. For interfaces or references assert the explicit null predicate.");
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="IsTrue" Id="{8c123f48-1d07-4937-b4a6-5c7f3b2478a2}">
+      <Declaration><![CDATA[(*!
+<summary>Asserts that the actual value is a boolean equal to TRUE.</summary>
+<description>
+A non-Boolean operand or FALSE records failure; the chain message remains available.
+</description>
+*)
+METHOD FINAL IsTrue : REFERENCE TO AssertionContext
+VAR
+	diagnostic : TOF_Core.ERROR_MESSAGE;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF _Actual.TypeClass <> TOF_Core.GENERIC_TYPE_CLASS.BOOLEAN OR_ELSE NOT _Actual.AsBool() THEN
+	diagnostic := TOF_Core.WideStrings.Concat255(
+		"Expected: TRUE, but was: ",
+		_Actual.AsWString255()
+	);
+	fail(defaultMessage := diagnostic);
+END_IF
+
+IsTrue REF= THIS^;]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="NamespaceName" Id="{2969daad-daa5-45ed-8437-06ecdb8172eb}">
+      <Declaration><![CDATA[(*!
+<summary>Provides the library namespace used in diagnostics.</summary>
+<description>
+Borrowed read-only reference to the compiler-initialized library namespace; no ownership transfer.
+</description>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{3e7728bf-9b95-4f1c-b03d-3014c3dac934}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[NamespaceName REF= CurrentNamespace.Name;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="NotToBe" Id="{cff40ee0-12cf-4934-8b02-4417be50f0a0}">
+      <Declaration><![CDATA[(*!
+<summary>Asserts exact inequality against a borrowed expected variable.</summary>
+<description>
+Uses Core value semantics without tolerance. Comparison exceptions record failure, including
+for inequality. The message applies to every assertion in the current chain.
+</description>
+<param name="expected">Live variable to compare; ANY does not accept literals or expression results.</param>
+*)
+METHOD FINAL NotToBe : REFERENCE TO AssertionContext
+VAR_INPUT
+	expected : ANY;
+END_VAR
+VAR
+	diagnostic : TOF_Core.ERROR_MESSAGE;
+	expectedGeneric : TOF_Core.GENERIC_VALUE;
+	areEqual : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[expectedGeneric := TOF_Core.GenericValueFactory.FromAny(
+	value := expected,
+	isObject := FALSE,
+	memoryManagementBehavior := TOF_Core.GENERIC_MEMORY_MANAGEMENT_BEHAVIOR.STORE_ORIGINAL_REFERENCE_AND_NOT_OWNS_MEMORY
+);
+
+__TRY
+	areEqual := _Actual.Equals(otherValue := expectedGeneric);
+__CATCH
+	fail(defaultMessage := "The values could not be compared for equality");
+	NotToBe REF= THIS^;
+	RETURN;
+__ENDTRY
+
+IF areEqual THEN
+	diagnostic := TOF_Core.WideStrings.Concat255(
+		"Expected value not to be: ",
+		expectedGeneric.AsWString255(),
+		", but was: ",
+		_Actual.AsWString255()
+	);
+	fail(defaultMessage := diagnostic);
+END_IF
+
+NotToBe REF= THIS^;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="Prepare" Id="{2addad84-071b-4117-b546-ff5369ffbb60}" FolderPath="Service methods\">
+      <Declaration><![CDATA[(*!
+<summary>Prepares one borrowed operand and copies its chain-wide diagnostic prefix.</summary>
+<description>
+The caller keeps actual storage alive and stable until the immediate chain ends.
+Every preparation replaces the message, including an empty message.
+</description>
+<param name="testCase">Receives failures from this chain.</param>
+<param name="actual">Live operand storage borrowed without ownership transfer.</param>
+<param name="message">Copied prefix for every assertion in the chain.</param>
+*)
+METHOD INTERNAL FINAL Prepare : REFERENCE TO AssertionContext
+VAR_INPUT
+	actual : ANY;
+	testCase : ITestCase;
+END_VAR
+VAR_IN_OUT CONSTANT
+	message : WSTRING(255);
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_Actual := TOF_Core.GenericValueFactory.FromAny(
+	value := actual,
+	isObject := FALSE,
+	memoryManagementBehavior := TOF_Core.GENERIC_MEMORY_MANAGEMENT_BEHAVIOR.STORE_ORIGINAL_REFERENCE_AND_NOT_OWNS_MEMORY
+);
+_TestCase := testCase;
+_Message := message;
+
+Prepare REF= THIS^;]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="SelfSize" Id="{ea1be24d-629b-47ab-b133-954adea25c54}">
+      <Declaration><![CDATA[(*!
+<summary>Reports the byte size of this concrete instance.</summary>
+<description>
+Uses XSIZEOF on the instance. Does not include separately allocated payloads or prove that an arbitrary
+address is valid.
+</description>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY SelfSize : ULINT]]></Declaration>
+      <Get Name="Get" Id="{aca5abdf-0863-4b55-8c3f-87e283bf9eb6}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[SelfSize := XSIZEOF(THIS^);]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="ToBe" Id="{bf726832-ed75-4bc1-a496-ca616fbfedbf}">
+      <Declaration><![CDATA[(*!
+<summary>Asserts exact equality against a borrowed expected variable.</summary>
+<description>
+Uses Core value semantics without tolerance. Comparison exceptions record failure, including
+for inequality. The message applies to every assertion in the current chain.
+</description>
+<param name="expected">Live variable to compare; ANY does not accept literals or expression results.</param>
+*)
+METHOD FINAL ToBe : REFERENCE TO AssertionContext
+VAR_INPUT
+	expected : ANY;
+END_VAR
+VAR
+	diagnostic : TOF_Core.ERROR_MESSAGE;
+	expectedGeneric : TOF_Core.GENERIC_VALUE;
+	areEqual : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[expectedGeneric := TOF_Core.GenericValueFactory.FromAny(
+	value := expected,
+	isObject := FALSE,
+	memoryManagementBehavior := TOF_Core.GENERIC_MEMORY_MANAGEMENT_BEHAVIOR.STORE_ORIGINAL_REFERENCE_AND_NOT_OWNS_MEMORY
+);
+
+__TRY
+	areEqual := _Actual.Equals(otherValue := expectedGeneric);
+__CATCH
+	fail(defaultMessage := "The values could not be compared for equality");
+	ToBe REF= THIS^;
+	RETURN;
+__ENDTRY
+
+IF NOT areEqual THEN
+	diagnostic := TOF_Core.WideStrings.Concat255(
+		"Expected: ",
+		expectedGeneric.AsWString255(),
+		", but was: ",
+		_Actual.AsWString255()
+	);
+	fail(defaultMessage := diagnostic);
+END_IF
+
+ToBe REF= THIS^;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="ToContain" Id="{c0cfc40d-7e9d-4938-8e1c-a6696e880d36}">
+      <Declaration><![CDATA[(*!
+<summary>Asserts that the actual string contains the specified substring.</summary>
+<description>
+Borrows the actual string and searches by code unit. A missing substring or non-string operand
+records failure without interrupting the callback. The chain message remains available.
+</description>
+*)
+METHOD FINAL ToContain : REFERENCE TO AssertionContext
+VAR_INPUT
+	substring : WSTRING(255);
+END_VAR
+VAR
+	diagnostic : TOF_Core.ERROR_MESSAGE;
+	contains : BOOL;
+	asciiSubstring : STRING(255);
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF _Actual.TypeClass = TOF_Core.GENERIC_TYPE_CLASS.STRING_UTF16 THEN
+	contains := TOF_Core.WideStrings.Contains(
+		stringToSearchIn := _Actual.AsWStringReference(),
+		stringToFind := substring
+	);
+ELSIF _Actual.TypeClass = TOF_Core.GENERIC_TYPE_CLASS.STRING_ASCII THEN
+	asciiSubstring := TO_STRING(substring);
+
+	IF TO_WSTRING(asciiSubstring) = substring THEN
+		contains := TOF_Core.Strings.Contains(
+			stringToSearchIn := _Actual.AsStringReference(),
+			stringToFind := asciiSubstring
+		);
+	END_IF
+END_IF
+
+IF NOT contains THEN
+	diagnostic := TOF_Core.WideStrings.Concat255(
+		"Expected text to contain '",
+		substring,
+		"', but was: '",
+		_Actual.AsWString255(),
+		"'"
+	);
+	fail(defaultMessage := diagnostic);
+END_IF
+
+ToContain REF= THIS^;]]></ST>
+      </Implementation>
+    </Method>
+  </POU>
+</TcPlcObject>

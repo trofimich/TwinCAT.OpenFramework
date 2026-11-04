@@ -1,0 +1,718 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="GenericValueTest" Id="{835a59f5-e661-48c4-953f-7b15a011417c}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+SPDX-FileCopyrightText: © 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+SPDX-License-Identifier: MIT
+License: https://opensource.org/license/mit
+*)
+
+(*!
+<summary>Exercises generic ordering and representation conversion queries.</summary>
+<description>
+Covers runtime type names and their use in diagnostics. Uses borrowed descriptors over method-local passive
+values. No test transfers ownership or allocates payload
+storage. Scenarios run once through the existing TcUnit execution path.
+</description>
+*)
+FUNCTION_BLOCK GenericValueTest EXTENDS TcUnit.FB_TestSuite]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[LongStringOrdering();
+StringPrefixAndEncodingOrder();
+NaNOrdering();
+MixedNumericPrecision();
+SupportedConversionPairs();
+SystemTypeClassFormatting();
+TypeClassDiagnostics();]]></ST>
+    </Implementation>
+    <Method Name="LongStringOrdering" Id="{a560cdae-6aec-43cf-b96d-7cd3a3100237}">
+      <Declaration><![CDATA[(*!
+<summary>Checks ordering after a 299-character common prefix in both string encodings.</summary>
+<description>
+Includes narrow, wide and mixed operands, reverse order and equality beyond 255 characters.
+Both 300-character fixtures contain ASCII and explicitly terminate their buffers at offset 300.
+</description>
+*)
+METHOD LongStringOrdering
+VAR
+	narrowFirst : STRING(300);
+	narrowSecond : STRING(300);
+	wideFirst : WSTRING(300);
+	wideSecond : WSTRING(300);
+	wideFirstData : POINTER TO WORD;
+	wideSecondData : POINTER TO WORD;
+	first : TOF_Core.GENERIC_VALUE;
+	second : TOF_Core.GENERIC_VALUE;
+	i : INT;
+END_VAR
+VAR_INST
+	testFinished : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN
+	RETURN;
+END_IF
+
+TEST(TestName := __POUNAME());
+wideFirstData := ADR(wideFirst);
+wideSecondData := ADR(wideSecond);
+
+// SA0175: Construct and explicitly terminate 300-byte ASCII operands.
+{analysis -175}
+FOR i := 0 TO 299 DO
+	narrowFirst[i] := BYTE#16#61;
+	narrowSecond[i] := BYTE#16#61;
+	wideFirstData[i] := WORD#16#61;
+	wideSecondData[i] := WORD#16#61;
+END_FOR
+
+narrowSecond[299] := BYTE#16#62;
+narrowFirst[300] := TO_BYTE(TOF_Core.UnsignedInt8.MIN_VALUE);
+narrowSecond[300] := TO_BYTE(TOF_Core.UnsignedInt8.MIN_VALUE);
+{analysis +175}
+wideSecondData[299] := WORD#16#62;
+wideFirstData[300] := TO_WORD(TOF_Core.UnsignedInt16.MIN_VALUE);
+wideSecondData[300] := TO_WORD(TOF_Core.UnsignedInt16.MIN_VALUE);
+first := TOF_Core.GenericValueFactory.FromStringReference(value := narrowFirst);
+second := TOF_Core.GenericValueFactory.FromStringReference(value := narrowSecond);
+AssertEquals_BOOL(
+	Expected := TRUE,
+	Actual := first.CompareTo(otherValue := second) = TOF_Core.COMPARISON_RESULT.FIRST_LESS_THAN_SECOND,
+	Message := 'Narrow ordering must include characters after position 255'
+);
+
+first := TOF_Core.GenericValueFactory.FromWStringReference(value := wideFirst);
+second := TOF_Core.GenericValueFactory.FromWStringReference(value := wideSecond);
+AssertEquals_BOOL(
+	Expected := TRUE,
+	Actual := first.CompareTo(otherValue := second) = TOF_Core.COMPARISON_RESULT.FIRST_LESS_THAN_SECOND,
+	Message := 'Wide ordering must include characters after position 255'
+);
+
+first := TOF_Core.GenericValueFactory.FromStringReference(value := narrowFirst);
+AssertEquals_BOOL(
+	Expected := TRUE,
+	Actual := first.CompareTo(otherValue := second) = TOF_Core.COMPARISON_RESULT.FIRST_LESS_THAN_SECOND,
+	Message := 'Mixed ordering must include the complete narrow and wide strings'
+);
+AssertEquals_BOOL(
+	Expected := TRUE,
+	Actual := second.CompareTo(otherValue := first) = TOF_Core.COMPARISON_RESULT.FIRST_GREATER_THAN_SECOND,
+	Message := 'Reversing mixed operands must reverse the result'
+);
+
+second := TOF_Core.GenericValueFactory.FromWStringReference(value := wideFirst);
+AssertEquals_BOOL(
+	Expected := TRUE,
+	Actual := first.CompareTo(otherValue := second) = TOF_Core.COMPARISON_RESULT.FIRST_EQUAL_TO_SECOND,
+	Message := 'Equal long strings must compare equal across encodings'
+);
+
+testFinished := TRUE;
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="StringPrefixAndEncodingOrder" Id="{996a92aa-0cb9-4b18-9e7b-66df48632f79}">
+      <Declaration><![CDATA[(*!
+<summary>Checks terminators, prefixes and unsigned Latin-1 code units in mixed string comparisons.</summary>
+<description>
+Uses terminated buffers and confirms both operand directions without encoding conversions.
+The FF fixture deliberately writes one Latin-1 byte rather than a UTF-8 sequence.
+</description>
+*)
+METHOD StringPrefixAndEncodingOrder
+VAR
+	narrow : STRING(2);
+	wide : WSTRING(2);
+	wideData : POINTER TO WORD;
+	first : TOF_Core.GENERIC_VALUE;
+	second : TOF_Core.GENERIC_VALUE;
+END_VAR
+VAR_INST
+	testFinished : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN
+	RETURN;
+END_IF
+
+TEST(TestName := __POUNAME());
+first := TOF_Core.GenericValueFactory.FromStringReference(value := narrow);
+second := TOF_Core.GenericValueFactory.FromWStringReference(value := wide);
+AssertEquals_BOOL(
+	Expected := TRUE,
+	Actual := first.CompareTo(otherValue := second) = TOF_Core.COMPARISON_RESULT.FIRST_EQUAL_TO_SECOND,
+	Message := 'Empty strings must compare equal across encodings'
+);
+
+narrow := 'a';
+wide := "ab";
+first := TOF_Core.GenericValueFactory.FromStringReference(value := narrow);
+second := TOF_Core.GenericValueFactory.FromWStringReference(value := wide);
+AssertEquals_BOOL(
+	Expected := TRUE,
+	Actual := first.CompareTo(otherValue := second) = TOF_Core.COMPARISON_RESULT.FIRST_LESS_THAN_SECOND,
+	Message := 'A prefix must precede a longer string'
+);
+AssertEquals_BOOL(
+	Expected := TRUE,
+	Actual := second.CompareTo(otherValue := first) = TOF_Core.COMPARISON_RESULT.FIRST_GREATER_THAN_SECOND,
+	Message := 'A longer string must follow its prefix'
+);
+
+// SA0175: The test requires one Latin-1 FF code unit, not a UTF-8 sequence, followed by a terminator.
+{analysis -175}
+narrow[0] := BYTE#16#FF;
+narrow[1] := BYTE#0;
+{analysis +175}
+wideData := ADR(wide);
+wideData[0] := WORD#16#FF;
+wideData[1] := WORD#0;
+first := TOF_Core.GenericValueFactory.FromStringReference(value := narrow);
+second := TOF_Core.GenericValueFactory.FromWStringReference(value := wide);
+AssertEquals_BOOL(
+	Expected := TRUE,
+	Actual := first.CompareTo(otherValue := second) = TOF_Core.COMPARISON_RESULT.FIRST_EQUAL_TO_SECOND,
+	Message := 'Latin-1 FF must widen to code unit 00FF'
+);
+
+wideData[0] := WORD#16#100;
+AssertEquals_BOOL(
+	Expected := TRUE,
+	Actual := first.CompareTo(otherValue := second) = TOF_Core.COMPARISON_RESULT.FIRST_LESS_THAN_SECOND,
+	Message := 'Latin-1 FF must precede UTF-16 0100'
+);
+
+testFinished := TRUE;
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="NaNOrdering" Id="{47b406d3-1db6-48be-a458-80e0009c8d8a}">
+      <Declaration><![CDATA[(*!
+<summary>Checks that every NaN precedes non-NaN numbers and NaN encodings compare equal.</summary>
+<description>
+Constructs quiet and signaling NaN bit patterns without floating-point arithmetic. Includes both widths,
+integers, negative infinity, reverse order and ordinary finite ordering.
+</description>
+*)
+METHOD NaNOrdering
+VAR
+	narrowNaN : TOF_Core.REAL_UNION;
+	wideNaN : TOF_Core.LREAL_UNION;
+	negativeInfinity : TOF_Core.LREAL_UNION;
+	integer : LINT;
+	first : TOF_Core.GENERIC_VALUE;
+	second : TOF_Core.GENERIC_VALUE;
+END_VAR
+VAR_INST
+	testFinished : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN
+	RETURN;
+END_IF
+
+TEST(TestName := __POUNAME());
+narrowNaN.Raw := UDINT#16#7F800001;
+wideNaN.Raw := ULINT#16#FFF8000000000011;
+negativeInfinity.Raw := ULINT#16#FFF0000000000000;
+first := TOF_Core.GenericValueFactory.FromRealReference(value := narrowNaN.Value);
+second := TOF_Core.GenericValueFactory.FromLRealReference(value := wideNaN.Value);
+AssertEquals_BOOL(
+	Expected := TRUE,
+	Actual := first.CompareTo(otherValue := second) = TOF_Core.COMPARISON_RESULT.FIRST_EQUAL_TO_SECOND,
+	Message := 'Signaling REAL NaN and quiet LREAL NaN must compare equal'
+);
+AssertEquals_BOOL(
+	Expected := TRUE,
+	Actual := second.CompareTo(otherValue := first) = TOF_Core.COMPARISON_RESULT.FIRST_EQUAL_TO_SECOND,
+	Message := 'NaN equality must be symmetric across widths'
+);
+
+second := TOF_Core.GenericValueFactory.FromLRealReference(value := negativeInfinity.Value);
+AssertEquals_BOOL(
+	Expected := TRUE,
+	Actual := first.CompareTo(otherValue := second) = TOF_Core.COMPARISON_RESULT.FIRST_LESS_THAN_SECOND,
+	Message := 'NaN must precede negative infinity'
+);
+AssertEquals_BOOL(
+	Expected := TRUE,
+	Actual := second.CompareTo(otherValue := first) = TOF_Core.COMPARISON_RESULT.FIRST_GREATER_THAN_SECOND,
+	Message := 'Negative infinity must follow NaN'
+);
+
+second := TOF_Core.GenericValueFactory.FromLIntReference(value := integer);
+AssertEquals_BOOL(
+	Expected := TRUE,
+	Actual := first.CompareTo(otherValue := second) = TOF_Core.COMPARISON_RESULT.FIRST_LESS_THAN_SECOND,
+	Message := 'NaN must precede an integer'
+);
+AssertEquals_BOOL(
+	Expected := TRUE,
+	Actual := second.CompareTo(otherValue := first) = TOF_Core.COMPARISON_RESULT.FIRST_GREATER_THAN_SECOND,
+	Message := 'An integer must follow NaN'
+);
+
+wideNaN.Raw := ULINT#16#7FF0000000000001;
+first := TOF_Core.GenericValueFactory.FromLRealReference(value := wideNaN.Value);
+AssertEquals_BOOL(
+	Expected := TRUE,
+	Actual := first.CompareTo(otherValue := second) = TOF_Core.COMPARISON_RESULT.FIRST_LESS_THAN_SECOND,
+	Message := 'Signaling LREAL NaN must be classified before conversion or comparison'
+);
+
+wideNaN.Value := LREAL#1.0;
+AssertEquals_BOOL(
+	Expected := TRUE,
+	Actual := first.CompareTo(otherValue := second) = TOF_Core.COMPARISON_RESULT.FIRST_GREATER_THAN_SECOND,
+	Message := 'Ordinary finite numeric ordering must remain unchanged'
+);
+
+testFinished := TRUE;
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="SupportedConversionPairs" Id="{5292ed6c-3746-4927-91c8-9a8616158071}">
+      <Declaration><![CDATA[(*!
+<summary>Checks supported pairs without dereferencing payload and keeps range checks in the accessors.</summary>
+<description>
+Uses non-owning descriptors over passive storage for category queries and typed numeric descriptors for
+selected conversions. Query-only descriptors are never read through typed accessors. Covers former false
+positives, numeric-to-calendar false negatives, asymmetric date pairs and unsupported identity targets.
+</description>
+*)
+METHOD SupportedConversionPairs
+VAR
+	value : TOF_Core.GENERIC_VALUE;
+	queryStorage : LWORD;
+	duration : TIME := T#1MS;
+	integer : LINT := 0;
+END_VAR
+VAR_INST
+	testFinished : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN
+	RETURN;
+END_IF
+
+TEST(TestName := __POUNAME());
+value := TOF_Core.GenericValueFactory.FromParts(
+	genericTypeClass := TOF_Core.GENERIC_TYPE_CLASS.OBJECT,
+	address := ADR(queryStorage),
+	size := XSIZEOF(queryStorage),
+	memoryManagementBehavior :=
+		TOF_Core.GENERIC_MEMORY_MANAGEMENT_BEHAVIOR.STORE_ORIGINAL_REFERENCE_AND_NOT_OWNS_MEMORY
+);
+AssertEquals_BOOL(
+	Expected := FALSE,
+	Actual := value.IsConvertibleTo(targetTypeClass := TOF_Core.GENERIC_TYPE_CLASS.STRING_UTF16),
+	Message := 'OBJECT has no text accessor conversion'
+);
+
+value := TOF_Core.GenericValueFactory.FromParts(
+	genericTypeClass := TOF_Core.GENERIC_TYPE_CLASS.REAL_64,
+	address := ADR(queryStorage),
+	size := XSIZEOF(queryStorage),
+	memoryManagementBehavior :=
+		TOF_Core.GENERIC_MEMORY_MANAGEMENT_BEHAVIOR.STORE_ORIGINAL_REFERENCE_AND_NOT_OWNS_MEMORY
+);
+AssertEquals_BOOL(
+	Expected := FALSE,
+	Actual := value.IsConvertibleTo(targetTypeClass := TOF_Core.GENERIC_TYPE_CLASS.INT_32),
+	Message := 'Floating-point to integer is not an accessor conversion'
+);
+AssertEquals_BOOL(
+	Expected := TRUE,
+	Actual := value.IsConvertibleTo(targetTypeClass := TOF_Core.GENERIC_TYPE_CLASS.REAL_32),
+	Message := 'A query inspects the category without interpreting the borrowed payload'
+);
+
+value := TOF_Core.GenericValueFactory.FromParts(
+	genericTypeClass := TOF_Core.GENERIC_TYPE_CLASS.DATE_AND_TIME_64,
+	address := ADR(queryStorage),
+	size := XSIZEOF(queryStorage),
+	memoryManagementBehavior :=
+		TOF_Core.GENERIC_MEMORY_MANAGEMENT_BEHAVIOR.STORE_ORIGINAL_REFERENCE_AND_NOT_OWNS_MEMORY
+);
+AssertEquals_BOOL(
+	Expected := FALSE,
+	Actual := value.IsConvertibleTo(targetTypeClass := TOF_Core.GENERIC_TYPE_CLASS.DATE_32),
+	Message := 'AsDate does not provide an LDT input branch'
+);
+AssertEquals_BOOL(
+	Expected := TRUE,
+	Actual := value.IsConvertibleTo(targetTypeClass := TOF_Core.GENERIC_TYPE_CLASS.DATE_64),
+	Message := 'AsLDate supports LDT input'
+);
+
+value := TOF_Core.GenericValueFactory.FromParts(
+	genericTypeClass := TOF_Core.GENERIC_TYPE_CLASS.POINTER_TO,
+	address := ADR(queryStorage),
+	size := XSIZEOF(queryStorage),
+	memoryManagementBehavior :=
+		TOF_Core.GENERIC_MEMORY_MANAGEMENT_BEHAVIOR.STORE_ORIGINAL_REFERENCE_AND_NOT_OWNS_MEMORY
+);
+AssertEquals_BOOL(
+	Expected := FALSE,
+	Actual := value.IsConvertibleTo(targetTypeClass := TOF_Core.GENERIC_TYPE_CLASS.POINTER_TO),
+	Message := 'A pointer identity tag has no As* accessor'
+);
+value := TOF_Core.GenericValueFactory.FromParts(
+	genericTypeClass := TOF_Core.GENERIC_TYPE_CLASS.USER_DEFINED,
+	address := ADR(queryStorage),
+	size := XSIZEOF(queryStorage),
+	memoryManagementBehavior :=
+		TOF_Core.GENERIC_MEMORY_MANAGEMENT_BEHAVIOR.STORE_ORIGINAL_REFERENCE_AND_NOT_OWNS_MEMORY
+);
+AssertEquals_BOOL(
+	Expected := FALSE,
+	Actual := value.IsConvertibleTo(targetTypeClass := TOF_Core.GENERIC_TYPE_CLASS.USER_DEFINED),
+	Message := 'A user-defined identity tag has no As* accessor'
+);
+
+value := TOF_Core.GenericValueFactory.FromLIntReference(value := integer);
+AssertEquals_BOOL(
+	Expected := TRUE,
+	Actual := value.IsConvertibleTo(targetTypeClass := TOF_Core.GENERIC_TYPE_CLASS.DATE_32),
+	Message := 'Integer seconds have a DATE conversion branch'
+);
+AssertEquals_BOOL(
+	Expected := TRUE,
+	Actual := value.AsDate() = DATE#1970-01-01,
+	Message := 'The supported numeric calendar conversion must be callable'
+);
+integer := TOF_Core.SignedInt64.MAX_VALUE;
+AssertEquals_BOOL(
+	Expected := TRUE,
+	Actual := value.IsConvertibleTo(targetTypeClass := TOF_Core.GENERIC_TYPE_CLASS.DATE_32),
+	Message := 'A pair query must not become a value range check'
+);
+
+value := TOF_Core.GenericValueFactory.FromTimeReference(value := duration);
+AssertEquals_BOOL(
+	Expected := TRUE,
+	Actual := value.IsConvertibleTo(targetTypeClass := TOF_Core.GENERIC_TYPE_CLASS.DATE_AND_TIME_64),
+	Message := 'TIME has a conversion to LDT'
+);
+AssertEquals_BOOL(
+	Expected := TRUE,
+	Actual := value.AsLDateAndTime() = LDT#1970-01-01-00:00:00.001,
+	Message := 'TIME to LDT must use the supported duration conversion'
+);
+
+testFinished := TRUE;
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="MixedNumericPrecision" Id="{c503261e-de1d-4d3e-aa96-5b2ceff5f652}">
+      <Declaration><![CDATA[(*!
+<summary>Checks exact integer-to-floating ordering at precision, range and fractional boundaries.</summary>
+<description>
+Uses independent expected directions for both operand orders. Values around 2^53 reproduce the transitivity
+defect caused by converting integers to LREAL. Raw patterns cover signed zero, subnormal and infinite values.
+</description>
+*)
+METHOD MixedNumericPrecision
+VAR
+	signedInteger : LINT;
+	unsignedInteger : ULINT;
+	floatingValue : LREAL;
+	narrowReal : REAL;
+	realBits : TOF_Core.LREAL_UNION;
+	integerValue : TOF_Core.GENERIC_VALUE;
+	realValue : TOF_Core.GENERIC_VALUE;
+END_VAR
+VAR_INST
+	testFinished : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN
+	RETURN;
+END_IF
+
+TEST(TestName := __POUNAME());
+integerValue := TOF_Core.GenericValueFactory.FromLIntReference(value := signedInteger);
+realValue := TOF_Core.GenericValueFactory.FromLRealReference(value := floatingValue);
+floatingValue := LREAL#9007199254740992.0;
+signedInteger := LINT#9007199254740993;
+assertOrder(first := integerValue, second := realValue, expected := TOF_Core.COMPARISON_RESULT.FIRST_GREATER_THAN_SECOND);
+signedInteger := LINT#9007199254740992;
+assertOrder(first := integerValue, second := realValue, expected := TOF_Core.COMPARISON_RESULT.FIRST_EQUAL_TO_SECOND);
+signedInteger := LINT#9007199254740991;
+assertOrder(first := integerValue, second := realValue, expected := TOF_Core.COMPARISON_RESULT.FIRST_LESS_THAN_SECOND);
+
+floatingValue := LREAL#-9007199254740992.0;
+signedInteger := LINT#-9007199254740993;
+assertOrder(first := integerValue, second := realValue, expected := TOF_Core.COMPARISON_RESULT.FIRST_LESS_THAN_SECOND);
+signedInteger := LINT#-9007199254740991;
+assertOrder(first := integerValue, second := realValue, expected := TOF_Core.COMPARISON_RESULT.FIRST_GREATER_THAN_SECOND);
+
+floatingValue := LREAL#9223372036854775808.0;
+signedInteger := TOF_Core.SignedInt64.MAX_VALUE;
+assertOrder(first := integerValue, second := realValue, expected := TOF_Core.COMPARISON_RESULT.FIRST_LESS_THAN_SECOND);
+floatingValue := LREAL#-9223372036854775808.0;
+signedInteger := TOF_Core.SignedInt64.MIN_VALUE;
+assertOrder(first := integerValue, second := realValue, expected := TOF_Core.COMPARISON_RESULT.FIRST_EQUAL_TO_SECOND);
+
+integerValue := TOF_Core.GenericValueFactory.FromULIntReference(value := unsignedInteger);
+floatingValue := LREAL#18446744073709551616.0;
+unsignedInteger := TOF_Core.UnsignedInt64.MAX_VALUE;
+assertOrder(first := integerValue, second := realValue, expected := TOF_Core.COMPARISON_RESULT.FIRST_LESS_THAN_SECOND);
+floatingValue := LREAL#9223372036854775808.0;
+unsignedInteger := ULINT#9223372036854775809;
+assertOrder(first := integerValue, second := realValue, expected := TOF_Core.COMPARISON_RESULT.FIRST_GREATER_THAN_SECOND);
+
+integerValue := TOF_Core.GenericValueFactory.FromLIntReference(value := signedInteger);
+signedInteger := -1;
+floatingValue := LREAL#-0.5;
+assertOrder(first := integerValue, second := realValue, expected := TOF_Core.COMPARISON_RESULT.FIRST_LESS_THAN_SECOND);
+signedInteger := 0;
+assertOrder(first := integerValue, second := realValue, expected := TOF_Core.COMPARISON_RESULT.FIRST_GREATER_THAN_SECOND);
+floatingValue := LREAL#0.5;
+assertOrder(first := integerValue, second := realValue, expected := TOF_Core.COMPARISON_RESULT.FIRST_LESS_THAN_SECOND);
+signedInteger := 1;
+assertOrder(first := integerValue, second := realValue, expected := TOF_Core.COMPARISON_RESULT.FIRST_GREATER_THAN_SECOND);
+signedInteger := 42;
+floatingValue := LREAL#42.0;
+assertOrder(first := integerValue, second := realValue, expected := TOF_Core.COMPARISON_RESULT.FIRST_EQUAL_TO_SECOND);
+floatingValue := LREAL#42.5;
+assertOrder(first := integerValue, second := realValue, expected := TOF_Core.COMPARISON_RESULT.FIRST_LESS_THAN_SECOND);
+floatingValue := LREAL#-42.5;
+signedInteger := -42;
+assertOrder(first := integerValue, second := realValue, expected := TOF_Core.COMPARISON_RESULT.FIRST_GREATER_THAN_SECOND);
+
+realValue := TOF_Core.GenericValueFactory.FromLRealReference(value := realBits.Value);
+signedInteger := 0;
+realBits.Raw := ULINT#16#8000000000000000;
+assertOrder(first := integerValue, second := realValue, expected := TOF_Core.COMPARISON_RESULT.FIRST_EQUAL_TO_SECOND);
+realBits.Raw := ULINT#1;
+assertOrder(first := integerValue, second := realValue, expected := TOF_Core.COMPARISON_RESULT.FIRST_LESS_THAN_SECOND);
+realBits.Raw := ULINT#16#7FF0000000000000;
+assertOrder(first := integerValue, second := realValue, expected := TOF_Core.COMPARISON_RESULT.FIRST_LESS_THAN_SECOND);
+realBits.Raw := ULINT#16#FFF0000000000000;
+assertOrder(first := integerValue, second := realValue, expected := TOF_Core.COMPARISON_RESULT.FIRST_GREATER_THAN_SECOND);
+
+narrowReal := REAL#16777216.0;
+signedInteger := LINT#16777217;
+realValue := TOF_Core.GenericValueFactory.FromRealReference(value := narrowReal);
+assertOrder(first := integerValue, second := realValue, expected := TOF_Core.COMPARISON_RESULT.FIRST_GREATER_THAN_SECOND);
+
+testFinished := TRUE;
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="assertOrder" Id="{69628a18-e5b3-489e-82b6-7bfa5ed20a1a}">
+      <Declaration><![CDATA[(*!
+<summary>Checks a numeric comparison and its reverse against an independently supplied expected direction.</summary>
+<description>Borrows both descriptors for assertions; no payload mutation or ownership transfer occurs.</description>
+<param name="first">First numeric descriptor.</param>
+<param name="second">Second numeric descriptor.</param>
+<param name="expected">Expected comparison of first with second.</param>
+*)
+METHOD PRIVATE assertOrder
+VAR_INPUT
+	first : TOF_Core.GENERIC_VALUE;
+	second : TOF_Core.GENERIC_VALUE;
+	expected : TOF_Core.COMPARISON_RESULT;
+END_VAR
+VAR
+	reversedExpected : TOF_Core.COMPARISON_RESULT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[CASE expected OF
+	TOF_Core.COMPARISON_RESULT.FIRST_LESS_THAN_SECOND:
+		reversedExpected := TOF_Core.COMPARISON_RESULT.FIRST_GREATER_THAN_SECOND;
+	TOF_Core.COMPARISON_RESULT.FIRST_EQUAL_TO_SECOND:
+		reversedExpected := TOF_Core.COMPARISON_RESULT.FIRST_EQUAL_TO_SECOND;
+	TOF_Core.COMPARISON_RESULT.FIRST_GREATER_THAN_SECOND:
+		reversedExpected := TOF_Core.COMPARISON_RESULT.FIRST_LESS_THAN_SECOND;
+END_CASE
+
+AssertEquals_BOOL(
+	Expected := TRUE,
+	Actual := first.CompareTo(otherValue := second) = expected,
+	Message := 'Mixed numeric comparison must preserve the exact mathematical order'
+);
+AssertEquals_BOOL(
+	Expected := TRUE,
+	Actual := second.CompareTo(otherValue := first) = reversedExpected,
+	Message := 'Reversing numeric operands must reverse the exact order'
+);]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="SystemTypeClassFormatting" Id="{755f6df5-ca55-4f21-b595-16e18eef0c39}">
+      <Declaration><![CDATA[(*!
+<summary>Checks symbolic runtime names in both encodings and lossless formatting of unknown codes.</summary>
+<description>
+Covers reference, pointer, text, sentinel and Build 4026 extended categories. Injects an unknown raw DWORD
+to exercise the fallback without requiring an enum conversion outside the declared values.
+</description>
+*)
+METHOD SystemTypeClassFormatting
+VAR
+	typeClasses : ARRAY [0..7] OF __SYSTEM.TYPE_CLASS := [
+		__SYSTEM.TYPE_CLASS.TYPE_BOOL,
+		__SYSTEM.TYPE_CLASS.TYPE_REFERENCE,
+		__SYSTEM.TYPE_CLASS.TYPE_POINTER,
+		__SYSTEM.TYPE_CLASS.TYPE_STRING,
+		__SYSTEM.TYPE_CLASS.TYPE_WSTRING,
+		__SYSTEM.TYPE_CLASS.TYPE_NONE,
+		__SYSTEM.TYPE_CLASS.TYPE_ANYSTRING,
+		__SYSTEM.TYPE_CLASS.TYPE_LTIMEOFDAY
+	];
+	expectedNames : ARRAY [0..7] OF STRING(80) := [
+		'TYPE_BOOL', 'TYPE_REFERENCE', 'TYPE_POINTER', 'TYPE_STRING',
+		'TYPE_WSTRING', 'TYPE_NONE', 'TYPE_ANYSTRING', 'TYPE_LTIMEOFDAY'
+	];
+	typeClass : __SYSTEM.TYPE_CLASS;
+	unknownCode : DWORD := DWORD#16#FFFFFFFF;
+	narrowName : STRING(80);
+	wideName : WSTRING(80);
+
+	i : INT;
+END_VAR
+VAR_INST
+	testFinished : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN
+	RETURN;
+END_IF
+
+TEST(TestName := __POUNAME());
+
+FOR i := 0 TO 7 DO
+	narrowName := TOF_Core.SystemTypeClassConvertor.ToString(typeClass := typeClasses[i]);
+	wideName := TOF_Core.SystemTypeClassConvertor.ToWideString(typeClass := typeClasses[i]);
+	AssertEquals_STRING(
+		Expected := expectedNames[i],
+		Actual := narrowName,
+		Message := 'Known runtime type classes must have their exact symbolic names'
+	);
+	AssertEquals_WSTRING(
+		Expected := TO_WSTRING(expectedNames[i]),
+		Actual := wideName,
+		Message := 'Wide runtime type names must match the symbolic names'
+	);
+END_FOR
+
+// Preserve all 32 bits of an unknown runtime code, including the unsigned high bit.
+Tc2_System.MEMCPY(destAddr := ADR(typeClass), srcAddr := ADR(unknownCode), n := SIZEOF(typeClass));
+narrowName := TOF_Core.SystemTypeClassConvertor.ToString(typeClass := typeClass);
+wideName := TOF_Core.SystemTypeClassConvertor.ToWideString(typeClass := typeClass);
+AssertEquals_STRING(
+	Expected := '4294967295',
+	Actual := narrowName,
+	Message := 'Unknown codes must retain their decimal value'
+);
+AssertEquals_WSTRING(Expected := "4294967295", Actual := wideName, Message := 'Wide fallback must retain the unsigned code');
+
+testFinished := TRUE;
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="TypeClassDiagnostics" Id="{43ccc62a-08e3-45f0-98ac-3a39300c4c3a}">
+      <Declaration><![CDATA[(*!
+<summary>Checks runtime names in public string rejection messages and unsupported-value markers.</summary>
+<description>
+Catches deliberate type errors to inspect the message while the task-owned exception is alive.
+A failed append must preserve its target. Unsupported arrays must retain a readable TYPE_ARRAY marker.
+</description>
+*)
+METHOD TypeClassDiagnostics
+VAR
+	narrowTarget : STRING(10) := 'keep';
+	wideTarget : WSTRING(10) := "keep";
+	narrowMessage : STRING(255);
+	wideMessage : WSTRING(255);
+	unsupportedValue : ARRAY [0..0] OF DINT;
+	exceptionCode : __SYSTEM.ExceptionCode;
+	caughtException : TOF_Core.IException;
+	caught : BOOL;
+	message : TOF_Core.ERROR_MESSAGE;
+END_VAR
+VAR_INST
+	testFinished : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN
+	RETURN;
+END_IF
+
+TEST(TestName := __POUNAME());
+
+caught := FALSE;
+
+// Convert the deliberate type error into diagnostic assertions and continue the test.
+__TRY
+	TOF_Core.WideStrings.AppendFit255(narrowTarget, "x");
+__CATCH(exceptionCode)
+	caught := TRUE;
+	caughtException := TOF_Core.ExceptionManager.GetLastException(
+		exceptionCode := exceptionCode,
+		catchPointNamespaceName := CurrentNamespace.Name,
+		catchPointPOUName := __POUNAME(),
+		catchPointPosition := __POSITION()
+	);
+	message := caughtException.GetMessage();
+	AssertEquals_WSTRING(
+		Expected := "Not supported type TYPE_STRING",
+		Actual := message,
+		Message := 'Type rejection must use a symbolic runtime name'
+	);
+__ENDTRY
+
+AssertEquals_BOOL(Expected := TRUE, Actual := caught, Message := 'An incompatible text target must be rejected');
+
+caught := FALSE;
+
+// Convert the deliberate type error into diagnostic assertions and continue the test.
+__TRY
+	TOF_Core.Strings.AppendFit255(wideTarget, 'x');
+__CATCH(exceptionCode)
+	caught := TRUE;
+	caughtException := TOF_Core.ExceptionManager.GetLastException(
+		exceptionCode := exceptionCode,
+		catchPointNamespaceName := CurrentNamespace.Name,
+		catchPointPOUName := __POUNAME(),
+		catchPointPosition := __POSITION()
+	);
+	message := caughtException.GetMessage();
+	AssertEquals_WSTRING(
+		Expected := "Not supported type TYPE_WSTRING",
+		Actual := message,
+		Message := 'Type rejection must use a symbolic runtime name'
+	);
+__ENDTRY
+
+AssertEquals_BOOL(Expected := TRUE, Actual := caught, Message := 'An incompatible text target must be rejected');
+
+AssertEquals_STRING(Expected := 'keep', Actual := narrowTarget, Message := 'Rejected narrow target must remain unchanged');
+AssertEquals_WSTRING(Expected := "keep", Actual := wideTarget, Message := 'Rejected wide target must remain unchanged');
+
+narrowMessage := TOF_Core.Strings.AnyToString255(value := unsupportedValue);
+wideMessage := TOF_Core.WideStrings.AnyToString255(value := unsupportedValue);
+AssertEquals_BOOL(
+	Expected := TRUE,
+	Actual := TOF_Core.Strings.Contains(
+		stringToSearchIn := narrowMessage,
+		stringToFind := 'type class: TYPE_ARRAY'
+	),
+	Message := 'Narrow marker must include the symbolic class'
+);
+AssertEquals_BOOL(
+	Expected := TRUE,
+	Actual := TOF_Core.WideStrings.Contains(
+		stringToSearchIn := wideMessage,
+		stringToFind := "type class: TYPE_ARRAY"
+	),
+	Message := 'Wide marker must include the symbolic class'
+);
+
+testFinished := TRUE;
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+  </POU>
+</TcPlcObject>

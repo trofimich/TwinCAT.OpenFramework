@@ -1,0 +1,419 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="LoggerRoutingTest" Id="{33978978-28ce-43ba-b9e5-2b538393d5cf}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+SPDX-FileCopyrightText: © 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+SPDX-License-Identifier: MIT
+License: https://opensource.org/license/mit
+*)
+(*!
+<summary>Exercises file logger feedback and byte readback in exclusively owned directories.</summary>
+<description>
+Uses temporary owner-task LogManager routing only during service calls and restores it before returning.
+No other task may log concurrently during these scenarios. Each case retains its fixtures and stays active
+through cleanup attempts, reporting their outcome before TEST_FINISHED on both success and failure.
+</description>
+*)
+
+{attribute 'no_explicit_call' := 'do not call this function block directly'}
+FUNCTION_BLOCK LoggerRoutingTest EXTENDS TcUnit.FB_TestSuite]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[DirectFileFeedbackAndReadback();
+QueuedFileFeedbackAndReadback();]]></ST>
+    </Implementation>
+    <Method Name="executeWithRouting" Id="{91dad1e2-37b7-4500-a674-c022e1e690c1}">
+      <Declaration><![CDATA[(*!
+<summary>Services the current task logger with the manager filter temporarily disabled.</summary>
+<description>
+Saves and restores this task's logger and the shared filter within this synchronous call. Tests require no
+concurrent logging while changing the shared filter. Restoring a standard logger view preserves its behavior
+when previously unset.
+The independent embedded diagnostic channel must not reenter this LogManager call.
+</description>
+*)
+METHOD PRIVATE executeWithRouting
+VAR_INPUT
+	logger : TOF_Core.ILogger;
+END_VAR
+VAR
+	savedLogger : TOF_Core.ILogger;
+	savedFilter : TOF_Core.ILogFilter;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[savedLogger := TOF_Core.LogManager.CurrentTaskLogger;
+savedFilter := TOF_Core.LogManager.Filter;
+TOF_Core.LogManager.CurrentTaskLogger := logger;
+TOF_Core.LogManager.Filter := 0;
+
+__TRY
+	TOF_Core.LogManager.ExecuteCurrentTaskLogger();
+__CATCH
+	// Restore manager configuration even if a foreign backend violates Execute containment.
+__ENDTRY
+
+TOF_Core.LogManager.Filter := savedFilter;
+TOF_Core.LogManager.CurrentTaskLogger := savedLogger;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="DirectFileFeedbackAndReadback" Id="{dfd48c8f-6401-491d-8a46-26664c21eda6}">
+      <Declaration><![CDATA[(*!
+<summary>Checks direct file logging through unfiltered current-task manager routing.</summary>
+<description>
+Two external records must finish, remain idle across eight service calls, stop, and read back as exactly
+two records in two owned files. Internal task/resource diagnostics must not create additional file records.
+Both success and failure retain cyclic stop/cleanup before TEST_FINISHED. Cleanup diagnostics fail the case;
+pending native work has no forced cleanup deadline and pre-existing paths are never adopted.
+</description>
+*)
+METHOD DirectFileFeedbackAndReadback
+VAR_INST
+	lifecycle : FILE_TEST_LIFECYCLE;
+	cleanupExceptionObserved : BOOL;
+	phase : LOGGER_FILE_TEST_PHASE;
+	deadline : Tc2_Standard.TON;
+	idleCycles : UINT;
+	directory : LoggerTestDirectory(directoryPath := 'C:\OpenFrameworkTests\Logger_Direct', logFilePrefix := 'Probe');
+	fileLogger : TOF_Loggers.SimpleTextFileLogger(
+		directoryPath := 'C:\OpenFrameworkTests\Logger_Direct',
+		logFilePrefix := 'Probe',
+		maxRecordsPerFile := 1,
+		directoryPathType := Tc2_System.E_OpenPath.PATH_GENERIC,
+		timeout := T#2S,
+		amsNetId := ''
+	);
+	message : TOF_Core.ERROR_MESSAGE;
+	number : ULINT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF lifecycle = FILE_TEST_LIFECYCLE.FINISHED THEN
+	RETURN;
+END_IF
+
+TEST(TestName := __POUNAME());
+
+IF lifecycle = FILE_TEST_LIFECYCLE.CLEANING_UP THEN
+	__TRY
+		fileLogger.Stop();
+
+		executeWithRouting(logger := fileLogger);
+
+		IF NOT fileLogger.Busy THEN
+			directory.Cleanup();
+
+			IF directory.CleanupComplete THEN
+				AssertTrue(
+					Condition := directory.CleanupSucceeded,
+					Message := TOF_Core.Strings.Concat255(directory.DirectoryPath, ': ', directory.CleanupMessage)
+				);
+				AssertFalse(
+					Condition := cleanupExceptionObserved,
+					Message := 'An exception interrupted cleanup before the final removal attempt'
+				);
+				lifecycle := FILE_TEST_LIFECYCLE.FINISHED;
+				TEST_FINISHED();
+			END_IF
+		END_IF
+
+	__CATCH
+		cleanupExceptionObserved := TRUE;
+	__ENDTRY
+
+	RETURN;
+END_IF
+
+deadline(IN := TRUE, PT := T#30S);
+
+__TRY
+
+	IF FileTestRoot.FailureMessage <> TOF_Core.Strings.Empty THEN
+		AssertTrue(Condition := FALSE, Message := FileTestRoot.FailureMessage);
+		lifecycle := FILE_TEST_LIFECYCLE.CLEANING_UP;
+		RETURN;
+	END_IF
+
+	IF NOT FileTestRoot.Prepared THEN
+		RETURN;
+	END_IF
+
+	CASE phase OF
+		LOGGER_FILE_TEST_PHASE.PREPARE_DIRECTORY:
+			directory.Prepare();
+
+			IF directory.PreparationFailed THEN
+				AssertTrue(Condition := FALSE, Message := directory.PreparationMessage);
+				lifecycle := FILE_TEST_LIFECYCLE.CLEANING_UP;
+			ELSIF directory.Prepared THEN
+				phase := LOGGER_FILE_TEST_PHASE.SEND_MESSAGES;
+			END_IF
+
+		LOGGER_FILE_TEST_PHASE.SEND_MESSAGES:
+			AssertTrue(
+				Condition := directory.ExpectRecord(text := "#41: [INFORMATION] first routed record"),
+				Message := 'First expected record must be registered'
+			);
+			AssertTrue(
+				Condition := directory.ExpectRecord(text := "#42: [INFORMATION] second routed record"),
+				Message := 'Second expected record must be registered'
+			);
+			message := "first routed record";
+			number := 41;
+			AssertTrue(
+				Condition := fileLogger.TryLogMessage(
+					category := TOF_Core.LOG_CATEGORY.INFORMATION,
+					message := message,
+					messageNumber := number
+				),
+				Message := 'First routed record must be accepted'
+			);
+			message := "second routed record";
+			number := 42;
+			AssertTrue(
+				Condition := fileLogger.TryLogMessage(
+					category := TOF_Core.LOG_CATEGORY.INFORMATION,
+					message := message,
+					messageNumber := number
+				),
+				Message := 'Second routed record must be accepted'
+			);
+			phase := LOGGER_FILE_TEST_PHASE.OBSERVE_IDLE;
+
+		LOGGER_FILE_TEST_PHASE.OBSERVE_IDLE:
+			executeWithRouting(logger := fileLogger);
+
+			IF NOT fileLogger.Busy THEN
+				idleCycles := idleCycles + 1;
+
+				IF idleCycles >= 8 THEN
+					AssertTrue(Condition := fileLogger.Stop(), Message := 'Idle backend must accept Stop');
+					phase := LOGGER_FILE_TEST_PHASE.WAIT_FOR_STOP;
+				END_IF
+
+			ELSE
+				idleCycles := 0;
+			END_IF
+
+		LOGGER_FILE_TEST_PHASE.WAIT_FOR_STOP:
+			executeWithRouting(logger := fileLogger);
+
+			IF fileLogger.State = TOF_Loggers.SIMPLE_TEXT_FILE_LOGGER_STATE.STOPPED THEN
+				AssertFalse(Condition := fileLogger.Busy, Message := 'Stopped logger must have no pending work');
+				phase := LOGGER_FILE_TEST_PHASE.READBACK;
+			END_IF
+
+		LOGGER_FILE_TEST_PHASE.READBACK:
+			directory.Cleanup();
+
+			IF directory.CleanupComplete THEN
+				AssertTrue(Condition := directory.CleanupSucceeded, Message := directory.CleanupMessage);
+				AssertTrue(Condition := directory.FileCount = 2, Message := 'Record limit one must produce exactly two files');
+				AssertTrue(Condition := directory.RecordCount = 2, Message := 'Readback must contain exactly the two external records');
+				lifecycle := FILE_TEST_LIFECYCLE.CLEANING_UP;
+				phase := LOGGER_FILE_TEST_PHASE.COMPLETE;
+			END_IF
+
+	END_CASE
+
+	IF lifecycle = FILE_TEST_LIFECYCLE.RUNNING_SCENARIO
+		AND_THEN fileLogger.State = TOF_Loggers.SIMPLE_TEXT_FILE_LOGGER_STATE.FAILED
+	THEN
+		AssertTrue(Condition := FALSE, Message := TO_STRING(fileLogger.ErrorMessage));
+		lifecycle := FILE_TEST_LIFECYCLE.CLEANING_UP;
+	END_IF
+
+__CATCH
+	AssertTrue(Condition := FALSE, Message := 'Exception interrupted the routed file logger regression');
+	lifecycle := FILE_TEST_LIFECYCLE.CLEANING_UP;
+__ENDTRY
+
+IF lifecycle = FILE_TEST_LIFECYCLE.RUNNING_SCENARIO AND_THEN deadline.Q THEN
+	AssertTrue(Condition := FALSE, Message := 'Routed logger did not become idle, stop and finish readback within 30 seconds');
+	lifecycle := FILE_TEST_LIFECYCLE.CLEANING_UP;
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="QueuedFileFeedbackAndReadback" Id="{0fb58dbd-2fa2-4a91-ac7b-e13df26b73ad}">
+      <Declaration><![CDATA[(*!
+<summary>Checks queued file logging through unfiltered current-task manager routing.</summary>
+<description>
+Two external records must finish, remain idle across eight service calls, stop, and read back as exactly
+two records in two owned files. Internal task/resource diagnostics must not create additional file records.
+Both success and failure retain cyclic stop/cleanup before TEST_FINISHED. Cleanup diagnostics fail the case;
+pending native work has no forced cleanup deadline and pre-existing paths are never adopted.
+Cleanup drains wrapper entries first, then services backend stopping directly even if wrapper configuration failed.
+</description>
+*)
+METHOD QueuedFileFeedbackAndReadback
+VAR_INST
+	lifecycle : FILE_TEST_LIFECYCLE;
+	cleanupExceptionObserved : BOOL;
+	phase : LOGGER_FILE_TEST_PHASE;
+	deadline : Tc2_Standard.TON;
+	idleCycles : UINT;
+	directory : LoggerTestDirectory(directoryPath := 'C:\OpenFrameworkTests\Logger_Queued', logFilePrefix := 'Probe');
+	fileLogger : TOF_Loggers.SimpleTextFileLogger(
+		directoryPath := 'C:\OpenFrameworkTests\Logger_Queued',
+		logFilePrefix := 'Probe',
+		maxRecordsPerFile := 1,
+		directoryPathType := Tc2_System.E_OpenPath.PATH_GENERIC,
+		timeout := T#2S,
+		amsNetId := ''
+	);
+	wrapper : TOF_Loggers.QueuedLogger;
+	message : TOF_Core.ERROR_MESSAGE;
+	number : ULINT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF lifecycle = FILE_TEST_LIFECYCLE.FINISHED THEN
+	RETURN;
+END_IF
+
+TEST(TestName := __POUNAME());
+
+IF lifecycle = FILE_TEST_LIFECYCLE.CLEANING_UP THEN
+	__TRY
+
+		IF wrapper.PendingMessageCount = 0 THEN
+			fileLogger.Stop();
+			executeWithRouting(logger := fileLogger);
+		ELSE
+			executeWithRouting(logger := wrapper);
+		END_IF
+
+		IF NOT fileLogger.Busy AND_THEN wrapper.PendingMessageCount = 0 THEN
+			directory.Cleanup();
+
+			IF directory.CleanupComplete THEN
+				AssertTrue(
+					Condition := directory.CleanupSucceeded,
+					Message := TOF_Core.Strings.Concat255(directory.DirectoryPath, ': ', directory.CleanupMessage)
+				);
+				AssertFalse(
+					Condition := cleanupExceptionObserved,
+					Message := 'An exception interrupted cleanup before the final removal attempt'
+				);
+				lifecycle := FILE_TEST_LIFECYCLE.FINISHED;
+				TEST_FINISHED();
+			END_IF
+		END_IF
+
+	__CATCH
+		cleanupExceptionObserved := TRUE;
+	__ENDTRY
+
+	RETURN;
+END_IF
+
+deadline(IN := TRUE, PT := T#30S);
+
+__TRY
+
+	IF FileTestRoot.FailureMessage <> TOF_Core.Strings.Empty THEN
+		AssertTrue(Condition := FALSE, Message := FileTestRoot.FailureMessage);
+		lifecycle := FILE_TEST_LIFECYCLE.CLEANING_UP;
+		RETURN;
+	END_IF
+
+	IF NOT FileTestRoot.Prepared THEN
+		RETURN;
+	END_IF
+
+	CASE phase OF
+		LOGGER_FILE_TEST_PHASE.PREPARE_DIRECTORY:
+			directory.Prepare();
+
+			IF directory.PreparationFailed THEN
+				AssertTrue(Condition := FALSE, Message := directory.PreparationMessage);
+				lifecycle := FILE_TEST_LIFECYCLE.CLEANING_UP;
+			ELSIF directory.Prepared THEN
+				AssertTrue(Condition := wrapper.Configure(backend := fileLogger), Message := 'Wrapper must bind in its owner task');
+				phase := LOGGER_FILE_TEST_PHASE.SEND_MESSAGES;
+			END_IF
+
+		LOGGER_FILE_TEST_PHASE.SEND_MESSAGES:
+			AssertTrue(
+				Condition := directory.ExpectRecord(text := "#41: [INFORMATION] first routed record"),
+				Message := 'First expected record must be registered'
+			);
+			AssertTrue(
+				Condition := directory.ExpectRecord(text := "#42: [INFORMATION] second routed record"),
+				Message := 'Second expected record must be registered'
+			);
+			message := "first routed record";
+			number := 41;
+			AssertTrue(
+				Condition := wrapper.TryLogMessage(
+					category := TOF_Core.LOG_CATEGORY.INFORMATION,
+					message := message,
+					messageNumber := number
+				),
+				Message := 'First routed record must be accepted'
+			);
+			message := "second routed record";
+			number := 42;
+			AssertTrue(
+				Condition := wrapper.TryLogMessage(
+					category := TOF_Core.LOG_CATEGORY.INFORMATION,
+					message := message,
+					messageNumber := number
+				),
+				Message := 'Second routed record must be accepted'
+			);
+			phase := LOGGER_FILE_TEST_PHASE.OBSERVE_IDLE;
+
+		LOGGER_FILE_TEST_PHASE.OBSERVE_IDLE:
+			executeWithRouting(logger := wrapper);
+
+			IF NOT fileLogger.Busy AND_THEN wrapper.PendingMessageCount = 0 THEN
+				idleCycles := idleCycles + 1;
+
+				IF idleCycles >= 8 THEN
+					AssertTrue(Condition := fileLogger.Stop(), Message := 'Idle backend must accept Stop');
+					phase := LOGGER_FILE_TEST_PHASE.WAIT_FOR_STOP;
+				END_IF
+
+			ELSE
+				idleCycles := 0;
+			END_IF
+
+		LOGGER_FILE_TEST_PHASE.WAIT_FOR_STOP:
+			executeWithRouting(logger := wrapper);
+
+			IF fileLogger.State = TOF_Loggers.SIMPLE_TEXT_FILE_LOGGER_STATE.STOPPED THEN
+				AssertFalse(Condition := fileLogger.Busy, Message := 'Stopped logger must have no pending work');
+				AssertTrue(Condition := wrapper.FailedDeliveryCount = 0, Message := 'Both routed records must be accepted by the backend');
+				phase := LOGGER_FILE_TEST_PHASE.READBACK;
+			END_IF
+
+		LOGGER_FILE_TEST_PHASE.READBACK:
+			directory.Cleanup();
+
+			IF directory.CleanupComplete THEN
+				AssertTrue(Condition := directory.CleanupSucceeded, Message := directory.CleanupMessage);
+				AssertTrue(Condition := directory.FileCount = 2, Message := 'Record limit one must produce exactly two files');
+				AssertTrue(Condition := directory.RecordCount = 2, Message := 'Readback must contain exactly the two external records');
+				lifecycle := FILE_TEST_LIFECYCLE.CLEANING_UP;
+				phase := LOGGER_FILE_TEST_PHASE.COMPLETE;
+			END_IF
+
+	END_CASE
+
+	IF lifecycle = FILE_TEST_LIFECYCLE.RUNNING_SCENARIO
+		AND_THEN fileLogger.State = TOF_Loggers.SIMPLE_TEXT_FILE_LOGGER_STATE.FAILED
+	THEN
+		AssertTrue(Condition := FALSE, Message := TO_STRING(fileLogger.ErrorMessage));
+		lifecycle := FILE_TEST_LIFECYCLE.CLEANING_UP;
+	END_IF
+
+__CATCH
+	AssertTrue(Condition := FALSE, Message := 'Exception interrupted the routed file logger regression');
+	lifecycle := FILE_TEST_LIFECYCLE.CLEANING_UP;
+__ENDTRY
+
+IF lifecycle = FILE_TEST_LIFECYCLE.RUNNING_SCENARIO AND_THEN deadline.Q THEN
+	AssertTrue(Condition := FALSE, Message := 'Routed logger did not become idle, stop and finish readback within 30 seconds');
+	lifecycle := FILE_TEST_LIFECYCLE.CLEANING_UP;
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+  </POU>
+</TcPlcObject>

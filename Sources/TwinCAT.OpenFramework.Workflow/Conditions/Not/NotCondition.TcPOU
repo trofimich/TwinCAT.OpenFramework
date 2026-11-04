@@ -31,7 +31,14 @@ END_VAR]]></Declaration>
     </Implementation>
     <Folder Name="Internal members" Id="{b93590a6-dd9b-4289-bf40-a61da5548aea}" />
     <Property Name="ClassName" Id="{bca735fa-76c8-4113-8046-d96caa463f1b}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Borrows the initialized class name used in diagnostics.</summary>
+<description>
+Returns initialized metadata storage without allocation. Callers must not modify the returned string.
+Derived function blocks must use distinct initialized static storage when overriding this metadata.
+</description>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
       <Get Name="Get" Id="{9ad56043-d757-444d-b758-425c6ce04d39}">
         <Declaration><![CDATA[]]></Declaration>
@@ -72,6 +79,9 @@ PROPERTY Configured : BOOL]]></Declaration>
 <description>
 Validates that the condition is not null, not this condition itself or an ancestor, and not already attached
 to another parent.
+The parent chain and owning workflow must be PASSIVE_READY; fixed workflow association is checked before
+mutation. Reusing the same dependency is permitted. Replaced dependencies retain their existing parent links
+and must not be attached elsewhere. Parent callbacks are not transactional. Dependencies remain borrowed.
 </description>
 <param name="condition">Inner condition to invert.</param>
 *)
@@ -87,7 +97,14 @@ condition.ParentCondition := THIS^;]]></ST>
       </Implementation>
     </Method>
     <Property Name="NamespaceName" Id="{42ff9a00-beff-49d9-9666-03a047f67985}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Borrows the compiler-initialized library namespace.</summary>
+<description>
+Borrows storage from the live internal namespace provider. Reacquire references after application
+reinitialization or relocation. Treat the reference as read-only; no ownership or synchronization is provided.
+</description>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
       <Get Name="Get" Id="{c12881cc-90f9-4ba4-a93d-ce9b87971edc}">
         <Declaration><![CDATA[]]></Declaration>
@@ -125,7 +142,14 @@ OnEvaluate := NOT _Condition.Evaluate(activity := activity);]]></ST>
       </Implementation>
     </Method>
     <Property Name="SelfSize" Id="{52232918-81b2-434b-820c-49bd1bbcb29a}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Reports the size of this concrete function block instance in bytes.</summary>
+<description>
+Reports the instance layout rather than dynamic allocations owned by its fields. A derived function block
+with a different layout must override this property; the value does not grant disposal rights.
+</description>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY SelfSize : ULINT]]></Declaration>
       <Get Name="Get" Id="{5565922b-1d3d-4db0-9941-176d41d9b15c}">
         <Declaration><![CDATA[]]></Declaration>
@@ -146,9 +170,6 @@ METHOD PROTECTED ValidateConditionAttachment
 VAR_INPUT
 	condition : ICondition;
 	argumentName : STRING(255);
-END_VAR
-VAR
-	ancestor : ICondition;
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[IF condition = 0 THEN
@@ -161,33 +182,7 @@ END_VAR]]></Declaration>
 	);
 END_IF
 
-ancestor := THIS^;
-
-WHILE ancestor <> 0 DO
-	IF ancestor = condition THEN
-		WorkflowExceptions.ThrowWorkflowAttachment(
-			sourceNamespaceName := NamespaceName,
-			sourceClassName := ClassName,
-			sourcePOUName := __POUNAME(),
-			sourcePosition := __POSITION(),
-			message := "Cannot attach a condition that is this condition or its ancestor"
-		);
-	END_IF
-
-	ancestor := ancestor.ParentCondition;
-END_WHILE
-
-IF condition.ParentActivity <> 0
-	OR_ELSE (condition.ParentCondition <> 0 AND_THEN condition.ParentCondition.SelfAddress <> SelfAddress)
-THEN
-	WorkflowExceptions.ThrowWorkflowAttachment(
-		sourceNamespaceName := NamespaceName,
-		sourceClassName := ClassName,
-		sourcePOUName := __POUNAME(),
-		sourcePosition := __POSITION(),
-		message := "Child condition is already attached to another parent"
-	);
-END_IF]]></ST>
+Workflows.ValidateElementAttachment(parent := THIS^, child := condition);]]></ST>
       </Implementation>
     </Method>
   </POU>

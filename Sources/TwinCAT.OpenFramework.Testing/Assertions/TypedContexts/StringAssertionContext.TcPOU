@@ -1,0 +1,419 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="StringAssertionContext" Id="{4fb39879-ad3a-41b5-a8ce-cee9e5cb013e}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+SPDX-FileCopyrightText: © 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+SPDX-License-Identifier: MIT
+License: https://opensource.org/license/mit
+*)
+
+(*!
+<summary>Provides fluent assertions on a copied STRING(255) value.</summary>
+<description>
+Copies actual into persistent instance storage before the entry method returns; literals and expression
+results therefore remain valid throughout the immediate chain. Owns no heap allocation or pointed-to resource.
+The message prefixes every failure until the next preparation. Finish one chain before starting another on
+the owning Assertions provider. Use only from the owning test callback on one task, without reentry.
+Obtain this context from the owning provider; direct unprepared use is unsupported.
+Expected arguments use the declared IEC type; ordinary compiler conversions happen before comparison.
+This context does not depend on another assertion context.
+Object metadata is available before preparation; inherited equality compares instance identity.
+Actual and expected strings are limited to 255 characters; normal IEC parameter conversion may truncate
+longer inputs. Use the generic That entry with live variables for longer strings. Comparison is by code unit.
+</description>
+*)
+
+{attribute 'no_explicit_call' := 'do not call this function block directly'}
+FUNCTION_BLOCK StringAssertionContext EXTENDS TOF_Core.Object
+VAR_STAT
+	{attribute 'hide'}
+	_ClassName : STRING := __POUNAME();
+END_VAR
+VAR
+	_Actual : STRING(255);
+	_TestCase : ITestCase;
+	_Message : WSTRING(255);
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[]]></ST>
+    </Implementation>
+    <Folder Name="Service methods" Id="{48d623f7-a21f-479d-9dd8-5ca9304fc30b}" />
+    <Property Name="ClassName" Id="{132535f3-65cd-4fd3-b4f6-44d9fb85f2c1}">
+      <Declaration><![CDATA[(*!
+<summary>Provides the implementation class name.</summary>
+<description>
+Borrowed read-only reference to compiler-initialized storage, valid throughout the instance lifetime.
+Do not modify the returned reference; no ownership is transferred.
+</description>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{fcecedd6-6016-491d-b0d0-15ac8fc1cba4}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ClassName REF= _ClassName;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="compareExpected" Id="{e9a2f320-177b-4a11-a359-2413d7700479}" FolderPath="Service methods\">
+      <Declaration><![CDATA[(*!
+<summary>Compares the copied string with a typed boundary by code unit.</summary>
+<description>
+Both typed operands provide terminated storage. Reads through the first differing code unit or
+terminator; does not allocate, convert encodings or retain the expected storage.
+</description>
+<param name="expected">Same-encoding boundary alive for this call.</param>
+*)
+METHOD PRIVATE compareExpected : TOF_Core.COMPARISON_RESULT
+VAR_INPUT
+	expected : STRING(255);
+END_VAR
+VAR
+	actualData : POINTER TO BYTE;
+	expectedData : POINTER TO BYTE;
+	characterIndex : UDINT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[actualData := ADR(_Actual);
+expectedData := ADR(expected);
+
+WHILE TRUE DO
+	IF actualData[characterIndex] < expectedData[characterIndex] THEN
+		compareExpected := TOF_Core.COMPARISON_RESULT.FIRST_LESS_THAN_SECOND;
+		RETURN;
+	ELSIF actualData[characterIndex] > expectedData[characterIndex] THEN
+		compareExpected := TOF_Core.COMPARISON_RESULT.FIRST_GREATER_THAN_SECOND;
+		RETURN;
+	ELSIF actualData[characterIndex] = TO_BYTE(TOF_Core.UnsignedInt16.MIN_VALUE) THEN
+		compareExpected := TOF_Core.COMPARISON_RESULT.FIRST_EQUAL_TO_SECOND;
+		RETURN;
+	END_IF
+
+	characterIndex := characterIndex + 1;
+END_WHILE]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="failComparison" Id="{1d0419d8-60a6-4d73-90dc-d89c11624c05}" FolderPath="Service methods\">
+      <Declaration><![CDATA[(*!
+<summary>Formats a failed typed predicate and reports it with the chain message.</summary>
+<description>
+Does not change operands or chain state. The receiver retains its first failure. Reporting exceptions
+propagate to the enclosing test callback handler; an unprepared receiver is a configuration error.
+</description>
+<param name="expected">Typed expected operand used only for this diagnostic.</param>
+<param name="expectation">Prefix identifying the failed predicate.</param>
+*)
+METHOD PRIVATE failComparison
+VAR_INPUT
+	expected : STRING(255);
+	expectation : WSTRING(40);
+END_VAR
+VAR
+	actualText : WSTRING(255);
+	expectedText : WSTRING(255);
+	diagnostic : TOF_Core.ERROR_MESSAGE;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[Tc2_Utilities.STRING_TO_WSTRING2(
+	pDstWSTRING := ADR(actualText),
+	pSrcSTRING := ADR(_Actual),
+	nDstSize := SIZEOF(actualText)
+);
+Tc2_Utilities.STRING_TO_WSTRING2(
+	pDstWSTRING := ADR(expectedText),
+	pSrcSTRING := ADR(expected),
+	nDstSize := SIZEOF(expectedText)
+);
+
+diagnostic := TOF_Core.WideStrings.Concat255(
+	expectation,
+	expectedText,
+	", but was: ",
+	actualText
+);
+
+TestServices.ReportAssertionFailure(
+	testCase := _TestCase,
+	message := _Message,
+	sourceClassName := ClassName,
+	defaultMessage := diagnostic
+);]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="IsGreaterThan" Id="{b54283d3-79ac-487b-b3de-4d4ddfcc4721}">
+      <Declaration><![CDATA[(*!
+<summary>Asserts that the actual value is strictly greater than expected.</summary>
+<description>
+Records failure without interrupting the callback; preserves the message for the rest of the chain.
+</description>
+<param name="expected">Expected value converted by the compiler to STRING(255).</param>
+*)
+METHOD FINAL IsGreaterThan : REFERENCE TO StringAssertionContext
+VAR_INPUT
+	expected : STRING(255);
+END_VAR
+VAR
+	comparison : TOF_Core.COMPARISON_RESULT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[comparison := compareExpected(expected := expected);
+
+IF comparison <> TOF_Core.COMPARISON_RESULT.FIRST_GREATER_THAN_SECOND THEN
+	failComparison(
+		expected := expected,
+		expectation := "Expected value > "
+	);
+END_IF
+
+IsGreaterThan REF= THIS^;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="IsGreaterThanOrEquals" Id="{30ec6789-f746-4bdc-b641-9a35ac5cdfce}">
+      <Declaration><![CDATA[(*!
+<summary>Asserts that the actual value meets the inclusive lower boundary.</summary>
+<description>
+Records failure without interrupting the callback; preserves the message for the rest of the chain.
+</description>
+<param name="expected">Expected value converted by the compiler to STRING(255).</param>
+*)
+METHOD FINAL IsGreaterThanOrEquals : REFERENCE TO StringAssertionContext
+VAR_INPUT
+	expected : STRING(255);
+END_VAR
+VAR
+	comparison : TOF_Core.COMPARISON_RESULT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[comparison := compareExpected(expected := expected);
+
+IF comparison = TOF_Core.COMPARISON_RESULT.FIRST_LESS_THAN_SECOND THEN
+	failComparison(
+		expected := expected,
+		expectation := "Expected value >= "
+	);
+END_IF
+
+IsGreaterThanOrEquals REF= THIS^;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="IsLessThan" Id="{c8c2c727-fc89-48b9-b8d8-a0b0a422d8fe}">
+      <Declaration><![CDATA[(*!
+<summary>Asserts that the actual value is strictly less than expected.</summary>
+<description>
+Records failure without interrupting the callback; preserves the message for the rest of the chain.
+</description>
+<param name="expected">Expected value converted by the compiler to STRING(255).</param>
+*)
+METHOD FINAL IsLessThan : REFERENCE TO StringAssertionContext
+VAR_INPUT
+	expected : STRING(255);
+END_VAR
+VAR
+	comparison : TOF_Core.COMPARISON_RESULT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[comparison := compareExpected(expected := expected);
+
+IF comparison <> TOF_Core.COMPARISON_RESULT.FIRST_LESS_THAN_SECOND THEN
+	failComparison(
+		expected := expected,
+		expectation := "Expected value < "
+	);
+END_IF
+
+IsLessThan REF= THIS^;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="IsLessThanOrEquals" Id="{7deb968c-b038-4ae8-9b97-bf0040269ce2}">
+      <Declaration><![CDATA[(*!
+<summary>Asserts that the actual value meets the inclusive upper boundary.</summary>
+<description>
+Records failure without interrupting the callback; preserves the message for the rest of the chain.
+</description>
+<param name="expected">Expected value converted by the compiler to STRING(255).</param>
+*)
+METHOD FINAL IsLessThanOrEquals : REFERENCE TO StringAssertionContext
+VAR_INPUT
+	expected : STRING(255);
+END_VAR
+VAR
+	comparison : TOF_Core.COMPARISON_RESULT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[comparison := compareExpected(expected := expected);
+
+IF comparison = TOF_Core.COMPARISON_RESULT.FIRST_GREATER_THAN_SECOND THEN
+	failComparison(
+		expected := expected,
+		expectation := "Expected value <= "
+	);
+END_IF
+
+IsLessThanOrEquals REF= THIS^;]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="NamespaceName" Id="{28bed6b7-9a34-427c-b66e-80e69d282798}">
+      <Declaration><![CDATA[(*!
+<summary>Provides the library namespace.</summary>
+<description>
+Borrowed read-only reference to the compiler-initialized namespace, valid throughout the instance lifetime.
+Do not modify the returned reference; no ownership is transferred.
+</description>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{80feaae2-e3e2-4393-b3ba-8b4dd66c0fab}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[NamespaceName REF= CurrentNamespace.Name;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="NotToBe" Id="{d71ecfd7-7902-4a98-9c82-ed9b9a82f1e7}">
+      <Declaration><![CDATA[(*!
+<summary>Asserts inequality with the expected value.</summary>
+<description>
+Records failure without interrupting the callback; preserves the message for the rest of the chain.
+</description>
+<param name="expected">Expected value converted by the compiler to STRING(255).</param>
+*)
+METHOD FINAL NotToBe : REFERENCE TO StringAssertionContext
+VAR_INPUT
+	expected : STRING(255);
+END_VAR
+VAR
+	comparison : TOF_Core.COMPARISON_RESULT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[comparison := compareExpected(expected := expected);
+
+IF comparison = TOF_Core.COMPARISON_RESULT.FIRST_EQUAL_TO_SECOND THEN
+	failComparison(
+		expected := expected,
+		expectation := "Expected value not to be: "
+	);
+END_IF
+
+NotToBe REF= THIS^;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="Prepare" Id="{7cd6d2de-736c-44d6-93e8-1051429b8408}" FolderPath="Service methods\">
+      <Declaration><![CDATA[(*!
+<summary>Copies the actual operand and replaces the chain-wide message.</summary>
+<description>
+Called by the owning Assertions provider after it verifies the running test case.
+No pointer to this method's input storage is retained. The receiver is borrowed until the next preparation;
+the owning provider keeps it alive throughout the immediate chain.
+</description>
+<param name="actual">Value copied into this context.</param>
+<param name="testCase">Borrowed failure receiver for the immediate chain.</param>
+<param name="message">Copied diagnostic prefix, including empty to clear the previous prefix.</param>
+*)
+METHOD INTERNAL FINAL Prepare
+VAR_INPUT
+	actual : STRING(255);
+	testCase : ITestCase;
+	message : WSTRING(255);
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_Actual := actual;
+_TestCase := testCase;
+_Message := message;]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="SelfSize" Id="{1b3a11fe-ac29-407f-a176-1d1d94de81f5}">
+      <Declaration><![CDATA[(*!
+<summary>Reports the byte size of this concrete instance.</summary>
+<description>
+Includes inline fields and nested instances, but excludes separately allocated payloads.
+Obtaining the size does not transfer ownership or validate an arbitrary address.
+</description>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY SelfSize : ULINT]]></Declaration>
+      <Get Name="Get" Id="{1ae2174c-3b5f-4106-96fe-58433f7d59e3}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[SelfSize := XSIZEOF(THIS^);]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="ToBe" Id="{b615d5da-888a-4797-b1fa-97f86d4f7e20}">
+      <Declaration><![CDATA[(*!
+<summary>Asserts equality with the expected value.</summary>
+<description>
+Records failure without interrupting the callback; preserves the message for the rest of the chain.
+</description>
+<param name="expected">Expected value converted by the compiler to STRING(255).</param>
+*)
+METHOD FINAL ToBe : REFERENCE TO StringAssertionContext
+VAR_INPUT
+	expected : STRING(255);
+END_VAR
+VAR
+	comparison : TOF_Core.COMPARISON_RESULT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[comparison := compareExpected(expected := expected);
+
+IF comparison <> TOF_Core.COMPARISON_RESULT.FIRST_EQUAL_TO_SECOND THEN
+	failComparison(
+		expected := expected,
+		expectation := "Expected: "
+	);
+END_IF
+
+ToBe REF= THIS^;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="ToContain" Id="{4423e68d-7399-451f-86c5-411bdbfc276c}">
+      <Declaration><![CDATA[(*!
+<summary>Asserts that the copied string contains the specified substring.</summary>
+<description>
+Uses the context's string encoding and retains the chain message after the assertion.
+</description>
+<param name="substring">Substring of at most 255 characters in the same encoding.</param>
+*)
+METHOD FINAL ToContain : REFERENCE TO StringAssertionContext
+VAR_INPUT
+	substring : STRING(255);
+END_VAR
+VAR
+	actualText : WSTRING(255);
+	expectedText : WSTRING(255);
+	diagnostic : TOF_Core.ERROR_MESSAGE;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF NOT TOF_Core.Strings.Contains(stringToSearchIn := _Actual, stringToFind := substring) THEN
+	Tc2_Utilities.STRING_TO_WSTRING2(
+		pDstWSTRING := ADR(actualText),
+		pSrcSTRING := ADR(_Actual),
+		nDstSize := SIZEOF(actualText)
+	);
+	Tc2_Utilities.STRING_TO_WSTRING2(
+		pDstWSTRING := ADR(expectedText),
+		pSrcSTRING := ADR(substring),
+		nDstSize := SIZEOF(expectedText)
+	);
+
+	diagnostic := TOF_Core.WideStrings.Concat255(
+		"Expected text to contain '",
+		expectedText,
+		"', but was: '",
+		actualText,
+		"'"
+	);
+
+	TestServices.ReportAssertionFailure(
+		testCase := _TestCase,
+		message := _Message,
+		sourceClassName := ClassName,
+		defaultMessage := diagnostic
+	);
+END_IF
+
+ToContain REF= THIS^;]]></ST>
+      </Implementation>
+    </Method>
+  </POU>
+</TcPlcObject>

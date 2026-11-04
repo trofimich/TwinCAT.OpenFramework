@@ -22,10 +22,15 @@ handle may cross online change; this precondition is not enforced automatically.
 
 {attribute 'no_explicit_call' := 'Direct call is not allowed'}
 FUNCTION_BLOCK INTERNAL FileHandleResourceManager EXTENDS TOF_Core.Object IMPLEMENTS TOF_Core.IResourceManager
-VAR
+VAR_STAT
+	//! <summary>Class name shared by all instances of this function block.</summary>
 	{attribute 'hide'} 
 	_ClassName : STRING := __POUNAME();
-	
+END_VAR
+VAR
+	//! <summary>Optional borrowed route that avoids the owning file logger.</summary>
+	_DiagnosticLogger : TOF_Core.ILogger;
+
 	_FileOpen : Tc2_System.FB_FileOpen;
 	_FileClose : Tc2_System.FB_FileClose;
 	
@@ -33,7 +38,7 @@ VAR
 	_Acquiring : BOOL;
 	_Releasing : BOOL;
 	
-	_FileHandleResource : FileHandleResource(_FileOpen);
+	_FileHandleResource : FileHandleResource(fileOpen := _FileOpen);
 END_VAR]]></Declaration>
     <Implementation>
       <ST><![CDATA[]]></ST>
@@ -66,7 +71,14 @@ _FileClose.sNetId := AmsNetId;]]></ST>
       </Set>
     </Property>
     <Property Name="ClassName" Id="{cc79ca29-ba9e-49d4-b09a-938a015d18e8}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Provides the concrete type name used in diagnostics.</summary>
+<description>
+Returns borrowed read-only metadata; keep the instance alive and do not modify the referenced string.
+Reading does not allocate memory, initialize resources or transfer ownership.
+</description>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
       <Get Name="Get" Id="{b72512a6-29f2-482c-8ad3-73e1bab73efc}">
         <Declaration><![CDATA[]]></Declaration>
@@ -98,7 +110,7 @@ VAR
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[_FileOpen(bExecute := TRUE);
-	
+
 IF _FileOpen.bError THEN
 	_Acquiring := FALSE;
 
@@ -115,20 +127,20 @@ IF _FileOpen.bError THEN
 		sourcePosition := __POSITION(),
 		message := message,
 		errorCode := _FileOpen.nErrId
-	);		
+	);
 END_IF
 
 IF NOT _FileOpen.bBusy AND_THEN _FileOpen.hFile > 0 THEN
 	_Acquiring := FALSE;
 	_FileHandleAcquired := TRUE;
-	
+
 	TOF_Core.WideStrings.Append255(
 		message,
 		"File '",
 		TO_WSTRING(_FileOpen.sPathName),
 		"' open");
 
-	TOF_Core.LogManager.TryLogMessage(
+	tryLogDiagnosticMessage(
 		message := message,
 		category := TOF_Core.LOG_CATEGORY.INFORMATION,
 		topic1 := TO_WSTRING(ClassName),
@@ -155,7 +167,7 @@ END_VAR]]></Declaration>
         <ST><![CDATA[IF NOT _FileHandleAcquired THEN
 	_Releasing := FALSE;
 	_FileOpen(bExecute := FALSE);
-	
+
 	RETURN;
 END_IF
 
@@ -164,7 +176,7 @@ _FileClose(hFile := _FileOpen.hFile, bExecute := TRUE);
 IF NOT _FileClose.bBusy THEN
 	_Releasing := FALSE;
 	_FileHandleAcquired := FALSE;
-	
+
 	_FileOpen(bExecute := FALSE);
 
 	IF _FileClose.bError THEN
@@ -175,8 +187,8 @@ IF NOT _FileClose.bBusy THEN
 			"): '",
 			TO_WSTRING(_FileOpen.sPathName),
 			"'");
-	
-		TOF_Core.LogManager.TryLogMessage(
+
+		tryLogDiagnosticMessage(
 			message := message,
 			category := TOF_Core.LOG_CATEGORY.ERROR,
 			topic1 := TO_WSTRING(ClassName),
@@ -189,16 +201,16 @@ IF NOT _FileClose.bBusy THEN
 			"File '",
 			TO_WSTRING(_FileOpen.sPathName),
 			"' closed");
-	
-		TOF_Core.LogManager.TryLogMessage(
+
+		tryLogDiagnosticMessage(
 			message := message,
 			category := TOF_Core.LOG_CATEGORY.INFORMATION,
 			topic1 := TO_WSTRING(ClassName),
 			topic2 := TO_WSTRING(__POUNAME())
 		);
 	END_IF
-END_IF 
-]]></ST>
+
+END_IF]]></ST>
       </Implementation>
     </Method>
     <Method Name="FB_exit" Id="{e2227dd5-5c0b-46b5-b99e-d2542b988db4}">
@@ -451,7 +463,7 @@ END_IF
 
 formattedLogMessage := TOF_Core.WideStrings.Concat255("Attempt to open file '", TO_WSTRING(_FileOpen.sPathName), "'");
 
-TOF_Core.LogManager.TryLogMessage(
+tryLogDiagnosticMessage(
 	message := formattedLogMessage,
 	category := TOF_Core.LOG_CATEGORY.INFORMATION,
 	topic1 := TO_WSTRING(ClassName),
@@ -478,7 +490,7 @@ END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[formattedLogMessage := TOF_Core.WideStrings.Concat255("Attempt to close file '", TO_WSTRING(_FileOpen.sPathName), "'");
 
-TOF_Core.LogManager.TryLogMessage(
+tryLogDiagnosticMessage(
 	message := formattedLogMessage,
 	category := TOF_Core.LOG_CATEGORY.INFORMATION,
 	topic1 := TO_WSTRING(ClassName),
@@ -516,5 +528,76 @@ _FileClose.tTimeout := Timeout;]]></ST>
         </Implementation>
       </Set>
     </Property>
+    <Property Name="DiagnosticLogger" Id="{f12be6bc-f545-492b-b27b-e8232e673adb}">
+      <Declaration><![CDATA[(*!
+<summary>Selects an independent borrowed destination for file-resource diagnostics.</summary>
+<description>
+Zero preserves LogManager topics and routing. A nonzero destination is called directly and must not route
+back into the owning file logger. The FileContentManager binds this before acquisition. Keep the destination
+alive and unchanged until release finishes; no ownership, configuration or cyclic execution is transferred.
+</description>
+*)
+PROPERTY DiagnosticLogger : TOF_Core.ILogger]]></Declaration>
+      <Get Name="Get" Id="{46b129cd-37aa-40ba-9f24-daacb5f04c5e}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[DiagnosticLogger := _DiagnosticLogger;]]></ST>
+        </Implementation>
+      </Get>
+      <Set Name="Set" Id="{f793b1ba-8490-419e-b0de-1477844081af}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[_DiagnosticLogger := DiagnosticLogger;]]></ST>
+        </Implementation>
+      </Set>
+    </Property>
+    <Method Name="tryLogDiagnosticMessage" Id="{29080d26-c452-4346-aad8-1d295009ab67}">
+      <Declaration><![CDATA[(*!
+<summary>Reports an internal message through the configured diagnostic route.</summary>
+<description>
+Uses the borrowed DiagnosticLogger directly when present; otherwise retains LogManager topics and routing.
+Contains destination exceptions without recursive logging. Returns FALSE on observed terminal allocation
+failure; prior diagnostic effects are not rolled back and the fatal latch remains set.
+</description>
+*)
+METHOD PRIVATE tryLogDiagnosticMessage : BOOL
+VAR_IN_OUT CONSTANT
+	message : TOF_Core.ERROR_MESSAGE;
+END_VAR
+VAR_INPUT
+	category : TOF_Core.LOG_CATEGORY;
+	topic1 : WSTRING := "";
+	topic2 : WSTRING := "";
+	topic3 : WSTRING := "";
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[__TRY
+
+	IF TOF_Core.DynamicMemoryManager.HasAllocationFailed THEN
+		RETURN;
+	END_IF
+
+	IF _DiagnosticLogger <> 0 THEN
+		tryLogDiagnosticMessage := _DiagnosticLogger.TryLogMessage(category := category, message := message);
+	ELSE
+		tryLogDiagnosticMessage := TOF_Core.LogManager.TryLogMessage(
+			category := category,
+			message := message,
+			topic1 := topic1,
+			topic2 := topic2,
+			topic3 := topic3
+		);
+	END_IF
+
+	IF TOF_Core.DynamicMemoryManager.HasAllocationFailed THEN
+		tryLogDiagnosticMessage := FALSE;
+	END_IF
+
+__CATCH
+	// Diagnostic failure must not replace the task lifecycle outcome.
+	tryLogDiagnosticMessage := FALSE;
+__ENDTRY]]></ST>
+      </Implementation>
+    </Method>
   </POU>
 </TcPlcObject>

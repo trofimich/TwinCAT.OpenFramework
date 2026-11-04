@@ -13,7 +13,11 @@ License: https://opensource.org/license/mit
 When TryActivity throws a non-terminal exception and CatchActivity is configured, synchronous diagnostics are
 passed to CatchActivity.CaptureException before starting CatchActivity. Terminal allocation failures and
 exceptions when CatchActivity is 0 (or thrown by CatchActivity itself) propagate to the parent. Resetting
-resets both TryActivity and CatchActivity back to PASSIVE_READY and clears CurrentActivity.
+resets both TryActivity and CatchActivity back to PASSIVE_READY and clears CurrentActivity. Catch startup
+does not wait for asynchronous cleanup in the failed try branch. The recovery implementation must use
+independent resources or explicitly coordinate cleanup completion before reusing a shared resource.
+A failed try branch is not automatically reset before catch. After the composite finishes, RequestReset
+provides the ordinary path for driving pending cancellation/reset work before a fresh run.
 </description>
 *)
 
@@ -51,7 +55,14 @@ PROPERTY FINAL CatchActivity : ICatchActivity]]></Declaration>
       </Get>
     </Property>
     <Property Name="ClassName" Id="{fdfdec0c-6bcb-49f1-bea5-0a524cb226e3}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Borrows the initialized class name used in diagnostics.</summary>
+<description>
+Returns initialized metadata storage without allocation. Callers must not modify the returned string.
+Derived function blocks must use distinct initialized static storage when overriding this metadata.
+</description>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
       <Get Name="Get" Id="{0d4ca4db-bcfb-4d1e-bfc1-64b96a5d7f54}">
         <Declaration><![CDATA[]]></Declaration>
@@ -117,7 +128,14 @@ PROPERTY FINAL CurrentActivity : IActivity]]></Declaration>
       </Get>
     </Property>
     <Property Name="NamespaceName" Id="{e11525f6-0bdd-472c-8148-75ceee244093}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Borrows the compiler-initialized library namespace.</summary>
+<description>
+Borrows storage from the live internal namespace provider. Reacquire references after application
+reinitialization or relocation. Treat the reference as read-only; no ownership or synchronization is provided.
+</description>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
       <Get Name="Get" Id="{efaef8de-4de6-4c21-a478-c15946922349}">
         <Declaration><![CDATA[]]></Declaration>
@@ -196,7 +214,7 @@ IF _CurrentActivity = _TryActivity THEN
 		ELSE
 			_CurrentActivity.Execute();
 		END_IF
-		
+
 		OnRunning := GetActivityRunningStateByNestedActivityState(nestedActivityState := _CurrentActivity.State);
 
 		IF OnRunning = ACTIVITY_RUNNING_STATE.WORK_HALTED THEN
@@ -222,6 +240,7 @@ IF _CurrentActivity = _TryActivity THEN
 		);
 
 		// Keep the native wrapper stable while CaptureException may handle another exception.
+
 		IF NOT exception.IsDynamicInstance THEN
 			__QUERYINTERFACE(exception.Clone(), exception);
 		END_IF
@@ -301,7 +320,7 @@ ELSIF startSuspending THEN
 ELSE
 	_CurrentActivity.Execute();
 END_IF
-	
+
 OnStopping := GetActivityStoppingStateByNestedActivityState(nestedActivityState := _CurrentActivity.State);
 
 IF OnStopping = ACTIVITY_STOPPING_STATE.WORK_HALTED THEN
@@ -310,7 +329,14 @@ END_IF]]></ST>
       </Implementation>
     </Method>
     <Property Name="SelfSize" Id="{e3dcfcd8-e5b6-434c-b73b-40d8ae840636}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Reports the size of this concrete function block instance in bytes.</summary>
+<description>
+Reports the instance layout rather than dynamic allocations owned by its fields. A derived function block
+with a different layout must override this property; the value does not grant disposal rights.
+</description>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY SelfSize : ULINT]]></Declaration>
       <Get Name="Get" Id="{7018bfdf-c2ce-492d-a525-6244d2e5d50f}">
         <Declaration><![CDATA[]]></Declaration>

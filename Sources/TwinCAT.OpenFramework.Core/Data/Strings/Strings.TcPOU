@@ -13,6 +13,7 @@ License: https://opensource.org/license/mit
 Buffer ownership and size requirements are defined by each operation. ANY formatting reads the caller's value
 through its type descriptor. Try methods contain exceptions; this does not validate buffer lifetime or undo
 partial modifications.
+Runtime type diagnostics use TYPE_ names for known classes and decimal codes for unknown values.
 </description>
 *)
 
@@ -20,6 +21,8 @@ partial modifications.
 PROGRAM Strings
 VAR_INPUT CONSTANT
 	CharSize : BYTE := 1;
+	//! <summary>ASCII space byte; values below it are control bytes in lexical text filters.</summary>
+	ASCII_SPACE : BYTE := BYTE#16#20;
 	NewLine : STRING(1) := '$R';
 	Empty : STRING(0) := '';
 	//! <summary>Standard three-dot ellipsis sequence for single-byte text truncation.</summary>
@@ -96,55 +99,17 @@ END_VAR]]></Declaration>
 
 IF value.TypeClass = __SYSTEM.TYPE_CLASS.TYPE_STRING THEN
 	valueLength := InternalGetLength(value := value.pValue);
+
 	IF valueLength > 255 THEN
 		AnyToStringFit255 := Tc2_Standard.CONCAT(STR1 := Tc2_Standard.LEFT(STR := AnyToStringFit255, SIZE := 252), STR2 := '...');
 	END_IF
 ELSIF value.TypeClass = __SYSTEM.TYPE_CLASS.TYPE_WSTRING THEN
 	valueLength := WideStrings.InternalGetLength(value := value.pValue);
+
 	IF valueLength > 255 THEN
 		AnyToStringFit255 := Tc2_Standard.CONCAT(STR1 := Tc2_Standard.LEFT(STR := AnyToStringFit255, SIZE := 252), STR2 := '...');
 	END_IF
 END_IF]]></ST>
-      </Implementation>
-    </Method>
-    <Method Name="AppendFit" Id="{64a20001-3f77-4b1a-908f-282a178d2bc7}" FolderPath="Append\">
-      <Declaration><![CDATA[(*!
-<summary>
-Appends one STRING to a caller-owned STRING buffer, fitting available capacity with an ellipsis ('...') if
-exceeded.
-</summary>
-<description>
-Requires a writable STRING target with valid capacity metadata. If the appended text exceeds target capacity,
-it is truncated so the final characters are '...' followed by a null-terminator. Raises NotSupportedException
-for a non-STRING target. Source storage is borrowed only for this call.
-</description>
-<param name="targetString">Writable STRING buffer to append to.</param>
-<param name="sourceString">Text to append; empty leaves the target unchanged.</param>
-*)
-METHOD AppendFit
-VAR_INPUT
-	targetString : ANY_STRING;
-END_VAR
-VAR_IN_OUT CONSTANT
-	sourceString : STRING;
-END_VAR
-VAR
-	formattedExceptionMessage : WSTRING(255);
-END_VAR]]></Declaration>
-      <Implementation>
-        <ST><![CDATA[IF targetString.TypeClass <> __SYSTEM.TYPE_CLASS.TYPE_STRING THEN
-	formattedExceptionMessage := WideStrings.Concat255("Not supported type ", TO_WSTRING(targetString.TypeClass));
-
-	Exceptions.ThrowNotSupported(
-		sourceNamespaceName := NamespaceName,
-		sourceClassName := ClassName,
-		sourcePOUName := __POUNAME(),
-		sourcePosition := __POSITION(),
-		message := formattedExceptionMessage
-	);
-END_IF
-
-InternalAppendFit(targetString := targetString, sourceString := ADR(sourceString));]]></ST>
       </Implementation>
     </Method>
     <Method Name="Append" Id="{7d3432ad-7058-4ce7-80d2-01c9d35ec6fb}" FolderPath="Append\">
@@ -155,6 +120,7 @@ Requires live, null-terminated strings and a writable target whose declared size
 validating the target type, an empty source completes without modifying the target. A non-STRING target raises
 NotSupportedException; failure of the append helper raises TargetVariableMemoryOverflowException. Source
 storage is borrowed only for this call.
+Known runtime type classes appear by their TYPE_ names; unknown values retain their decimal codes.
 </description>
 *)
 //!<param name="targetString">Writable STRING buffer to append to.</param>
@@ -172,7 +138,10 @@ VAR
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[IF targetString.TypeClass <> __SYSTEM.TYPE_CLASS.TYPE_STRING THEN
-	formattedExceptionMessage := Tc2_Utilities.WCONCAT(STR1 := "Not supported type ", STR2 := TO_WSTRING(targetString.TypeClass));
+	formattedExceptionMessage := Tc2_Utilities.WCONCAT(
+		STR1 := "Not supported type ",
+		STR2 := SystemTypeClassConvertor.ToWideString(typeClass := targetString.TypeClass)
+	);
 
 	Exceptions.ThrowNotSupported(
 		sourceNamespaceName := NamespaceName,
@@ -220,6 +189,7 @@ fragments do not stop processing; if all are empty, the target is unchanged and 
 NotSupportedException for a non-STRING target or TargetVariableMemoryOverflowException when appending fails.
 Processing stops on the first append failure; earlier modifications are not rolled back. Source storage is
 borrowed only for this call.
+Known runtime type classes appear by their TYPE_ names; unknown values retain their decimal codes.
 </description>
 *)
 METHOD Append255
@@ -242,7 +212,10 @@ VAR
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[IF targetString.TypeClass <> __SYSTEM.TYPE_CLASS.TYPE_STRING THEN
-	formattedExceptionMessage := Tc2_Utilities.WCONCAT(STR1 := "Not supported type ", STR2 := TO_WSTRING(targetString.TypeClass));
+	formattedExceptionMessage := Tc2_Utilities.WCONCAT(
+		STR1 := "Not supported type ",
+		STR2 := SystemTypeClassConvertor.ToWideString(typeClass := targetString.TypeClass)
+	);
 
 	Exceptions.ThrowNotSupported(
 		sourceNamespaceName := NamespaceName,
@@ -277,6 +250,50 @@ END_IF
 END_IF]]></ST>
       </Implementation>
     </Method>
+    <Method Name="AppendFit" Id="{64a20001-3f77-4b1a-908f-282a178d2bc7}" FolderPath="Append\">
+      <Declaration><![CDATA[(*!
+<summary>
+Appends one STRING to a caller-owned STRING buffer, fitting available capacity with an ellipsis ('...') if
+exceeded.
+</summary>
+<description>
+Requires a writable STRING target with valid capacity metadata. If the appended text exceeds target capacity,
+it is truncated so the final characters are '...' followed by a null-terminator. Raises NotSupportedException
+for a non-STRING target. Source storage is borrowed only for this call.
+Known runtime type classes appear by their TYPE_ names; unknown values retain their decimal codes.
+</description>
+<param name="targetString">Writable STRING buffer to append to.</param>
+<param name="sourceString">Text to append; empty leaves the target unchanged.</param>
+*)
+METHOD AppendFit
+VAR_INPUT
+	targetString : ANY_STRING;
+END_VAR
+VAR_IN_OUT CONSTANT
+	sourceString : STRING;
+END_VAR
+VAR
+	formattedExceptionMessage : WSTRING(255);
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF targetString.TypeClass <> __SYSTEM.TYPE_CLASS.TYPE_STRING THEN
+	formattedExceptionMessage := WideStrings.Concat255(
+		"Not supported type ",
+		SystemTypeClassConvertor.ToWideString(typeClass := targetString.TypeClass)
+	);
+
+	Exceptions.ThrowNotSupported(
+		sourceNamespaceName := NamespaceName,
+		sourceClassName := ClassName,
+		sourcePOUName := __POUNAME(),
+		sourcePosition := __POSITION(),
+		message := formattedExceptionMessage
+	);
+END_IF
+
+InternalAppendFit(targetString := targetString, sourceString := ADR(sourceString));]]></ST>
+      </Implementation>
+    </Method>
     <Method Name="AppendFit255" Id="{741614c7-882a-4b63-b2d0-ee975117324f}" FolderPath="Append\">
       <Declaration><![CDATA[(*!
 <summary>
@@ -288,6 +305,7 @@ Requires a writable STRING target with valid capacity metadata. Fragments are ap
 empty fragments. If the combined text exceeds target capacity, it is truncated so the final characters are
 '...' followed by a null-terminator. Raises NotSupportedException for a non-STRING target. Source storage is
 borrowed only for this call.
+Known runtime type classes appear by their TYPE_ names; unknown values retain their decimal codes.
 </description>
 <param name="targetString">Writable STRING buffer to append to.</param>
 <param name="sourceString1">First text fragment to append.</param>
@@ -320,7 +338,10 @@ VAR
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[IF targetString.TypeClass <> __SYSTEM.TYPE_CLASS.TYPE_STRING THEN
-	formattedExceptionMessage := Tc2_Utilities.WCONCAT(STR1 := "Not supported type ", STR2 := TO_WSTRING(targetString.TypeClass));
+	formattedExceptionMessage := Tc2_Utilities.WCONCAT(
+		STR1 := "Not supported type ",
+		STR2 := SystemTypeClassConvertor.ToWideString(typeClass := targetString.TypeClass)
+	);
 
 	Exceptions.ThrowNotSupported(
 		sourceNamespaceName := NamespaceName,
@@ -589,6 +610,29 @@ END_IF
 ConcatFit255 := result;]]></ST>
       </Implementation>
     </Method>
+    <Method Name="Contains" Id="{382d5dec-076a-4371-95cd-edb6d9d627f6}">
+      <Declaration><![CDATA[(*!
+<summary>Determines whether a string contains an exact, case-sensitive occurrence of a substring.</summary>
+<description>
+Returns TRUE when the substring is found. An empty search substring matches any source, including an empty
+source. Returns FALSE when absent. Inputs must be live, null-terminated strings; they are borrowed only for
+this call and are not modified.
+</description>
+<param name="stringToSearchIn">Text to search.</param>
+<param name="stringToFind">Substring to locate; empty matches any string.</param>
+*)
+METHOD Contains : BOOL
+VAR_IN_OUT CONSTANT
+	stringToSearchIn : STRING;
+	stringToFind : STRING;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[Contains := Find(
+	stringToSearchIn := stringToSearchIn,
+	stringToFind := stringToFind
+);]]></ST>
+      </Implementation>
+    </Method>
     <Method Name="CreateSplitter" Id="{74505d39-c9b2-47f5-a8a1-80fe0e3aaae8}" FolderPath="Split\">
       <Declaration><![CDATA[(*!
 <summary>Creates an enumerator over fragments of a borrowed source string.</summary>
@@ -608,14 +652,15 @@ explicitly allocated with __NEW may be deleted with __DELETE.
 //! </param>
 //!<param name="separator">
 //! Copied separator containing 1 to 80 characters. An empty or longer value raises
-//! ArgumentOutOfRangeException before initialization.
+//! ArgumentOutOfRangeException before initialization. The 255-character input capacity preserves rejection
+//! of all values longer than 80.
 //! </param>
 METHOD CreateSplitter : StringSplittingEnumerator
 VAR_IN_OUT CONSTANT
 	sourceString : STRING;
 END_VAR
 VAR_INPUT
-	separator : STRING;
+	separator : STRING(255);
 	maxCount : UDINT := 0;
 	trimEntries : BOOL := FALSE;
 	removeEmptyEntries : BOOL := FALSE;
@@ -736,6 +781,7 @@ Borrows the value storage for this call. The descriptor must identify a live val
 result does not retain a reference to the source. Unhandled type classes return a diagnostic marker containing
 the type class and descriptor size in bytes, without reading value storage, allocating heap memory or raising
 a formatting exception. This also applies to an unhandled type with a null data address.
+Known runtime type classes appear by their TYPE_ names; unknown values retain their decimal codes.
 </description>
 <param name="value">Type descriptor and address of the value to format.</param>
 *)
@@ -783,6 +829,7 @@ END_VAR]]></Declaration>
 	
 	__SYSTEM.TYPE_CLASS.TYPE_BIT:
 		anyByte := value.pValue;
+
 		IF anyByte^ > 0 THEN
 			InternalAnyToString255 := '1';		
 		ELSE
@@ -869,101 +916,12 @@ END_VAR]]></Declaration>
 	ELSE
 		InternalAnyToString255 := Concat255(
 			'<value unavailable; type class: ',
-			TO_STRING(value.TypeClass),
+			SystemTypeClassConvertor.ToString(typeClass := value.TypeClass),
 			'; size: ',
 			TO_STRING(value.diSize),
 			' bytes>'
 		);
 END_CASE	]]></ST>
-      </Implementation>
-    </Method>
-    <Method Name="InternalAppendFit" Id="{64a20005-3f77-4b1a-908f-282a178d2bc7}" FolderPath="Service members\">
-      <Declaration><![CDATA[(*!
-<summary>
-Appends a null-terminated STRING to a target descriptor, fitting available capacity with an ellipsis ('...')
-if exceeded.
-</summary>
-<description>
-Validates target type and capacity. If the text does not fit, copies as many characters as can fit before
-'...' and appends null terminator. Returns FALSE on type mismatch or invalid target.
-</description>
-*)
-METHOD INTERNAL InternalAppendFit : BOOL
-VAR_INPUT
-	targetString : __SYSTEM.AnyType;
-	sourceString : POINTER TO STRING;
-END_VAR
-VAR
-	maxCapacity : UDINT;
-	currentLength : UDINT;
-	sourceLength : UDINT;
-	availableChars : UDINT;
-	targetBytes : POINTER TO BYTE;
-END_VAR]]></Declaration>
-      <Implementation>
-        <ST><![CDATA[InternalAppendFit := FALSE;
-
-IF targetString.TypeClass <> __SYSTEM.TYPE_CLASS.TYPE_STRING
-	OR_ELSE targetString.pValue = 0
-	OR_ELSE targetString.diSize < 1
-THEN
-	RETURN;
-END_IF
-
-IF sourceString = 0 THEN
-	InternalAppendFit := TRUE;
-	RETURN;
-END_IF
-
-sourceLength := TO_UDINT(Tc2_Utilities.LEN2(pSTRING := sourceString));
-IF sourceLength = 0 THEN
-	InternalAppendFit := TRUE;
-	RETURN;
-END_IF
-
-maxCapacity := TO_UDINT(targetString.diSize) - 1;
-currentLength := TO_UDINT(Tc2_Utilities.LEN2(pSTRING := targetString.pValue));
-
-IF currentLength > maxCapacity THEN
-	currentLength := maxCapacity;
-END_IF
-
-targetBytes := targetString.pValue;
-
-IF currentLength + sourceLength <= maxCapacity THEN
-	Tc2_Utilities.CONCAT2(
-		pSrcString1 := targetString.pValue,
-		pSrcString2 := sourceString,
-		pDstString := targetString.pValue,
-		nDstSize := TO_UDINT(targetString.diSize)
-	);
-ELSE
-	IF maxCapacity >= 3 THEN
-		IF currentLength >= maxCapacity - 3 THEN
-			currentLength := maxCapacity - 3;
-			availableChars := 0;
-		ELSE
-			availableChars := maxCapacity - 3 - currentLength;
-			Tc2_System.MEMCPY(destAddr := targetString.pValue + currentLength, srcAddr := sourceString, n := availableChars);
-		END_IF
-
-		targetBytes[currentLength + availableChars] := 16#2E; // '.'
-		targetBytes[currentLength + availableChars + 1] := 16#2E; // '.'
-		targetBytes[currentLength + availableChars + 2] := 16#2E; // '.'
-		targetBytes[currentLength + availableChars + 3] := 0;
-	ELSIF maxCapacity > 0 THEN
-		IF currentLength >= maxCapacity - 1 THEN
-			currentLength := maxCapacity - 1;
-		END_IF
-		
-		targetBytes[currentLength] := 16#2E;
-		targetBytes[currentLength + 1] := 0;
-	ELSE
-		targetBytes[0] := 0;
-	END_IF
-END_IF
-
-InternalAppendFit := TRUE;]]></ST>
       </Implementation>
     </Method>
     <Method Name="InternalAppend" Id="{96f09b6b-a3b9-4899-b746-36fdcd4d9236}" FolderPath="Service members\">
@@ -1109,6 +1067,96 @@ IF sourceString10 <> 0 AND_THEN Tc2_Utilities.LEN2(pSTRING := sourceString10) > 
 END_IF
 
 InternalAppend := TRUE;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="InternalAppendFit" Id="{64a20005-3f77-4b1a-908f-282a178d2bc7}" FolderPath="Service members\">
+      <Declaration><![CDATA[(*!
+<summary>
+Appends a null-terminated STRING to a target descriptor, fitting available capacity with an ellipsis ('...')
+if exceeded.
+</summary>
+<description>
+Validates target type and capacity. If the text does not fit, copies as many characters as can fit before
+'...' and appends null terminator. Returns FALSE on type mismatch or invalid target.
+</description>
+*)
+METHOD INTERNAL InternalAppendFit : BOOL
+VAR_INPUT
+	targetString : __SYSTEM.AnyType;
+	sourceString : POINTER TO STRING;
+END_VAR
+VAR
+	maxCapacity : UDINT;
+	currentLength : UDINT;
+	sourceLength : UDINT;
+	availableChars : UDINT;
+	targetBytes : POINTER TO BYTE;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[InternalAppendFit := FALSE;
+
+IF targetString.TypeClass <> __SYSTEM.TYPE_CLASS.TYPE_STRING
+	OR_ELSE targetString.pValue = 0
+	OR_ELSE targetString.diSize < 1
+THEN
+	RETURN;
+END_IF
+
+IF sourceString = 0 THEN
+	InternalAppendFit := TRUE;
+	RETURN;
+END_IF
+
+sourceLength := TO_UDINT(Tc2_Utilities.LEN2(pSTRING := sourceString));
+
+IF sourceLength = 0 THEN
+	InternalAppendFit := TRUE;
+	RETURN;
+END_IF
+
+maxCapacity := TO_UDINT(targetString.diSize) - 1;
+currentLength := TO_UDINT(Tc2_Utilities.LEN2(pSTRING := targetString.pValue));
+
+IF currentLength > maxCapacity THEN
+	currentLength := maxCapacity;
+END_IF
+
+targetBytes := targetString.pValue;
+
+IF currentLength + sourceLength <= maxCapacity THEN
+	Tc2_Utilities.CONCAT2(
+		pSrcString1 := targetString.pValue,
+		pSrcString2 := sourceString,
+		pDstString := targetString.pValue,
+		nDstSize := TO_UDINT(targetString.diSize)
+	);
+ELSE
+	IF maxCapacity >= 3 THEN
+		IF currentLength >= maxCapacity - 3 THEN
+			currentLength := maxCapacity - 3;
+			availableChars := 0;
+		ELSE
+			availableChars := maxCapacity - 3 - currentLength;
+			Tc2_System.MEMCPY(destAddr := targetString.pValue + currentLength, srcAddr := sourceString, n := availableChars);
+		END_IF
+
+		targetBytes[currentLength + availableChars] := 16#2E; // '.'
+		targetBytes[currentLength + availableChars + 1] := 16#2E; // '.'
+		targetBytes[currentLength + availableChars + 2] := 16#2E; // '.'
+		targetBytes[currentLength + availableChars + 3] := 0;
+	ELSIF maxCapacity > 0 THEN
+		IF currentLength >= maxCapacity - 1 THEN
+			currentLength := maxCapacity - 1;
+		END_IF
+		
+		targetBytes[currentLength] := 16#2E;
+		targetBytes[currentLength + 1] := 0;
+	ELSE
+		targetBytes[0] := 0;
+	END_IF
+END_IF
+
+InternalAppendFit := TRUE;]]></ST>
       </Implementation>
     </Method>
     <Method Name="InternalFind" Id="{5b6aff61-016c-4db4-94ed-cfbbb336515e}" FolderPath="Service members\">
@@ -1631,6 +1679,7 @@ not rolled back. The caller supplies live writable target storage and source dat
 operation. Strings of the target encoding are joined through a borrowed reference without a 255-character
 intermediate limit. Other values use AsString255 with its default conversion policy and 255-character
 capacity; unsupported conversions raise an exception.
+Known runtime type classes appear by their TYPE_ names; unknown values retain their decimal codes.
 </description>
 *)
 //!<param name="targetString">
@@ -1659,7 +1708,10 @@ VAR
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[IF targetString.TypeClass <> __SYSTEM.TYPE_CLASS.TYPE_STRING THEN
-	formattedExceptionMessage := Tc2_Utilities.WCONCAT(STR1 := "Not supported type ", STR2 := TO_WSTRING(targetString.TypeClass));
+	formattedExceptionMessage := Tc2_Utilities.WCONCAT(
+		STR1 := "Not supported type ",
+		STR2 := SystemTypeClassConvertor.ToWideString(typeClass := targetString.TypeClass)
+	);
 
 	Exceptions.ThrowNotSupported(
 		sourceNamespaceName := NamespaceName,
@@ -1727,6 +1779,7 @@ performed; completed replacements remain, replacementCount reports their count, 
 null-terminated. These guarantees concern capacity failure with valid input buffers, not invalid memory
 access. The caller supplies live buffers of the correct encoding; sourceString must be writable and its size
 must include space for the terminator.
+Known runtime type classes appear by their TYPE_ names; unknown values retain their decimal codes.
 </description>
 *)
 //!<param name="oldSubstring">Text to replace; empty performs no replacements.</param>
@@ -1756,7 +1809,10 @@ VAR
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[IF sourceString.TypeClass <> __SYSTEM.TYPE_CLASS.TYPE_STRING THEN
-	formattedExceptionMessage := Tc2_Utilities.WCONCAT(STR1 := "Not supported type ", STR2 := TO_WSTRING(sourceString.TypeClass));
+	formattedExceptionMessage := Tc2_Utilities.WCONCAT(
+		STR1 := "Not supported type ",
+		STR2 := SystemTypeClassConvertor.ToWideString(typeClass := sourceString.TypeClass)
+	);
 
 	Exceptions.ThrowNotSupported(
 		sourceNamespaceName := NamespaceName,
@@ -1799,6 +1855,7 @@ performed; completed replacements remain, replacementCount reports their count, 
 null-terminated. These guarantees concern capacity failure with valid input buffers, not invalid memory
 access. The caller supplies live buffers of the correct encoding; sourceString must be writable and its size
 must include space for the terminator.
+Known runtime type classes appear by their TYPE_ names; unknown values retain their decimal codes.
 </description>
 *)
 //!<param name="oldSubstring">Text to replace; empty performs no replacements.</param>
@@ -1824,7 +1881,10 @@ VAR
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[IF sourceString.TypeClass <> __SYSTEM.TYPE_CLASS.TYPE_STRING THEN
-	formattedExceptionMessage := Tc2_Utilities.WCONCAT(STR1 := "Not supported type ", STR2 := TO_WSTRING(sourceString.TypeClass));
+	formattedExceptionMessage := Tc2_Utilities.WCONCAT(
+		STR1 := "Not supported type ",
+		STR2 := SystemTypeClassConvertor.ToWideString(typeClass := sourceString.TypeClass)
+	);
 
 	Exceptions.ThrowNotSupported(
 		sourceNamespaceName := NamespaceName,
@@ -2032,36 +2092,6 @@ IF trimMode = TRIM_MODE.LEFT_AND_RIGHT OR_ELSE trimMode = TRIM_MODE.RIGHT THEN
 END_IF]]></ST>
       </Implementation>
     </Method>
-    <Method Name="TryAppendFit" Id="{64a20002-3f77-4b1a-908f-282a178d2bc7}" FolderPath="Append\">
-      <Declaration><![CDATA[(*!
-<summary>
-Appends one STRING to a caller-owned STRING buffer, fitting available capacity with an ellipsis ('...') if
-exceeded.
-</summary>
-<description>
-Requires a writable STRING target with valid capacity metadata. If the appended text exceeds target capacity,
-it is truncated so the final characters are '...' followed by a null-terminator. Returns TRUE if the text was
-appended (including when truncated); returns FALSE if target is not a valid STRING or has zero capacity.
-Catches exceptions and returns FALSE.
-</description>
-<param name="targetString">Writable STRING buffer to append to.</param>
-<param name="sourceString">Text to append; empty leaves the target unchanged.</param>
-*)
-METHOD TryAppendFit : BOOL
-VAR_INPUT
-	targetString : ANY_STRING;
-END_VAR
-VAR_IN_OUT CONSTANT
-	sourceString : STRING;
-END_VAR]]></Declaration>
-      <Implementation>
-        <ST><![CDATA[__TRY
-	TryAppendFit := InternalAppendFit(targetString := targetString, sourceString := ADR(sourceString));
-__CATCH
-	TryAppendFit := FALSE;
-__ENDTRY]]></ST>
-      </Implementation>
-    </Method>
     <Method Name="TryAppend" Id="{bf1d041e-2745-49ca-b076-368f2e842cc8}" FolderPath="Append\">
       <Declaration><![CDATA[(*!
 <summary>Appends one STRING to a caller-owned buffer and reports success.</summary>
@@ -2144,6 +2174,36 @@ END_VAR]]></Declaration>
 	);
 __CATCH
 	TryAppend255 := FALSE;
+__ENDTRY]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="TryAppendFit" Id="{64a20002-3f77-4b1a-908f-282a178d2bc7}" FolderPath="Append\">
+      <Declaration><![CDATA[(*!
+<summary>
+Appends one STRING to a caller-owned STRING buffer, fitting available capacity with an ellipsis ('...') if
+exceeded.
+</summary>
+<description>
+Requires a writable STRING target with valid capacity metadata. If the appended text exceeds target capacity,
+it is truncated so the final characters are '...' followed by a null-terminator. Returns TRUE if the text was
+appended (including when truncated); returns FALSE if target is not a valid STRING or has zero capacity.
+Catches exceptions and returns FALSE.
+</description>
+<param name="targetString">Writable STRING buffer to append to.</param>
+<param name="sourceString">Text to append; empty leaves the target unchanged.</param>
+*)
+METHOD TryAppendFit : BOOL
+VAR_INPUT
+	targetString : ANY_STRING;
+END_VAR
+VAR_IN_OUT CONSTANT
+	sourceString : STRING;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[__TRY
+	TryAppendFit := InternalAppendFit(targetString := targetString, sourceString := ADR(sourceString));
+__CATCH
+	TryAppendFit := FALSE;
 __ENDTRY]]></ST>
       </Implementation>
     </Method>
@@ -2249,7 +2309,9 @@ __NEW. The initialized result has no fragment allocation until MoveNext; assigni
 instance with an unreleased fragment. The caller is responsible for the result lifetime and cleanup, including
 Reset when abandoning iteration. Do not copy an active splitter by value; use references. Only an instance
 explicitly allocated with __NEW may be deleted with __DELETE. Catches exceptions and returns FALSE; terminal
-allocation state is preserved for the task boundary. Use the output only after TRUE is returned.
+allocation state is preserved for the task boundary. A null source address or missing terminator capacity
+returns FALSE before initialization.
+Use the output only after TRUE is returned.
 </description>
 *)
 //!<param name="maxCount">
@@ -2259,14 +2321,14 @@ allocation state is preserved for the task boundary. Use the output only after T
 //! </param>
 //!<param name="separator">
 //! Copied separator containing 1 to 80 characters. An invalid reference, empty or longer value returns FALSE
-//! before initialization.
+//! before initialization. The 255-character input capacity preserves rejection of all values longer than 80.
 //! </param>
 METHOD TryCreateSplitter : BOOL
 VAR_INPUT
 	sourceString : ANY_STRING;
 END_VAR
 VAR_INPUT
-	separator : STRING;
+	separator : STRING(255);
 	maxCount : UDINT := 0;
 	trimEntries : BOOL := FALSE;
 	removeEmptyEntries : BOOL := FALSE;
@@ -2277,7 +2339,10 @@ END_VAR
 ]]></Declaration>
       <Implementation>
         <ST><![CDATA[__TRY
-	IF sourceString.TypeClass <> __SYSTEM.TYPE_CLASS.TYPE_STRING THEN
+	IF sourceString.TypeClass <> __SYSTEM.TYPE_CLASS.TYPE_STRING
+		OR_ELSE sourceString.pValue = Memory.NULL_ADDRESS
+		OR_ELSE sourceString.diSize < TO_DINT(CharSize)
+	THEN
 		RETURN;
 	END_IF
 

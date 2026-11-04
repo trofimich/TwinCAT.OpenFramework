@@ -1,0 +1,186 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1" ProductVersion="3.1.4026.21">
+  <POU Name="CollectionCloneProbe" Id="{ab41c45c-b964-4ecf-9cb5-8b769e137e60}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+SPDX-FileCopyrightText: © 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+SPDX-License-Identifier: MIT
+License: https://opensource.org/license/mit
+*)
+
+(*!
+<summary>Creates caller-owned clones that observe disposal and can invalidate exception transport.</summary>
+<description>
+The source is persistent. Clones borrow a persistent counter and belong exclusively to their recipient.
+Clone can reject before allocation. A selected clone clears only the current task's borrowed exception slot
+on disposal, modelling cleanup context changes without throwing, allocating or registering exceptions in
+FB_exit. The source itself never clears transport. Do not copy source or clone instances by value.
+No cross-task access is supported.
+</description>
+*)
+
+{attribute 'enable_dynamic_creation'}
+FUNCTION_BLOCK CollectionCloneProbe EXTENDS TOF_Core.Object IMPLEMENTS TOF_Core.ICloneable
+VAR_INPUT
+	//! <summary>Rejects default object equality callbacks without changing either operand.</summary>
+	ThrowOnEquality : BOOL;
+	//! <summary>Rejects Clone before allocating a result.</summary>
+	ThrowOnClone : BOOL;
+	//! <summary>Makes subsequent clones drop the current task's borrowed exception slot during disposal.</summary>
+	ClearCloneTransportOnExit : BOOL;
+END_VAR
+VAR_STAT
+	_ClassName : STRING := __POUNAME();
+END_VAR
+VAR
+	_ExitCounter : REFERENCE TO UDINT;
+	_ClearTransportOnExit : BOOL;
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[]]></ST>
+    </Implementation>
+    <Property Name="ClassName" Id="{97f83bac-b97a-4367-97b7-61ac7d6b2648}">
+      <Declaration><![CDATA[(*!
+<summary>Provides the concrete test fixture class name.</summary>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{bd476383-6984-4c43-b537-2ab9dc402aeb}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ClassName REF= _ClassName;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="Clone" Id="{7262ef1d-8f7c-41e1-9e3d-471dabd0808a}">
+      <Declaration><![CDATA[(*!
+<summary>Creates one independently owned probe or raises before returning.</summary>
+<description>
+Does not register its result for automatic cleanup. The caller owns it and must release or transfer it.
+The source's counter is borrowed; failure before NEW leaves source and counter unchanged.
+</description>
+*)
+METHOD Clone : TOF_Core.IObject
+VAR
+	clonePointer : POINTER TO CollectionCloneProbe;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF ThrowOnClone THEN
+	TOF_Core.Exceptions.ThrowStandard(
+		sourceNamespaceName := NamespaceName,
+		sourceClassName := ClassName,
+		sourcePOUName := __POUNAME(),
+		sourcePosition := __POSITION(),
+		message := "Collection clone rejected"
+	);
+END_IF
+
+clonePointer := __NEW(CollectionCloneProbe);
+
+IF clonePointer = 0 THEN
+	TOF_Core.DynamicMemoryManager.RaiseAllocationFailure();
+END_IF
+
+IF __ISVALIDREF(_ExitCounter) THEN
+	clonePointer^._ExitCounter REF= _ExitCounter;
+END_IF
+clonePointer^._ClearTransportOnExit := ClearCloneTransportOnExit;
+Clone := clonePointer^;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="Equals" Id="{731a5013-f42d-463e-9e18-144009cd0f43}">
+      <Declaration><![CDATA[(*!
+<summary>Uses identity equality or raises the configured callback failure.</summary>
+<description>
+Does not mutate or retain the compared object. Default identity hashes remain consistent when not rejecting.
+</description>
+*)
+METHOD Equals : BOOL
+VAR_INPUT
+	other : TOF_Core.IObject;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF ThrowOnEquality THEN
+	TOF_Core.Exceptions.ThrowStandard(
+		sourceNamespaceName := NamespaceName,
+		sourceClassName := ClassName,
+		sourcePOUName := __POUNAME(),
+		sourcePosition := __POSITION(),
+		message := "Collection object equality rejected"
+	);
+END_IF
+
+Equals := SUPER^.Equals(other := other);]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="FB_exit" Id="{bee8932c-a4ec-496c-8af9-e46ecef3995c}">
+      <Declaration><![CDATA[(*!
+<summary>Observes destruction and optionally drops current-task exception transport.</summary>
+<description>
+Does not raise, allocate or register exceptions. Guards the cyclic task context before touching transport;
+the borrowed counter is persistent. Dropping transport does not free registered exception payloads.
+</description>
+*)
+METHOD FB_exit : BOOL
+VAR_INPUT
+	bInCopyCode : BOOL;
+END_VAR
+VAR
+	taskIndex : DINT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF __ISVALIDREF(_ExitCounter) THEN
+	_ExitCounter := _ExitCounter + 1;
+END_IF
+
+IF _ClearTransportOnExit THEN
+	taskIndex := TOF_Core.System.GetCurrentTaskIndex();
+
+	IF taskIndex > TOF_Core.SignedInt32.ZERO AND_THEN taskIndex <= TOF_Core.System.TASK_COUNT THEN
+		TOF_Core.ExceptionManager.Cleanup();
+	END_IF
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="NamespaceName" Id="{5b80be69-d889-47ed-b781-52468a7d1d44}">
+      <Declaration><![CDATA[(*!
+<summary>Borrows the compiler-initialized test namespace.</summary>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{160cf686-b6d6-4ade-83ba-a28278f0e779}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[NamespaceName REF= CurrentNamespace.Name;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="ObserveExit" Id="{3723d98e-4e07-4e0a-b183-51da983f9c8a}">
+      <Declaration><![CDATA[(*!
+<summary>Binds the persistent counter borrowed by subsequent clones.</summary>
+<description>
+The counter must remain alive until every clone and the source have been destroyed.
+</description>
+*)
+METHOD ObserveExit
+VAR_IN_OUT
+	counter : UDINT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_ExitCounter REF= counter;]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="SelfSize" Id="{782dc670-303e-4b13-b75b-afccb307e478}">
+      <Declaration><![CDATA[(*!
+<summary>Reports the complete fixture instance size, excluding separately allocated storage.</summary>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY SelfSize : ULINT]]></Declaration>
+      <Get Name="Get" Id="{135bb2de-737f-4275-8e26-958bf6e99f5a}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[SelfSize := XSIZEOF(THIS^);]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+  </POU>
+</TcPlcObject>

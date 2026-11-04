@@ -2,7 +2,7 @@
 <TcPlcObject Version="1.1.0.1">
   <POU Name="TaskStopReason" Id="{7d87c05a-fcfb-432e-850f-e02324aa4eaa}" SpecialFunc="None">
     <Declaration><![CDATA[(*
-SPDX-FileCopyrightText: © 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+SPDX-FileCopyrightText: Â© 2026 Oleksandr Tiutyk <trofimich@gmail.com>
 SPDX-License-Identifier: MIT
 License: https://opensource.org/license/mit
 *)
@@ -10,9 +10,9 @@ License: https://opensource.org/license/mit
 (*!
 <summary>Exposes a task's live stop reason and diagnostic message.</summary>
 <description>
-Borrows live backing variables supplied at initialization. They must remain valid for the entire view
-lifetime; getters do not check for unbound references. Treat the view and returned references as read-only.
-Copy values when a snapshot is required.
+Borrows live backing variables supplied at initialization or rebound after online change. Getters safely guard
+against unbound references and return default values if references are not valid. Treat the view and returned
+references as read-only. Copy values when a snapshot is required.
 </description>
 *)
 
@@ -26,11 +26,12 @@ END_VAR]]></Declaration>
     <Implementation>
       <ST><![CDATA[]]></ST>
     </Implementation>
+    <Folder Name="Service methods" Id="{640d0762-9bf0-4131-882f-dcb46e69365c}" />
     <Property Name="ExternalCancel" Id="{d65436ff-6214-4d46-9752-1b7fe17ac652}">
       <Declaration><![CDATA[(*!
 <summary>Reports an external cancellation reason.</summary>
 <description>
-For a final result, inspect only after the task reaches STOPPED.
+For a final result, inspect only after the task reaches STOPPED. Returns FALSE if unbound.
 </description>
 *)
 {attribute 'monitoring' := 'call'}
@@ -39,7 +40,9 @@ PROPERTY FINAL ExternalCancel : BOOL
       <Get Name="Get" Id="{7f13fe79-d3bc-4bc8-b4d0-6ac92e5863ec}">
         <Declaration><![CDATA[]]></Declaration>
         <Implementation>
-          <ST><![CDATA[ExternalCancel := _StopReason = TASK_STOP_REASON.EXTERNAL_CANCEL;]]></ST>
+          <ST><![CDATA[IF __ISVALIDREF(_StopReason) THEN
+	ExternalCancel := _StopReason = TASK_STOP_REASON.EXTERNAL_CANCEL;
+END_IF]]></ST>
         </Implementation>
       </Get>
     </Property>
@@ -47,7 +50,7 @@ PROPERTY FINAL ExternalCancel : BOOL
       <Declaration><![CDATA[(*!
 <summary>Reports a failure reason.</summary>
 <description>
-Original and final reasons can differ when resource release fails.
+Original and final reasons can differ when resource release fails. Returns FALSE if unbound.
 </description>
 *)
 {attribute 'monitoring' := 'call'}
@@ -56,7 +59,9 @@ PROPERTY FINAL Failure : BOOL
       <Get Name="Get" Id="{d068f895-ce50-4ef3-9400-cfe95cba193f}">
         <Declaration><![CDATA[]]></Declaration>
         <Implementation>
-          <ST><![CDATA[Failure := _StopReason = TASK_STOP_REASON.FAILURE;]]></ST>
+          <ST><![CDATA[IF __ISVALIDREF(_StopReason) THEN
+	Failure := _StopReason = TASK_STOP_REASON.FAILURE;
+END_IF]]></ST>
         </Implementation>
       </Get>
     </Property>
@@ -64,8 +69,8 @@ PROPERTY FINAL Failure : BOOL
       <Declaration><![CDATA[(*!
 <summary>Binds the view to its owner's live state.</summary>
 <description>
-Stores references without copying their current values or changing the owner. All supplied references must be
-valid and outlive the view. Does not allocate or raise framework exceptions.
+Stores references without copying their current values or changing the owner. Valid supplied references are
+bound; skipped during online change copy code. Does not allocate or raise framework exceptions.
 </description>
 <param name="stopReason">Live original or final reason owned by the task.</param>
 <param name="stopReasonMessage">Live message paired with that reason.</param>
@@ -78,15 +83,19 @@ VAR_INPUT
 	stopReasonMessage : REFERENCE TO TOF_Core.ERROR_MESSAGE;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[_StopReason REF= stopReason;
-_StopReasonMessage REF= stopReasonMessage;]]></ST>
+        <ST><![CDATA[IF NOT bInCopyCode THEN
+	Rebind(
+		stopReason := stopReason,
+		stopReasonMessage := ADR(stopReasonMessage)
+	);
+END_IF]]></ST>
       </Implementation>
     </Method>
     <Property Name="InternalAbort" Id="{83d53d2e-69b8-477b-a831-f35aca5a62a2}">
       <Declaration><![CDATA[(*!
 <summary>Reports an internal abort reason.</summary>
 <description>
-An internal abort comes from ABORTED processing rather than an accepted external Cancel.
+An internal abort comes from ABORTED processing rather than an accepted external Cancel. Returns FALSE if unbound.
 </description>
 *)
 {attribute 'monitoring' := 'call'}
@@ -95,7 +104,9 @@ PROPERTY FINAL InternalAbort : BOOL
       <Get Name="Get" Id="{92ffbc6f-df3a-4e34-a23c-cf718d105a5c}">
         <Declaration><![CDATA[]]></Declaration>
         <Implementation>
-          <ST><![CDATA[InternalAbort := _StopReason = TASK_STOP_REASON.INTERNAL_ABORT;]]></ST>
+          <ST><![CDATA[IF __ISVALIDREF(_StopReason) THEN
+	InternalAbort := _StopReason = TASK_STOP_REASON.INTERNAL_ABORT;
+END_IF]]></ST>
         </Implementation>
       </Get>
     </Property>
@@ -110,18 +121,40 @@ text before Reset or reuse if needed.
 {attribute 'monitoring' := 'call'}
 PROPERTY FINAL Message : REFERENCE TO TOF_Core.ERROR_MESSAGE]]></Declaration>
       <Get Name="Get" Id="{6e0f0ef3-6037-4993-90fa-17ec1e266163}">
-        <Declaration><![CDATA[
-]]></Declaration>
+        <Declaration><![CDATA[]]></Declaration>
         <Implementation>
-          <ST><![CDATA[Message REF= _StopReasonMessage;]]></ST>
+          <ST><![CDATA[IF __ISVALIDREF(_StopReasonMessage) THEN
+	Message REF= _StopReasonMessage;
+END_IF]]></ST>
         </Implementation>
       </Get>
     </Property>
+    <Method Name="Rebind" Id="{6005371b-076e-4f41-89ae-b484140aadfa}" FolderPath="Service methods\">
+      <Declaration><![CDATA[(*!
+<summary>Rebinds the view to its owner's live stop reason and message variables.</summary>
+<description>
+Updates internal references when valid variables are supplied. Used during initialization and
+subsequent online-change reinitialization.
+</description>
+<param name="stopReason">Live original or final reason owned by the task.</param>
+<param name="stopReasonMessage">Live message paired with that reason.</param>
+*)
+METHOD INTERNAL Rebind
+VAR_INPUT
+	stopReason : REFERENCE TO TASK_STOP_REASON;
+	stopReasonMessage : POINTER TO TOF_Core.ERROR_MESSAGE;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_StopReason REF= stopReason;
+_StopReasonMessage REF= stopReasonMessage^;]]></ST>
+      </Implementation>
+    </Method>
     <Property Name="Value" Id="{bf66afab-3314-4fc2-84c5-0c928fe81af1}">
       <Declaration><![CDATA[(*!
 <summary>Returns the current stop reason by value.</summary>
 <description>
 WORK_DONE is also the initialization/reset default, so a final result is meaningful only after STOPPED.
+Returns WORK_DONE if unbound.
 </description>
 *)
 {attribute 'monitoring' := 'call'}
@@ -130,7 +163,9 @@ PROPERTY FINAL Value : TASK_STOP_REASON
       <Get Name="Get" Id="{47e63340-a1b6-40b3-a584-a27092139917}">
         <Declaration><![CDATA[]]></Declaration>
         <Implementation>
-          <ST><![CDATA[Value := _StopReason;]]></ST>
+          <ST><![CDATA[IF __ISVALIDREF(_StopReason) THEN
+	Value := _StopReason;
+END_IF]]></ST>
         </Implementation>
       </Get>
     </Property>
@@ -139,7 +174,7 @@ PROPERTY FINAL Value : TASK_STOP_REASON
 <summary>Reports the WORK_DONE reason.</summary>
 <description>
 Does not prove completion on its own: WORK_DONE is also the initial/reset value. Combine final-result checks
-with State.Stopped.
+with State.Stopped. Returns FALSE if unbound.
 </description>
 *)
 {attribute 'monitoring' := 'call'}
@@ -148,7 +183,9 @@ PROPERTY FINAL WorkDone : BOOL
       <Get Name="Get" Id="{78980f47-9ff5-4e3f-aeec-12296145f136}">
         <Declaration><![CDATA[]]></Declaration>
         <Implementation>
-          <ST><![CDATA[WorkDone := _StopReason = TASK_STOP_REASON.WORK_DONE;]]></ST>
+          <ST><![CDATA[IF __ISVALIDREF(_StopReason) THEN
+	WorkDone := _StopReason = TASK_STOP_REASON.WORK_DONE;
+END_IF]]></ST>
         </Implementation>
       </Get>
     </Property>

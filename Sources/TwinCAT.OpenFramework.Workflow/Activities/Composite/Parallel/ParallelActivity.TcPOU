@@ -27,7 +27,7 @@ VAR_STAT
 END_VAR
 VAR
 	{attribute 'OPC.UA.DA' := '0'}
-	_Children : TOF_Collections.List<0>(0);
+	_Children : TOF_Collections.List<0>(valueValidator := 0);
 
 	{attribute 'OPC.UA.DA' := '0'}
 	_Mode : PARALLEL_JOIN_MODE := PARALLEL_JOIN_MODE.WAIT_ALL;
@@ -51,6 +51,10 @@ END_VAR]]></Declaration>
 <description>
 Permitted only in PASSIVE_READY. Validates that the activity belongs to the same workflow, is not already
 attached, and does not form an ancestor cycle.
+The child must be unattached, including to this parent; duplicate slots are rejected before insertion.
+The parent chain and owning workflow must be PASSIVE_READY. Fixed workflow association is validated.
+Storage allocation precedes parent callbacks; callback exceptions may leave a partial configuration.
+Child references remain borrowed and must outlive the tree. No implicit detach or ownership transfer occurs.
 </description>
 <param name="activity">Child activity to execute concurrently.</param>
 *)
@@ -61,8 +65,18 @@ END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[ValidateChildActivityAttachment(childActivity := activity, argumentName := 'activity');
 
+IF activity.Parent <> 0 THEN
+	WorkflowExceptions.ThrowWorkflowAttachment(
+		sourceNamespaceName := NamespaceName,
+		sourceClassName := ClassName,
+		sourcePOUName := __POUNAME(),
+		sourcePosition := __POSITION(),
+		message := "Child element already occupies a parent slot"
+	);
+END_IF
+
 _Children.AppendGeneric(
-	TOF_Core.GenericValueFactory.FromParts(
+	value := TOF_Core.GenericValueFactory.FromParts(
 		genericTypeClass := TOF_Core.GENERIC_TYPE_CLASS.OBJECT,
 		address := activity.SelfAddress,
 		size := activity.SelfSize,
@@ -88,7 +102,14 @@ PROPERTY ChildCount : DINT]]></Declaration>
       </Get>
     </Property>
     <Property Name="ClassName" Id="{f108a989-028d-405d-87cf-71f0f548a4d6}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Borrows the initialized class name used in diagnostics.</summary>
+<description>
+Returns initialized metadata storage without allocation. Callers must not modify the returned string.
+Derived function blocks must use distinct initialized static storage when overriding this metadata.
+</description>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
       <Get Name="Get" Id="{e13e85c6-7fb6-49a2-bb4c-1ac98668a3d5}">
         <Declaration><![CDATA[]]></Declaration>
@@ -120,8 +141,8 @@ VAR_INPUT
 	index : DINT;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[IF index >= 0 AND_THEN index < _Children.Length THEN
-	__QUERYINTERFACE(_Children.Get(index).AsObject(), getChildActivityAt);
+        <ST><![CDATA[IF index >= TOF_Core.SignedInt32.ZERO AND_THEN index < _Children.Length THEN
+	__QUERYINTERFACE(_Children.Get(index := index).AsObject(), getChildActivityAt);
 END_IF]]></ST>
       </Implementation>
     </Method>
@@ -159,7 +180,14 @@ _Mode := Mode;]]></ST>
       </Set>
     </Property>
     <Property Name="NamespaceName" Id="{b01d14a2-cf3c-4554-83c0-3da70ecb2e96}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Borrows the compiler-initialized library namespace.</summary>
+<description>
+Borrows storage from the live internal namespace provider. Reacquire references after application
+reinitialization or relocation. Treat the reference as read-only; no ownership or synchronization is provided.
+</description>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
       <Get Name="Get" Id="{e65dc63c-0d39-4335-b979-44071d360f90}">
         <Declaration><![CDATA[]]></Declaration>
@@ -171,6 +199,11 @@ PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
     <Method Name="OnFail" Id="{0d7481d5-e08f-41df-bce5-678c7c1a7ebe}">
       <Declaration><![CDATA[(*!
 <summary>Cancels all active child activities when this parallel activity transitions to PASSIVE_FAILED.</summary>
+<description>
+Attempts cancellation of each busy child independently under the no-throw hook contract. It does not wait
+for child stopping or release. Child cancellation failures preserve the parent failure; OnResetting or the
+explicit resource owner must finish recovery before affected resources are reused.
+</description>
 <param name="exception">Caught exception that caused the failure.</param>
 *)
 METHOD PROTECTED OnFail
@@ -209,7 +242,7 @@ VAR
 	allReset : BOOL;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[IF _Children.Length < 1 THEN
+        <ST><![CDATA[IF _Children.Length = TOF_Core.SignedInt32.ZERO THEN
 	_BranchHalted := FALSE;
 	_BranchHaltedReason := "";
 	_AnyBranchCompleted := FALSE;
@@ -261,7 +294,7 @@ VAR
 	anyBusy : BOOL;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[IF _Children.Length < 1 THEN
+        <ST><![CDATA[IF _Children.Length = TOF_Core.SignedInt32.ZERO THEN
 	_BranchHalted := FALSE;
 	_BranchHaltedReason := "";
 	_AnyBranchCompleted := FALSE;
@@ -391,7 +424,7 @@ VAR
 	allCompleted : BOOL;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[IF _Children.Length < 1 THEN
+        <ST><![CDATA[IF _Children.Length = TOF_Core.SignedInt32.ZERO THEN
 	OnStopping := ACTIVITY_STOPPING_STATE.WORK_STOPPED;
 	RETURN;
 END_IF
@@ -526,7 +559,14 @@ END_CASE]]></ST>
       </Implementation>
     </Method>
     <Property Name="SelfSize" Id="{a91f65a8-cf85-4b20-a318-aec1e1d0f781}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Reports the size of this concrete function block instance in bytes.</summary>
+<description>
+Reports the instance layout rather than dynamic allocations owned by its fields. A derived function block
+with a different layout must override this property; the value does not grant disposal rights.
+</description>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY SelfSize : ULINT]]></Declaration>
       <Get Name="Get" Id="{63d24e9a-fedc-40ac-9fcc-d98ab14927ae}">
         <Declaration><![CDATA[]]></Declaration>
@@ -542,8 +582,9 @@ Verifies that a candidate child activity can be attached to this parallel compos
 conflicts.
 </summary>
 <description>
-Rejects null references, attaching while not in PASSIVE_READY, self-attachment, ancestor cycles, children
-already attached to a parent activity, workflow root conflicts, or different workflow ownership.
+Delegates to Workflows.ValidateElementAttachment for readiness, cycles, existing parent, root exclusion and
+fixed workflow association. Reusing the same link during Configure is allowed; append methods must reject
+occupied slots separately. No topology or ownership mutation is performed.
 </description>
 <param name="childActivity">Candidate child activity to validate.</param>
 <param name="argumentName">Parameter name for diagnostic reporting.</param>
@@ -552,10 +593,6 @@ METHOD PROTECTED ValidateChildActivityAttachment
 VAR_INPUT
 	childActivity : IActivity;
 	argumentName : STRING(255);
-END_VAR
-VAR
-	ancestor : IActivity;
-	childWorkflow : IWorkflow;
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[IF childActivity = 0 THEN
@@ -568,73 +605,7 @@ END_VAR]]></Declaration>
 	);
 END_IF
 
-IF State <> WORKFLOW_ELEMENT_STATE.PASSIVE_READY THEN
-	WorkflowExceptions.ThrowWorkflowConfiguration(
-		sourceNamespaceName := NamespaceName,
-		sourceClassName := ClassName,
-		sourcePOUName := __POUNAME(),
-		sourcePosition := __POSITION(),
-		message := "Cannot modify composite child activities outside PASSIVE_READY"
-	);
-END_IF
-
-ancestor := THIS^;
-
-WHILE ancestor <> 0 DO
-	IF ancestor = childActivity THEN
-		WorkflowExceptions.ThrowWorkflowAttachment(
-			sourceNamespaceName := NamespaceName,
-			sourceClassName := ClassName,
-			sourcePOUName := __POUNAME(),
-			sourcePosition := __POSITION(),
-			message := "Cannot attach an activity that is this composite or its ancestor"
-		);
-	END_IF
-
-	ancestor := ancestor.ParentActivity;
-END_WHILE
-
-IF childActivity.ParentActivity <> 0 THEN
-	IF childActivity.ParentActivity.SelfAddress = SelfAddress THEN
-		WorkflowExceptions.ThrowWorkflowAttachment(
-			sourceNamespaceName := NamespaceName,
-			sourceClassName := ClassName,
-			sourcePOUName := __POUNAME(),
-			sourcePosition := __POSITION(),
-			message := "Child activity is already attached to this parent activity"
-		);
-	ELSE
-		WorkflowExceptions.ThrowWorkflowAttachment(
-			sourceNamespaceName := NamespaceName,
-			sourceClassName := ClassName,
-			sourcePOUName := __POUNAME(),
-			sourcePosition := __POSITION(),
-			message := "Child activity is already attached to another parent activity"
-		);
-	END_IF
-END_IF
-
-childWorkflow := childActivity.Workflow;
-
-IF childWorkflow <> 0 AND_THEN childWorkflow.RootActivity = childActivity THEN
-	WorkflowExceptions.ThrowWorkflowAttachment(
-		sourceNamespaceName := NamespaceName,
-		sourceClassName := ClassName,
-		sourcePOUName := __POUNAME(),
-		sourcePosition := __POSITION(),
-		message := "Child activity is already attached as the workflow root activity"
-	);
-END_IF
-
-IF childWorkflow <> 0 AND_THEN Workflow <> 0 AND_THEN childWorkflow <> Workflow THEN
-	WorkflowExceptions.ThrowWorkflowAttachment(
-		sourceNamespaceName := NamespaceName,
-		sourceClassName := ClassName,
-		sourcePOUName := __POUNAME(),
-		sourcePosition := __POSITION(),
-		message := "Child activity belongs to a different workflow"
-	);
-END_IF]]></ST>
+Workflows.ValidateElementAttachment(parent := THIS^, child := childActivity);]]></ST>
       </Implementation>
     </Method>
   </POU>

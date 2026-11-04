@@ -10,10 +10,10 @@ License: https://opensource.org/license/mit
 (*!
 <summary>Writes messages and exception diagnostics to the ADS log.</summary>
 <description>
-Use this backend for short diagnostics in the standard ADS log; it is the built-in LogManager fallback and
-requires no cyclic work. Direct concurrent use has no established guarantee in this contract: formatting uses
-call-local storage, but that alone does not establish concurrency guarantees for ADSLOGSTR and all nested
-calls. This is not a confirmed concurrency defect. For a single-task backend access path from multiple sending
+Use this backend for short diagnostics in the standard ADS log. LogManager provides a separate instance for
+each cyclic task. Requires no cyclic work. Direct concurrent use has no established guarantee in this
+contract: formatting uses call-local storage, but that alone does not establish concurrency guarantees for
+ADSLOGSTR and all nested calls. This is not a confirmed concurrency defect. For a single-task backend access path from multiple sending
 tasks, use the QueuedLogger wrapper from the Loggers library and do not call the backend concurrently outside
 that wrapper. This backend is intended for short diagnostics. Each TryLogMessage call emits one ADS record;
 text exceeding the conversion or ADS output capacity is truncated at the end, without splitting it into
@@ -30,7 +30,8 @@ latch is preserved for RaiseIfAllocationFailed at the task boundary outside reco
 
 {attribute 'no_explicit_call' := 'do not call this function block directly'}
 FUNCTION_BLOCK AdsLogger EXTENDS Object IMPLEMENTS ILogger
-VAR
+VAR_STAT
+	//! <summary>Class name shared by all instances of this function block.</summary>
 	{attribute 'hide'} 
 	_ClassName : STRING := __POUNAME();
 END_VAR]]></Declaration>
@@ -101,6 +102,8 @@ returns FALSE instead. Already emitted entries are not rolled back, so FALSE may
 exceptions are not logged again. The fatal allocation latch is preserved for RaiseIfAllocationFailed at the
 task boundary outside recoverable handlers. Descendants cannot replace this non-throwing ADS logging path;
 implement ILogger separately for another backend.
+Returns FALSE when fatal allocation state is observed before work or after nested calls. The latch remains
+set for the caller's task boundary; already accepted or emitted records are not rolled back.
 </description>
 *)
 METHOD FINAL TryLogError : BOOL
@@ -113,7 +116,7 @@ VAR
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[__TRY
-	IF NOT __ISVALIDREF(error) THEN
+	IF DynamicMemoryManager.HasAllocationFailed OR_ELSE NOT __ISVALIDREF(error) THEN
 		RETURN;
 	END_IF
 
@@ -127,6 +130,10 @@ END_VAR]]></Declaration>
 		message := message,
 		messageNumber := messageNumber
 	);
+
+	IF DynamicMemoryManager.HasAllocationFailed THEN
+		TryLogError := FALSE;
+	END_IF
 __CATCH
 	TryLogError := FALSE;
 __ENDTRY]]></ST>
@@ -143,6 +150,8 @@ instead. Already emitted entries are not rolled back, so FALSE may follow partia
 are not logged again. The fatal allocation latch is preserved for RaiseIfAllocationFailed at the task boundary
 outside recoverable handlers. Descendants cannot replace this non-throwing ADS logging path; implement ILogger
 separately for another backend.
+Returns FALSE when fatal allocation state is observed before work or after nested calls. The latch remains
+set for the caller's task boundary; already accepted or emitted records are not rolled back.
 </description>
 <param name="exception">Exception view to read; null is ignored.</param>
 <param name="severity">Severity used to select the log category.</param>
@@ -160,58 +169,82 @@ END_VAR
 VAR
 	message : ERROR_MESSAGE;
 	aggregateException : IAggregateException;
+	innerExceptionCount : UINT;
 	innerException : IReadOnlyException;
 	i : DINT;
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[__TRY
-	IF exception = 0 THEN
+	IF DynamicMemoryManager.HasAllocationFailed AND_THEN exception = 0 THEN
 		RETURN;
 	END_IF
 
-	IF NOT __QUERYINTERFACE(exception, aggregateException) OR_ELSE aggregateException.InnerExceptionCount = 0 THEN
+	IF __QUERYINTERFACE(exception, aggregateException) THEN
+		innerExceptionCount := aggregateException.InnerExceptionCount;
+	END_IF
+
+	IF innerExceptionCount = 0 THEN
 		message := exception.GetMessage(showSource := TRUE, timestampDisplayMode := TIMESTAMP_DISPLAY_MODE.LOCAL);
-		
+
 		TryLogException := TryLogMessage(
 			category := SEL(severity = ERROR_SEVERITY.CRITICAL, LOG_CATEGORY.ERROR, LOG_CATEGORY.CRITICAL_ERROR),
 			message := message,
 			messageNumber := messageNumber
 		);
 	ELSE
-		IF aggregateException.InnerExceptionCount > 1 THEN
+		IF innerExceptionCount > 1 THEN
 			// reverce order
 			TryLogException := TryLogMessage(category := LOG_CATEGORY.ERROR, message := "<<< aggregate exception end <<<");
-			
-			FOR i := TO_DINT(aggregateException.InnerExceptionCount) - 1 TO 0 BY -1 DO
+
+			FOR i := TO_DINT(innerExceptionCount) - 1 TO 0 BY -1 DO
 				innerException := aggregateException.GetInnerException(index := i);
-				
+
+				IF DynamicMemoryManager.HasAllocationFailed THEN
+					TryLogException := FALSE;
+					RETURN;
+				END_IF
+
 				message := WideStrings.Concat255(
 					"  ",
 					innerException.GetMessage(showSource := TRUE, timestampDisplayMode := TIMESTAMP_DISPLAY_MODE.LOCAL)
 				);
-				
+
 				TryLogException := TryLogException AND TryLogMessage(
 					category := SEL(severity = ERROR_SEVERITY.CRITICAL, LOG_CATEGORY.ERROR, LOG_CATEGORY.CRITICAL_ERROR),
 					message := message
-				);		
+				);
+
+				IF DynamicMemoryManager.HasAllocationFailed THEN
+					TryLogException := FALSE;
+					RETURN;
+				END_IF
 			END_FOR
-			
+
 			TryLogException := TryLogException AND TryLogMessage(
 				category := SEL(severity = ERROR_SEVERITY.CRITICAL, LOG_CATEGORY.ERROR, LOG_CATEGORY.CRITICAL_ERROR),
 				message := ">>> aggregate exception start >>>",
 				messageNumber := messageNumber
 			);
-		ELSE		
+		ELSE
 			innerException := aggregateException.GetInnerException(index := 0);
-			
+
+			IF DynamicMemoryManager.HasAllocationFailed THEN
+				TryLogException := FALSE;
+				RETURN;
+			END_IF
+
 			message := innerException.GetMessage(showSource := TRUE, timestampDisplayMode := TIMESTAMP_DISPLAY_MODE.LOCAL);
-			
+
 			TryLogException := TryLogMessage(
 				category := SEL(severity = ERROR_SEVERITY.CRITICAL, LOG_CATEGORY.ERROR, LOG_CATEGORY.CRITICAL_ERROR),
 				message := message,
 				messageNumber := messageNumber
 			);
 		END_IF
+	END_IF
+
+	IF DynamicMemoryManager.HasAllocationFailed THEN
+		TryLogException := FALSE;
 	END_IF
 __CATCH
 	TryLogException := FALSE;
@@ -232,6 +265,8 @@ Already emitted entries are not rolled back, so FALSE may follow partial output.
 logged again. The fatal allocation latch is preserved for RaiseIfAllocationFailed at the task boundary outside
 recoverable handlers. Descendants cannot replace this non-throwing ADS logging path; implement ILogger
 separately for another backend.
+Returns FALSE when fatal allocation state is observed before work or after nested calls. The latch remains
+set for the caller's task boundary; already accepted or emitted records are not rolled back.
 </description>
 <param name="category">Category used to select the ADS message mask and optional number prefix.</param>
 <param name="message">Message text converted to STRING for ADS output.</param>
@@ -252,33 +287,36 @@ VAR
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[__TRY
+	IF DynamicMemoryManager.HasAllocationFailed THEN
+		RETURN;
+	END_IF
+
 	CASE category OF
 		LOG_CATEGORY.DEBUG, LOG_CATEGORY.INFORMATION:
 			messageControlMask := Tc2_System.Global_Variables.ADSLOG_MSGTYPE_LOG;
-			
+
 		LOG_CATEGORY.WARNING:
 			messageControlMask := Tc2_System.Global_Variables.ADSLOG_MSGTYPE_WARN;
-		
+
 		LOG_CATEGORY.ERROR, LOG_CATEGORY.CRITICAL_ERROR:
 			messageControlMask := Tc2_System.Global_Variables.ADSLOG_MSGTYPE_ERROR;
 	END_CASE
 
 	IF __ISVALIDREF(messageNumber) THEN
 		TryLogMessage := Tc2_System.ADSLOGSTR(
-			msgCtrlMask := messageControlMask, 
+			msgCtrlMask := messageControlMask,
 			msgFmtStr := '%s',
-			strArg := Strings.Concat255(
-	TO_STRING(Exceptions.MESSAGE_NUMBER_PREFIX),
-	Exceptions.LOG_CATEGORY_PREFIXES[category],
-	TO_STRING(messageNumber),
-	TO_STRING(Exceptions.MESSAGE_NUMBER_SUFFIX),
-	TO_STRING(message)
-)) = 0;
+			strArg := Strings.Concat255(TO_STRING(Exceptions.MESSAGE_NUMBER_PREFIX), Exceptions.LOG_CATEGORY_PREFIXES[category], TO_STRING(messageNumber), TO_STRING(Exceptions.MESSAGE_NUMBER_SUFFIX),	TO_STRING(message))
+		) = 0;
 	ELSE
 		TryLogMessage := Tc2_System.ADSLOGSTR(
 			msgCtrlMask := messageControlMask,
 			msgFmtStr := '%s',
 			strArg := TO_STRING(message)) = 0;
+	END_IF
+
+	IF DynamicMemoryManager.HasAllocationFailed THEN
+		TryLogMessage := FALSE;
 	END_IF
 __CATCH
 	TryLogMessage := FALSE;

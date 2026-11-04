@@ -8,9 +8,10 @@ License: https://opensource.org/license/mit
 *)
 
 (*!
-<summary>Serializes PLC values to JSON and restores values from JSON.</summary>
+<summary>Serializes live PLC structures to JSON and restores them from JSON.</summary>
 <description>
 Supports live PLC structures with native type information; dynamically created structures are not supported.
+ByVarInfo methods require an explicit PVOID address; descriptor ByteAddress is ignored to preserve pointer width.
 Application method calls and property access belong to one owner task per instance. Instances are not
 thread-safe and do not support reentry: a callback must not call methods or access properties of the
 serializer whose operation is still active, directly or indirectly. Use a separate instance and separate
@@ -22,7 +23,8 @@ discipline; sharing an extender must not introduce concurrent state access. Borr
 callbacks for each call. Throwing methods report invalid arguments and native failures through framework
 exceptions. Try methods return FALSE directly for rejected arguments or reported native failures and contain
 exceptions from native calls or callbacks; partial effects are not rolled back. Try methods use the shared
-native conversion helpers, not overrides of the throwing methods or their protected helpers. The caller
+native conversion helpers, not overrides of the throwing methods or their protected helpers. JSON text uses
+native UTF-8 encoding; capacity and copy sizes count bytes. Instances must not be copied by value. The caller
 provides cyclic-task exception cleanup and RaiseIfAllocationFailed at the task boundary, outside Try and
 recoverable handlers. Try methods do not clear terminal allocation state. Ownership examples and future
 shared-service guidance: Guides/JsonAndEventLoggerOwnership.md in the repository.
@@ -31,10 +33,12 @@ shared-service guidance: Guides/JsonAndEventLoggerOwnership.md in the repository
 
 {attribute 'no_explicit_call' := 'Direct call is not allowed'}
 FUNCTION_BLOCK AutomaticJsonSerializer EXTENDS TOF_Core.Object
-VAR
+VAR_STAT
+	//! <summary>Class name shared by all instances of this function block.</summary>
 	{attribute 'hide'} 
 	_ClassName : STRING := __POUNAME();
-	
+END_VAR
+VAR
 	_JsonSaxWriter : Tc3_JsonXml.FB_JsonSaxWriter;
 	_JsonDataTypeWriter : Tc3_JsonXml.FB_JsonReadWriteDatatype;
 END_VAR]]></Declaration>
@@ -43,7 +47,11 @@ END_VAR]]></Declaration>
     </Implementation>
     <Folder Name="Service memebers" Id="{ac3ba484-d0b1-4d7e-b557-cd243c8b8997}" />
     <Property Name="ClassName" Id="{0ef034e0-c59c-400d-8910-5199a1e43c28}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Provides the concrete serializer class name.</summary>
+<description>Borrows read-only instance storage that remains valid for the instance lifetime.</description>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY ClassName : REFERENCE TO STRING
 ]]></Declaration>
       <Get Name="Get" Id="{7d8e441f-d9e1-4fe6-a84f-2d3a88ae1b83}">
@@ -57,7 +65,8 @@ PROPERTY ClassName : REFERENCE TO STRING
       <Declaration><![CDATA[(*!
 <summary>Serializes a PLC structure into caller-owned JSON storage.</summary>
 <description>
-Uses native symbol lookup for the source type; dynamically created structures are not supported. Borrows
+Uses native symbol lookup for the source type; dynamically created structures are not supported. Single-field
+structures have native lookup limitations; use ByVarInfo to supply the type explicitly. Borrows
 source, destination and optional extender for the call. The destination must be writable and have at least
 JSON_DOCUMENT capacity. Invalid source arguments and reported native failures raise framework exceptions;
 extender exceptions propagate. Output and callback effects are not rolled back on failure. Exception transport
@@ -80,7 +89,7 @@ VAR_INPUT
 	extender : IJsonExtender := 0;
 END_VAR
 VAR_IN_OUT
-    targetJson : TOF_Core.JSON_DOCUMENT;
+	targetJson : TOF_Core.JSON_DOCUMENT;
 END_VAR
 VAR_OUTPUT
 	jsonSize : UDINT; 
@@ -98,15 +107,19 @@ END_VAR]]></Declaration>
       <Declaration><![CDATA[(*!
 <summary>Serializes a PLC structure described by VAR_INFO into caller-owned JSON storage.</summary>
 <description>
-The descriptor must identify a live structure with matching type, address and byte-aligned size. Dynamically
-created structures are not supported. Borrows source, destination and optional extender for the call. The
+The descriptor type and byte-aligned size must match sourceStructureAddress. ByteAddress is ignored.
+Dynamically created structures are not supported. Borrows source, destination and optional extender for the call. The
 destination must be writable and have at least JSON_DOCUMENT capacity. Invalid source arguments and reported
 native failures raise framework exceptions; extender exceptions propagate. Output and callback effects are not
 rolled back on failure. Exception transport and cleanup require the caller's cyclic-task boundary.
 CopyDocument returning zero or a nonzero HRESULT raises an exception; jsonSize is not usable on failure.
 </description>
+<param name="sourceStructureAddress">
+Required address from ADR of the live source structure, borrowed for this call. Must match the descriptor.
+Zero is rejected; no address is recovered from ByteAddress or ByteOffset.
+</param>
 <param name="sourceStructureVarInfo">
-Descriptor whose TypeName, ByteAddress and BitSize describe the source structure.
+Descriptor whose TypeName and BitSize describe the source structure; ByteAddress is ignored.
 </param>
 <param name="extender">
 Optional callback invoked before and after writing the structure value; zero skips both calls.
@@ -120,10 +133,11 @@ completion.
 METHOD CreateJsonFromStructureByVarInfo
 VAR_INPUT
 	sourceStructureVarInfo : __SYSTEM.VAR_INFO;
+	sourceStructureAddress : PVOID;
 	extender : IJsonExtender := 0;
 END_VAR
 VAR_IN_OUT
-    targetJson : TOF_Core.JSON_DOCUMENT;
+	targetJson : TOF_Core.JSON_DOCUMENT;
 END_VAR
 VAR_OUTPUT
 	jsonSize : UDINT; 
@@ -135,13 +149,13 @@ VAR
 	errorCode : HRESULT;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[IF sourceStructureVarInfo.ByteAddress = 0 THEN
+        <ST><![CDATA[IF sourceStructureAddress = TOF_Core.Memory.NULL_ADDRESS THEN
 	TOF_Core.Exceptions.ThrowArgumentNotSpecified(
 		sourceNamespaceName := NamespaceName,
 		sourceClassName := ClassName,
 		sourcePOUName := __POUNAME(),
 		sourcePosition := __POSITION(),
-		argumentName := 'sourceStructureVarInfo'
+		argumentName := 'sourceStructureAddress'
 	);
 END_IF
 
@@ -156,9 +170,10 @@ IF sourceStructureVarInfo.TypeClass <> __SYSTEM.TYPE_CLASS.TYPE_USERDEF THEN
 	);
 END_IF
 
+// VAR_INFO sizes are in bits; the caller supplies a byte-aligned structure descriptor.
 IF NOT writeStructureJson(
 	structureTypeName := sourceStructureVarInfo.TypeName,
-	structureAddress := sourceStructureVarInfo.ByteAddress,
+	structureAddress := sourceStructureAddress,
 	structureSize := TO_UDINT(sourceStructureVarInfo.BitSize / 8),
 	extender := extender,
 	targetJson := targetJson,
@@ -221,8 +236,9 @@ END_IF]]></ST>
       <Declaration><![CDATA[(*!
 <summary>Populates a PLC structure from JSON using the type supplied by VAR_INFO.</summary>
 <description>
-TypeName, ByteAddress and the byte-aligned BitSize must describe the same live, writable structure. Uses the
-supplied TypeName directly, avoiding ambiguous address-based type lookup for single-field structures. The type
+TypeName and byte-aligned BitSize must describe the live, writable structure at targetStructureAddress.
+ByteAddress is ignored. Uses the supplied TypeName directly, avoiding ambiguous address-based type lookup
+for single-field structures. The type
 must be available to the native JSON converter; support for dynamically created structures is not implied.
 Borrows the JSON and destination for this call. A zero address, an unsupported type class or a reported native
 conversion failure raises a framework exception. Conversion requires both a TRUE SetSymbolFromJson result and
@@ -230,6 +246,10 @@ a zero HRESULT. Destination fields may already have changed on failure; writes a
 provides cyclic-task exception cleanup and the terminal allocation-failure boundary.
 </description>
 <param name="json">JSON text to read without modification.</param>
+<param name="targetStructureAddress">
+Required address from ADR of the live target structure, borrowed for this call. Must match the descriptor.
+Zero is rejected; no address is recovered from ByteAddress or ByteOffset.
+</param>
 <param name="targetStructureVarInfo">
 Consistent descriptor of the destination structure, including its explicit TypeName.
 </param>
@@ -240,19 +260,20 @@ VAR_IN_OUT CONSTANT
 END_VAR
 VAR_INPUT
 	targetStructureVarInfo : __SYSTEM.VAR_INFO;
+	targetStructureAddress : PVOID;
 END_VAR
 VAR
 	
 	errorCode : HRESULT;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[IF targetStructureVarInfo.ByteAddress = 0 THEN
+        <ST><![CDATA[IF targetStructureAddress = TOF_Core.Memory.NULL_ADDRESS THEN
 	TOF_Core.Exceptions.ThrowArgumentNotSpecified(
 		sourceNamespaceName := NamespaceName,
 		sourceClassName := ClassName,
 		sourcePOUName := __POUNAME(),
 		sourcePosition := __POSITION(),
-		argumentName := 'targetStructureVarInfo'
+		argumentName := 'targetStructureAddress'
 	);
 END_IF
 
@@ -267,10 +288,11 @@ IF targetStructureVarInfo.TypeClass <> __SYSTEM.TYPE_CLASS.TYPE_USERDEF THEN
 	);
 END_IF
 
+// VAR_INFO sizes are in bits; the caller supplies a byte-aligned structure descriptor.
 IF NOT readStructureJson(
 	json := json,
 	structureTypeName := targetStructureVarInfo.TypeName,
-	structureAddress := targetStructureVarInfo.ByteAddress,
+	structureAddress := targetStructureAddress,
 	structureSize := TO_UDINT(targetStructureVarInfo.BitSize / 8),
 	errorCode => errorCode
 )
@@ -342,7 +364,7 @@ VAR_INPUT
 	extender : IJsonExtender := 0;
 END_VAR
 VAR_IN_OUT
-    targetJson : TOF_Core.JSON_DOCUMENT;
+	targetJson : TOF_Core.JSON_DOCUMENT;
 END_VAR
 VAR_OUTPUT
 	jsonSize : UDINT; 
@@ -355,7 +377,7 @@ VAR
 	errorCode : HRESULT;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[IF sourceStructure.pValue = 0 THEN
+        <ST><![CDATA[IF sourceStructure.pValue = TOF_Core.Memory.NULL_ADDRESS THEN
 	TOF_Core.Exceptions.ThrowArgumentNotSpecified(
 		sourceNamespaceName := NamespaceName,
 		sourceClassName := ClassName,
@@ -377,8 +399,8 @@ IF sourceStructure.TypeClass <> __SYSTEM.TYPE_CLASS.TYPE_USERDEF THEN
 END_IF
 
 structureTypeName := _JsonDataTypeWriter.GetDatatypeNameByAddress(
-	TO_UDINT(sourceStructure.diSize),
-	sourceStructure.pValue,
+	nData := TO_UDINT(sourceStructure.diSize),
+	pData := sourceStructure.pValue,
 	hrErrorCode => errorCode
 );
 
@@ -443,7 +465,7 @@ VAR
 	errorCode : HRESULT;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[IF targetStructure.pValue = 0 THEN
+        <ST><![CDATA[IF targetStructure.pValue = TOF_Core.Memory.NULL_ADDRESS THEN
 	TOF_Core.Exceptions.ThrowArgumentNotSpecified(
 		sourceNamespaceName := NamespaceName,
 		sourceClassName := ClassName,
@@ -465,8 +487,8 @@ IF targetStructure.TypeClass <> __SYSTEM.TYPE_CLASS.TYPE_USERDEF THEN
 END_IF
 
 structureTypeName := _JsonDataTypeWriter.GetDatatypeNameByAddress(
-	TO_UDINT(targetStructure.diSize),
-	targetStructure.pValue,
+	nData := TO_UDINT(targetStructure.diSize),
+	pData := targetStructure.pValue,
 	hrErrorCode => errorCode
 );
 
@@ -505,10 +527,13 @@ END_IF]]></ST>
 <summary>Writes a validated structure and optional extensions to caller-owned JSON storage.</summary>
 <description>
 Callers validate the structure descriptor before entry. Borrows all arguments for this call and resets the
-writer before invoking callbacks. Returns FALSE for reported native failures without creating exceptions;
-native or callback exceptions propagate to the throwing caller or the public Try boundary. No output, writer
-or callback effects are rolled back. Each later write resets the writer again. On FALSE, errorMessage
-describes the failed native step and errorCode retains its HRESULT without substitution.
+writer before invoking callbacks. A nonzero ResetDocument HRESULT returns FALSE before any hook or copy.
+Returns FALSE for reported native failures without creating exceptions; native or callback exceptions propagate
+to the throwing caller or the public Try boundary. Checks fatal allocation state before native work, after
+successful native steps and after each hook. A contained terminal failure is raised again without allocating
+an exception object; the Try boundary converts it to FALSE. No output, writer or callback effects are rolled
+back. Each later write attempts to reset the writer again. On FALSE, errorMessage describes the failed native
+step and errorCode retains its HRESULT without substitution.
 </description>
 <param name="structureTypeName">Native type name matching the live source structure.</param>
 <param name="structureAddress">Address of the validated source structure.</param>
@@ -537,17 +562,25 @@ VAR_OUTPUT
 	errorMessage : WSTRING(255);
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[_JsonSaxWriter.ResetDocument();
+        <ST><![CDATA[TOF_Core.DynamicMemoryManager.RaiseIfAllocationFailed();
+errorCode := _JsonSaxWriter.ResetDocument();
+TOF_Core.DynamicMemoryManager.RaiseIfAllocationFailed();
+
+IF errorCode <> TOF_Core.SignedInt32.ZERO THEN
+	errorMessage := "Can't reset JSON writer before structure serialization";
+	RETURN;
+END_IF
 
 IF extender <> 0 THEN
 	extender.ExtendAtStart(jsonSaxWriter := _JsonSaxWriter);
+	TOF_Core.DynamicMemoryManager.RaiseIfAllocationFailed();
 END_IF
 
 IF NOT _JsonDataTypeWriter.AddJsonValueFromSymbol(
-		_JsonSaxWriter,
-		structureTypeName,
-		structureSize,
-		structureAddress,
+		fbWriter := _JsonSaxWriter,
+		sDatatype := structureTypeName,
+		nData := structureSize,
+		pData := structureAddress,
 		hrErrorCode => errorCode
 	)
 	OR_ELSE errorCode <> TOF_Core.SignedInt32.ZERO
@@ -560,17 +593,29 @@ THEN
 	RETURN;
 END_IF
 
+TOF_Core.DynamicMemoryManager.RaiseIfAllocationFailed();
+
 IF extender <> 0 THEN
 	extender.ExtendAtFinish(jsonSaxWriter := _JsonSaxWriter);
+	TOF_Core.DynamicMemoryManager.RaiseIfAllocationFailed();
 END_IF
 
-jsonSize := _JsonSaxWriter.CopyDocument(pDoc := targetJson, nDoc := SIZEOF(targetJson), hrErrorCode => errorCode);
+jsonSize := _JsonSaxWriter.CopyDocument(
+	pDoc := targetJson,
+	nDoc := SIZEOF(targetJson),
+	hrErrorCode => errorCode
+);
 
 IF jsonSize = TOF_Core.UnsignedInt32.MIN_VALUE OR_ELSE errorCode <> TOF_Core.SignedInt32.ZERO THEN
-	errorMessage := TOF_Core.WideStrings.Concat255("Can't fill JSON from the symbol of type '", TO_WSTRING(structureTypeName), "'");
+	errorMessage := TOF_Core.WideStrings.Concat255(
+		"Can't fill JSON from the symbol of type '",
+		TO_WSTRING(structureTypeName),
+		"'"
+	);
 	RETURN;
 END_IF
 
+TOF_Core.DynamicMemoryManager.RaiseIfAllocationFailed();
 writeStructureJson := TRUE;]]></ST>
       </Implementation>
     </Method>
@@ -580,7 +625,9 @@ writeStructureJson := TRUE;]]></ST>
 <description>
 Callers validate the descriptor before entry. Borrows the JSON, type name and destination for this call.
 Returns FALSE for a native FALSE result or nonzero HRESULT without creating exceptions. Native exceptions
-propagate to the throwing caller or the public Try boundary. Partial destination writes are not rolled back.
+propagate to the throwing caller or the public Try boundary. Checks fatal allocation state before conversion
+and before reporting success, raising a contained terminal failure without constructing an exception object.
+The Try boundary converts that failure to FALSE. Partial destination writes are not rolled back.
 </description>
 <param name="json">JSON text to read without modification.</param>
 <param name="structureTypeName">Native type name matching the destination structure.</param>
@@ -601,12 +648,13 @@ VAR_OUTPUT
 	errorCode : HRESULT;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[
+        <ST><![CDATA[TOF_Core.DynamicMemoryManager.RaiseIfAllocationFailed();
+
 IF NOT _JsonDataTypeWriter.SetSymbolFromJson(
-		json,
-		structureTypeName,
-		structureSize,
-		structureAddress,
+		sJson := json,
+		sDatatype := structureTypeName,
+		nData := structureSize,
+		pData := structureAddress,
 		hrErrorCode => errorCode
 	)
 	OR_ELSE errorCode <> TOF_Core.SignedInt32.ZERO
@@ -614,11 +662,16 @@ THEN
 	RETURN;
 END_IF
 
+TOF_Core.DynamicMemoryManager.RaiseIfAllocationFailed();
 readStructureJson := TRUE;]]></ST>
       </Implementation>
     </Method>
     <Property Name="NamespaceName" Id="{7371ecef-1936-4268-af0d-813ed5877183}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Provides the compiler-initialized library namespace.</summary>
+<description>Borrows read-only library storage; no allocation or ownership transfer occurs.</description>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
       <Get Name="Get" Id="{a712aceb-e580-4469-b321-74f0e6ab0c97}">
         <Declaration><![CDATA[]]></Declaration>
@@ -628,7 +681,11 @@ PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
       </Get>
     </Property>
     <Property Name="SelfSize" Id="{4e2cc4a2-86a6-48cc-a757-58f1b82e3903}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Reports the complete instance size in bytes.</summary>
+<description>Uses XSIZEOF; separately allocated native resources are not included.</description>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY SelfSize : ULINT]]></Declaration>
       <Get Name="Get" Id="{3c9a353a-dae3-4a6a-8486-44c6e5bd0b57}">
         <Declaration><![CDATA[]]></Declaration>
@@ -645,13 +702,15 @@ PROPERTY SelfSize : ULINT]]></Declaration>
 Returns FALSE directly for a null address, an unsupported type class or a reported native failure, including a
 zero CopyDocument result, without creating a framework exception. Contains native and callback exceptions.
 Uses the shared conversion helper rather than the protected throwing hook. Use JSON and jsonSize only on TRUE;
-partial writes and callback effects are not rolled back. A subsequent conversion resets the writer before
-callbacks. Borrows live source and writable destination storage. Does not clear terminal allocation state; the
+partial writes and callback effects are not rolled back. Each subsequent conversion attempts to reset the
+writer before callbacks. Borrows live source and writable destination storage. Does not clear terminal allocation state; the
 caller provides exception cleanup and RaiseIfAllocationFailed at the task boundary outside Try and recoverable
-handlers.
+handlers. Returns FALSE when fatal allocation state is observed on entry or after nested calls; a contained
+allocation failure is not a successful conversion. The application-wide latch remains set.
 </description>
 <param name="sourceStructure">
 Live PLC structure supported by native symbol lookup; dynamically created structures are not supported.
+Single-field structures have native lookup limitations; use ByVarInfo to supply the type explicitly.
 </param>
 <param name="extender">
 Optional callback invoked before and after writing the structure value; borrowed for the call.
@@ -669,7 +728,7 @@ VAR_INPUT
 	extender : IJsonExtender := 0;
 END_VAR
 VAR_IN_OUT
-    targetJson : TOF_Core.JSON_DOCUMENT;
+	targetJson : TOF_Core.JSON_DOCUMENT;
 END_VAR
 VAR_OUTPUT
 	jsonSize : UDINT; 
@@ -680,13 +739,20 @@ VAR
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[__TRY
-	IF sourceStructure.pValue = 0 OR_ELSE sourceStructure.TypeClass <> __SYSTEM.TYPE_CLASS.TYPE_USERDEF THEN
+
+	IF TOF_Core.DynamicMemoryManager.HasAllocationFailed THEN
+		RETURN;
+	END_IF
+
+	IF sourceStructure.pValue = TOF_Core.Memory.NULL_ADDRESS
+		OR_ELSE sourceStructure.TypeClass <> __SYSTEM.TYPE_CLASS.TYPE_USERDEF
+	THEN
 		RETURN;
 	END_IF
 
 	structureTypeName := _JsonDataTypeWriter.GetDatatypeNameByAddress(
-		TO_UDINT(sourceStructure.diSize),
-		sourceStructure.pValue,
+		nData := TO_UDINT(sourceStructure.diSize),
+		pData := sourceStructure.pValue,
 		hrErrorCode => errorCode
 	);
 
@@ -702,6 +768,11 @@ END_VAR]]></Declaration>
 		targetJson := targetJson,
 		jsonSize => jsonSize
 	);
+
+	IF TOF_Core.DynamicMemoryManager.HasAllocationFailed THEN
+		TryCreateJsonFromStructure := FALSE;
+	END_IF
+
 __CATCH
 	TryCreateJsonFromStructure := FALSE;
 __ENDTRY]]></ST>
@@ -714,14 +785,19 @@ __ENDTRY]]></ST>
 Returns FALSE directly for a null address, an unsupported type class or a reported native failure, including a
 zero CopyDocument result, without creating a framework exception. Contains native and callback exceptions.
 Uses the shared conversion helper rather than the throwing ByVarInfo method. Use JSON and jsonSize only on
-TRUE; partial writes and callback effects are not rolled back. A subsequent conversion resets the writer
-before callbacks. Borrows live source and writable destination storage. Does not clear terminal allocation
+TRUE; partial writes and callback effects are not rolled back. Each subsequent conversion attempts to reset
+the writer before callbacks. Borrows live source and writable destination storage. Does not clear terminal allocation
 state; the caller provides exception cleanup and RaiseIfAllocationFailed at the task boundary outside Try and
-recoverable handlers.
+recoverable handlers. Returns FALSE when fatal allocation state is observed on entry or after nested calls; a contained
+allocation failure is not a successful conversion. The application-wide latch remains set.
 </description>
+<param name="sourceStructureAddress">
+Required address from ADR of the live source structure, borrowed for this call. Must match the descriptor.
+Zero is rejected; no address is recovered from ByteAddress or ByteOffset.
+</param>
 <param name="sourceStructureVarInfo">
-Descriptor with matching TypeName, ByteAddress and byte-aligned BitSize for a live structure; dynamically
-created structures are not supported.
+Descriptor with matching TypeName and byte-aligned BitSize for sourceStructureAddress; ByteAddress is ignored.
+Dynamically created structures are not supported.
 </param>
 <param name="extender">
 Optional callback invoked before and after writing the structure value; borrowed for the call.
@@ -736,28 +812,42 @@ Byte count reported by CopyDocument, including the terminator on a successful co
 METHOD TryCreateJsonFromStructureByVarInfo : BOOL
 VAR_INPUT
 	sourceStructureVarInfo : __SYSTEM.VAR_INFO;
+	sourceStructureAddress : PVOID;
 	extender : IJsonExtender := 0;
 END_VAR
 VAR_IN_OUT
-    targetJson : TOF_Core.JSON_DOCUMENT;
+	targetJson : TOF_Core.JSON_DOCUMENT;
 END_VAR
 VAR_OUTPUT
 	jsonSize : UDINT; 
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[__TRY
-	IF sourceStructureVarInfo.ByteAddress = 0 OR_ELSE sourceStructureVarInfo.TypeClass <> __SYSTEM.TYPE_CLASS.TYPE_USERDEF THEN
+
+	IF TOF_Core.DynamicMemoryManager.HasAllocationFailed THEN
 		RETURN;
 	END_IF
 
+	IF sourceStructureAddress = TOF_Core.Memory.NULL_ADDRESS
+		OR_ELSE sourceStructureVarInfo.TypeClass <> __SYSTEM.TYPE_CLASS.TYPE_USERDEF
+	THEN
+		RETURN;
+	END_IF
+
+	// VAR_INFO sizes are in bits; the descriptor must be byte-aligned.
 	TryCreateJsonFromStructureByVarInfo := writeStructureJson(
 		structureTypeName := sourceStructureVarInfo.TypeName,
-		structureAddress := sourceStructureVarInfo.ByteAddress,
+		structureAddress := sourceStructureAddress,
 		structureSize := TO_UDINT(sourceStructureVarInfo.BitSize / 8),
 		extender := extender,
 		targetJson := targetJson,
 		jsonSize => jsonSize
 	);
+
+	IF TOF_Core.DynamicMemoryManager.HasAllocationFailed THEN
+		TryCreateJsonFromStructureByVarInfo := FALSE;
+	END_IF
+
 __CATCH
 	TryCreateJsonFromStructureByVarInfo := FALSE;
 __ENDTRY]]></ST>
@@ -767,15 +857,22 @@ __ENDTRY]]></ST>
       <Declaration><![CDATA[(*!
 <summary>Attempts to populate a PLC structure from JSON using the type supplied by VAR_INFO.</summary>
 <description>
-Uses the supplied TypeName directly without address-based type lookup. TypeName, ByteAddress and byte-aligned
-BitSize must describe the same live, writable structure, with its type available to the native converter.
+Uses the supplied TypeName directly without address-based type lookup. TypeName and byte-aligned BitSize must
+describe the live, writable structure at targetStructureAddress, with its type available to the native converter.
+ByteAddress is ignored.
 Returns FALSE directly for a null address, an unsupported type class, a FALSE native conversion result or a
 nonzero HRESULT, without creating a framework exception. Contains native exceptions. Uses the shared
 conversion helper rather than the throwing ByVarInfo method. Partial destination writes are not rolled back.
 Borrows the JSON and destination for this call. Does not clear terminal allocation state; the caller provides
 exception cleanup and RaiseIfAllocationFailed at the task boundary outside Try and recoverable handlers.
+Returns FALSE when fatal allocation state is observed on entry or after nested calls; a contained
+allocation failure is not a successful conversion. The application-wide latch remains set.
 </description>
 <param name="json">JSON text to read without modification.</param>
+<param name="targetStructureAddress">
+Required address from ADR of the live target structure, borrowed for this call. Must match the descriptor.
+Zero is rejected; no address is recovered from ByteAddress or ByteOffset.
+</param>
 <param name="targetStructureVarInfo">
 Consistent descriptor of the destination structure, including its explicit TypeName.
 </param>
@@ -786,19 +883,33 @@ VAR_IN_OUT CONSTANT
 END_VAR
 VAR_INPUT
 	targetStructureVarInfo : __SYSTEM.VAR_INFO;
+	targetStructureAddress : PVOID;
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[__TRY
-	IF targetStructureVarInfo.ByteAddress = 0 OR_ELSE targetStructureVarInfo.TypeClass <> __SYSTEM.TYPE_CLASS.TYPE_USERDEF THEN
+
+	IF TOF_Core.DynamicMemoryManager.HasAllocationFailed THEN
 		RETURN;
 	END_IF
 
+	IF targetStructureAddress = TOF_Core.Memory.NULL_ADDRESS
+		OR_ELSE targetStructureVarInfo.TypeClass <> __SYSTEM.TYPE_CLASS.TYPE_USERDEF
+	THEN
+		RETURN;
+	END_IF
+
+	// VAR_INFO sizes are in bits; the descriptor must be byte-aligned.
 	TryFillStructureByVarInfoFromJson := readStructureJson(
 		json := json,
 		structureTypeName := targetStructureVarInfo.TypeName,
-		structureAddress := targetStructureVarInfo.ByteAddress,
+		structureAddress := targetStructureAddress,
 		structureSize := TO_UDINT(targetStructureVarInfo.BitSize / 8)
 	);
+
+	IF TOF_Core.DynamicMemoryManager.HasAllocationFailed THEN
+		TryFillStructureByVarInfoFromJson := FALSE;
+	END_IF
+
 __CATCH
 	TryFillStructureByVarInfoFromJson := FALSE;
 __ENDTRY]]></ST>
@@ -815,6 +926,8 @@ exception. Contains native exceptions. Uses the shared conversion helper rather 
 hook. Partial destination writes are not rolled back. Borrows JSON and live, writable destination storage for
 this call. Does not clear terminal allocation state; the caller provides exception cleanup and
 RaiseIfAllocationFailed at the task boundary outside Try and recoverable handlers.
+Returns FALSE when fatal allocation state is observed on entry or after nested calls; a contained
+allocation failure is not a successful conversion. The application-wide latch remains set.
 </description>
 <param name="json">JSON text to read without modification.</param>
 <param name="targetStructure">
@@ -834,13 +947,20 @@ VAR
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[__TRY
-	IF targetStructure.pValue = 0 OR_ELSE targetStructure.TypeClass <> __SYSTEM.TYPE_CLASS.TYPE_USERDEF THEN
+
+	IF TOF_Core.DynamicMemoryManager.HasAllocationFailed THEN
+		RETURN;
+	END_IF
+
+	IF targetStructure.pValue = TOF_Core.Memory.NULL_ADDRESS
+		OR_ELSE targetStructure.TypeClass <> __SYSTEM.TYPE_CLASS.TYPE_USERDEF
+	THEN
 		RETURN;
 	END_IF
 
 	structureTypeName := _JsonDataTypeWriter.GetDatatypeNameByAddress(
-		TO_UDINT(targetStructure.diSize),
-		targetStructure.pValue,
+		nData := TO_UDINT(targetStructure.diSize),
+		pData := targetStructure.pValue,
 		hrErrorCode => errorCode
 	);
 
@@ -854,6 +974,11 @@ END_VAR]]></Declaration>
 		structureAddress := targetStructure.pValue,
 		structureSize := TO_UDINT(targetStructure.diSize)
 	);
+
+	IF TOF_Core.DynamicMemoryManager.HasAllocationFailed THEN
+		TryFillStructureFromJson := FALSE;
+	END_IF
+
 __CATCH
 	TryFillStructureFromJson := FALSE;
 __ENDTRY]]></ST>

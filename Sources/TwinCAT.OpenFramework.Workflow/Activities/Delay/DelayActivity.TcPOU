@@ -10,7 +10,10 @@ License: https://opensource.org/license/mit
 (*!
 <summary>Waits for the configured Interval using an internal TON timer before completing.</summary>
 <description>
-A fresh start resets the timer; cancelling, failing or resetting deactivates the timer immediately.
+Only active running time counts toward Interval. Suspension snapshots the elapsed active segment and
+deactivates the timer; resuming waits for the remaining duration. Repeated pauses preserve accumulated time.
+A fresh start, cancellation, failure or reset clears accumulated time without changing Interval.
+Use one owner task without reentry; timing is observed on cooperative calls at native TON precision.
 </description>
 *)
 
@@ -23,12 +26,24 @@ VAR_STAT
 END_VAR
 VAR
 	_Timer : Tc2_Standard.TON;
+
+	//! <summary>Configured total active duration, independent of the current timer segment.</summary>
+	_Interval : TIME;
+	//! <summary>Active time retained from completed segments before suspension.</summary>
+	_ElapsedBeforeSegment : TIME;
 END_VAR]]></Declaration>
     <Implementation>
       <ST><![CDATA[]]></ST>
     </Implementation>
     <Property Name="ClassName" Id="{99031060-eb4d-44c6-bf8d-9db6d8f4facd}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Borrows the initialized class name used in diagnostics.</summary>
+<description>
+Returns initialized metadata storage without allocation. Callers must not modify the returned string.
+Derived function blocks must use distinct initialized static storage when overriding this metadata.
+</description>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
       <Get Name="Get" Id="{7b66933e-2fad-4721-b44b-551fae9394b7}">
         <Declaration><![CDATA[]]></Declaration>
@@ -39,25 +54,36 @@ PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
     </Property>
     <Property Name="Interval" Id="{daabaad1-5c20-4f74-afaa-15249ee65d86}">
       <Declaration><![CDATA[(*!
-<summary>Gets or sets the delay duration.</summary>
+<summary>Gets or sets the total active duration.</summary>
+<description>
+Changing Interval changes the target for accumulated active time, including after suspension.
+The new target is applied on the next running or stopping call. Suspended wall time is excluded.
+</description>
 *)
 {attribute 'monitoring' := 'call'}
 PROPERTY Interval : TIME]]></Declaration>
       <Get Name="Get" Id="{1abcca3c-4b5b-4e4d-a54a-fa4c23acf5bf}">
         <Declaration><![CDATA[]]></Declaration>
         <Implementation>
-          <ST><![CDATA[Interval := _Timer.PT;]]></ST>
+          <ST><![CDATA[Interval := _Interval;]]></ST>
         </Implementation>
       </Get>
       <Set Name="Set" Id="{ef745e0e-2a9d-4737-820c-34f86af7494d}">
         <Declaration><![CDATA[]]></Declaration>
         <Implementation>
-          <ST><![CDATA[_Timer.PT := Interval;]]></ST>
+          <ST><![CDATA[_Interval := Interval;]]></ST>
         </Implementation>
       </Set>
     </Property>
     <Property Name="NamespaceName" Id="{74cc9664-6f44-4467-967e-c02431fb9266}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Borrows the compiler-initialized library namespace.</summary>
+<description>
+Borrows storage from the live internal namespace provider. Reacquire references after application
+reinitialization or relocation. Treat the reference as read-only; no ownership or synchronization is provided.
+</description>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
       <Get Name="Get" Id="{0e2b87df-357b-4365-b650-6deb72911a5c}">
         <Declaration><![CDATA[]]></Declaration>
@@ -76,7 +102,8 @@ VAR_INPUT
 	exception : TOF_Core.IException;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[_Timer(IN := FALSE);]]></ST>
+        <ST><![CDATA[_ElapsedBeforeSegment := TOF_Core.Times.MIN_VALUE;
+_Timer(IN := FALSE);]]></ST>
       </Implementation>
     </Method>
     <Method Name="OnResetting" Id="{b69e2170-12a4-4f63-91b8-63497c0512a0}">
@@ -89,7 +116,8 @@ VAR_INPUT
 	startResetting : BOOL;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[_Timer(IN := FALSE);
+        <ST><![CDATA[_ElapsedBeforeSegment := TOF_Core.Times.MIN_VALUE;
+_Timer(IN := FALSE);
 
 OnResetting := ACTIVITY_RESETTING_STATE.WORK_RESET;]]></ST>
       </Implementation>
@@ -111,10 +139,11 @@ VAR_OUTPUT
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[IF startRunning THEN
-	_Timer(IN := FALSE);	
+	_ElapsedBeforeSegment := TOF_Core.Times.MIN_VALUE;
+	_Timer(IN := FALSE);
 END_IF
 
-_Timer(IN := TRUE);
+advanceTimer();
 
 IF _Timer.Q THEN
 	OnRunning := ACTIVITY_RUNNING_STATE.WORK_COMPLETED;
@@ -123,7 +152,11 @@ END_IF]]></ST>
     </Method>
     <Method Name="OnStopping" Id="{94638f0f-931e-47a0-91a7-8200eee6e478}">
       <Declaration><![CDATA[(*!
-<summary>Stops the delay activity immediately; resets the timer when cancelling.</summary>
+<summary>Snapshots active elapsed time for suspension or clears it for cancellation.</summary>
+<description>
+An expired segment is retained as a zero remainder; resume then completes on its first observation.
+The snapshot is clamped to the current segment target so accumulated TIME cannot overflow.
+</description>
 <param name="startCancelling">TRUE when stopping due to cancellation.</param>
 <param name="startSuspending">TRUE when stopping due to suspension.</param>
 <param name="haltReason">Unused halt reason output.</param>
@@ -137,15 +170,27 @@ VAR_OUTPUT
 	haltReason : WSTRING(255);
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[IF startCancelling THEN
-	_Timer(IN := FALSE);
+        <ST><![CDATA[IF startSuspending THEN
+	advanceTimer();
+	_ElapsedBeforeSegment := _ElapsedBeforeSegment + MIN(_Timer.ET, _Timer.PT);
+ELSIF startCancelling THEN
+	_ElapsedBeforeSegment := TOF_Core.Times.MIN_VALUE;
 END_IF
+
+_Timer(IN := FALSE);
 
 OnStopping := ACTIVITY_STOPPING_STATE.WORK_STOPPED;]]></ST>
       </Implementation>
     </Method>
     <Property Name="SelfSize" Id="{ad9a3f84-13f9-40de-a533-562bb92a2b3c}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Reports the size of this concrete function block instance in bytes.</summary>
+<description>
+Reports the instance layout rather than dynamic allocations owned by its fields. A derived function block
+with a different layout must override this property; the value does not grant disposal rights.
+</description>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY SelfSize : ULINT]]></Declaration>
       <Get Name="Get" Id="{8276e7d1-1622-45cb-a22e-0bf694631cef}">
         <Declaration><![CDATA[]]></Declaration>
@@ -154,5 +199,27 @@ PROPERTY SelfSize : ULINT]]></Declaration>
         </Implementation>
       </Get>
     </Property>
+    <Method Name="advanceTimer" Id="{5fbf51dc-64be-4493-9eea-d2559b48d6da}">
+      <Declaration><![CDATA[(*!
+<summary>Advances one active timer segment against the remaining configured duration.</summary>
+<description>
+Subtracts only time retained from earlier active segments. PT is zero when the retained time
+already meets the current target, so the next running observation can complete immediately.
+</description>
+*)
+METHOD PRIVATE advanceTimer
+VAR
+	remainingInterval : TIME;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF _ElapsedBeforeSegment < _Interval THEN
+	remainingInterval := _Interval - _ElapsedBeforeSegment;
+ELSE
+	remainingInterval := TOF_Core.Times.MIN_VALUE;
+END_IF
+
+_Timer(IN := TRUE, PT := remainingInterval);]]></ST>
+      </Implementation>
+    </Method>
   </POU>
 </TcPlcObject>

@@ -1,0 +1,270 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="TestElement" Id="{643696b2-4079-4318-bb67-0551c73b3953}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+SPDX-FileCopyrightText: © 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+SPDX-License-Identifier: MIT
+License: https://opensource.org/license/mit
+*)
+
+(*!
+<summary>Shares names, computed paths, lifecycle observations and borrowed tree links between test elements.</summary>
+<description>
+Construction copies the display name and assigned parent without invoking callbacks or inspecting the tree.
+No automatic registration or deletion of children or reporters occurs. Parent links are fixed structural assignments,
+not allocation ownership. Do not copy instances by value or change configuration during execution.
+Descendants implement execution and reset their own state.
+Reset is not cancellation; recover resources explicitly before resetting an externally aborted tree.
+Concrete descendants implement the Object metadata properties for their own class, namespace and instance size.
+Inherited Object equality and hashing use instance identity unless a descendant overrides both consistently.
+</description>
+*)
+
+{attribute 'no_explicit_call' := 'do not call this function block directly'}
+FUNCTION_BLOCK ABSTRACT TestElement EXTENDS TOF_Core.Object IMPLEMENTS ITestElement
+VAR
+	{attribute 'hide'} 
+	_Name : WSTRING;
+	
+	{attribute 'hide'} 
+	_Parent : ITestElement;
+	_Reporter : ITestReporter;
+	_State : TEST_ELEMENT_STATE;
+	_PassedCount : UDINT;
+	_FailedCount : UDINT;
+	_SkippedCount : UDINT;
+	_Duration : LTIME;
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[]]></ST>
+    </Implementation>
+    <Property Name="Duration" Id="{5fde9e5e-0445-4844-9c9c-eeb2ea0af88d}">
+      <Declaration><![CDATA[(*!
+<summary>Reports nominal scheduled duration, not CPU execution time.</summary>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY FINAL Duration : TIME]]></Declaration>
+      <Get Name="Get" Id="{4362fc55-9028-4aa3-b728-3f759460c8fb}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[Duration := TO_TIME(_Duration);]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="Execute" Id="{eb01e8c4-9bc8-439e-80e4-b5e2ce53fa41}">
+      <Declaration><![CDATA[(*!
+<summary>Advances the concrete element once; descendants preserve the ITestElement lifecycle.</summary>
+*)
+METHOD ABSTRACT Execute]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="FailedCount" Id="{3f2a271a-86f3-4103-99e9-bc8b410e39a0}">
+      <Declaration><![CDATA[(*!
+<summary>Counts failed leaves.</summary>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY FINAL FailedCount : UDINT]]></Declaration>
+      <Get Name="Get" Id="{1fed1f87-a415-40f1-a4dc-f73ef10329eb}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[FailedCount := _FailedCount;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="FB_init" Id="{4069196d-7791-4a61-bb82-958651619d8f}">
+      <Declaration><![CDATA[(*!
+<summary>Copies the display name and fixed parent without invoking overridable code.</summary>
+<description>
+Copies the borrowed parent without calling it or validating topology. Roots explicitly pass zero.
+The parent must remain alive throughout this element's lifetime; construction never raises exceptions.
+</description>
+<param name="name">Copied display name of at most 80 wide characters; longer input is truncated by IEC conversion.</param>
+<param name="parent">Assigned group for the instance lifetime, or zero for a root.</param>
+*)
+METHOD FB_init : BOOL
+VAR_INPUT
+	bInitRetains : BOOL; // TRUE: the retain variables are initialized (reset warm / reset cold)
+	bInCopyCode : BOOL; // TRUE: the instance will be copied to the copy code afterward (online change)
+	name : WSTRING;
+	parent : ITestElement;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_Name := name;
+_Parent := parent;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="GetPath" Id="{621214f6-690b-4f11-a5f8-f29debde6a5d}">
+      <Declaration><![CDATA[(*!
+<summary>Builds the full display path from the root through this element.</summary>
+<description>
+Joins nonempty names with '/', including this element's name. A nameless root returns an empty path.
+The result is a copied WSTRING bounded to 255 characters; overflow preserves the root prefix and ends with an ellipsis.
+Reads the live Parent and Name properties without caching or changing the tree. All providers must remain alive
+and stable during the call; use only in the owning task without reentry. Can be called before Reset.
+A cyclic Parent chain raises StandardException to prevent an endless traversal. Provider exceptions propagate;
+no element state or ownership is changed. Valid traversal uses fixed local strings without recursion or heap allocation.
+</description>
+*)
+METHOD FINAL GetPath : WSTRING(255)
+VAR
+	ancestor : ITestElement;
+	slowAncestor : ITestElement;
+	fastAncestor : ITestElement;
+	descendantPath : WSTRING(255);
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[ancestor := THIS^;
+slowAncestor := ancestor;
+fastAncestor := ancestor;
+
+// Reject a cyclic parent chain before constructing any path or invoking another GetPath.
+WHILE fastAncestor <> 0 DO
+	fastAncestor := fastAncestor.Parent;
+
+	IF fastAncestor = 0 THEN
+		EXIT;
+	END_IF
+
+	fastAncestor := fastAncestor.Parent;
+	slowAncestor := slowAncestor.Parent;
+
+	IF fastAncestor <> 0 AND_THEN fastAncestor = slowAncestor THEN
+		TOF_Core.Exceptions.ThrowStandard(
+			sourceNamespaceName := NamespaceName,
+			sourceClassName := ClassName,
+			sourcePOUName := __POUNAME(),
+			sourcePosition := __POSITION(),
+			message := "The assigned parent chain contains a cycle"
+		);
+	END_IF
+END_WHILE
+
+// Prepending each nonempty ancestor preserves the root prefix when the bounded path overflows.
+WHILE ancestor <> 0 DO
+	IF ancestor.Name <> "" THEN
+		descendantPath := GetPath;
+		GetPath := "";
+		TOF_Core.WideStrings.AppendFit(targetString := GetPath, sourceString := ancestor.Name);
+
+		IF descendantPath <> "" THEN
+			TOF_Core.WideStrings.AppendFit(targetString := GetPath, sourceString := "/");
+			TOF_Core.WideStrings.AppendFit(targetString := GetPath, sourceString := descendantPath);
+		END_IF
+	END_IF
+
+	ancestor := ancestor.Parent;
+END_WHILE]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="IsFinished" Id="{a4838436-93e7-4f29-bd67-c153396e1c7f}">
+      <Declaration><![CDATA[(*!
+<summary>Reports terminal completion.</summary>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY FINAL IsFinished : BOOL]]></Declaration>
+      <Get Name="Get" Id="{3f33fc7e-6ea5-45fb-a9ef-8ee0de4f6282}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[IsFinished := _State = TEST_ELEMENT_STATE.COMPLETED;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="IsRunning" Id="{a32e5470-72f6-4d6a-8464-734df5c21550}">
+      <Declaration><![CDATA[(*!
+<summary>Reports an active run.</summary>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY FINAL IsRunning : BOOL]]></Declaration>
+      <Get Name="Get" Id="{5b3ba06d-05df-4927-8731-b59f59f1aea3}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[IsRunning := _State = TEST_ELEMENT_STATE.RUNNING;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="Name" Id="{5001f566-bb77-411c-a734-e326c47fb13b}">
+      <Declaration><![CDATA[(*!
+<summary>Borrows the display name through the INamed property signature.</summary>
+<description>
+The reference aliases the constructor-copied name of at most 80 wide characters and remains valid while this element lives.
+Callers must not modify the returned reference; no ownership is transferred.
+</description>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY FINAL Name : REFERENCE TO WSTRING]]></Declaration>
+      <Get Name="Get" Id="{6b72acc3-c694-440d-9086-c2cc5e03d594}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[Name REF= _Name;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="Parent" Id="{6e4ad8b0-312a-4d9f-96c6-4e09e8ac458b}">
+      <Declaration><![CDATA[(*!
+<summary>Returns the parent assigned at construction; roots have no parent.</summary>
+<description>Borrowed lifetime association, not a registration or allocation-ownership transfer.
+The value remains unchanged across Reset and execution; the parent must outlive this element.</description>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY FINAL Parent : ITestElement]]></Declaration>
+      <Get Name="Get" Id="{43c37b15-223e-42d7-8405-bf3c059f6b10}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[Parent := _Parent;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="PassedCount" Id="{40af94ed-b15f-4057-84d3-60cf345ea214}">
+      <Declaration><![CDATA[(*!
+<summary>Counts passed leaves.</summary>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY FINAL PassedCount : UDINT]]></Declaration>
+      <Get Name="Get" Id="{dcb5e4f0-ece0-4136-9330-9f779e5b2692}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[PassedCount := _PassedCount;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="Reset" Id="{0b030b61-2153-419f-bffb-be96849836b9}">
+      <Declaration><![CDATA[(*!
+<summary>Clears common execution observations and borrows the reporter for a fresh run.</summary>
+<description>
+Does not run teardown or release user resources. Call only at the lifecycle boundaries in ITestElement.
+The reporter is borrowed until completion; no locks or cross-task transfer are provided.
+Derived reset failures propagate and can leave a partially reset tree; the runner aborts startup.
+Custom element overrides reset their own observations and call SUPER^.Reset with the same reporter.
+The base implementation resets only common observations; there is no OnReset callback.
+</description>
+*)
+METHOD Reset
+VAR_INPUT
+	reporter : ITestReporter;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_Reporter := reporter;
+_State := TEST_ELEMENT_STATE.READY;
+_PassedCount := 0;
+_FailedCount := 0;
+_SkippedCount := 0;
+_Duration := LTIME#0NS;]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="SkippedCount" Id="{d3df0a37-dd56-416f-897d-ba4a71990c20}">
+      <Declaration><![CDATA[(*!
+<summary>Counts skipped leaves.</summary>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY FINAL SkippedCount : UDINT]]></Declaration>
+      <Get Name="Get" Id="{8ddb2cb1-7c53-4b25-9495-5e70fcbe3b94}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[SkippedCount := _SkippedCount;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+  </POU>
+</TcPlcObject>

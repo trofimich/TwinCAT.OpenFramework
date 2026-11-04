@@ -1,0 +1,317 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="JUnitXmlReporter" Id="{0445267d-c284-4539-80ff-a14762a5bb66}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+SPDX-FileCopyrightText: © 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+SPDX-License-Identifier: MIT
+License: https://opensource.org/license/mit
+*)
+
+(*!
+<summary>Builds an in-memory JUnit report with one testcase per leaf.</summary>
+<description>
+One flat testsuite contains all leaves; testcase classname preserves the slash-separated group path.
+Wide names and diagnostics are escaped as ASCII XML character references, including surrogate pairs.
+XML 1.0 disallowed control characters, isolated surrogates and U+FFFE/U+FFFF are replaced by U+FFFD;
+tab, line feed and carriage return are emitted as references to preserve attribute whitespace.
+Use a separate instance and buffer for each runner task without reentry. Read ContentLength bytes from
+ContentAddress only after IsReady and before reset or the next run. Buffer growth invalidates old addresses.
+The reporter owns its dynamic buffer; never copy it by value. Callback exceptions can leave incomplete XML.
+</description>
+*)
+
+{attribute 'no_explicit_call' := 'do not call this function block directly'}
+FUNCTION_BLOCK JUnitXmlReporter EXTENDS TOF_Core.Object IMPLEMENTS ITestReporter
+VAR CONSTANT
+	//! <summary>First and last UTF-16 high-surrogate code units; subtract the first to recover ten payload bits.</summary>
+	HIGH_SURROGATE_FIRST : UDINT := 16#D800;
+	//! <summary>Last UTF-16 high-surrogate code unit accepted as the first part of a pair.</summary>
+	HIGH_SURROGATE_LAST : UDINT := 16#DBFF;
+	//! <summary>First and last UTF-16 low-surrogate code units; subtract the first to recover ten payload bits.</summary>
+	LOW_SURROGATE_FIRST : UDINT := 16#DC00;
+	//! <summary>Last UTF-16 low-surrogate code unit; isolated surrogates through this value are invalid scalars.</summary>
+	LOW_SURROGATE_LAST : UDINT := 16#DFFF;
+	//! <summary>Base scalar value added when decoding a supplementary UTF-16 surrogate pair.</summary>
+	SUPPLEMENTARY_FIRST : UDINT := 16#10000;
+	//! <summary>Multiplier that moves a high surrogate's ten payload bits above the low payload.</summary>
+	SURROGATE_PAYLOAD_BASE : UDINT := 1024;
+	//! <summary>Printable ASCII boundaries; these scalars are emitted as bytes instead of decimal XML references.</summary>
+	PRINTABLE_ASCII_FIRST : UDINT := 32;
+	//! <summary>Last ASCII scalar emitted directly as a byte instead of a decimal XML reference.</summary>
+	PRINTABLE_ASCII_LAST : UDINT := 126;
+END_VAR
+VAR_STAT
+	_ClassName : STRING := __POUNAME();
+END_VAR
+VAR
+	_Buffer : TOF_Core.StringBuilder;
+	_IsReady : BOOL;
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[]]></ST>
+    </Implementation>
+    <Folder Name="Service methods" Id="{2e1ba206-fbd0-4eb3-9246-e3fbe68b5f25}" />
+    <Method Name="appendEscapedText" Id="{27faa4b5-a961-4e34-a5d8-da638f9a57f0}" FolderPath="Service methods\">
+      <Declaration><![CDATA[//! <summary>Escapes UTF-16 input and replaces isolated surrogates and forbidden XML characters.</summary>
+METHOD PRIVATE appendEscapedText
+VAR_IN_OUT CONSTANT
+	text : WSTRING;
+END_VAR
+VAR
+	charLength : UDINT;
+	i : UDINT;
+	wordPointer : POINTER TO WORD;
+	codePoint : UDINT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[charLength := TOF_Core.WideStrings.GetLength(value := text);
+wordPointer := ADR(text);
+
+WHILE i < charLength DO
+	codePoint := wordPointer[i];
+	i := i + 1;
+
+	IF codePoint >= HIGH_SURROGATE_FIRST AND_THEN codePoint <= HIGH_SURROGATE_LAST AND_THEN i < charLength
+		AND_THEN wordPointer[i] >= LOW_SURROGATE_FIRST AND_THEN wordPointer[i] <= LOW_SURROGATE_LAST
+	THEN
+		// UTF-16 uses high D800..DBFF and low DC00..DFFF surrogates. Subtract their bases to obtain
+		// ten-bit payloads; shift the high payload by ten bits and add the supplementary-plane base.
+		codePoint := SUPPLEMENTARY_FIRST + (codePoint - HIGH_SURROGATE_FIRST) * SURROGATE_PAYLOAD_BASE
+			+ (wordPointer[i] - LOW_SURROGATE_FIRST);
+		i := i + 1;
+	END_IF
+
+	appendXmlCharacter(codePoint := codePoint);
+END_WHILE]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="appendXmlCharacter" Id="{1b043205-25f8-4c0d-aafc-7bb6b98da5da}" FolderPath="Service methods\">
+      <Declaration><![CDATA[(*!
+<summary>Appends a scalar as printable ASCII or an XML decimal character reference.</summary>
+<description>Explicitly terminates the single-byte temporary before the buffer reads it.</description>
+*)
+METHOD PRIVATE appendXmlCharacter
+VAR_INPUT
+	codePoint : UDINT;
+END_VAR
+VAR
+	character : STRING(1);
+	referenceText : STRING(255);
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[// XML 1.0 permits only TAB/LF/CR below U+0020 and excludes surrogates and U+FFFE/U+FFFF.
+CASE codePoint OF
+	0..8, 11, 12, 14..31, 16#D800..16#DFFF, 16#FFFE, 16#FFFF:
+		_Buffer.AppendString(value := '&#65533;');
+	34:
+		_Buffer.AppendString(value := '&quot;');
+	38:
+		_Buffer.AppendString(value := '&amp;');
+	39:
+		_Buffer.AppendString(value := '&apos;');
+	60:
+		_Buffer.AppendString(value := '&lt;');
+	62:
+		_Buffer.AppendString(value := '&gt;');
+ELSE
+	IF codePoint >= PRINTABLE_ASCII_FIRST AND_THEN codePoint <= PRINTABLE_ASCII_LAST THEN
+		character[0] := TO_BYTE(codePoint);
+		character[1] := TO_BYTE(TOF_Core.UnsignedInt8.MIN_VALUE);
+		_Buffer.AppendString(value := character);
+	ELSE
+		referenceText := TOF_Core.Strings.Concat255('&#', TO_STRING(codePoint), ';');
+		_Buffer.AppendString(value := referenceText);
+	END_IF
+END_CASE]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="ClassName" Id="{79c047a6-77dc-4043-a30f-ab9864902cc3}">
+      <Declaration><![CDATA[(*!
+<summary>Provides the implementation class name.</summary>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{cbcff19a-c588-4190-88bd-53578b2fe426}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ClassName REF= _ClassName;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="ContentAddress" Id="{f32d4643-eedb-4224-b73d-1608cc892c0b}">
+      <Declaration><![CDATA[(*!
+<summary>Borrows the current XML buffer address.</summary>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY ContentAddress : POINTER TO STRING]]></Declaration>
+      <Get Name="Get" Id="{b34b5bb4-2965-44e8-844c-c574915879b5}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ContentAddress := _Buffer.StringAddress;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="ContentLength" Id="{ffd9c112-df1c-451e-971d-f02606e9c0bc}">
+      <Declaration><![CDATA[(*!
+<summary>Reports the ASCII byte count excluding the terminating zero.</summary>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY ContentLength : UDINT]]></Declaration>
+      <Get Name="Get" Id="{f5a9b5b5-42e7-4d1a-a52d-099ee7e9b6eb}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ContentLength := _Buffer.StringLength;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="IsReady" Id="{99e1993b-c0ce-40cb-b41a-cc380ef5339f}">
+      <Declaration><![CDATA[(*!
+<summary>Reports whether ReportRunEnd completed the XML document.</summary>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY IsReady : BOOL]]></Declaration>
+      <Get Name="Get" Id="{8771323a-c237-4cc8-a2b0-7feb3c8e293d}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[IsReady := _IsReady;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="NamespaceName" Id="{7fd441df-b069-4018-bf07-52340ef352e0}">
+      <Declaration><![CDATA[(*!
+<summary>Provides the library namespace.</summary>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{3658f151-d26d-43ac-a642-ecdd9a55eaa5}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[NamespaceName REF= CurrentNamespace.Name;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="ReportRunEnd" Id="{881f7c7d-becd-406f-babe-29d1610a2c5d}">
+      <Declaration><![CDATA[(*!
+<summary>Closes the JUnit container and makes its buffer available to readers.</summary>
+*)
+METHOD ReportRunEnd
+VAR_INPUT
+	totalTests : UDINT;
+	passedTests : UDINT;
+	failedTests : UDINT;
+	skippedTests : UDINT;
+	duration : TIME;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_Buffer.AppendString(value := '  </testsuite>$R$N</testsuites>$R$N');
+_IsReady := TRUE;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="ReportRunStart" Id="{eb4fa9b2-a6ac-434b-a000-8c17bccf17d6}">
+      <Declaration><![CDATA[(*!
+<summary>Clears previous output and opens the flat JUnit container.</summary>
+*)
+METHOD ReportRunStart
+VAR_INPUT
+	totalElements : UDINT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_Buffer.Clear(releaseMemory := FALSE);
+_IsReady := FALSE;
+_Buffer.AppendString(value := '<?xml version="1.0" encoding="UTF-8"?>$R$N');
+_Buffer.AppendString(value := '<testsuites>$R$N  <testsuite name="OpenFramework">$R$N');]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="ReportTestCaseResult" Id="{22ad0189-3c8b-4862-ab86-9e530398a189}">
+      <Declaration><![CDATA[(*!
+<summary>Appends a terminal leaf result with its group path as classname.</summary>
+<param name="testName">Individual name bounded to 80 wide characters, matching INamed.</param>
+*)
+METHOD ReportTestCaseResult
+VAR_INPUT
+	groupPath : WSTRING(255);
+	testName : WSTRING;
+	outcome : TEST_OUTCOME;
+	duration : TIME;
+END_VAR
+VAR_IN_OUT CONSTANT
+	message : TOF_Core.ERROR_MESSAGE;
+END_VAR
+VAR
+	milliseconds : UDINT;
+	timeAttribute : STRING(255);
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF outcome <> TEST_OUTCOME.PASSED
+	AND_THEN outcome <> TEST_OUTCOME.FAILED
+	AND_THEN outcome <> TEST_OUTCOME.SKIPPED
+THEN
+	TOF_Core.Exceptions.ThrowArgumentValueNotSupported(
+		sourceNamespaceName := NamespaceName,
+		sourceClassName := ClassName,
+		sourcePOUName := __POUNAME(),
+		sourcePosition := __POSITION(),
+		argumentName := 'outcome',
+		argumentValue := outcome
+	);
+END_IF
+
+_Buffer.AppendString(value := '    <testcase name="');
+appendEscapedText(text := testName);
+_Buffer.AppendString(value := '" classname="');
+appendEscapedText(text := groupPath);
+milliseconds := TO_UDINT(duration);
+timeAttribute := TOF_Core.Strings.Concat255(
+	'" time="',
+	TO_STRING(milliseconds / 1000),
+	'.',
+	TO_STRING(milliseconds / 100 MOD 10),
+	TO_STRING(milliseconds / 10 MOD 10),
+	TO_STRING(milliseconds MOD 10),
+	'"'
+);
+_Buffer.AppendString(value := timeAttribute);
+
+IF outcome = TEST_OUTCOME.FAILED THEN
+	_Buffer.AppendString(value := '>$R$N');
+	_Buffer.AppendString(value := '      <failure message="');
+	appendEscapedText(text := message);
+	_Buffer.AppendString(value := '" type="AssertionFailure">');
+	appendEscapedText(text := message);
+	_Buffer.AppendString(value := '</failure>$R$N');
+	_Buffer.AppendString(value := '    </testcase>$R$N');
+ELSIF outcome = TEST_OUTCOME.SKIPPED THEN
+	_Buffer.AppendString(value := '>$R$N');
+	_Buffer.AppendString(value := '      <skipped />$R$N');
+	_Buffer.AppendString(value := '    </testcase>$R$N');
+ELSE
+	_Buffer.AppendString(value := ' />$R$N');
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="Reset" Id="{1f4c467e-74bb-4202-ab1a-bf3c54f46616}">
+      <Declaration><![CDATA[(*!
+<summary>Releases the XML buffer outside an active run; existing reader addresses become invalid.</summary>
+*)
+METHOD FINAL Reset]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_Buffer.Clear(releaseMemory := TRUE);
+
+_IsReady := FALSE;]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="SelfSize" Id="{34c1bce7-bc33-4a89-bbfb-bb24a10a23ea}">
+      <Declaration><![CDATA[(*!
+<summary>Reports instance storage without separately allocated payloads.</summary>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY SelfSize : ULINT]]></Declaration>
+      <Get Name="Get" Id="{6b6dcfff-9dd5-4903-a05b-5932f49e66ce}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[SelfSize := XSIZEOF(THIS^);]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+  </POU>
+</TcPlcObject>

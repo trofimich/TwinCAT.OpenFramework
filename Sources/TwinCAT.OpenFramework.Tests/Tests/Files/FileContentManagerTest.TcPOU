@@ -7,19 +7,31 @@ SPDX-License-Identifier: MIT
 License: https://opensource.org/license/mit
 *)
 
+(*!
+<summary>Exercises file-content operations in separately owned scenario directories.</summary>
+<description>
+FileTestRoot prepares C:\OpenFrameworkTests before TcUnit.RUN. Every case creates a distinct new directory;
+existing entries fail preparation without overwrite or adoption. Fixed artifacts are registered only inside
+that owned directory. The owner prevents external changes. Each case remains active until manager stopping
+and directory cleanup attempts finish, then reports their outcome before TEST_FINISHED. Native close errors
+can still prevent physical resource release; cleanup never adopts a pre-existing directory.
+Failed or cancelled creation grants no ownership; inspect the retained fixture diagnostics and path.
+</description>
+*)
+
 FUNCTION_BLOCK FileContentManagerTest EXTENDS TcUnit.FB_TestSuite
-VAR
+VAR_STAT
+	//! <summary>Class name shared by all instances of this function block.</summary>
 	{attribute 'hide'} 
 	_ClassName : STRING := __POUNAME();
-
-	_FilePath : STRING(255) := 'C:\TestFile.txt';
+END_VAR
+VAR
+	_FileContentManager : TOF_FileSystem.FileContentManager(name := "FileContentManager");
 	
-	_FileContentManager : TOF_FileSystem.FileContentManager("FileContentManager");
-	
-	_WriteStringToFile1 : TOF_FileSystem.WriteString255ToFile("WriteStringToFile1");
-	_WriteStringToFile2 : TOF_FileSystem.WriteString255ToFile("WriteStringToFile2");
-	_SetPositionInFile : TOF_FileSystem.SetPositionInFile("SetPositionInFile");
-	_ReadStringFromFile : TOF_FileSystem.ReadString255FromFile("ReadStringFromFile");
+	_WriteStringToFile1 : TOF_FileSystem.WriteString255ToFile(name := "WriteStringToFile1");
+	_WriteStringToFile2 : TOF_FileSystem.WriteString255ToFile(name := "WriteStringToFile2");
+	_SetPositionInFile : TOF_FileSystem.SetPositionInFile(name := "SetPositionInFile");
+	_ReadStringFromFile : TOF_FileSystem.ReadString255FromFile(name := "ReadStringFromFile");
 END_VAR]]></Declaration>
     <Implementation>
       <ST><![CDATA[CreateTextFile();
@@ -29,7 +41,13 @@ CancelDuringFileWrite();
 ReuseAfterReset();]]></ST>
     </Implementation>
     <Property Name="ClassName" Id="{15b21f35-d24f-4ab1-a702-91ec38a46309}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Provides the diagnostic name of this persistent test suite.</summary>
+<description>
+Returns borrowed read-only instance storage; it remains valid while this suite is alive.
+</description>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
       <Get Name="Get" Id="{91a3149f-5498-41eb-9a10-635d05b0e259}">
         <Declaration><![CDATA[]]></Declaration>
@@ -39,7 +57,19 @@ PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
       </Get>
     </Property>
     <Method Name="CreateTextFile" Id="{3ee86f47-dc17-44e0-bf7e-f1687979763f}">
-      <Declaration><![CDATA[METHOD CreateTextFile
+      <Declaration><![CDATA[(*!
+<summary>Exercises ordered text write/readback.</summary>
+<description>
+Prepares a new exclusively owned scenario directory before file I/O. Existing entries fail preparation.
+The scenario deadline includes preparation; Start refusals and exceptions fail once. Subsequent suite calls
+cancel and drain all persistent managers before fixture cleanup. TEST_FINISHED is deferred until cleanup
+attempts complete. Cleanup refusal or a caught cleanup exception fails the case without erasing its first
+failure. No forced cleanup deadline or deletion of pre-existing external files is used.
+Terminal allocation failure remains latched for the task boundary.
+The alias assertion compares buffer addresses only; it does not inspect string byte offsets.
+</description>
+*)
+METHOD CreateTextFile
 VAR CONSTANT
 	TEST_STRING1 : STRING := 'Test string...';
 	TEST_STRING2 : STRING := 'Another test string...';
@@ -52,81 +82,190 @@ VAR
 	errorMessage : TOF_Core.ERROR_MESSAGE;
 END_VAR
 VAR_INST
-	testFinished : BOOL;
+	testTimeout : Tc2_Standard.TON;
+	directory : FileTestDirectory(directoryPath := 'C:\OpenFrameworkTests\FileContent_CreateText');
+	cleanupExceptionObserved : BOOL;
+	lifecycle : FILE_TEST_LIFECYCLE;
 	
 	initialized : BOOL;
+	readAlias : REFERENCE TO STRING(255);
+	emptyAlias : REFERENCE TO STRING(255);
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[IF testFinished THEN 
-	RETURN; 
-END_IF 
+        <ST><![CDATA[IF lifecycle = FILE_TEST_LIFECYCLE.FINISHED THEN
+	RETURN;
+END_IF
 
 TEST(TestName := __POUNAME());
 
-IF NOT initialized THEN
-	_FileContentManager.FilePath := _FilePath;
-	_FileContentManager.ModeFlags := Tc2_System.Global_Variables.FOPEN_MODEWRITE
-		OR Tc2_System.Global_Variables.FOPEN_MODEPLUS
-		OR Tc2_System.Global_Variables.FOPEN_MODETEXT;
-	_FileContentManager.PathType := Tc2_System.E_OpenPath.PATH_GENERIC;
-	_FileContentManager.StopWhenNoPendingTasks := TRUE;
-	
-	_WriteStringToFile1.StringToWrite := TEST_STRING1;
-	_WriteStringToFile2.StringToWrite := TEST_STRING2;
-	
-	_FileContentManager.Enqueue(fileHandleTask := _WriteStringToFile1);
-	_FileContentManager.Enqueue(fileHandleTask := _WriteStringToFile2);
-	_FileContentManager.Enqueue(fileHandleTask := _SetPositionInFile);
-	_FileContentManager.Enqueue(fileHandleTask := _ReadStringFromFile);
+IF lifecycle = FILE_TEST_LIFECYCLE.CLEANING_UP THEN
+
+	__TRY
+
+		IF _FileContentManager.State.Running THEN
+			_FileContentManager.Cancel();
+			_FileContentManager.Execute();
+		END_IF
+
+		IF NOT _FileContentManager.State.Running THEN
+			directory.Cleanup();
+
+			IF directory.CleanupComplete THEN
+				AssertTrue(
+					Condition := directory.CleanupSucceeded,
+					Message := TOF_Core.Strings.Concat255(directory.DirectoryPath, ': ', directory.CleanupMessage)
+				);
+				AssertFalse(
+					Condition := cleanupExceptionObserved,
+					Message := 'An exception interrupted cleanup before the final removal attempt'
+				);
+				lifecycle := FILE_TEST_LIFECYCLE.FINISHED;
+				TEST_FINISHED();
+			END_IF
+		END_IF
+
+	__CATCH
+		(* Keep persistent tasks and retry cleanup next cycle; do not replace the original test result. *)
+		cleanupExceptionObserved := TRUE;
+	__ENDTRY
+
+	RETURN;
 END_IF
 
 __TRY
+	testTimeout(IN := TRUE, PT := T#10S);
+
+	IF FileTestRoot.FailureMessage <> TOF_Core.Strings.Empty THEN
+		lifecycle := FILE_TEST_LIFECYCLE.CLEANING_UP;
+		AssertTrue(Condition := FALSE, Message := FileTestRoot.FailureMessage);
+		RETURN;
+	END_IF
+
+	IF NOT FileTestRoot.Prepared THEN
+		RETURN;
+	END_IF
+
+	directory.Prepare();
+
+	IF directory.PreparationFailed THEN
+		lifecycle := FILE_TEST_LIFECYCLE.CLEANING_UP;
+		AssertTrue(
+			Condition := FALSE,
+			Message := TOF_Core.Strings.Concat255(directory.DirectoryPath, ': ', directory.PreparationMessage)
+		);
+		RETURN;
+	END_IF
+
+	IF NOT directory.Prepared THEN
+
+		IF testTimeout.Q THEN
+			lifecycle := FILE_TEST_LIFECYCLE.CLEANING_UP;
+			AssertTrue(Condition := FALSE, Message := 'Scenario directory preparation exceeded its deadline');
+		END_IF
+
+		RETURN;
+	END_IF
+
 	IF NOT initialized THEN
 		initialized := TRUE;
-	
-		_FileContentManager.Start();
-	ELSE
-		_FileContentManager.Execute();
-	END_IF	
-	
+		directory.ExpectFirstFile();
+		_FileContentManager.FilePath := directory.FirstFilePath;
+		_FileContentManager.ModeFlags := Tc2_System.Global_Variables.FOPEN_MODEWRITE
+			OR Tc2_System.Global_Variables.FOPEN_MODEPLUS
+			OR Tc2_System.Global_Variables.FOPEN_MODETEXT;
+		_FileContentManager.PathType := Tc2_System.E_OpenPath.PATH_GENERIC;
+		_FileContentManager.Timeout := T#2S;
+		_FileContentManager.StopWhenNoPendingTasks := TRUE;
+		_WriteStringToFile1.StringToWrite := TEST_STRING1;
+		_WriteStringToFile2.StringToWrite := TEST_STRING2;
+		_WriteStringToFile1.Timeout := T#2S;
+		_WriteStringToFile2.Timeout := T#2S;
+		_SetPositionInFile.Position := TOF_Core.SignedInt32.ZERO;
+		_SetPositionInFile.Origin := Tc2_System.E_SeekOrigin.SEEK_SET;
+		_SetPositionInFile.Timeout := T#2S;
+		_ReadStringFromFile.Timeout := T#2S;
+		_FileContentManager.Enqueue(fileHandleTask := _WriteStringToFile1);
+		_FileContentManager.Enqueue(fileHandleTask := _WriteStringToFile2);
+		_FileContentManager.Enqueue(fileHandleTask := _SetPositionInFile);
+		_FileContentManager.Enqueue(fileHandleTask := _ReadStringFromFile);
+
+		IF NOT _FileContentManager.Start() THEN
+			lifecycle := FILE_TEST_LIFECYCLE.CLEANING_UP;
+			AssertTrue(Condition := FALSE, Message := 'Prepared text file manager must accept Start');
+			RETURN;
+		END_IF
+
+	END_IF
+
+	_FileContentManager.Execute();
+
 	IF _FileContentManager.State.Stopped THEN
 		AssertTrue(
 			Condition := _FileContentManager.FinalStopReason.WorkDone,
-			Message := 'FileContentManager must stop with WorkDone after all file operations complete'
+			Message := 'FileContentManager must complete all text operations successfully'
 		);
 		AssertFalse(
 			Condition := _FileContentManager.ResourceManager.ResourceAcquired,
-			Message := 'File resource cleanup must finish before the test completes'
+			Message := 'File resource cleanup must finish before text readback is reported'
 		);
-
 		AssertEquals_STRING(
 			Expected := Tc2_Standard.CONCAT(STR1 := TEST_STRING1, STR2 := TEST_STRING2),
 			Actual := _ReadStringFromFile.ReadString,
-			Message := 'The written to file string differs from the read string'
+			Message := 'Readback must contain both written strings in order'
 		);
-		
-		testFinished := TRUE; 
-		TEST_FINISHED();
+		readAlias REF= _ReadStringFromFile.ReadString;
+		AssertTrue(Condition := _ReadStringFromFile.Reset(), Message := 'Successful string-read child must accept Reset');
+		emptyAlias REF= _ReadStringFromFile.ReadString;
+		AssertTrue(Condition := emptyAlias = '', Message := 'READY string-read result must use the empty buffer');
+		// SA0175: Only buffer identities are compared; neither string is indexed or decoded.
+		{analysis -175}
+		AssertTrue(
+			Condition := ADR(readAlias) <> ADR(emptyAlias),
+			Message := 'A new result read must not redirect an earlier alias'
+		);
+		{analysis +175}
+		AssertFalse(Condition := _ReadStringFromFile.IsEndOfFile, Message := 'Reset must hide the previous string EOF');
+		AssertTrue(Condition := _ReadStringFromFile.Start(), Message := 'Reset string task must accept Start');
+		AssertTrue(Condition := _ReadStringFromFile.Cancel(), Message := 'String task can cancel before native submission');
+		_ReadStringFromFile.Execute();
+		AssertTrue(Condition := _ReadStringFromFile.ReadString = '', Message := 'Cancelled string task must expose the empty result');
+		AssertFalse(Condition := _ReadStringFromFile.IsEndOfFile, Message := 'Cancelled string task must hide its old EOF');
+		lifecycle := FILE_TEST_LIFECYCLE.CLEANING_UP;
+	ELSIF testTimeout.Q THEN
+		lifecycle := FILE_TEST_LIFECYCLE.CLEANING_UP;
+		_FileContentManager.Cancel();
+		AssertTrue(Condition := FALSE, Message := 'Text file scenario exceeded its 10-second deadline');
 	END_IF
 __CATCH(exceptionCode)
-	caughtException := TOF_Core.ExceptionManager.GetLastException(
-		exceptionCode := exceptionCode,
-		catchPointNamespaceName := NamespaceName,
-		catchPointPOUName := __POUNAME(),
-		catchPointPosition := __POSITION()
-	);
-	
-	errorMessage := caughtException.GetMessage();
-	
-	AssertTrue(Condition := FALSE, Message := WSTRING_TO_STRING(errorMessage));
-	
-	testFinished := TRUE; 
-	TEST_FINISHED();	
+	errorMessage := "Text file scenario failed; diagnostic information is unavailable";
+
+	__TRY
+		caughtException := TOF_Core.ExceptionManager.GetLastException(
+			exceptionCode := exceptionCode,
+			catchPointNamespaceName := NamespaceName,
+			catchPointPOUName := __POUNAME(),
+			catchPointPosition := __POSITION()
+		);
+
+		IF caughtException <> 0 THEN
+			errorMessage := caughtException.GetMessage();
+		END_IF
+
+	__CATCH
+		(* Preserve the fixed fallback and the fatal allocation latch. *)
+	__ENDTRY
+
+	lifecycle := FILE_TEST_LIFECYCLE.CLEANING_UP;
+	AssertTrue(Condition := FALSE, Message := TO_STRING(errorMessage));
 __ENDTRY]]></ST>
       </Implementation>
     </Method>
     <Property Name="NamespaceName" Id="{8fdb97a0-d902-494b-81c7-71229c516980}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Provides borrowed read-only diagnostic metadata for this persistent suite.</summary>
+<description>Keep the suite alive and do not modify the referenced string.</description>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
       <Get Name="Get" Id="{dd92adc3-305b-4a29-bbd8-71436c04b1b1}">
         <Declaration><![CDATA[]]></Declaration>
@@ -136,443 +275,485 @@ PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
       </Get>
     </Property>
     <Method Name="OpenMissingFileForReading" Id="{d4580f26-1480-4672-9e04-e0d633a96424}">
-      <Declaration><![CDATA[
-//! <param name="MISSING_FILE_PATH">
-//! This file must not exist on the PLC target. The test never creates it.
-//! </param>
-
+      <Declaration><![CDATA[(*!
+<summary>Exercises missing-file acquisition failure.</summary>
+<description>
+Prepares a new exclusively owned scenario directory before file I/O. Existing entries fail preparation.
+The scenario deadline includes preparation; Start refusals and exceptions fail once. Subsequent suite calls
+cancel and drain all persistent managers before fixture cleanup. TEST_FINISHED is deferred until cleanup
+attempts complete. Cleanup refusal or a caught cleanup exception fails the case without erasing its first
+failure. No forced cleanup deadline or deletion of pre-existing external files is used.
+Terminal allocation failure remains latched for the task boundary.
+</description>
+*)
 METHOD OpenMissingFileForReading
-VAR CONSTANT
-	
-	MISSING_FILE_PATH : STRING(255) := 'C:\OpenFramework_Missing_Test_Missing_File.txt';
-END_VAR
 VAR_INST
-	testFinished : BOOL;
+	directory : FileTestDirectory(directoryPath := 'C:\OpenFrameworkTests\FileContent_Missing');
+	cleanupExceptionObserved : BOOL;
+	lifecycle : FILE_TEST_LIFECYCLE;
 	initialized : BOOL;
 
-	fileContentManager : TOF_FileSystem.FileContentManager("fileContentManager");
-	readStringFromFile : TOF_FileSystem.ReadString255FromFile("readStringFromFile");
+	fileContentManager : TOF_FileSystem.FileContentManager(name := "fileContentManager");
+	readStringFromFile : TOF_FileSystem.ReadString255FromFile(name := "readStringFromFile");
 
 	testTimeout : Tc2_Standard.TON;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[IF testFinished THEN
-	IF fileContentManager.State.Running THEN
-		fileContentManager.Execute();
-	END_IF
-
+        <ST><![CDATA[IF lifecycle = FILE_TEST_LIFECYCLE.FINISHED THEN
 	RETURN;
 END_IF
 
 TEST(TestName := __POUNAME());
 
-testTimeout(IN := TRUE, PT := T#10S);
+IF lifecycle = FILE_TEST_LIFECYCLE.CLEANING_UP THEN
 
-IF NOT initialized THEN
-	initialized := TRUE;
+	__TRY
 
-	fileContentManager.FilePath := MISSING_FILE_PATH;
-	fileContentManager.ModeFlags := Tc2_System.Global_Variables.FOPEN_MODEREAD OR Tc2_System.Global_Variables.FOPEN_MODETEXT;
-	fileContentManager.PathType := Tc2_System.E_OpenPath.PATH_GENERIC;
-	fileContentManager.Timeout := T#2S;
-	fileContentManager.StopWhenNoPendingTasks := TRUE;
+		IF fileContentManager.State.Running THEN
+			fileContentManager.Cancel();
+			fileContentManager.Execute();
+		END_IF
 
-	fileContentManager.Enqueue(fileHandleTask := readStringFromFile);
+		IF NOT fileContentManager.State.Running THEN
+			directory.Cleanup();
 
-	IF NOT fileContentManager.Start() THEN
-		AssertTrue(
-			Condition := FALSE,
-			Message := 'Start must accept the task; the missing file must be detected during resource acquisition'
-		);
+			IF directory.CleanupComplete THEN
+				AssertTrue(
+					Condition := directory.CleanupSucceeded,
+					Message := TOF_Core.Strings.Concat255(directory.DirectoryPath, ': ', directory.CleanupMessage)
+				);
+				AssertFalse(
+					Condition := cleanupExceptionObserved,
+					Message := 'An exception interrupted cleanup before the final removal attempt'
+				);
+				lifecycle := FILE_TEST_LIFECYCLE.FINISHED;
+				TEST_FINISHED();
+			END_IF
+		END_IF
 
-		testFinished := TRUE;
-		TEST_FINISHED();
-		RETURN;
-	END_IF
+	__CATCH
+		(* Keep persistent tasks and retry cleanup next cycle; do not replace the original test result. *)
+		cleanupExceptionObserved := TRUE;
+	__ENDTRY
+
+	RETURN;
 END_IF
 
-fileContentManager.Execute();
+__TRY
+	testTimeout(IN := TRUE, PT := T#10S);
 
-IF fileContentManager.State.Stopped THEN
-	AssertTrue(
-		Condition := fileContentManager.FinalStopReason.Failure,
-		Message := 'Opening a missing file for reading must stop FileContentManager with Failure'
-	);
-	AssertTrue(
-		Condition := fileContentManager.FinalStopReason.Message <> "",
-		Message := 'File open failure must provide an error message'
-	);
+	IF FileTestRoot.FailureMessage <> TOF_Core.Strings.Empty THEN
+		lifecycle := FILE_TEST_LIFECYCLE.CLEANING_UP;
+		AssertTrue(Condition := FALSE, Message := FileTestRoot.FailureMessage);
+		RETURN;
+	END_IF
 
-	// Opening failed before any child could execute.
-	AssertTrue(
-		Condition := readStringFromFile.State.Ready,
-		Message := 'Read task must remain READY when the file cannot be opened'
-	);
-	AssertFalse(
-		Condition := fileContentManager.ResourceManager.ResourceAcquired,
-		Message := 'No file resource must remain acquired after file open failure'
-	);
+	IF NOT FileTestRoot.Prepared THEN
+		RETURN;
+	END_IF
 
-	testFinished := TRUE;
-	TEST_FINISHED();
-ELSIF testTimeout.Q THEN
-	AssertTrue(
-		Condition := FALSE,
-		Message := 'FileContentManager did not stop within 10 seconds after attempting to open a missing file'
-	);
+	directory.Prepare();
 
-	fileContentManager.Cancel();
+	IF directory.PreparationFailed THEN
+		lifecycle := FILE_TEST_LIFECYCLE.CLEANING_UP;
+		AssertTrue(
+			Condition := FALSE,
+			Message := TOF_Core.Strings.Concat255(directory.DirectoryPath, ': ', directory.PreparationMessage)
+		);
+		RETURN;
+	END_IF
 
-	testFinished := TRUE;
-	TEST_FINISHED();
-END_IF]]></ST>
+	IF NOT directory.Prepared THEN
+
+		IF testTimeout.Q THEN
+			lifecycle := FILE_TEST_LIFECYCLE.CLEANING_UP;
+			AssertTrue(Condition := FALSE, Message := 'Scenario directory preparation exceeded its deadline');
+		END_IF
+
+		RETURN;
+	END_IF
+
+	IF NOT initialized THEN
+		initialized := TRUE;
+
+		fileContentManager.FilePath := directory.FirstFilePath;
+		fileContentManager.ModeFlags := Tc2_System.Global_Variables.FOPEN_MODEREAD OR Tc2_System.Global_Variables.FOPEN_MODETEXT;
+		fileContentManager.PathType := Tc2_System.E_OpenPath.PATH_GENERIC;
+		fileContentManager.Timeout := T#2S;
+		fileContentManager.StopWhenNoPendingTasks := TRUE;
+
+		fileContentManager.Enqueue(fileHandleTask := readStringFromFile);
+
+		IF NOT fileContentManager.Start() THEN
+			AssertTrue(
+				Condition := FALSE,
+				Message := 'Start must accept the task; the missing file must be detected during resource acquisition'
+			);
+
+			lifecycle := FILE_TEST_LIFECYCLE.CLEANING_UP;
+			RETURN;
+		END_IF
+
+	END_IF
+
+	fileContentManager.Execute();
+
+	IF fileContentManager.State.Stopped THEN
+		AssertTrue(
+			Condition := fileContentManager.FinalStopReason.Failure,
+			Message := 'Opening a missing file for reading must stop FileContentManager with Failure'
+		);
+		AssertTrue(
+			Condition := fileContentManager.FinalStopReason.Message <> "",
+			Message := 'File open failure must provide an error message'
+		);
+
+		// Opening failed before any child could execute.
+		AssertTrue(
+			Condition := readStringFromFile.State.Ready,
+			Message := 'Read task must remain READY when the file cannot be opened'
+		);
+		AssertFalse(
+			Condition := fileContentManager.ResourceManager.ResourceAcquired,
+			Message := 'No file resource must remain acquired after file open failure'
+		);
+
+		lifecycle := FILE_TEST_LIFECYCLE.CLEANING_UP;
+	ELSIF testTimeout.Q THEN
+		AssertTrue(
+			Condition := FALSE,
+			Message := 'FileContentManager did not stop within 10 seconds after attempting to open a missing file'
+		);
+
+		fileContentManager.Cancel();
+
+		lifecycle := FILE_TEST_LIFECYCLE.CLEANING_UP;
+	END_IF
+__CATCH
+	lifecycle := FILE_TEST_LIFECYCLE.CLEANING_UP;
+	AssertTrue(Condition := FALSE, Message := 'Exception interrupted the file scenario; later cycles drain its tasks');
+__ENDTRY]]></ST>
       </Implementation>
     </Method>
     <Method Name="WriteToFileOpenedForReading" Id="{83158742-6402-4a1f-a1b4-e5b3a39a5218}">
-      <Declaration><![CDATA[
-//! <param name="TEST_FILE_PATH">
-//! Reserved test file: created or overwritten during preparation.
-//! </param>
-
-(*!
-<summary>Names preparation and write-failure checks for a file opened for reading.</summary>
+      <Declaration><![CDATA[(*!
+<summary>Exercises write failure on a read-only handle.</summary>
 <description>
-Creates a reserved file, reopens it for reading, then checks write failure and queue cleanup. The file is
-overwritten during preparation. Timeout and post-test cleanup remain part of the method.
+Prepares a new exclusively owned scenario directory before file I/O. Existing entries fail preparation.
+The scenario deadline includes preparation; Start refusals and exceptions fail once. Subsequent suite calls
+cancel and drain all persistent managers before fixture cleanup. TEST_FINISHED is deferred until cleanup
+attempts complete. Cleanup refusal or a caught cleanup exception fails the case without erasing its first
+failure. No forced cleanup deadline or deletion of pre-existing external files is used.
+Terminal allocation failure remains latched for the task boundary.
 </description>
 *)
 METHOD WriteToFileOpenedForReading
-VAR CONSTANT
-	
-	TEST_FILE_PATH : STRING(255) := 'C:\OpenFramework_Test_ReadOnlyFile.txt';
-END_VAR
 VAR_INST
-	testFinished : BOOL;
+	directory : FileTestDirectory(directoryPath := 'C:\OpenFrameworkTests\FileContent_ReadOnly');
+	cleanupExceptionObserved : BOOL;
+	lifecycle : FILE_TEST_LIFECYCLE;
 	step : READ_ONLY_FILE_TEST_STEP;
 
-	createFileManager : TOF_FileSystem.FileContentManager("createFileManager");
-	fileContentManager : TOF_FileSystem.FileContentManager("fileContentManager");
+	createFileManager : TOF_FileSystem.FileContentManager(name := "createFileManager");
+	fileContentManager : TOF_FileSystem.FileContentManager(name := "fileContentManager");
 
-	writeStringToFile : TOF_FileSystem.WriteString255ToFile("writeStringToFile");
-	readStringFromFile : TOF_FileSystem.ReadString255FromFile("readStringFromFile");
+	writeStringToFile : TOF_FileSystem.WriteString255ToFile(name := "writeStringToFile");
+	readStringFromFile : TOF_FileSystem.ReadString255FromFile(name := "readStringFromFile");
 
 	testTimeout : Tc2_Standard.TON;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[IF testFinished THEN
-	IF createFileManager.State.Running THEN
-		createFileManager.Execute();
-	END_IF
-
-	IF fileContentManager.State.Running THEN
-		fileContentManager.Execute();
-	END_IF
-
+        <ST><![CDATA[IF lifecycle = FILE_TEST_LIFECYCLE.FINISHED THEN
 	RETURN;
 END_IF
 
 TEST(TestName := __POUNAME());
 
-testTimeout(IN := TRUE, PT := T#15S);
+IF lifecycle = FILE_TEST_LIFECYCLE.CLEANING_UP THEN
 
-CASE step OF
-	READ_ONLY_FILE_TEST_STEP.CREATE_FILE:
-		// Create an empty file and finish closing it before the actual test.
-		createFileManager.FilePath := TEST_FILE_PATH;
-		createFileManager.ModeFlags := Tc2_System.Global_Variables.FOPEN_MODEWRITE OR Tc2_System.Global_Variables.FOPEN_MODETEXT;
-		createFileManager.PathType := Tc2_System.E_OpenPath.PATH_GENERIC;
-		createFileManager.Timeout := T#2S;
-		createFileManager.StopWhenNoPendingTasks := TRUE;
+	__TRY
 
-		IF createFileManager.Start() THEN
-			step := READ_ONLY_FILE_TEST_STEP.OPEN_FILE_FOR_READING;
-		ELSE
-			AssertTrue(Condition := FALSE, Message := 'File preparation manager must accept Start');
-
-			testFinished := TRUE;
-			TEST_FINISHED();
+		IF createFileManager.State.Running THEN
+			createFileManager.Cancel();
+			createFileManager.Execute();
 		END_IF
 
-	READ_ONLY_FILE_TEST_STEP.OPEN_FILE_FOR_READING:
-		createFileManager.Execute();
+		IF fileContentManager.State.Running THEN
+			fileContentManager.Cancel();
+			fileContentManager.Execute();
+		END_IF
 
-		IF createFileManager.State.Stopped THEN
-			IF NOT createFileManager.FinalStopReason.WorkDone OR_ELSE createFileManager.ResourceManager.ResourceAcquired THEN
+		IF NOT createFileManager.State.Running AND_THEN NOT fileContentManager.State.Running THEN
+			directory.Cleanup();
+
+			IF directory.CleanupComplete THEN
 				AssertTrue(
-					Condition := FALSE,
-					Message := 'Test preparation must create the file and finish resource cleanup before testing write failure'
+					Condition := directory.CleanupSucceeded,
+					Message := TOF_Core.Strings.Concat255(directory.DirectoryPath, ': ', directory.CleanupMessage)
+				);
+				AssertFalse(
+					Condition := cleanupExceptionObserved,
+					Message := 'An exception interrupted cleanup before the final removal attempt'
+				);
+				lifecycle := FILE_TEST_LIFECYCLE.FINISHED;
+				TEST_FINISHED();
+			END_IF
+		END_IF
+
+	__CATCH
+		(* Keep persistent tasks and retry cleanup next cycle; do not replace the original test result. *)
+		cleanupExceptionObserved := TRUE;
+	__ENDTRY
+
+	RETURN;
+END_IF
+
+__TRY
+	testTimeout(IN := TRUE, PT := T#15S);
+
+	IF FileTestRoot.FailureMessage <> TOF_Core.Strings.Empty THEN
+		lifecycle := FILE_TEST_LIFECYCLE.CLEANING_UP;
+		AssertTrue(Condition := FALSE, Message := FileTestRoot.FailureMessage);
+		RETURN;
+	END_IF
+
+	IF NOT FileTestRoot.Prepared THEN
+		RETURN;
+	END_IF
+
+	directory.Prepare();
+
+	IF directory.PreparationFailed THEN
+		lifecycle := FILE_TEST_LIFECYCLE.CLEANING_UP;
+		AssertTrue(
+			Condition := FALSE,
+			Message := TOF_Core.Strings.Concat255(directory.DirectoryPath, ': ', directory.PreparationMessage)
+		);
+		RETURN;
+	END_IF
+
+	IF NOT directory.Prepared THEN
+
+		IF testTimeout.Q THEN
+			lifecycle := FILE_TEST_LIFECYCLE.CLEANING_UP;
+			AssertTrue(Condition := FALSE, Message := 'Scenario directory preparation exceeded its deadline');
+		END_IF
+
+		RETURN;
+	END_IF
+
+	CASE step OF
+		READ_ONLY_FILE_TEST_STEP.CREATE_FILE:
+			directory.ExpectFirstFile();
+			// Create an empty file and finish closing it before the actual test.
+			createFileManager.FilePath := directory.FirstFilePath;
+			createFileManager.ModeFlags := Tc2_System.Global_Variables.FOPEN_MODEWRITE OR Tc2_System.Global_Variables.FOPEN_MODETEXT;
+			createFileManager.PathType := Tc2_System.E_OpenPath.PATH_GENERIC;
+			createFileManager.Timeout := T#2S;
+			createFileManager.StopWhenNoPendingTasks := TRUE;
+
+			IF createFileManager.Start() THEN
+				step := READ_ONLY_FILE_TEST_STEP.OPEN_FILE_FOR_READING;
+			ELSE
+				AssertTrue(Condition := FALSE, Message := 'File preparation manager must accept Start');
+
+				lifecycle := FILE_TEST_LIFECYCLE.CLEANING_UP;
+			END_IF
+
+		READ_ONLY_FILE_TEST_STEP.OPEN_FILE_FOR_READING:
+			createFileManager.Execute();
+
+			IF createFileManager.State.Stopped THEN
+
+				IF NOT createFileManager.FinalStopReason.WorkDone OR_ELSE createFileManager.ResourceManager.ResourceAcquired THEN
+					AssertTrue(
+						Condition := FALSE,
+						Message := 'Test preparation must create the file and finish resource cleanup before testing write failure'
+					);
+
+					lifecycle := FILE_TEST_LIFECYCLE.CLEANING_UP;
+					RETURN;
+				END_IF
+
+				fileContentManager.FilePath := directory.FirstFilePath;
+				fileContentManager.ModeFlags := Tc2_System.Global_Variables.FOPEN_MODEREAD OR Tc2_System.Global_Variables.FOPEN_MODETEXT;
+				fileContentManager.PathType := Tc2_System.E_OpenPath.PATH_GENERIC;
+				fileContentManager.Timeout := T#2S;
+				fileContentManager.StopWhenNoPendingTasks := TRUE;
+
+				writeStringToFile.StringToWrite := 'Writing through a read-only handle must fail';
+				writeStringToFile.Timeout := T#2S;
+
+				fileContentManager.Enqueue(fileHandleTask := writeStringToFile);
+				fileContentManager.Enqueue(fileHandleTask := readStringFromFile);
+
+				IF fileContentManager.Start() THEN
+					step := READ_ONLY_FILE_TEST_STEP.CHECK_WRITE_FAILURE;
+				ELSE
+					AssertTrue(Condition := FALSE, Message := 'FileContentManager must accept Start before executing the write task');
+
+					lifecycle := FILE_TEST_LIFECYCLE.CLEANING_UP;
+				END_IF
+
+			END_IF
+
+		READ_ONLY_FILE_TEST_STEP.CHECK_WRITE_FAILURE:
+			fileContentManager.Execute();
+
+			IF fileContentManager.State.Stopped THEN
+				// The child failed, and its error reached the manager.
+				AssertTrue(
+					Condition := writeStringToFile.FinalStopReason.Failure,
+					Message := 'Writing through a file handle opened for reading must fail'
+				);
+				AssertTrue(
+					Condition := fileContentManager.FinalStopReason.Failure,
+					Message := 'FileContentManager must stop with Failure when its write task fails'
+				);
+				AssertEquals_WSTRING(
+					Expected := writeStringToFile.FinalStopReason.Message,
+					Actual := fileContentManager.FinalStopReason.Message,
+					Message := 'FileContentManager must report the error message from the failed write task'
 				);
 
-				testFinished := TRUE;
-				TEST_FINISHED();
-				RETURN;
+				// The queue stopped before the next task and finished cleanup.
+				AssertTrue(
+					Condition := readStringFromFile.State.Ready,
+					Message := 'Read task following the failed write must remain READY'
+				);
+				AssertFalse(
+					Condition := fileContentManager.ResourceManager.ResourceAcquired,
+					Message := 'File resource cleanup must finish after write failure'
+				);
+
+				lifecycle := FILE_TEST_LIFECYCLE.CLEANING_UP;
 			END_IF
 
-			fileContentManager.FilePath := TEST_FILE_PATH;
-			fileContentManager.ModeFlags := Tc2_System.Global_Variables.FOPEN_MODEREAD OR Tc2_System.Global_Variables.FOPEN_MODETEXT;
-			fileContentManager.PathType := Tc2_System.E_OpenPath.PATH_GENERIC;
-			fileContentManager.Timeout := T#2S;
-			fileContentManager.StopWhenNoPendingTasks := TRUE;
+	END_CASE
 
-			writeStringToFile.StringToWrite := 'Writing through a read-only handle must fail';
-			writeStringToFile.Timeout := T#2S;
+	IF lifecycle = FILE_TEST_LIFECYCLE.RUNNING_SCENARIO AND_THEN testTimeout.Q THEN
+		AssertTrue(
+			Condition := FALSE,
+			Message := 'Preparing the file and checking write failure did not finish within 15 seconds'
+		);
 
-			fileContentManager.Enqueue(fileHandleTask := writeStringToFile);
-			fileContentManager.Enqueue(fileHandleTask := readStringFromFile);
+		createFileManager.Cancel();
+		fileContentManager.Cancel();
 
-			IF fileContentManager.Start() THEN
-				step := READ_ONLY_FILE_TEST_STEP.CHECK_WRITE_FAILURE;
-			ELSE
-				AssertTrue(Condition := FALSE, Message := 'FileContentManager must accept Start before executing the write task');
-
-				testFinished := TRUE;
-				TEST_FINISHED();
-			END_IF
-		END_IF
-
-	READ_ONLY_FILE_TEST_STEP.CHECK_WRITE_FAILURE:
-		fileContentManager.Execute();
-
-		IF fileContentManager.State.Stopped THEN
-			// The child failed, and its error reached the manager.
-			AssertTrue(
-				Condition := writeStringToFile.FinalStopReason.Failure,
-				Message := 'Writing through a file handle opened for reading must fail'
-			);
-			AssertTrue(
-				Condition := fileContentManager.FinalStopReason.Failure,
-				Message := 'FileContentManager must stop with Failure when its write task fails'
-			);
-			AssertEquals_WSTRING(
-				Expected := writeStringToFile.FinalStopReason.Message,
-				Actual := fileContentManager.FinalStopReason.Message,
-				Message := 'FileContentManager must report the error message from the failed write task'
-			);
-
-			// The queue stopped before the next task and finished cleanup.
-			AssertTrue(
-				Condition := readStringFromFile.State.Ready,
-				Message := 'Read task following the failed write must remain READY'
-			);
-			AssertFalse(
-				Condition := fileContentManager.ResourceManager.ResourceAcquired,
-				Message := 'File resource cleanup must finish after write failure'
-			);
-
-			testFinished := TRUE;
-			TEST_FINISHED();
-		END_IF
-END_CASE
-
-IF NOT testFinished AND_THEN testTimeout.Q THEN
-	AssertTrue(
-		Condition := FALSE,
-		Message := 'Preparing the file and checking write failure did not finish within 15 seconds'
-	);
-
-	createFileManager.Cancel();
-	fileContentManager.Cancel();
-
-	testFinished := TRUE;
-	TEST_FINISHED();
-END_IF]]></ST>
+		lifecycle := FILE_TEST_LIFECYCLE.CLEANING_UP;
+	END_IF
+__CATCH
+	lifecycle := FILE_TEST_LIFECYCLE.CLEANING_UP;
+	AssertTrue(Condition := FALSE, Message := 'Exception interrupted the file scenario; later cycles drain its tasks');
+__ENDTRY]]></ST>
       </Implementation>
     </Method>
     <Method Name="CancelDuringFileWrite" Id="{d4a7f1c2-086b-4eaf-aa4e-0be42aa38d39}">
-      <Declaration><![CDATA[
-//! <param name="TEST_FILE_PATH">
-//! Reserved test file: created or overwritten by this test.
-//! </param>
-
+      <Declaration><![CDATA[(*!
+<summary>Exercises cancellation during an observed busy write.</summary>
+<description>
+Prepares a new exclusively owned scenario directory before file I/O. Existing entries fail preparation.
+The scenario deadline includes preparation; Start refusals and exceptions fail once. Subsequent suite calls
+cancel and drain all persistent managers before fixture cleanup. TEST_FINISHED is deferred until cleanup
+attempts complete. Cleanup refusal or a caught cleanup exception fails the case without erasing its first
+failure. No forced cleanup deadline or deletion of pre-existing external files is used.
+Terminal allocation failure remains latched for the task boundary.
+</description>
+*)
 METHOD CancelDuringFileWrite
-VAR CONSTANT
-	
-	TEST_FILE_PATH : STRING(255) := 'C:\OpenFramework_Test_CancelFileWrite.txt';
-END_VAR
 VAR_INST
-	testFinished : BOOL;
+	directory : FileTestDirectory(directoryPath := 'C:\OpenFrameworkTests\FileContent_Cancel');
+	cleanupExceptionObserved : BOOL;
+	lifecycle : FILE_TEST_LIFECYCLE;
 	initialized : BOOL;
 	cancelRequested : BOOL;
 
-	fileContentManager : TOF_FileSystem.FileContentManager("fileContentManager");
-	writeStringToFile : TOF_FileSystem.WriteString255ToFile("writeStringToFile");
-	readStringFromFile : TOF_FileSystem.ReadString255FromFile("readStringFromFile");
+	fileContentManager : TOF_FileSystem.FileContentManager(name := "fileContentManager");
+	writeStringToFile : TOF_FileSystem.WriteString255ToFile(name := "writeStringToFile");
+	readStringFromFile : TOF_FileSystem.ReadString255FromFile(name := "readStringFromFile");
 
 	testTimeout : Tc2_Standard.TON;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[IF testFinished THEN
-	IF fileContentManager.State.Running THEN
-		fileContentManager.Execute();
-	END_IF
-
+        <ST><![CDATA[IF lifecycle = FILE_TEST_LIFECYCLE.FINISHED THEN
 	RETURN;
 END_IF
 
 TEST(TestName := __POUNAME());
 
-testTimeout(IN := TRUE, PT := T#10S);
+IF lifecycle = FILE_TEST_LIFECYCLE.CLEANING_UP THEN
 
-IF NOT initialized THEN
-	initialized := TRUE;
+	__TRY
 
-	fileContentManager.FilePath := TEST_FILE_PATH;
-	fileContentManager.ModeFlags := Tc2_System.Global_Variables.FOPEN_MODEWRITE
-		OR Tc2_System.Global_Variables.FOPEN_MODEPLUS
-		OR Tc2_System.Global_Variables.FOPEN_MODETEXT;
-	fileContentManager.PathType := Tc2_System.E_OpenPath.PATH_GENERIC;
-	fileContentManager.Timeout := T#2S;
-	fileContentManager.StopWhenNoPendingTasks := TRUE;
+		IF fileContentManager.State.Running THEN
+			fileContentManager.Cancel();
+			fileContentManager.Execute();
+		END_IF
 
-	writeStringToFile.StringToWrite := 'Cancel while the file write request is still busy';
-	writeStringToFile.Timeout := T#2S;
-	readStringFromFile.Timeout := T#2S;
+		IF NOT fileContentManager.State.Running THEN
+			directory.Cleanup();
 
-	fileContentManager.Enqueue(fileHandleTask := writeStringToFile);
-	fileContentManager.Enqueue(fileHandleTask := readStringFromFile);
+			IF directory.CleanupComplete THEN
+				AssertTrue(
+					Condition := directory.CleanupSucceeded,
+					Message := TOF_Core.Strings.Concat255(directory.DirectoryPath, ': ', directory.CleanupMessage)
+				);
+				AssertFalse(
+					Condition := cleanupExceptionObserved,
+					Message := 'An exception interrupted cleanup before the final removal attempt'
+				);
+				lifecycle := FILE_TEST_LIFECYCLE.FINISHED;
+				TEST_FINISHED();
+			END_IF
+		END_IF
 
-	IF NOT fileContentManager.Start() THEN
-		AssertTrue(Condition := FALSE, Message := 'FileContentManager must accept Start before testing cancellation');
+	__CATCH
+		(* Keep persistent tasks and retry cleanup next cycle; do not replace the original test result. *)
+		cleanupExceptionObserved := TRUE;
+	__ENDTRY
 
-		testFinished := TRUE;
-		TEST_FINISHED();
+	RETURN;
+END_IF
+
+__TRY
+	testTimeout(IN := TRUE, PT := T#10S);
+
+	IF FileTestRoot.FailureMessage <> TOF_Core.Strings.Empty THEN
+		lifecycle := FILE_TEST_LIFECYCLE.CLEANING_UP;
+		AssertTrue(Condition := FALSE, Message := FileTestRoot.FailureMessage);
 		RETURN;
 	END_IF
-END_IF
 
-fileContentManager.Execute();
+	IF NOT FileTestRoot.Prepared THEN
+		RETURN;
+	END_IF
 
-// Request cancellation only after observing a real pending write.
-IF NOT cancelRequested AND_THEN writeStringToFile.FileOperationInProgress THEN
-	cancelRequested := fileContentManager.Cancel();
+	directory.Prepare();
 
-	AssertTrue(
-		Condition := cancelRequested,
-		Message := 'FileContentManager must accept Cancel while its write request is busy'
-	);
-END_IF
-
-// While cancelling, keep the file until the active child finishes.
-IF cancelRequested THEN
-	IF writeStringToFile.FileOperationInProgress THEN
+	IF directory.PreparationFailed THEN
+		lifecycle := FILE_TEST_LIFECYCLE.CLEANING_UP;
 		AssertTrue(
-			Condition := fileContentManager.ResourceManager.ResourceAcquired,
-			Message := 'File resource must remain acquired while the write request is busy'
+			Condition := FALSE,
+			Message := TOF_Core.Strings.Concat255(directory.DirectoryPath, ': ', directory.PreparationMessage)
 		);
+		RETURN;
 	END_IF
 
-	IF fileContentManager.RunningSubstate.ResourceReleasing THEN
-		AssertTrue(
-			Condition := writeStringToFile.State.Stopped,
-			Message := 'File resource release must wait until the write task stops'
-		);
-	END_IF
-END_IF
+	IF NOT directory.Prepared THEN
 
-IF NOT cancelRequested AND_THEN writeStringToFile.State.Stopped THEN
-	AssertTrue(
-		Condition := FALSE,
-		Message := 'Write completed without observing bBusy; cancellation during an active request was not tested'
-	);
+		IF testTimeout.Q THEN
+			lifecycle := FILE_TEST_LIFECYCLE.CLEANING_UP;
+			AssertTrue(Condition := FALSE, Message := 'Scenario directory preparation exceeded its deadline');
+		END_IF
 
-	fileContentManager.Cancel();
-
-	testFinished := TRUE;
-	TEST_FINISHED();
-	RETURN;
-END_IF
-
-IF fileContentManager.State.Stopped THEN
-	// Both the manager and its active child completed cancellation.
-	AssertTrue(
-		Condition := cancelRequested,
-		Message := 'Test must observe a busy write and request cancellation before completion'
-	);
-	AssertTrue(
-		Condition := fileContentManager.FinalStopReason.ExternalCancel,
-		Message := 'FileContentManager must stop with ExternalCancel'
-	);
-	AssertTrue(
-		Condition := writeStringToFile.FinalStopReason.ExternalCancel,
-		Message := 'Active write task must receive cancellation from FileContentManager'
-	);
-
-	// No pending write, no successor execution, no acquired resource.
-	AssertFalse(
-		Condition := writeStringToFile.FileOperationInProgress,
-		Message := 'Write request must no longer be busy after FileContentManager stops'
-	);
-	AssertTrue(Condition := readStringFromFile.State.Ready, Message := 'Read task must remain READY after cancellation');
-	AssertFalse(
-		Condition := fileContentManager.ResourceManager.ResourceAcquired,
-		Message := 'File resource cleanup must finish after cancellation'
-	);
-
-	testFinished := TRUE;
-	TEST_FINISHED();
-ELSIF testTimeout.Q THEN
-	AssertTrue(
-		Condition := FALSE,
-		Message := 'File write cancellation and resource cleanup did not finish within 10 seconds'
-	);
-
-	fileContentManager.Cancel();
-
-	testFinished := TRUE;
-	TEST_FINISHED();
-END_IF]]></ST>
-      </Implementation>
-    </Method>
-    <Method Name="ReuseAfterReset" Id="{a9229bf6-ad23-46c8-bc5f-a1c5b832a6e5}">
-      <Declaration><![CDATA[
-//! <param name="FIRST_FILE_PATH">
-//! Reserved test files: created or overwritten by this test.
-//! </param>
-
-(*!
-<summary>Names the two runs and intervening cancellation in the file-manager reuse test.</summary>
-<description>
-Writes the first reserved file, cancels before the waiting read, then resets and runs against the second file.
-Checks that Reset drops waiting entries and that caller-prepared children can be reused. Reserved files are
-overwritten; timeout cleanup continues on later suite cycles.
-</description>
-*)
-METHOD ReuseAfterReset
-VAR CONSTANT
-	
-	FIRST_FILE_PATH : STRING(255) := 'C:\OpenFramework_Test_Reset_First.txt';
-	SECOND_FILE_PATH : STRING(255) := 'C:\OpenFramework_Test_Reset_Second.txt';
-	SECOND_FILE_TEXT : STRING := 'FileContentManager reused after Reset';
-END_VAR
-VAR_INST
-	testFinished : BOOL;
-	step : FILE_MANAGER_REUSE_TEST_STEP;
-
-	fileContentManager : TOF_FileSystem.FileContentManager("fileContentManager");
-	writeStringToFile : TOF_FileSystem.WriteString255ToFile("writeStringToFile");
-	waitingReadTask : TOF_FileSystem.ReadString255FromFile("waitingReadTask");
-	setPositionInFile : TOF_FileSystem.SetPositionInFile("setPositionInFile");
-	readStringFromFile : TOF_FileSystem.ReadString255FromFile("readStringFromFile");
-
-	testTimeout : Tc2_Standard.TON;
-END_VAR]]></Declaration>
-      <Implementation>
-        <ST><![CDATA[IF testFinished THEN
-	IF fileContentManager.State.Running THEN
-		fileContentManager.Execute();
+		RETURN;
 	END_IF
 
-	RETURN;
-END_IF
+	IF NOT initialized THEN
+		initialized := TRUE;
+		directory.ExpectFirstFile();
 
-TEST(TestName := __POUNAME());
-
-testTimeout(IN := TRUE, PT := T#20S);
-
-CASE step OF
-	FILE_MANAGER_REUSE_TEST_STEP.START_FIRST_WRITE:
-		// First run: write a file, with another task waiting in the queue.
-		fileContentManager.FilePath := FIRST_FILE_PATH;
+		fileContentManager.FilePath := directory.FirstFilePath;
 		fileContentManager.ModeFlags := Tc2_System.Global_Variables.FOPEN_MODEWRITE
 			OR Tc2_System.Global_Variables.FOPEN_MODEPLUS
 			OR Tc2_System.Global_Variables.FOPEN_MODETEXT;
@@ -580,153 +761,380 @@ CASE step OF
 		fileContentManager.Timeout := T#2S;
 		fileContentManager.StopWhenNoPendingTasks := TRUE;
 
-		writeStringToFile.StringToWrite := 'First run before Reset';
+		writeStringToFile.StringToWrite := 'Cancel while the file write request is still busy';
 		writeStringToFile.Timeout := T#2S;
-		waitingReadTask.Timeout := T#2S;
-		setPositionInFile.Timeout := T#2S;
 		readStringFromFile.Timeout := T#2S;
 
 		fileContentManager.Enqueue(fileHandleTask := writeStringToFile);
-		fileContentManager.Enqueue(fileHandleTask := waitingReadTask);
+		fileContentManager.Enqueue(fileHandleTask := readStringFromFile);
 
 		IF NOT fileContentManager.Start() THEN
-			AssertTrue(Condition := FALSE, Message := 'FileContentManager must accept Start for the first run');
+			AssertTrue(Condition := FALSE, Message := 'FileContentManager must accept Start before testing cancellation');
 
-			testFinished := TRUE;
-			TEST_FINISHED();
+			lifecycle := FILE_TEST_LIFECYCLE.CLEANING_UP;
 			RETURN;
 		END_IF
 
-		step := FILE_MANAGER_REUSE_TEST_STEP.CANCEL_AFTER_WRITE;
+	END_IF
 
-	FILE_MANAGER_REUSE_TEST_STEP.CANCEL_AFTER_WRITE:
-		// Finish the write, then cancel before the waiting task starts.
-		fileContentManager.Execute();
+	fileContentManager.Execute();
 
-		IF fileContentManager.State.Stopped THEN
+	// Request cancellation only after observing a real pending write.
+
+	IF NOT cancelRequested AND_THEN writeStringToFile.FileOperationInProgress THEN
+		cancelRequested := fileContentManager.Cancel();
+
+		AssertTrue(
+			Condition := cancelRequested,
+			Message := 'FileContentManager must accept Cancel while its write request is busy'
+		);
+	END_IF
+
+	// While cancelling, keep the file until the active child finishes.
+
+	IF cancelRequested THEN
+
+		IF writeStringToFile.FileOperationInProgress THEN
 			AssertTrue(
-				Condition := FALSE,
-				Message := 'First run must finish its write before stopping; inspect FinalStopReason.Message'
+				Condition := fileContentManager.ResourceManager.ResourceAcquired,
+				Message := 'File resource must remain acquired while the write request is busy'
 			);
-
-			testFinished := TRUE;
-			TEST_FINISHED();
-			RETURN;
 		END_IF
 
-		IF writeStringToFile.State.Stopped THEN
+		IF fileContentManager.RunningSubstate.ResourceReleasing THEN
 			AssertTrue(
-				Condition := writeStringToFile.FinalStopReason.WorkDone,
-				Message := 'First write must finish successfully before testing Reset'
+				Condition := writeStringToFile.State.Stopped,
+				Message := 'File resource release must wait until the write task stops'
 			);
-
-			// Keep one waiting task to verify that Reset actually clears the queue.
-			AssertTrue(
-				Condition := fileContentManager.Cancel(),
-				Message := 'FileContentManager must accept Cancel between queued tasks'
-			);
-
-			step := FILE_MANAGER_REUSE_TEST_STEP.RESET_AND_START_SECOND_FILE;
 		END_IF
 
-	FILE_MANAGER_REUSE_TEST_STEP.RESET_AND_START_SECOND_FILE:
-		// Reset the stopped manager and prepare a new run with another file.
-		fileContentManager.Execute();
+	END_IF
 
-		IF fileContentManager.State.Stopped THEN
-			AssertEquals_DINT(
-				Expected := 1,
-				Actual := fileContentManager.PendingTaskCount,
-				Message := 'One unstarted read task must remain before Reset'
-			);
+	IF NOT cancelRequested AND_THEN writeStringToFile.State.Stopped THEN
+		AssertTrue(
+			Condition := FALSE,
+			Message := 'Write completed without observing bBusy; cancellation during an active request was not tested'
+		);
 
-			IF NOT fileContentManager.Reset() THEN
-				AssertTrue(Condition := FALSE, Message := 'Reset must succeed after FileContentManager stops');
+		fileContentManager.Cancel();
 
-				testFinished := TRUE;
+		lifecycle := FILE_TEST_LIFECYCLE.CLEANING_UP;
+		RETURN;
+	END_IF
+
+	IF fileContentManager.State.Stopped THEN
+		// Both the manager and its active child completed cancellation.
+		AssertTrue(
+			Condition := cancelRequested,
+			Message := 'Test must observe a busy write and request cancellation before completion'
+		);
+		AssertTrue(
+			Condition := fileContentManager.FinalStopReason.ExternalCancel,
+			Message := 'FileContentManager must stop with ExternalCancel'
+		);
+		AssertTrue(
+			Condition := writeStringToFile.FinalStopReason.ExternalCancel,
+			Message := 'Active write task must receive cancellation from FileContentManager'
+		);
+
+		// No pending write, no successor execution, no acquired resource.
+		AssertFalse(
+			Condition := writeStringToFile.FileOperationInProgress,
+			Message := 'Write request must no longer be busy after FileContentManager stops'
+		);
+		AssertTrue(Condition := readStringFromFile.State.Ready, Message := 'Read task must remain READY after cancellation');
+		AssertFalse(
+			Condition := fileContentManager.ResourceManager.ResourceAcquired,
+			Message := 'File resource cleanup must finish after cancellation'
+		);
+
+		lifecycle := FILE_TEST_LIFECYCLE.CLEANING_UP;
+	ELSIF testTimeout.Q THEN
+		AssertTrue(
+			Condition := FALSE,
+			Message := 'File write cancellation and resource cleanup did not finish within 10 seconds'
+		);
+
+		fileContentManager.Cancel();
+
+		lifecycle := FILE_TEST_LIFECYCLE.CLEANING_UP;
+	END_IF
+__CATCH
+	lifecycle := FILE_TEST_LIFECYCLE.CLEANING_UP;
+	AssertTrue(Condition := FALSE, Message := 'Exception interrupted the file scenario; later cycles drain its tasks');
+__ENDTRY]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="ReuseAfterReset" Id="{a9229bf6-ad23-46c8-bc5f-a1c5b832a6e5}">
+      <Declaration><![CDATA[(*!
+<summary>Exercises manager reset and child reuse across two files.</summary>
+<description>
+Prepares a new exclusively owned scenario directory before file I/O. Existing entries fail preparation.
+The scenario deadline includes preparation; Start refusals and exceptions fail once. Subsequent suite calls
+cancel and drain all persistent managers before fixture cleanup. TEST_FINISHED is deferred until cleanup
+attempts complete. Cleanup refusal or a caught cleanup exception fails the case without erasing its first
+failure. No forced cleanup deadline or deletion of pre-existing external files is used.
+Terminal allocation failure remains latched for the task boundary.
+</description>
+*)
+METHOD ReuseAfterReset
+VAR CONSTANT
+	SECOND_FILE_TEXT : STRING := 'FileContentManager reused after Reset';
+END_VAR
+VAR_INST
+	directory : FileTestDirectory(directoryPath := 'C:\OpenFrameworkTests\FileContent_Reuse');
+	cleanupExceptionObserved : BOOL;
+	lifecycle : FILE_TEST_LIFECYCLE;
+	step : FILE_MANAGER_REUSE_TEST_STEP;
+
+	fileContentManager : TOF_FileSystem.FileContentManager(name := "fileContentManager");
+	writeStringToFile : TOF_FileSystem.WriteString255ToFile(name := "writeStringToFile");
+	waitingReadTask : TOF_FileSystem.ReadString255FromFile(name := "waitingReadTask");
+	setPositionInFile : TOF_FileSystem.SetPositionInFile(name := "setPositionInFile");
+	readStringFromFile : TOF_FileSystem.ReadString255FromFile(name := "readStringFromFile");
+
+	testTimeout : Tc2_Standard.TON;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF lifecycle = FILE_TEST_LIFECYCLE.FINISHED THEN
+	RETURN;
+END_IF
+
+TEST(TestName := __POUNAME());
+
+IF lifecycle = FILE_TEST_LIFECYCLE.CLEANING_UP THEN
+
+	__TRY
+
+		IF fileContentManager.State.Running THEN
+			fileContentManager.Cancel();
+			fileContentManager.Execute();
+		END_IF
+
+		IF NOT fileContentManager.State.Running THEN
+			directory.Cleanup();
+
+			IF directory.CleanupComplete THEN
+				AssertTrue(
+					Condition := directory.CleanupSucceeded,
+					Message := TOF_Core.Strings.Concat255(directory.DirectoryPath, ': ', directory.CleanupMessage)
+				);
+				AssertFalse(
+					Condition := cleanupExceptionObserved,
+					Message := 'An exception interrupted cleanup before the final removal attempt'
+				);
+				lifecycle := FILE_TEST_LIFECYCLE.FINISHED;
 				TEST_FINISHED();
-				RETURN;
 			END_IF
+		END_IF
 
-			AssertEquals_DINT(
-				Expected := 0,
-				Actual := fileContentManager.PendingTaskCount,
-				Message := 'Reset must remove the waiting task from the queue'
-			);
-			AssertEquals_STRING(
-				Expected := '',
-				Actual := fileContentManager.FilePath,
-				Message := 'Reset must clear the previous file path'
-			);
+	__CATCH
+		(* Keep persistent tasks and retry cleanup next cycle; do not replace the original test result. *)
+		cleanupExceptionObserved := TRUE;
+	__ENDTRY
 
-			// The caller prepares the child separately before enqueuing it again.
-			IF NOT writeStringToFile.Reset() THEN
-				AssertTrue(Condition := FALSE, Message := 'Completed write task must accept Reset before reuse');
+	RETURN;
+END_IF
 
-				testFinished := TRUE;
-				TEST_FINISHED();
-				RETURN;
-			END_IF
+__TRY
+	testTimeout(IN := TRUE, PT := T#20S);
 
-			fileContentManager.FilePath := SECOND_FILE_PATH;
+	IF FileTestRoot.FailureMessage <> TOF_Core.Strings.Empty THEN
+		lifecycle := FILE_TEST_LIFECYCLE.CLEANING_UP;
+		AssertTrue(Condition := FALSE, Message := FileTestRoot.FailureMessage);
+		RETURN;
+	END_IF
+
+	IF NOT FileTestRoot.Prepared THEN
+		RETURN;
+	END_IF
+
+	directory.Prepare();
+
+	IF directory.PreparationFailed THEN
+		lifecycle := FILE_TEST_LIFECYCLE.CLEANING_UP;
+		AssertTrue(
+			Condition := FALSE,
+			Message := TOF_Core.Strings.Concat255(directory.DirectoryPath, ': ', directory.PreparationMessage)
+		);
+		RETURN;
+	END_IF
+
+	IF NOT directory.Prepared THEN
+
+		IF testTimeout.Q THEN
+			lifecycle := FILE_TEST_LIFECYCLE.CLEANING_UP;
+			AssertTrue(Condition := FALSE, Message := 'Scenario directory preparation exceeded its deadline');
+		END_IF
+
+		RETURN;
+	END_IF
+
+	CASE step OF
+		FILE_MANAGER_REUSE_TEST_STEP.START_FIRST_WRITE:
+			directory.ExpectFirstFile();
+			// First run: write a file, with another task waiting in the queue.
+			fileContentManager.FilePath := directory.FirstFilePath;
 			fileContentManager.ModeFlags := Tc2_System.Global_Variables.FOPEN_MODEWRITE
 				OR Tc2_System.Global_Variables.FOPEN_MODEPLUS
 				OR Tc2_System.Global_Variables.FOPEN_MODETEXT;
+			fileContentManager.PathType := Tc2_System.E_OpenPath.PATH_GENERIC;
+			fileContentManager.Timeout := T#2S;
 			fileContentManager.StopWhenNoPendingTasks := TRUE;
 
-			writeStringToFile.StringToWrite := SECOND_FILE_TEXT;
-			setPositionInFile.Position := 0;
-			setPositionInFile.Origin := Tc2_System.E_SeekOrigin.SEEK_SET;
+			writeStringToFile.StringToWrite := 'First run before Reset';
+			writeStringToFile.Timeout := T#2S;
+			waitingReadTask.Timeout := T#2S;
+			setPositionInFile.Timeout := T#2S;
+			readStringFromFile.Timeout := T#2S;
 
 			fileContentManager.Enqueue(fileHandleTask := writeStringToFile);
-			fileContentManager.Enqueue(fileHandleTask := setPositionInFile);
-			fileContentManager.Enqueue(fileHandleTask := readStringFromFile);
+			fileContentManager.Enqueue(fileHandleTask := waitingReadTask);
 
 			IF NOT fileContentManager.Start() THEN
-				AssertTrue(Condition := FALSE, Message := 'FileContentManager must accept Start after Reset and new configuration');
+				AssertTrue(Condition := FALSE, Message := 'FileContentManager must accept Start for the first run');
 
-				testFinished := TRUE;
-				TEST_FINISHED();
+				lifecycle := FILE_TEST_LIFECYCLE.CLEANING_UP;
 				RETURN;
 			END_IF
 
-			step := FILE_MANAGER_REUSE_TEST_STEP.CHECK_SECOND_FILE;
-		END_IF
+			step := FILE_MANAGER_REUSE_TEST_STEP.CANCEL_AFTER_WRITE;
 
-	FILE_MANAGER_REUSE_TEST_STEP.CHECK_SECOND_FILE:
-		// Verify the second run and that the old waiting task stayed unused.
-		fileContentManager.Execute();
+		FILE_MANAGER_REUSE_TEST_STEP.CANCEL_AFTER_WRITE:
+			// Finish the write, then cancel before the waiting task starts.
+			fileContentManager.Execute();
 
-		IF fileContentManager.State.Stopped THEN
-			AssertTrue(Condition := fileContentManager.FinalStopReason.WorkDone, Message := 'Second run must stop with WorkDone');
-			AssertEquals_STRING(
-				Expected := SECOND_FILE_TEXT,
-				Actual := readStringFromFile.ReadString,
-				Message := 'Second run must read back the new text written after Reset'
-			);
+			IF fileContentManager.State.Stopped THEN
+				AssertTrue(
+					Condition := FALSE,
+					Message := 'First run must finish its write before stopping; inspect FinalStopReason.Message'
+				);
 
-			AssertTrue(
-				Condition := waitingReadTask.State.Ready,
-				Message := 'Task removed by Reset must never execute during the second run'
-			);
-			AssertFalse(
-				Condition := fileContentManager.ResourceManager.ResourceAcquired,
-				Message := 'Second run must finish resource cleanup'
-			);
+				lifecycle := FILE_TEST_LIFECYCLE.CLEANING_UP;
+				RETURN;
+			END_IF
 
-			testFinished := TRUE;
-			TEST_FINISHED();
-		END_IF
-END_CASE
+			IF writeStringToFile.State.Stopped THEN
+				AssertTrue(
+					Condition := writeStringToFile.FinalStopReason.WorkDone,
+					Message := 'First write must finish successfully before testing Reset'
+				);
 
-IF NOT testFinished AND_THEN testTimeout.Q THEN
-	AssertTrue(Condition := FALSE, Message := 'FileContentManager reuse test did not finish within 20 seconds');
+				// Keep one waiting task to verify that Reset actually clears the queue.
+				AssertTrue(
+					Condition := fileContentManager.Cancel(),
+					Message := 'FileContentManager must accept Cancel between queued tasks'
+				);
 
-	fileContentManager.Cancel();
+				step := FILE_MANAGER_REUSE_TEST_STEP.RESET_AND_START_SECOND_FILE;
+			END_IF
 
-	testFinished := TRUE;
-	TEST_FINISHED();
-END_IF]]></ST>
+		FILE_MANAGER_REUSE_TEST_STEP.RESET_AND_START_SECOND_FILE:
+			// Reset the stopped manager and prepare a new run with another file.
+			fileContentManager.Execute();
+
+			IF fileContentManager.State.Stopped THEN
+				AssertEquals_DINT(
+					Expected := 1,
+					Actual := fileContentManager.PendingTaskCount,
+					Message := 'One unstarted read task must remain before Reset'
+				);
+
+				IF NOT fileContentManager.Reset() THEN
+					AssertTrue(Condition := FALSE, Message := 'Reset must succeed after FileContentManager stops');
+
+					lifecycle := FILE_TEST_LIFECYCLE.CLEANING_UP;
+					RETURN;
+				END_IF
+
+				AssertEquals_DINT(
+					Expected := 0,
+					Actual := fileContentManager.PendingTaskCount,
+					Message := 'Reset must remove the waiting task from the queue'
+				);
+				AssertEquals_STRING(
+					Expected := '',
+					Actual := fileContentManager.FilePath,
+					Message := 'Reset must clear the previous file path'
+				);
+
+				// The caller prepares the child separately before enqueuing it again.
+
+				IF NOT writeStringToFile.Reset() THEN
+					AssertTrue(Condition := FALSE, Message := 'Completed write task must accept Reset before reuse');
+
+					lifecycle := FILE_TEST_LIFECYCLE.CLEANING_UP;
+					RETURN;
+				END_IF
+
+				directory.ExpectSecondFile();
+				fileContentManager.FilePath := directory.SecondFilePath;
+				fileContentManager.ModeFlags := Tc2_System.Global_Variables.FOPEN_MODEWRITE
+					OR Tc2_System.Global_Variables.FOPEN_MODEPLUS
+					OR Tc2_System.Global_Variables.FOPEN_MODETEXT;
+				fileContentManager.StopWhenNoPendingTasks := TRUE;
+
+				writeStringToFile.StringToWrite := SECOND_FILE_TEXT;
+				setPositionInFile.Position := 0;
+				setPositionInFile.Origin := Tc2_System.E_SeekOrigin.SEEK_SET;
+
+				fileContentManager.Enqueue(fileHandleTask := writeStringToFile);
+				fileContentManager.Enqueue(fileHandleTask := setPositionInFile);
+				fileContentManager.Enqueue(fileHandleTask := readStringFromFile);
+
+				IF NOT fileContentManager.Start() THEN
+					AssertTrue(
+						Condition := FALSE,
+						Message := 'FileContentManager must accept Start after Reset and new configuration'
+					);
+
+					lifecycle := FILE_TEST_LIFECYCLE.CLEANING_UP;
+					RETURN;
+				END_IF
+
+				step := FILE_MANAGER_REUSE_TEST_STEP.CHECK_SECOND_FILE;
+			END_IF
+
+		FILE_MANAGER_REUSE_TEST_STEP.CHECK_SECOND_FILE:
+			// Verify the second run and that the old waiting task stayed unused.
+			fileContentManager.Execute();
+
+			IF fileContentManager.State.Stopped THEN
+				AssertTrue(
+					Condition := fileContentManager.FinalStopReason.WorkDone,
+					Message := 'Second run must stop with WorkDone'
+				);
+				AssertEquals_STRING(
+					Expected := SECOND_FILE_TEXT,
+					Actual := readStringFromFile.ReadString,
+					Message := 'Second run must read back the new text written after Reset'
+				);
+
+				AssertTrue(
+					Condition := waitingReadTask.State.Ready,
+					Message := 'Task removed by Reset must never execute during the second run'
+				);
+				AssertFalse(
+					Condition := fileContentManager.ResourceManager.ResourceAcquired,
+					Message := 'Second run must finish resource cleanup'
+				);
+
+				lifecycle := FILE_TEST_LIFECYCLE.CLEANING_UP;
+			END_IF
+
+	END_CASE
+
+	IF lifecycle = FILE_TEST_LIFECYCLE.RUNNING_SCENARIO AND_THEN testTimeout.Q THEN
+		AssertTrue(Condition := FALSE, Message := 'FileContentManager reuse test did not finish within 20 seconds');
+
+		fileContentManager.Cancel();
+
+		lifecycle := FILE_TEST_LIFECYCLE.CLEANING_UP;
+	END_IF
+__CATCH
+	lifecycle := FILE_TEST_LIFECYCLE.CLEANING_UP;
+	AssertTrue(Condition := FALSE, Message := 'Exception interrupted the file scenario; later cycles drain its tasks');
+__ENDTRY]]></ST>
       </Implementation>
     </Method>
   </POU>

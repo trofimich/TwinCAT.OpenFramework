@@ -1,0 +1,160 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="TimerRestartProbe" Id="{6c6e912b-7351-4ef9-8d85-9b710c27af1f}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+SPDX-FileCopyrightText: © 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+SPDX-License-Identifier: MIT
+License: https://opensource.org/license/mit
+*)
+
+(*!
+<summary>Exercises inherited timer restart contracts with controlled stopping and callback failures.</summary>
+<description>
+Owned persistently by one test scenario and driven by its task only. AllowStopping delays termination without
+blocking. Exceptions deliberately injected outside FB lifecycle methods must be converted to refusal by Task;
+the enclosing AutomationRunner supplies exception cleanup and the terminal allocation boundary.
+</description>
+*)
+
+FUNCTION_BLOCK TimerRestartProbe EXTENDS TOF_Timers.Timer
+VAR_INPUT
+	//! <summary>Allows the next stopping call to finish; FALSE keeps cleanup pending.</summary>
+	AllowStopping : BOOL := TRUE;
+	//! <summary>Injects a start-preparation exception before the base timer is started.</summary>
+	ThrowOnBeforeStart : BOOL;
+	//! <summary>Injects a reset exception before the base TON state is cleared.</summary>
+	ThrowOnReset : BOOL;
+	//! <summary>Exercises the supported Reset callback after final completion.</summary>
+	ResetOnAfterStop : BOOL;
+END_VAR
+VAR_OUTPUT
+	//! <summary>Counts stopping calls so tests can detect extra advancement or busy waiting.</summary>
+	StoppingCalls : UINT;
+END_VAR
+VAR_STAT
+	_ProbeClassName : STRING := __POUNAME();
+END_VAR
+VAR
+	_Failure : TOF_Core.StandardException;
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[]]></ST>
+    </Implementation>
+    <Property Name="ClassName" Id="{7a106d54-7f1b-4ae7-9aab-f4bfd6209c5e}">
+      <Declaration><![CDATA[(*!
+<summary>Borrows the concrete fixture name from initialized static read-only storage.</summary>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{854bafe5-fd6b-41ac-897c-4d4f9433dad0}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ClassName REF= _ProbeClassName;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="NamespaceName" Id="{f20ae44f-18cc-4cae-ae2e-55991bccc959}">
+      <Declaration><![CDATA[(*!
+<summary>Borrows the test library namespace; callers must not modify the text.</summary>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{33cbeb1b-ceda-4fbc-8e04-6677c2a9dc73}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[NamespaceName REF= CurrentNamespace.Name;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="SelfSize" Id="{f9268190-ad2e-467b-a6b8-ff9ae9d54d25}">
+      <Declaration><![CDATA[(*!
+<summary>Returns the size in bytes of the concrete restart fixture.</summary>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY SelfSize : ULINT]]></Declaration>
+      <Get Name="Get" Id="{7ad0a746-1009-48b7-9337-2aefcab1c9ac}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[SelfSize := XSIZEOF(THIS^);]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="OnBeforeStart" Id="{3697a82b-edac-402b-8c33-2ba217b1cb63}">
+      <Declaration><![CDATA[(*!
+<summary>Injects a refusal before preserving the base timer start preparation.</summary>
+<description>The deliberate exception exercises Task.Start failure handling without leaving an active TON.</description>
+*)
+METHOD PROTECTED OnBeforeStart]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF ThrowOnBeforeStart THEN
+	raiseConfiguredFailure(message := "Timer start preparation failure");
+END_IF
+
+SUPER^.OnBeforeStart();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="OnReset" Id="{93396ca4-88cc-431f-85bb-3c1b550a447d}">
+      <Declaration><![CDATA[(*!
+<summary>Injects a refusal before preserving the base TON reset.</summary>
+<description>A refused reset leaves the old interval and elapsed observations available for assertions.</description>
+*)
+METHOD PROTECTED OnReset]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF ThrowOnReset THEN
+	raiseConfiguredFailure(message := "Timer reset failure");
+END_IF
+
+SUPER^.OnReset();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="OnStopping" Id="{530181ca-9c21-451f-a8a4-2bc724e03ba1}">
+      <Declaration><![CDATA[(*!
+<summary>Counts one stopping step and combines base readiness with the configured gate.</summary>
+<param name="readyToRelease">TRUE only when inherited stopping is complete and the test opens its gate.</param>
+*)
+METHOD PROTECTED OnStopping
+VAR_OUTPUT
+	readyToRelease : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[StoppingCalls := StoppingCalls + 1;
+SUPER^.OnStopping(readyToRelease => readyToRelease);
+readyToRelease := readyToRelease AND AllowStopping;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="OnAfterStop" Id="{5824cc7b-73c5-4188-9ca9-22bf561727fc}">
+      <Declaration><![CDATA[(*!
+<summary>Optionally resets the completed timer through the supported notification callback.</summary>
+<description>Reset clears the completion observation before the outer Execute returns.</description>
+*)
+METHOD PROTECTED OnAfterStop]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[SUPER^.OnAfterStop();
+
+IF ResetOnAfterStop THEN
+	Reset();
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="raiseConfiguredFailure" Id="{3bddae52-91de-4d2f-9a35-e02598380ecd}">
+      <Declaration><![CDATA[(*!
+<summary>Raises a diagnostic exception to exercise the inherited callback refusal boundary.</summary>
+<description>Used only by operational hooks; never called from FB_init, FB_exit or FB_reinit.</description>
+<param name="message">Diagnostic text copied into the synthetic exception.</param>
+*)
+METHOD PRIVATE raiseConfiguredFailure
+VAR_INPUT
+	message : WSTRING(255);
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_Failure.Throw(
+	sourceNamespaceName := NamespaceName,
+	sourceClassName := ClassName,
+	sourcePOUName := __POUNAME(),
+	sourcePosition := __POSITION(),
+	message := message
+);]]></ST>
+      </Implementation>
+    </Method>
+  </POU>
+</TcPlcObject>

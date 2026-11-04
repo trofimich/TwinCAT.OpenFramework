@@ -35,7 +35,14 @@ END_VAR]]></Declaration>
       <ST><![CDATA[]]></ST>
     </Implementation>
     <Property Name="ClassName" Id="{535d0327-a4db-4687-8471-79785ff04224}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Borrows the initialized class name used in diagnostics.</summary>
+<description>
+Returns initialized metadata storage without allocation. Callers must not modify the returned string.
+Derived function blocks must use distinct initialized static storage when overriding this metadata.
+</description>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
       <Get Name="Get" Id="{e0df0140-9afe-4cb4-8e00-b2e01c649db3}">
         <Declaration><![CDATA[]]></Declaration>
@@ -48,7 +55,9 @@ PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
       <Declaration><![CDATA[(*!
 <summary>Configures the task to be executed.</summary>
 <description>
-Requires a non-zero task instance.
+Requires a nonzero task instance and PASSIVE_READY. Validation precedes mutation; rejection preserves the
+previous dependency and its execution. The task remains borrowed and must stay alive until cleanup completes.
+Reset the activity before replacing the dependency after a finished run; no hot replacement is performed.
 </description>
 <param name="task">The task instance to execute.</param>
 *)
@@ -64,6 +73,16 @@ END_VAR]]></Declaration>
 		sourcePOUName := __POUNAME(),
 		sourcePosition := __POSITION(),
 		argumentName := 'task'
+	);
+END_IF
+
+IF State <> WORKFLOW_ELEMENT_STATE.PASSIVE_READY THEN
+	WorkflowExceptions.ThrowWorkflowConfiguration(
+		sourceNamespaceName := NamespaceName,
+		sourceClassName := ClassName,
+		sourcePOUName := __POUNAME(),
+		sourcePosition := __POSITION(),
+		message := "Cannot configure InvokeTaskActivity outside PASSIVE_READY"
 	);
 END_IF
 
@@ -88,7 +107,14 @@ PROPERTY Configured : BOOL]]></Declaration>
       </Get>
     </Property>
     <Property Name="NamespaceName" Id="{2139b150-41de-4351-bbcc-e69724ff224a}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Borrows the compiler-initialized library namespace.</summary>
+<description>
+Borrows storage from the live internal namespace provider. Reacquire references after application
+reinitialization or relocation. Treat the reference as read-only; no ownership or synchronization is provided.
+</description>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
       <Get Name="Get" Id="{18ab3231-1812-4adb-9361-24254a945427}">
         <Declaration><![CDATA[]]></Declaration>
@@ -100,6 +126,10 @@ PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
     <Method Name="OnFail" Id="{15e3e2ba-cf2d-4b9f-b585-b21dd25c7dfc}">
       <Declaration><![CDATA[(*!
 <summary>Requests cancellation of the running task when this activity fails.</summary>
+<description>
+Requests cancellation without waiting for STOPPED. Task ownership and pending cleanup remain with the owner;
+OnResetting can advance the task later. Catch handlers must not infer resource release from this hook.
+</description>
 <param name="exception">Caught exception that caused the failure.</param>
 *)
 METHOD PROTECTED OnFail
@@ -182,7 +212,12 @@ END_IF
 IF startRunning THEN
 	IF _Task.State.Ready THEN
 		IF NOT _Task.Start(refuseReason => taskRefuseReason) THEN
-			formattedExceptionMessage := TOF_Core.WideStrings.Concat255("Failed to start task '", _Task.Name, "': ", taskRefuseReason);
+			formattedExceptionMessage := TOF_Core.WideStrings.Concat255(
+				"Failed to start task '",
+				_Task.Name,
+				"': ",
+				taskRefuseReason
+			);
 			WorkflowExceptions.ThrowWorkflowConfiguration(
 				sourceNamespaceName := NamespaceName,
 				sourceClassName := ClassName,
@@ -193,7 +228,12 @@ IF startRunning THEN
 		END_IF
 	ELSIF _Task.State.Stopped THEN
 		IF NOT _Task.Reset(refuseReason => taskRefuseReason) THEN
-			formattedExceptionMessage := TOF_Core.WideStrings.Concat255("Failed to reset task '", _Task.Name, "': ", taskRefuseReason);
+			formattedExceptionMessage := TOF_Core.WideStrings.Concat255(
+				"Failed to reset task '",
+				_Task.Name,
+				"': ",
+				taskRefuseReason
+			);
 			WorkflowExceptions.ThrowWorkflowConfiguration(
 				sourceNamespaceName := NamespaceName,
 				sourceClassName := ClassName,
@@ -204,7 +244,12 @@ IF startRunning THEN
 		END_IF
 
 		IF NOT _Task.Start(refuseReason => taskRefuseReason) THEN
-			formattedExceptionMessage := TOF_Core.WideStrings.Concat255("Failed to start task '", _Task.Name, "': ", taskRefuseReason);
+			formattedExceptionMessage := TOF_Core.WideStrings.Concat255(
+				"Failed to start task '",
+				_Task.Name,
+				"': ",
+				taskRefuseReason
+			);
 			WorkflowExceptions.ThrowWorkflowConfiguration(
 				sourceNamespaceName := NamespaceName,
 				sourceClassName := ClassName,
@@ -229,7 +274,12 @@ IF _Task.State.Stopped THEN
 			OnRunning := ACTIVITY_RUNNING_STATE.WORK_HALTED;
 
 		TOF_Tasks.TASK_STOP_REASON.FAILURE:
-			formattedExceptionMessage := TOF_Core.WideStrings.Concat255("Task '", _Task.Name, "' failed: ", _Task.FinalStopReason.Message);
+			formattedExceptionMessage := TOF_Core.WideStrings.Concat255(
+				"Task '",
+				_Task.Name,
+				"' failed: ",
+				_Task.FinalStopReason.Message
+			);
 			TOF_Core.Exceptions.ThrowStandard(
 				sourceNamespaceName := NamespaceName,
 				sourceClassName := ClassName,
@@ -243,10 +293,16 @@ END_IF]]></ST>
     </Method>
     <Method Name="OnStopping" Id="{4046a63a-9467-4603-b5c9-9c196f6321b4}">
       <Declaration><![CDATA[(*!
-<summary>Cancels the running task and drives it to STOPPED.</summary>
+<summary>Drives task stopping and translates its final outcome without hiding failures.</summary>
+<description>
+Cancellation requests Cancel once; suspension keeps advancing the task without requesting cancellation.
+WORK_DONE completes the activity, INTERNAL_ABORT halts it with the task message, EXTERNAL_CANCEL completes
+the requested stop, and FAILURE propagates a StandardException to activity failure handling. Cleanup remains
+cyclic until the task reaches STOPPED; suspension is not a pause of the task's internal work.
+</description>
 <param name="startCancelling">TRUE when stopping due to cancellation.</param>
 <param name="startSuspending">TRUE when stopping due to suspension.</param>
-<param name="haltReason">Unused halt reason output.</param>
+<param name="haltReason">Receives the task diagnostic on INTERNAL_ABORT.</param>
 *)
 METHOD PROTECTED OnStopping : ACTIVITY_STOPPING_STATE
 VAR_INPUT
@@ -258,6 +314,7 @@ VAR_OUTPUT
 END_VAR
 VAR
 	taskRefuseReason : TOF_Core.ERROR_MESSAGE;
+	formattedExceptionMessage : TOF_Core.ERROR_MESSAGE;
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[IF NOT _Configured THEN
@@ -274,12 +331,45 @@ IF _Task.State.Running THEN
 END_IF
 
 IF _Task.State.Stopped THEN
-	OnStopping := ACTIVITY_STOPPING_STATE.WORK_STOPPED;
+	CASE _Task.FinalStopReason.Value OF
+		TOF_Tasks.TASK_STOP_REASON.WORK_DONE:
+			OnStopping := ACTIVITY_STOPPING_STATE.WORK_COMPLETED;
+
+		TOF_Tasks.TASK_STOP_REASON.INTERNAL_ABORT:
+			haltReason := _Task.FinalStopReason.Message;
+			OnStopping := ACTIVITY_STOPPING_STATE.WORK_HALTED;
+
+		TOF_Tasks.TASK_STOP_REASON.EXTERNAL_CANCEL:
+			OnStopping := ACTIVITY_STOPPING_STATE.WORK_STOPPED;
+
+		TOF_Tasks.TASK_STOP_REASON.FAILURE:
+			formattedExceptionMessage := TOF_Core.WideStrings.Concat255(
+				"Task '",
+				_Task.Name,
+				"' failed: ",
+				_Task.FinalStopReason.Message
+			);
+
+			TOF_Core.Exceptions.ThrowStandard(
+				sourceNamespaceName := NamespaceName,
+				sourceClassName := ClassName,
+				sourcePOUName := __POUNAME(),
+				sourcePosition := __POSITION(),
+				message := formattedExceptionMessage
+			);
+	END_CASE
 END_IF]]></ST>
       </Implementation>
     </Method>
     <Property Name="SelfSize" Id="{cb67ecf2-c298-4211-a9bc-cf4579b49edf}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Reports the size of this concrete function block instance in bytes.</summary>
+<description>
+Reports the instance layout rather than dynamic allocations owned by its fields. A derived function block
+with a different layout must override this property; the value does not grant disposal rights.
+</description>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY SelfSize : ULINT]]></Declaration>
       <Get Name="Get" Id="{9b2f2569-44f4-46b5-8b74-908ef0568d68}">
         <Declaration><![CDATA[]]></Declaration>

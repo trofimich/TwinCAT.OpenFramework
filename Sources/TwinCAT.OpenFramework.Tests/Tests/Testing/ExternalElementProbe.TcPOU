@@ -1,0 +1,179 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="ExternalElementProbe" Id="{1488408e-37ba-4d58-8f7e-51e679382855}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+SPDX-FileCopyrightText: © 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+SPDX-License-Identifier: MIT
+License: https://opensource.org/license/mit
+*)
+
+(*!
+<summary>Exercises external element abort and retryable reset recovery.</summary>
+<description>
+ResourceActive models a user resource and must be cleared through ReleaseResource before recovery.
+Reset never releases it or retries Execute. Disable ThrowOnExecute before a successful subsequent run.
+No allocation or I/O is performed.
+Use from the hosting test task only.
+</description>
+*)
+
+{attribute 'no_explicit_call' := 'do not call this function block directly'}
+FUNCTION_BLOCK ExternalElementProbe EXTENDS TOF_Testing.TestElement
+VAR_INPUT
+	//! <summary>Raises from Execute until the recovery test explicitly enables a successful new run.</summary>
+	ThrowOnExecute : BOOL := TRUE;
+	ThrowOnReset : BOOL;
+END_VAR
+VAR_OUTPUT
+	//! <summary>Whether the modeled resource still requires explicit ReleaseResource before recovery.</summary>
+	ResourceActive : BOOL;
+	ExecuteCalls : UDINT;
+	ResetCalls : UDINT;
+END_VAR
+VAR
+	_Exception : TOF_Core.StandardException;
+END_VAR
+VAR_STAT
+	//! <summary>Class name shared by all instances of this function block.</summary>
+	{attribute 'hide'}
+	_ClassName : STRING := __POUNAME();
+END_VAR
+VAR
+	{attribute 'hide'}
+	{attribute 'init_namespace'}
+	_NamespaceName : STRING;
+END_VAR
+]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[]]></ST>
+    </Implementation>
+    <Method Name="Execute" Id="{cf8bcb3c-f3aa-44bb-b023-bf35baeb1d85}">
+      <Declaration><![CDATA[(*!
+<summary>Raises with a modeled resource or completes a subsequent explicitly recovered run.</summary>
+<description>
+When ThrowOnExecute is FALSE, completes one passing result without acquiring the modeled resource.
+The borrowed reporter receives that result once with the live parent path; path-provider and reporter failures propagate.
+A completed element ignores Execute until Reset.
+</description>
+*)
+METHOD Execute
+VAR
+	groupPath : WSTRING(255);
+	diagnostic : TOF_Core.ERROR_MESSAGE;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF IsFinished THEN
+	RETURN;
+END_IF
+
+_State := TOF_Testing.TEST_ELEMENT_STATE.RUNNING;
+ExecuteCalls := ExecuteCalls + 1;
+
+IF ThrowOnExecute THEN
+	ResourceActive := TRUE;
+	_Exception.Throw(
+		sourceNamespaceName := NamespaceName,
+		sourceClassName := ClassName,
+		sourcePOUName := __POUNAME(),
+		sourcePosition := __POSITION(),
+		message := "External element failed"
+	);
+END_IF
+
+_PassedCount := 1;
+_State := TOF_Testing.TEST_ELEMENT_STATE.COMPLETED;
+
+IF _Reporter <> 0 THEN
+	IF _Parent <> 0 THEN
+		groupPath := _Parent.GetPath();
+	END_IF
+
+	_Reporter.ReportTestCaseResult(
+		groupPath := groupPath,
+		testName := _Name,
+		outcome := TOF_Testing.TEST_OUTCOME.PASSED,
+		duration := T#0S,
+		message := diagnostic
+	);
+END_IF
+
+_Reporter := 0;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="ReleaseResource" Id="{2c5d4eff-0f99-4b1a-a813-c99deafcf5b9}">
+      <Declaration><![CDATA[(*!
+<summary>Releases the resource modeled by this regression fixture.</summary>
+<description>
+Clears ResourceActive without changing execution state, callback counters or failure controls.
+Repeated calls are a no-op. Performs no allocation or I/O and raises no exception. Use from the hosting test task.
+</description>
+*)
+METHOD ReleaseResource]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[ResourceActive := FALSE;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="Reset" Id="{4249043c-8166-4c7d-b3b0-ebadbe29099f}">
+      <Declaration><![CDATA[(*!
+<summary>Counts reset attempts and optionally fails without releasing the modeled resource.</summary>
+<description>
+Failure occurs before common observations are reset. A subsequent explicit Reset can retry the same operation.
+Successful reset delegates common state and reporter binding to the base without releasing ResourceActive.
+</description>
+<param name="reporter">Borrowed reporter for the next run, or zero to suppress reporting.</param>
+*)
+METHOD Reset
+VAR_INPUT
+	reporter : TOF_Testing.ITestReporter;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[ResetCalls := ResetCalls + 1;
+
+IF ThrowOnReset THEN
+	_Exception.Throw(
+		sourceNamespaceName := NamespaceName,
+		sourceClassName := ClassName,
+		sourcePOUName := __POUNAME(),
+		sourcePosition := __POSITION(),
+		message := "External reset failed"
+	);
+END_IF
+
+SUPER^.Reset(reporter := reporter);]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="ClassName" Id="{dc2d0cea-1e28-4eb9-bc84-7d8ffee0d9e1}">
+      <Declaration><![CDATA[//! <summary>Borrows the concrete class name for the lifetime of this instance; callers must not modify it.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{aa9644b5-4d3e-4199-b94b-ba9edce598a4}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ClassName REF= _ClassName;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="NamespaceName" Id="{2552f2b7-4e66-49b6-baa5-5759d1f59113}">
+      <Declaration><![CDATA[//! <summary>Borrows the compiler-initialized namespace; callers must not modify the returned reference.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{02bc0e8e-160c-495e-a409-549d5af8d267}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[NamespaceName REF= _NamespaceName;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="SelfSize" Id="{f3b08737-73e0-441d-aaa4-d5febcd99757}">
+      <Declaration><![CDATA[//! <summary>Reports the complete concrete instance size, excluding separately allocated storage.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY SelfSize : ULINT]]></Declaration>
+      <Get Name="Get" Id="{fad63da7-cb3a-4f19-b5c7-ad3cd65abb1b}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[SelfSize := XSIZEOF(THIS^);]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+  </POU>
+</TcPlcObject>

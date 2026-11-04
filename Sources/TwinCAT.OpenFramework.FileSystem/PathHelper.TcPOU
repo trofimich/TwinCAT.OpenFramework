@@ -17,10 +17,36 @@ path requirements of the actual operation and target.
 </description>
 *)
 
-PROGRAM PathHelper]]></Declaration>
+{attribute 'no_explicit_call' := 'do not call this function block directly'}
+PROGRAM PathHelper
+VAR CONSTANT
+	//! <summary>Drive-letter, colon and separator occupy the first three bytes of an absolute drive prefix.</summary>
+	_DrivePrefixLength : UDINT := 3;
+	//! <summary>Zero-based index of the colon immediately following a drive letter.</summary>
+	_DriveColonIndex : UDINT := 1;
+	//! <summary>Zero-based index of the separator following the drive colon.</summary>
+	_DriveSeparatorIndex : UDINT := 2;
+	//! <summary>Last index allowed in the initial separator pair before repeated separators are rejected.</summary>
+	_LeadingSeparatorPairLastIndex : UDINT := 1;
+END_VAR
+VAR
+	{attribute 'hide'} 
+	_ClassName : STRING := __POUNAME();
+END_VAR]]></Declaration>
     <Implementation>
       <ST><![CDATA[]]></ST>
     </Implementation>
+    <Property Name="ClassName" Id="{bcad59d0-30a2-4095-8b10-42c3bd512232}">
+      <Declaration><![CDATA[//! <summary>Borrows the concrete class name for the lifetime of this instance; callers must not modify it.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{4ebc6fc7-9213-424f-b2ff-4e572f38dc62}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ClassName REF= _ClassName;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
     <Method Name="IsValidDirectoryPath" Id="{74a38896-f3ee-456c-865c-7f0b909dbd4e}">
       <Declaration><![CDATA[(*!
 <summary>Checks the lexical form of a directory path without accessing the filesystem.</summary>
@@ -44,69 +70,80 @@ VAR_OUTPUT
 	errorMessage : WSTRING(255);
 END_VAR
 VAR
-    i, j : UDINT;
-    stringLength : UDINT;
-    character : BYTE;
-    (* Current lexical exclusions, not an OS-wide list. Caret is an existing library restriction;
-       the drive-letter exception below handles the only accepted colon position. *)
-    invalidChars : STRING(8) := '<>"|?*^:';
+	i, j : UDINT;
+	stringLength : UDINT;
+	character : BYTE;
+
+	(* Current lexical exclusions, not an OS-wide list. Caret is an existing library restriction;
+	   the drive-letter exception below handles the only accepted colon position. *)
+	invalidChars : STRING(8) := '<>"|?*^:';
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[stringLength := TOF_Core.Strings.GetLength(value := directoryPath);
 
-IF stringLength = 0 THEN
+IF stringLength = TOF_Core.UnsignedInt32.ZERO THEN
 	errorMessage := "Path is empty";
-    RETURN;
+	RETURN;
 END_IF
 
 FOR i := 0 TO stringLength - 1 DO
-    character := directoryPath[i];
-	
-	// special case with Windows drive path
-	IF i = 1 AND_THEN character = Tc2_System.F_ToASC(str := ':') THEN
-		IF stringLength >= 3 
-			AND_THEN (directoryPath[2] = Tc2_System.F_ToASC(str := '\') OR_ELSE directoryPath[2] = Tc2_System.F_ToASC(str := '/')) 
+	character := directoryPath[i];
+
+	(* A colon is allowed only in an absolute ASCII drive prefix. *)
+	IF i = _DriveColonIndex AND_THEN character = Tc2_System.F_ToASC(str := ':') THEN
+
+		IF stringLength >= _DrivePrefixLength
 			AND_THEN (
-				(directoryPath[0] >= Tc2_System.F_ToASC(str := 'A') AND_THEN directoryPath[0] <= Tc2_System.F_ToASC(str := 'Z'))
-				OR_ELSE (directoryPath[0] >= Tc2_System.F_ToASC(str := 'a') AND_THEN directoryPath[0] <= Tc2_System.F_ToASC(str := 'z'))
+				directoryPath[_DriveSeparatorIndex] = Tc2_System.F_ToASC(str := '\')
+				OR_ELSE directoryPath[_DriveSeparatorIndex] = Tc2_System.F_ToASC(str := '/')
+			)
+			AND_THEN (
+				(directoryPath[0] >= Tc2_System.F_ToASC(str := 'A')
+					AND_THEN directoryPath[0] <= Tc2_System.F_ToASC(str := 'Z'))
+				OR_ELSE (directoryPath[0] >= Tc2_System.F_ToASC(str := 'a')
+					AND_THEN directoryPath[0] <= Tc2_System.F_ToASC(str := 'z'))
 			)
 		THEN
 			CONTINUE;
-		END_IF		
+		END_IF
+
 	END_IF
-    
-    // check for invalid characters
-    FOR j := 0 TO TOF_Core.Strings.GetLength(value := invalidChars) - 1 DO
-        IF character = invalidChars[j] THEN			
+
+	FOR j := 0 TO TOF_Core.Strings.GetLength(value := invalidChars) - 1 DO
+
+		IF character = invalidChars[j] THEN
 			errorMessage := TOF_Core.WideStrings.Concat255(
 				"The forbidden character '",
 				TO_WSTRING(Tc2_System.F_ToCHR(c := character)),
 				"' at position ",
 				TO_WSTRING(i + 1)
 			);
-            RETURN;
-        END_IF
-    END_FOR
-    
-	// check for special ascii characters
-    IF character < 32 THEN
+			RETURN;
+		END_IF
+
+	END_FOR
+
+	IF character < TOF_Core.Strings.ASCII_SPACE THEN
 		errorMessage := TOF_Core.WideStrings.Concat255(
 			"The forbidden character with code ",
 			TO_WSTRING(character),
 			" at position ",
 			TO_WSTRING(i + 1)
 		);
-        RETURN;
-    END_IF
-	
-	// two slashes one after other are not allowed (except on start)
-	IF i > 1 
-		AND_THEN (character = Tc2_System.F_ToASC(str := '\') OR_ELSE character = Tc2_System.F_ToASC(str := '/')) 
-		AND_THEN (directoryPath[i - 1] = Tc2_System.F_ToASC(str := '\') OR_ELSE directoryPath[i - 1] = Tc2_System.F_ToASC(str := '/')) 
-	THEN
-		errorMessage := TOF_Core.WideStrings.Concat255("Several slashes one by one at position ", TO_WSTRING(i + 1));	
 		RETURN;
 	END_IF
+
+	IF i > _LeadingSeparatorPairLastIndex
+		AND_THEN (character = Tc2_System.F_ToASC(str := '\') OR_ELSE character = Tc2_System.F_ToASC(str := '/'))
+		AND_THEN (
+			directoryPath[i - 1] = Tc2_System.F_ToASC(str := '\')
+			OR_ELSE directoryPath[i - 1] = Tc2_System.F_ToASC(str := '/')
+		)
+	THEN
+		errorMessage := TOF_Core.WideStrings.Concat255("Several slashes one by one at position ", TO_WSTRING(i + 1));
+		RETURN;
+	END_IF
+
 END_FOR
 
 IsValidDirectoryPath := TRUE;]]></ST>
@@ -135,79 +172,102 @@ VAR_OUTPUT
 	errorMessage : WSTRING(255);
 END_VAR
 VAR
-    i, j : UDINT;
-    stringLength : UDINT;
-    character : BYTE;
-    (* Current lexical exclusions, not an OS-wide list. Caret is an existing library restriction;
-       the drive-letter exception below handles the only accepted colon position. *)
-    invalidChars : STRING(8) := '<>"|?*^:';
+	i, j : UDINT;
+	stringLength : UDINT;
+	character : BYTE;
+
+	(* Current lexical exclusions, not an OS-wide list. Caret is an existing library restriction;
+	   the drive-letter exception below handles the only accepted colon position. *)
+	invalidChars : STRING(8) := '<>"|?*^:';
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[stringLength := TOF_Core.Strings.GetLength(value := filePath);
 
-IF stringLength = 0 THEN
+IF stringLength = TOF_Core.UnsignedInt32.ZERO THEN
 	errorMessage := "Path is empty";
-    RETURN;
+	RETURN;
 END_IF
 
 FOR i := 0 TO stringLength - 1 DO
-    character := filePath[i];
-	
-	// special case with Windows drive path
-	IF i = 1 AND_THEN character = Tc2_System.F_ToASC(str := ':') THEN
-		IF stringLength >= 3 
-			AND_THEN (filePath[2] = Tc2_System.F_ToASC(str := '\') OR_ELSE filePath[2] = Tc2_System.F_ToASC(str := '/')) 
+	character := filePath[i];
+
+	(* A colon is allowed only in an absolute ASCII drive prefix. *)
+	IF i = _DriveColonIndex AND_THEN character = Tc2_System.F_ToASC(str := ':') THEN
+
+		IF stringLength >= _DrivePrefixLength
 			AND_THEN (
-				(filePath[0] >= Tc2_System.F_ToASC(str := 'A') AND_THEN filePath[0] <= Tc2_System.F_ToASC(str := 'Z'))
-				OR_ELSE (filePath[0] >= Tc2_System.F_ToASC(str := 'a') AND_THEN filePath[0] <= Tc2_System.F_ToASC(str := 'z'))
+				filePath[_DriveSeparatorIndex] = Tc2_System.F_ToASC(str := '\')
+				OR_ELSE filePath[_DriveSeparatorIndex] = Tc2_System.F_ToASC(str := '/')
+			)
+			AND_THEN (
+				(filePath[0] >= Tc2_System.F_ToASC(str := 'A')
+					AND_THEN filePath[0] <= Tc2_System.F_ToASC(str := 'Z'))
+				OR_ELSE (filePath[0] >= Tc2_System.F_ToASC(str := 'a')
+					AND_THEN filePath[0] <= Tc2_System.F_ToASC(str := 'z'))
 			)
 		THEN
 			CONTINUE;
-		END_IF		
+		END_IF
+
 	END_IF
-    
-    // check for invalid characters
-    FOR j := 0 TO TOF_Core.Strings.GetLength(value := invalidChars) - 1 DO
-        IF character = invalidChars[j] THEN
+
+	FOR j := 0 TO TOF_Core.Strings.GetLength(value := invalidChars) - 1 DO
+
+		IF character = invalidChars[j] THEN
 			errorMessage := TOF_Core.WideStrings.Concat255(
 				"The forbidden character '",
 				TO_WSTRING(Tc2_System.F_ToCHR(c := character)),
 				"' at position ",
 				TO_WSTRING(i + 1)
 			);
-            RETURN;
-        END_IF
-    END_FOR
-    
-	// check for special ascii characters
-    IF character < 32 THEN
+			RETURN;
+		END_IF
+
+	END_FOR
+
+	IF character < TOF_Core.Strings.ASCII_SPACE THEN
 		errorMessage := TOF_Core.WideStrings.Concat255(
 			"The forbidden character with code ",
 			TO_WSTRING(character),
 			" at position ",
 			TO_WSTRING(i + 1)
 		);
-        RETURN;
-    END_IF
-	
-	// two slashes one after other are not allowed (except on start)
-	IF i > 1 
-		AND_THEN (character = Tc2_System.F_ToASC(str := '\') OR_ELSE character = Tc2_System.F_ToASC(str := '/')) 
-		AND_THEN (filePath[i - 1] = Tc2_System.F_ToASC(str := '\') OR_ELSE filePath[i - 1] = Tc2_System.F_ToASC(str := '/')) 
+		RETURN;
+	END_IF
+
+	IF i > _LeadingSeparatorPairLastIndex
+		AND_THEN (character = Tc2_System.F_ToASC(str := '\') OR_ELSE character = Tc2_System.F_ToASC(str := '/'))
+		AND_THEN (
+			filePath[i - 1] = Tc2_System.F_ToASC(str := '\')
+			OR_ELSE filePath[i - 1] = Tc2_System.F_ToASC(str := '/')
+		)
 	THEN
-		errorMessage := TOF_Core.WideStrings.Concat255("Several slashes one by one at position ", TO_WSTRING(i + 1));	
+		errorMessage := TOF_Core.WideStrings.Concat255("Several slashes one by one at position ", TO_WSTRING(i + 1));
 		RETURN;
 	END_IF
-	
-	// slash can't be the last char of the file path
-	IF i = stringLength - 1 AND_THEN (character = Tc2_System.F_ToASC(str := '\') OR_ELSE character = Tc2_System.F_ToASC(str := '/')) THEN
-		errorMessage := "Slash at the end of the path";	
+
+	IF i = stringLength - 1
+		AND_THEN (character = Tc2_System.F_ToASC(str := '\') OR_ELSE character = Tc2_System.F_ToASC(str := '/'))
+	THEN
+		errorMessage := "Slash at the end of the path";
 		RETURN;
 	END_IF
+
 END_FOR
 
 IsValidFilePath := TRUE;]]></ST>
       </Implementation>
     </Method>
+    <Property Name="NamespaceName" Id="{03b769a2-dbc8-4792-82dc-d2506f34e5a7}">
+      <Declaration><![CDATA[//! <summary>Borrows the compiler-initialized namespace; callers must not modify the returned reference.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{d7e4e13f-8a4a-4bb5-a58d-6cd9c5969c93}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[NamespaceName REF= CurrentNamespace.Name;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
   </POU>
 </TcPlcObject>

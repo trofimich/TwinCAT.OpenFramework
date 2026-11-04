@@ -16,13 +16,17 @@ Activities start from PASSIVE_READY, pause into PASSIVE_SUSPENDED, finish in PAS
 PASSIVE_HALTED, PASSIVE_CANCELLED or PASSIVE_FAILED, and return to PASSIVE_READY through ACTIVE_RESETTING via
 RequestReset. Any uncaught exception in Execute, RequestStart, RequestSuspend, RequestCancel or RequestReset
 transitions the activity to PASSIVE_FAILED, copies diagnostics into FailError, invokes OnFail once and
-rethrows the exception to the caller. FB_init stores the workflow association only; dynamic instances require
+rethrows the exception to the caller. Diagnostic conversion failure stores fixed fallback text. FB_init
+stores the workflow association and the default diagnostic name; dynamic instances require
 explicit RegisterChild after construction, while static instances remain caller-owned.
+PASSIVE_FAILED ends ordinary execution without certifying completion of child or resource cleanup.
+Failure handling invokes only synchronous local cleanup. Resource owners must explicitly complete pending
+cleanup before sharing or reusing affected resources; resetting may advance that work through OnResetting.
 </description>
 *)
 
 {attribute 'no_explicit_call' := 'do not call this function block directly'}
-FUNCTION_BLOCK ABSTRACT Activity EXTENDS TOF_Core.Object IMPLEMENTS IActivity
+FUNCTION_BLOCK ABSTRACT Activity EXTENDS TOF_Core.Object IMPLEMENTS IActivity, ILocalVariableContainer
 VAR
 	{attribute 'hide'} 
 	_Name : WSTRING;
@@ -49,13 +53,14 @@ END_VAR]]></Declaration>
     <Property Name="Busy" Id="{4a27e4a6-049e-423b-bd5e-9b17f40d26c7}">
       <Declaration><![CDATA[(*!
 <summary>Reports whether the activity is in an active state requiring cyclic Execute calls.</summary>
+<description>Reports this activity lifecycle only. FALSE does not certify nested resource release after failure.</description>
 *)
 {attribute 'monitoring' := 'call'}
 PROPERTY FINAL Busy : BOOL]]></Declaration>
       <Get Name="Get" Id="{051f0622-8617-4132-bb68-a981920bece1}">
         <Declaration><![CDATA[]]></Declaration>
         <Implementation>
-          <ST><![CDATA[Busy := _State = WORKFLOW_ELEMENT_STATE.ACTIVE_RUNNING 
+          <ST><![CDATA[Busy := _State = WORKFLOW_ELEMENT_STATE.ACTIVE_RUNNING
 	OR_ELSE _State = WORKFLOW_ELEMENT_STATE.ACTIVE_CANCELLING
 	OR_ELSE _State = WORKFLOW_ELEMENT_STATE.ACTIVE_SUSPENDING
 	OR_ELSE _State = WORKFLOW_ELEMENT_STATE.ACTIVE_RESETTING;]]></ST>
@@ -97,34 +102,34 @@ END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[_StateChanged := FALSE;
 
-__TRY	
+__TRY
 	CASE _State OF
 		WORKFLOW_ELEMENT_STATE.ACTIVE_RUNNING:
 			runningState := OnRunning(startRunning := FALSE, startResuming := FALSE, haltReason => haltReason);
-	
+
 			CASE runningState OF
 				ACTIVITY_RUNNING_STATE.WORK_COMPLETED:
 					SetNewState(newState := WORKFLOW_ELEMENT_STATE.PASSIVE_COMPLETED);
-					
+
 				ACTIVITY_RUNNING_STATE.WORK_HALTED:
 					_HaltReason := haltReason;
 					SetNewState(newState := WORKFLOW_ELEMENT_STATE.PASSIVE_HALTED);
 			END_CASE
-		
+
 		WORKFLOW_ELEMENT_STATE.ACTIVE_CANCELLING, WORKFLOW_ELEMENT_STATE.ACTIVE_SUSPENDING:
-			stoppingState := OnStopping(startCancelling := FALSE, startSuspending := FALSE, haltReason => haltReason); 
-		
+			stoppingState := OnStopping(startCancelling := FALSE, startSuspending := FALSE, haltReason => haltReason);
+
 			CASE stoppingState OF
 				ACTIVITY_STOPPING_STATE.WORK_STOPPED:
 					IF _State = WORKFLOW_ELEMENT_STATE.ACTIVE_CANCELLING THEN
 						SetNewState(newState := WORKFLOW_ELEMENT_STATE.PASSIVE_CANCELLED);
-					ELSE 
+					ELSE
 						SetNewState(newState := WORKFLOW_ELEMENT_STATE.PASSIVE_SUSPENDED);
 					END_IF
-					
+
 				ACTIVITY_STOPPING_STATE.WORK_COMPLETED:
 					SetNewState(newState := WORKFLOW_ELEMENT_STATE.PASSIVE_COMPLETED);
-					
+
 				ACTIVITY_STOPPING_STATE.WORK_HALTED:
 					_HaltReason := haltReason;
 					SetNewState(newState := WORKFLOW_ELEMENT_STATE.PASSIVE_HALTED);
@@ -150,7 +155,8 @@ __ENDTRY]]></ST>
 <summary>Returns a borrowed read-only view of the durable error snapshot captured when the activity failed.</summary>
 <description>
 Populated when an exception transitions the activity to PASSIVE_FAILED and cleared when resetting completes or
-a new run starts. Callers must not mutate the returned ERROR instance.
+a new run starts. If diagnostic conversion fails, contains fixed fallback text with epoch timestamps instead of partial data.
+Callers must not mutate the returned ERROR instance.
 </description>
 *)
 {attribute 'monitoring' := 'call'}
@@ -166,10 +172,13 @@ PROPERTY FINAL FailError : REFERENCE TO TOF_Core.ERROR]]></Declaration>
       <Declaration><![CDATA[(*!
 <summary>Stores the borrowed workflow association and initializes the default activity name.</summary>
 <description>
-Does not allocate registry storage. The creator must call workflow.RegisterChild after __NEW succeeds, outside
+ClassName must return initialized static storage without reading derived instance fields, raising or
+recursively reading Name during base initialization. Does not allocate registry storage. The creator must call
+workflow.RegisterChild after __NEW succeeds, outside
 lifecycle methods, if the workflow is to own this dynamic instance.
 </description>
-<param name="workflow">Workflow that hosts this activity, or 0 when attached later.</param>
+<param name="workflow">Workflow that hosts this activity. A root requires an explicit association; 0 is allowed for a child that
+inherits its association from its parent.</param>
 *)
 METHOD FB_init : BOOL
 VAR_INPUT
@@ -204,7 +213,8 @@ Transitions the activity to PASSIVE_FAILED, records FailError, invokes OnFail an
 </summary>
 <description>
 Clones static native exception wrappers before invoking ToError or OnFail so nested exceptions cannot
-overwrite the original payload. Preserves terminal allocation failure priority before rethrowing.
+overwrite the original payload. Conversion failure replaces partial diagnostics with a fixed ERROR fallback;
+the original exception is still rethrown. Preserves terminal allocation failure priority before rethrowing.
 </description>
 <param name="exceptionCode">Caught system exception code.</param>
 <param name="catchPointPOUName">Method name where the exception was caught.</param>
@@ -229,6 +239,7 @@ exception := TOF_Core.ExceptionManager.GetLastException(
 	);
 
 // Keep the native wrapper stable while callbacks may handle another exception.
+
 IF NOT exception.IsDynamicInstance THEN
 	__QUERYINTERFACE(exception.Clone(), exception);
 END_IF
@@ -241,6 +252,7 @@ __TRY
 	exception.ToError(targetError := _FailError, severity := TOF_Core.ERROR_SEVERITY.ERROR);
 __CATCH
 	_FailError.Clear();
+	_FailError.SetMessage(message := "Activity exception diagnostics are unavailable");
 __ENDTRY
 
 __TRY
@@ -272,7 +284,8 @@ PROPERTY FINAL Name : REFERENCE TO WSTRING]]></Declaration>
 <description>
 Override to perform immediate local stop actions (such as deactivating a timer trigger). Implementations must
 not raise exceptions or retain the task-scoped exception reference after returning. Multi-cycle reset work
-belongs in OnResetting.
+belongs in OnResetting. Returning from this hook does not certify that pending child or resource operations
+have stopped. Keep ownership explicit; a local catch handler cannot infer cleanup completion from this call.
 </description>
 <param name="exception">Caught exception that caused the failure.</param>
 *)
@@ -370,6 +383,11 @@ PROPERTY FINAL Parent : IWorkflowElement]]></Declaration>
     <Property Name="ParentActivity" Id="{7746eee7-81b2-4cc8-b04b-86aaff99c3e3}">
       <Declaration><![CDATA[(*!
 <summary>Gets or sets the borrowed parent composite activity.</summary>
+<description>
+An unchanged parent is a no-op. A new parent is validated before mutation; detachment and reparenting are
+rejected. Links are borrowed, single-task and stable for the tree lifetime; they do not transfer ownership.
+The element, its parent chain and its owning workflow must be PASSIVE_READY during attachment.
+</description>
 *)
 {attribute 'monitoring' := 'call'}
 PROPERTY ParentActivity : IActivity]]></Declaration>
@@ -382,7 +400,23 @@ PROPERTY ParentActivity : IActivity]]></Declaration>
       <Set Name="Set" Id="{45312744-e8d0-4156-ae50-a2d68cc6dcc8}">
         <Declaration><![CDATA[]]></Declaration>
         <Implementation>
-          <ST><![CDATA[_ParentActivity := ParentActivity;]]></ST>
+          <ST><![CDATA[IF _ParentActivity = ParentActivity THEN
+	RETURN;
+END_IF
+
+IF _ParentActivity <> 0 OR_ELSE ParentActivity = 0 THEN
+	WorkflowExceptions.ThrowWorkflowAttachment(
+		sourceNamespaceName := NamespaceName,
+		sourceClassName := ClassName,
+		sourcePOUName := __POUNAME(),
+		sourcePosition := __POSITION(),
+		message := "Activity parent cannot be detached or replaced"
+	);
+END_IF
+
+Workflows.ValidateElementAttachment(parent := ParentActivity, child := THIS^);
+
+_ParentActivity := ParentActivity;]]></ST>
         </Implementation>
       </Set>
     </Property>
@@ -430,16 +464,16 @@ END_IF
 SetNewState(newState := targetState);
 _CancelReason := reason;
 
-__TRY	
-	stoppingState := OnStopping(startCancelling := TRUE, startSuspending := FALSE, haltReason => haltReason); 
+__TRY
+	stoppingState := OnStopping(startCancelling := TRUE, startSuspending := FALSE, haltReason => haltReason);
 
 	CASE stoppingState OF
 		ACTIVITY_STOPPING_STATE.WORK_STOPPED:
 			SetNewState(newState := WORKFLOW_ELEMENT_STATE.PASSIVE_CANCELLED);
-			
+
 		ACTIVITY_STOPPING_STATE.WORK_COMPLETED:
 			SetNewState(newState := WORKFLOW_ELEMENT_STATE.PASSIVE_COMPLETED);
-			
+
 		ACTIVITY_STOPPING_STATE.WORK_HALTED:
 			_HaltReason := haltReason;
 			SetNewState(newState := WORKFLOW_ELEMENT_STATE.PASSIVE_HALTED);
@@ -550,12 +584,12 @@ _CancelReason := "";
 _HaltReason := "";
 
 __TRY
-	runningState := OnRunning(startRunning := NOT resuming, startResuming := resuming, haltReason => haltReason); 
+	runningState := OnRunning(startRunning := NOT resuming, startResuming := resuming, haltReason => haltReason);
 
 	CASE runningState OF
 		ACTIVITY_RUNNING_STATE.WORK_COMPLETED:
 			SetNewState(newState := WORKFLOW_ELEMENT_STATE.PASSIVE_COMPLETED);
-			
+
 		ACTIVITY_RUNNING_STATE.WORK_HALTED:
 			_HaltReason := haltReason;
 			SetNewState(newState := WORKFLOW_ELEMENT_STATE.PASSIVE_HALTED);
@@ -604,16 +638,16 @@ END_IF
 
 SetNewState(newState := targetState);
 
-__TRY	
-	stoppingState := OnStopping(startCancelling := FALSE, startSuspending := TRUE, haltReason => haltReason); 
+__TRY
+	stoppingState := OnStopping(startCancelling := FALSE, startSuspending := TRUE, haltReason => haltReason);
 
 	CASE stoppingState OF
 		ACTIVITY_STOPPING_STATE.WORK_STOPPED:
 			SetNewState(newState := WORKFLOW_ELEMENT_STATE.PASSIVE_SUSPENDED);
-			
+
 		ACTIVITY_STOPPING_STATE.WORK_COMPLETED:
 			SetNewState(newState := WORKFLOW_ELEMENT_STATE.PASSIVE_COMPLETED);
-			
+
 		ACTIVITY_STOPPING_STATE.WORK_HALTED:
 			_HaltReason := haltReason;
 			SetNewState(newState := WORKFLOW_ELEMENT_STATE.PASSIVE_HALTED);
@@ -678,12 +712,139 @@ PROPERTY FINAL State : WORKFLOW_ELEMENT_STATE]]></Declaration>
         </Implementation>
       </Get>
     </Property>
+    <Method Name="RegisterVariable" Id="{dde0d6e5-83d1-429f-8eac-2c04daa1ca2a}">
+      <Declaration><![CDATA[(*!
+<summary>Registers a named PLC variable reference in this activity's local scope.</summary>
+<description>
+Stores a borrowed reference to the supplied PLC variable in the activity variable dictionary under a unique name.
+Fails if the activity is busy, the name is empty, the name already exists in this activity, or the variable resides
+in stack memory.
+Type mapping precedes allocation of the owned name key. Failure before dictionary acceptance releases
+that key and propagates the exception; successful registration transfers key ownership to the dictionary.
+The variable storage remains borrowed and must outlive its binding.
+</description>
+<param name="name">Unique non-empty variable name.</param>
+<param name="plcVariable">PLC variable to bind (instance field or global variable).</param>
+<param name="plcVariableIsObject">TRUE if the variable is an FB instance implementing IObject.</param>
+*)
+METHOD RegisterVariable : BOOL
+VAR_INPUT
+	name : STRING;
+	plcVariable : ANY;
+	plcVariableIsObject : BOOL := FALSE;
+END_VAR
+VAR
+	formattedExceptionMessage : TOF_Core.ERROR_MESSAGE;
+	variableKey : TOF_Core.GENERIC_VALUE;
+	variableValue : TOF_Core.GENERIC_VALUE;
+	existingVariable : TOF_Core.GENERIC_VALUE;
+	exceptionCode : __SYSTEM.ExceptionCode;
+END_VAR
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF name = '' THEN
+	WorkflowExceptions.ThrowWorkflowConfiguration(
+		sourceNamespaceName := NamespaceName,
+		sourceClassName := ClassName,
+		sourcePOUName := __POUNAME(),
+		sourcePosition := __POSITION(),
+		message := "Variable name cannot be empty"
+	);
+END_IF
+
+IF Busy THEN
+	formattedExceptionMessage := TOF_Core.WideStrings.Concat255(
+		"Unable to register variable '",
+		TO_WSTRING(name),
+		"' in activity '",
+		THIS^.Name,
+		"': activity is busy"
+	);
+
+	WorkflowExceptions.ThrowWorkflowConfiguration(
+		sourceNamespaceName := NamespaceName,
+		sourceClassName := ClassName,
+		sourcePOUName := __POUNAME(),
+		sourcePosition := __POSITION(),
+		message := formattedExceptionMessage
+	);
+END_IF
+
+IF TOF_Core.Memory.IsStackData(dataAddress := plcVariable.pValue, dataSize := TO_UDINT(plcVariable.diSize)) THEN
+	formattedExceptionMessage := TOF_Core.WideStrings.Concat255(
+		"Unable to register variable '",
+		TO_WSTRING(name),
+		"' in activity '",
+		THIS^.Name,
+		"': variable resides in stack memory"
+	);
+
+	WorkflowExceptions.ThrowWorkflowConfiguration(
+		sourceNamespaceName := NamespaceName,
+		sourceClassName := ClassName,
+		sourcePOUName := __POUNAME(),
+		sourcePosition := __POSITION(),
+		message := formattedExceptionMessage
+	);
+END_IF
+
+IF _Variables.TryGetValueByKey(key := name, value => existingVariable) THEN
+	formattedExceptionMessage := TOF_Core.WideStrings.Concat255(
+		"Variable with name '",
+		TO_WSTRING(name),
+		"' is already registered in activity '",
+		THIS^.Name,
+		"'"
+	);
+
+	WorkflowExceptions.ThrowWorkflowConfiguration(
+		sourceNamespaceName := NamespaceName,
+		sourceClassName := ClassName,
+		sourcePOUName := __POUNAME(),
+		sourcePosition := __POSITION(),
+		message := formattedExceptionMessage
+	);
+END_IF
+
+variableValue := TOF_Core.GenericValueFactory.FromParts(
+	genericTypeClass := TOF_Core.GenericTypeClassConvertor.GetGenericTypeClassBySystemAnyType(
+		systemAnyType := plcVariable,
+		isObject := plcVariableIsObject
+	),
+	address := plcVariable.pValue,
+	size := TO_ULINT(plcVariable.diSize),
+	memoryManagementBehavior := TOF_Core.GENERIC_MEMORY_MANAGEMENT_BEHAVIOR.STORE_ORIGINAL_REFERENCE_AND_NOT_OWNS_MEMORY
+);
+
+variableKey := TOF_Core.GenericValueFactory.FromStringValue(value := name);
+
+// The dictionary accepts key ownership only after validation and storage growth succeed.
+
+__TRY
+	_Variables.SetGeneric(key := variableKey, value := variableValue);
+__CATCH(exceptionCode)
+	variableKey.Release();
+
+	TOF_Core.ExceptionManager.ReThrowLastException(
+		exceptionCode := exceptionCode,
+		catchPointNamespaceName := NamespaceName,
+		catchPointPOUName := __POUNAME(),
+		catchPointPosition := __POSITION()
+	);
+__ENDTRY
+
+variableKey.Reset();
+
+RegisterVariable := TRUE;]]></ST>
+      </Implementation>
+    </Method>
     <Method Name="TryGetVariable" Id="{7404742e-521b-4644-b536-622820cce67b}">
       <Declaration><![CDATA[(*!
 <summary>Attempts to resolve a named variable from this activity, its ancestor activities or the workflow.</summary>
 <description>
 Returns FALSE when resolution fails or a nested call raises an exception. Use the output only when TRUE is
-returned. Does not propagate exceptions or clear terminal allocation state.
+returned. Does not propagate exceptions or clear terminal allocation state. A latched allocation failure returns FALSE
+without entering further lookup callbacks, including when a nested callback contained the allocation exception.
 </description>
 <param name="name">Case-sensitive variable name to look up.</param>
 <param name="variable">Resolved variable value when TRUE is returned.</param>
@@ -697,19 +858,31 @@ VAR_OUTPUT
 END_VAR
 ]]></Declaration>
       <Implementation>
-        <ST><![CDATA[__TRY
+        <ST><![CDATA[IF TOF_Core.DynamicMemoryManager.HasAllocationFailed THEN
+	RETURN;
+END_IF
+
+__TRY
 	TryGetVariable := _Variables.TryGetValueByKey(key := name, value => variable);
 
-	IF NOT TryGetVariable AND_THEN _ParentActivity <> 0 THEN
+	IF NOT TryGetVariable AND_THEN NOT TOF_Core.DynamicMemoryManager.HasAllocationFailed
+		AND_THEN _ParentActivity <> 0
+	THEN
 		TryGetVariable := _ParentActivity.TryGetVariable(name := name, variable => variable);
 	END_IF
 
-	IF NOT TryGetVariable AND_THEN _Workflow <> 0 THEN
+	IF NOT TryGetVariable AND_THEN NOT TOF_Core.DynamicMemoryManager.HasAllocationFailed
+		AND_THEN _Workflow <> 0
+	THEN
 		TryGetVariable := _Workflow.TryGetVariable(name := name, variable => variable);
 	END_IF
 __CATCH
 	TryGetVariable := FALSE;
-__ENDTRY]]></ST>
+__ENDTRY
+
+IF TOF_Core.DynamicMemoryManager.HasAllocationFailed THEN
+	TryGetVariable := FALSE;
+END_IF]]></ST>
       </Implementation>
     </Method>
     <Property Name="Workflow" Id="{5b9f0838-cfd8-4e68-96b0-62c7d023998f}">
@@ -729,5 +902,39 @@ END_IF]]></ST>
         </Implementation>
       </Get>
     </Property>
+    <Method Name="TryGetLocalVariable" Id="{94a358d5-d57f-4692-8c09-8e852ed362d3}">
+      <Declaration><![CDATA[(*!
+<summary>Attempts to find a binding registered directly on this instance.</summary>
+<description>
+Does not inspect parents or workflow fallback. Returns a borrowed descriptor only on TRUE.
+Returns FALSE for absence, callback exceptions or terminal allocation failure without clearing the fatal latch.
+The owner keeps the registered PLC storage alive; use one task without concurrent reconfiguration.
+</description>
+<param name="name">Case-sensitive name registered directly on this instance.</param>
+<param name="variable">Borrowed binding descriptor, usable only on TRUE.</param>
+*)
+METHOD TryGetLocalVariable : BOOL
+VAR_INPUT
+	name : STRING;
+END_VAR
+VAR_OUTPUT
+	variable : TOF_Core.GENERIC_VALUE;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF TOF_Core.DynamicMemoryManager.HasAllocationFailed THEN
+	RETURN;
+END_IF
+
+__TRY
+	TryGetLocalVariable := _Variables.TryGetValueByKey(key := name, value => variable);
+__CATCH
+	TryGetLocalVariable := FALSE;
+__ENDTRY
+
+IF TOF_Core.DynamicMemoryManager.HasAllocationFailed THEN
+	TryGetLocalVariable := FALSE;
+END_IF]]></ST>
+      </Implementation>
+    </Method>
   </POU>
 </TcPlcObject>

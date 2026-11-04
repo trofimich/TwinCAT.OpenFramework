@@ -1,0 +1,157 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="AdsLogReporter" Id="{eb91e524-2438-48a4-9961-78fd9f56893c}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+SPDX-FileCopyrightText: © 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+SPDX-License-Identifier: MIT
+License: https://opensource.org/license/mit
+*)
+
+(*!
+<summary>Writes run summaries and leaf failures to the ADS log.</summary>
+<description>
+Use in one task without reentry. The ADS backend has no established concurrent-call guarantee, even for
+separate reporter instances. For multiple tasks use per-task in-memory reports or a synchronized backend.
+Diagnostic transport may truncate long text; each result callback emits at most one ADS record.
+</description>
+*)
+
+{attribute 'no_explicit_call' := 'do not call this function block directly'}
+FUNCTION_BLOCK AdsLogReporter EXTENDS TOF_Core.Object IMPLEMENTS ITestReporter
+VAR_STAT
+	_ClassName : STRING := __POUNAME();
+END_VAR
+VAR
+	_AdsLogger : TOF_Core.AdsLogger;
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[]]></ST>
+    </Implementation>
+    <Property Name="ClassName" Id="{b69bfb0d-2ea3-4617-a4a6-eeca92a7fefb}">
+      <Declaration><![CDATA[(*!
+<summary>Provides the implementation class name.</summary>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{b294ab84-b0af-46fc-8248-793022e91b31}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ClassName REF= _ClassName;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="NamespaceName" Id="{307044c2-62a4-4bee-b8de-9823fa86f60c}">
+      <Declaration><![CDATA[(*!
+<summary>Provides the library namespace.</summary>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{92366a78-e137-465b-8ae9-cefa48f32002}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[NamespaceName REF= CurrentNamespace.Name;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="ReportRunEnd" Id="{f342d4f8-6bd1-4885-9c6d-263d40c86dfe}">
+      <Declaration><![CDATA[(*!
+<summary>Logs aggregated leaf counts.</summary>
+*)
+METHOD ReportRunEnd
+VAR_INPUT
+	totalTests : UDINT;
+	passedTests : UDINT;
+	failedTests : UDINT;
+	skippedTests : UDINT;
+	duration : TIME;
+END_VAR
+VAR
+	diagnostic : TOF_Core.ERROR_MESSAGE;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[diagnostic := TOF_Core.WideStrings.Concat255(
+	"[TOF_Testing] Finished: ", TO_WSTRING(passedTests), " passed, ",
+	TO_WSTRING(failedTests), " failed, ", TO_WSTRING(skippedTests), " skipped"
+);
+
+_AdsLogger.TryLogMessage(category := TOF_Core.LOG_CATEGORY.INFORMATION, message := diagnostic);]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="ReportRunStart" Id="{e33e2cad-cdc4-4f26-9afe-7859394471ba}">
+      <Declaration><![CDATA[(*!
+<summary>Logs the number of root elements.</summary>
+*)
+METHOD ReportRunStart
+VAR_INPUT
+	totalElements : UDINT;
+END_VAR
+VAR
+	diagnostic : TOF_Core.ERROR_MESSAGE;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[diagnostic := TOF_Core.WideStrings.Concat255(
+	"[TOF_Testing] Starting ", TO_WSTRING(totalElements), " root elements"
+);
+
+_AdsLogger.TryLogMessage(category := TOF_Core.LOG_CATEGORY.INFORMATION, message := diagnostic);]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="ReportTestCaseResult" Id="{fef23984-ca74-4077-b47a-ac9e1f01e9b5}">
+      <Declaration><![CDATA[(*!
+<summary>Logs a failed leaf with its group path and copied diagnostic.</summary>
+<param name="testName">Individual name bounded to 80 wide characters, matching INamed.</param>
+*)
+METHOD ReportTestCaseResult
+VAR_INPUT
+	groupPath : WSTRING(255);
+	testName : WSTRING;
+	outcome : TEST_OUTCOME;
+	duration : TIME;
+END_VAR
+VAR_IN_OUT CONSTANT
+	message : TOF_Core.ERROR_MESSAGE;
+END_VAR
+VAR
+	diagnostic : TOF_Core.ERROR_MESSAGE;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF outcome <> TEST_OUTCOME.PASSED
+	AND_THEN outcome <> TEST_OUTCOME.FAILED
+	AND_THEN outcome <> TEST_OUTCOME.SKIPPED
+THEN
+	TOF_Core.Exceptions.ThrowArgumentValueNotSupported(
+		sourceNamespaceName := NamespaceName,
+		sourceClassName := ClassName,
+		sourcePOUName := __POUNAME(),
+		sourcePosition := __POSITION(),
+		argumentName := 'outcome',
+		argumentValue := outcome
+	);
+END_IF
+
+IF outcome <> TEST_OUTCOME.FAILED THEN
+	RETURN;
+END_IF
+
+diagnostic := TOF_Core.WideStrings.Concat255("[TOF_Testing] ", groupPath, "/", testName, ": ");
+
+TOF_Core.WideStrings.AppendFit(targetString := diagnostic, sourceString := message);
+
+_AdsLogger.TryLogMessage(category := TOF_Core.LOG_CATEGORY.ERROR, message := diagnostic);]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="SelfSize" Id="{0dd6e191-246a-483b-a793-65cba039133e}">
+      <Declaration><![CDATA[(*!
+<summary>Reports instance storage without separately allocated payloads.</summary>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY SelfSize : ULINT]]></Declaration>
+      <Get Name="Get" Id="{4b75b5da-6a57-48b6-ad20-c8ea20db62c7}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[SelfSize := XSIZEOF(THIS^);]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+  </POU>
+</TcPlcObject>

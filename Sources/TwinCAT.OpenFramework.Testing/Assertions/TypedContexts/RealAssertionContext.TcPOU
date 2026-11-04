@@ -1,0 +1,462 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="RealAssertionContext" Id="{febfc777-5aef-4975-9dc7-dc9816ddd23d}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+SPDX-FileCopyrightText: © 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+SPDX-License-Identifier: MIT
+License: https://opensource.org/license/mit
+*)
+
+(*!
+<summary>Provides fluent assertions on a copied REAL value.</summary>
+<description>
+Copies actual into persistent instance storage before the entry method returns; literals and expression
+results therefore remain valid throughout the immediate chain. Owns no heap allocation or pointed-to resource.
+The message prefixes every failure until the next preparation. Finish one chain before starting another on
+the owning Assertions provider. Use only from the owning test callback on one task, without reentry.
+Obtain this context from the owning provider; direct unprepared use is unsupported.
+Expected arguments use the declared IEC type; ordinary compiler conversions happen before comparison.
+This context does not depend on another assertion context.
+Object metadata is available before preparation; inherited equality compares instance identity.
+Equality and inclusive ordering accept a finite nonnegative LREAL tolerance, default zero. Strict ordering
+has no tolerance. Core canonical NaN, infinity and signed-zero rules apply; unequal nonfinite values are
+never close. Invalid tolerance records failure without throwing. Tolerance belongs only to that method call.
+Inclusive ordering also accepts equality from Core ordering under the target's floating configuration;
+exact ToBe and NotToBe still compare canonical bits when tolerance is zero.
+</description>
+*)
+
+{attribute 'no_explicit_call' := 'do not call this function block directly'}
+FUNCTION_BLOCK RealAssertionContext EXTENDS TOF_Core.Object
+VAR_STAT
+	{attribute 'hide'}
+	_ClassName : STRING := __POUNAME();
+END_VAR
+VAR
+	_Actual : REAL;
+	_TestCase : ITestCase;
+	_Message : WSTRING(255);
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[]]></ST>
+    </Implementation>
+    <Folder Name="Service methods" Id="{cf2c8f1d-44b4-478e-af48-4d7a417f2565}" />
+    <Property Name="ClassName" Id="{3d075edf-82d8-4304-ae15-f646883a50ef}">
+      <Declaration><![CDATA[(*!
+<summary>Provides the implementation class name.</summary>
+<description>
+Borrowed read-only reference to compiler-initialized storage, valid throughout the instance lifetime.
+Do not modify the returned reference; no ownership is transferred.
+</description>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{bee03153-32a6-4d2c-8d52-58294ffc10b9}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ClassName REF= _ClassName;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="IsGreaterThan" Id="{be6a40ec-4498-4012-904e-95c364a70dae}">
+      <Declaration><![CDATA[(*!
+<summary>Asserts that the actual value is strictly greater than expected.</summary>
+<description>
+Records failure without interrupting the callback; preserves the message for the rest of the chain.
+</description>
+<param name="expected">Expected value converted by the compiler to REAL.</param>
+*)
+METHOD FINAL IsGreaterThan : REFERENCE TO RealAssertionContext
+VAR_INPUT
+	expected : REAL;
+END_VAR
+VAR
+	actualBits : ULINT;
+	expectedBits : ULINT;
+	comparison : TOF_Core.COMPARISON_RESULT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[actualBits := TestServices.GetCanonicalRealBits(value := _Actual);
+expectedBits := TestServices.GetCanonicalRealBits(value := expected);
+
+comparison := TestServices.CompareFloatingValues(
+	actualBits := actualBits,
+	expectedBits := expectedBits
+);
+
+IF comparison <> TOF_Core.COMPARISON_RESULT.FIRST_GREATER_THAN_SECOND THEN
+	failComparison(
+		expected := expected,
+		expectation := "Expected value > "
+	);
+END_IF
+
+IsGreaterThan REF= THIS^;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="IsGreaterThanOrEquals" Id="{2951557c-7c9d-4f47-8276-3446640ae4b0}">
+      <Declaration><![CDATA[(*!
+<summary>Asserts that the actual value meets the inclusive lower boundary.</summary>
+<description>
+Records failure without interrupting the callback; preserves the message for the rest of the chain.
+Uses the canonical floating policy shared by the typed contexts, matching Core semantics, and absolute tolerance.
+Invalid tolerance records failure before comparison. The default zero does not affect later assertions in this chain.
+</description>
+<param name="expected">Expected value converted by the compiler to REAL.</param>
+<param name="tolerance">Finite nonnegative absolute distance for this call only; default zero.</param>
+*)
+METHOD FINAL IsGreaterThanOrEquals : REFERENCE TO RealAssertionContext
+VAR_INPUT
+	expected : REAL;
+	tolerance : LREAL := LREAL#0.0;
+END_VAR
+VAR
+	actualBits : ULINT;
+	expectedBits : ULINT;
+	comparison : TOF_Core.COMPARISON_RESULT;
+	isSatisfied : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF NOT TestServices.IsValidFloatingTolerance(tolerance := tolerance) THEN
+	TestServices.ReportAssertionFailure(
+		testCase := _TestCase,
+		message := _Message,
+		sourceClassName := ClassName,
+		defaultMessage := "Expected a finite nonnegative comparison tolerance"
+	);
+	IsGreaterThanOrEquals REF= THIS^;
+	RETURN;
+END_IF
+
+actualBits := TestServices.GetCanonicalRealBits(value := _Actual);
+expectedBits := TestServices.GetCanonicalRealBits(value := expected);
+
+comparison := TestServices.CompareFloatingValues(
+	actualBits := actualBits,
+	expectedBits := expectedBits
+);
+
+isSatisfied := (comparison = TOF_Core.COMPARISON_RESULT.FIRST_GREATER_THAN_SECOND)
+	OR_ELSE (comparison = TOF_Core.COMPARISON_RESULT.FIRST_EQUAL_TO_SECOND)
+	OR_ELSE TestServices.AreFloatingValuesWithinTolerance(
+		actualBits := actualBits,
+		expectedBits := expectedBits,
+		tolerance := tolerance
+	);
+
+IF NOT isSatisfied THEN
+	failComparison(
+		expected := expected,
+		expectation := "Expected value >= ",
+		toleranceText := TOF_Core.WideStrings.Concat255(", tolerance: ", TO_WSTRING(tolerance))
+	);
+END_IF
+
+IsGreaterThanOrEquals REF= THIS^;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="IsLessThan" Id="{45ea319c-ff20-4aeb-8412-0cbb972524c9}">
+      <Declaration><![CDATA[(*!
+<summary>Asserts that the actual value is strictly less than expected.</summary>
+<description>
+Records failure without interrupting the callback; preserves the message for the rest of the chain.
+</description>
+<param name="expected">Expected value converted by the compiler to REAL.</param>
+*)
+METHOD FINAL IsLessThan : REFERENCE TO RealAssertionContext
+VAR_INPUT
+	expected : REAL;
+END_VAR
+VAR
+	actualBits : ULINT;
+	expectedBits : ULINT;
+	comparison : TOF_Core.COMPARISON_RESULT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[actualBits := TestServices.GetCanonicalRealBits(value := _Actual);
+expectedBits := TestServices.GetCanonicalRealBits(value := expected);
+
+comparison := TestServices.CompareFloatingValues(
+	actualBits := actualBits,
+	expectedBits := expectedBits
+);
+
+IF comparison <> TOF_Core.COMPARISON_RESULT.FIRST_LESS_THAN_SECOND THEN
+	failComparison(
+		expected := expected,
+		expectation := "Expected value < "
+	);
+END_IF
+
+IsLessThan REF= THIS^;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="IsLessThanOrEquals" Id="{92b09cc0-cf86-428c-981c-d8d2e95c0b95}">
+      <Declaration><![CDATA[(*!
+<summary>Asserts that the actual value meets the inclusive upper boundary.</summary>
+<description>
+Records failure without interrupting the callback; preserves the message for the rest of the chain.
+Uses the canonical floating policy shared by the typed contexts, matching Core semantics, and absolute tolerance.
+Invalid tolerance records failure before comparison. The default zero does not affect later assertions in this chain.
+</description>
+<param name="expected">Expected value converted by the compiler to REAL.</param>
+<param name="tolerance">Finite nonnegative absolute distance for this call only; default zero.</param>
+*)
+METHOD FINAL IsLessThanOrEquals : REFERENCE TO RealAssertionContext
+VAR_INPUT
+	expected : REAL;
+	tolerance : LREAL := LREAL#0.0;
+END_VAR
+VAR
+	actualBits : ULINT;
+	expectedBits : ULINT;
+	comparison : TOF_Core.COMPARISON_RESULT;
+	isSatisfied : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF NOT TestServices.IsValidFloatingTolerance(tolerance := tolerance) THEN
+	TestServices.ReportAssertionFailure(
+		testCase := _TestCase,
+		message := _Message,
+		sourceClassName := ClassName,
+		defaultMessage := "Expected a finite nonnegative comparison tolerance"
+	);
+	IsLessThanOrEquals REF= THIS^;
+	RETURN;
+END_IF
+
+actualBits := TestServices.GetCanonicalRealBits(value := _Actual);
+expectedBits := TestServices.GetCanonicalRealBits(value := expected);
+
+comparison := TestServices.CompareFloatingValues(
+	actualBits := actualBits,
+	expectedBits := expectedBits
+);
+
+isSatisfied := (comparison = TOF_Core.COMPARISON_RESULT.FIRST_LESS_THAN_SECOND)
+	OR_ELSE (comparison = TOF_Core.COMPARISON_RESULT.FIRST_EQUAL_TO_SECOND)
+	OR_ELSE TestServices.AreFloatingValuesWithinTolerance(
+		actualBits := actualBits,
+		expectedBits := expectedBits,
+		tolerance := tolerance
+	);
+
+IF NOT isSatisfied THEN
+	failComparison(
+		expected := expected,
+		expectation := "Expected value <= ",
+		toleranceText := TOF_Core.WideStrings.Concat255(", tolerance: ", TO_WSTRING(tolerance))
+	);
+END_IF
+
+IsLessThanOrEquals REF= THIS^;]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="NamespaceName" Id="{0155d492-38e8-40e1-b57c-255919f2367b}">
+      <Declaration><![CDATA[(*!
+<summary>Provides the library namespace.</summary>
+<description>
+Borrowed read-only reference to the compiler-initialized namespace, valid throughout the instance lifetime.
+Do not modify the returned reference; no ownership is transferred.
+</description>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{c9364151-7aa1-40a6-a31f-bb46e861f4e7}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[NamespaceName REF= CurrentNamespace.Name;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="NotToBe" Id="{96cbad13-0647-465e-a418-47d115fef611}">
+      <Declaration><![CDATA[(*!
+<summary>Asserts inequality with the expected value.</summary>
+<description>
+Records failure without interrupting the callback; preserves the message for the rest of the chain.
+Uses the canonical floating policy shared by the typed contexts, matching Core semantics, and absolute tolerance.
+Invalid tolerance records failure before comparison. The default zero does not affect later assertions in this chain.
+</description>
+<param name="expected">Expected value converted by the compiler to REAL.</param>
+<param name="tolerance">Finite nonnegative absolute distance for this call only; default zero.</param>
+*)
+METHOD FINAL NotToBe : REFERENCE TO RealAssertionContext
+VAR_INPUT
+	expected : REAL;
+	tolerance : LREAL := LREAL#0.0;
+END_VAR
+VAR
+	actualBits : ULINT;
+	expectedBits : ULINT;
+	areEqual : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF NOT TestServices.IsValidFloatingTolerance(tolerance := tolerance) THEN
+	TestServices.ReportAssertionFailure(
+		testCase := _TestCase,
+		message := _Message,
+		sourceClassName := ClassName,
+		defaultMessage := "Expected a finite nonnegative comparison tolerance"
+	);
+	NotToBe REF= THIS^;
+	RETURN;
+END_IF
+
+actualBits := TestServices.GetCanonicalRealBits(value := _Actual);
+expectedBits := TestServices.GetCanonicalRealBits(value := expected);
+
+areEqual := TestServices.AreFloatingValuesWithinTolerance(
+	actualBits := actualBits,
+	expectedBits := expectedBits,
+	tolerance := tolerance
+);
+
+IF areEqual THEN
+	failComparison(
+		expected := expected,
+		expectation := "Expected value not to be: ",
+		toleranceText := TOF_Core.WideStrings.Concat255(", tolerance: ", TO_WSTRING(tolerance))
+	);
+END_IF
+
+NotToBe REF= THIS^;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="Prepare" Id="{5686fad9-7e8b-48c3-93fc-e3f84358d138}" FolderPath="Service methods\">
+      <Declaration><![CDATA[(*!
+<summary>Copies the actual operand and replaces the chain-wide message.</summary>
+<description>
+Called by the owning Assertions provider after it verifies the running test case.
+No pointer to this method's input storage is retained. The receiver is borrowed until the next preparation;
+the owning provider keeps it alive throughout the immediate chain.
+</description>
+<param name="actual">Value copied into this context.</param>
+<param name="testCase">Borrowed failure receiver for the immediate chain.</param>
+<param name="message">Copied diagnostic prefix, including empty to clear the previous prefix.</param>
+*)
+METHOD INTERNAL FINAL Prepare
+VAR_INPUT
+	actual : REAL;
+	testCase : ITestCase;
+	message : WSTRING(255);
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_Actual := actual;
+_TestCase := testCase;
+_Message := message;]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="SelfSize" Id="{ff016c05-1a2c-4da7-9877-2560c719cecb}">
+      <Declaration><![CDATA[(*!
+<summary>Reports the byte size of this concrete instance.</summary>
+<description>
+Includes inline fields and nested instances, but excludes separately allocated payloads.
+Obtaining the size does not transfer ownership or validate an arbitrary address.
+</description>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY SelfSize : ULINT]]></Declaration>
+      <Get Name="Get" Id="{0c3fddf1-5718-4cd9-95f6-ffa44752e8a2}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[SelfSize := XSIZEOF(THIS^);]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="ToBe" Id="{346820b3-94c2-44c5-9862-7a873a071abe}">
+      <Declaration><![CDATA[(*!
+<summary>Asserts equality with the expected value.</summary>
+<description>
+Records failure without interrupting the callback; preserves the message for the rest of the chain.
+Uses the canonical floating policy shared by the typed contexts, matching Core semantics, and absolute tolerance.
+Invalid tolerance records failure before comparison. The default zero does not affect later assertions in this chain.
+</description>
+<param name="expected">Expected value converted by the compiler to REAL.</param>
+<param name="tolerance">Finite nonnegative absolute distance for this call only; default zero.</param>
+*)
+METHOD FINAL ToBe : REFERENCE TO RealAssertionContext
+VAR_INPUT
+	expected : REAL;
+	tolerance : LREAL := LREAL#0.0;
+END_VAR
+VAR
+	actualBits : ULINT;
+	expectedBits : ULINT;
+	areEqual : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF NOT TestServices.IsValidFloatingTolerance(tolerance := tolerance) THEN
+	TestServices.ReportAssertionFailure(
+		testCase := _TestCase,
+		message := _Message,
+		sourceClassName := ClassName,
+		defaultMessage := "Expected a finite nonnegative comparison tolerance"
+	);
+	ToBe REF= THIS^;
+	RETURN;
+END_IF
+
+actualBits := TestServices.GetCanonicalRealBits(value := _Actual);
+expectedBits := TestServices.GetCanonicalRealBits(value := expected);
+
+areEqual := TestServices.AreFloatingValuesWithinTolerance(
+	actualBits := actualBits,
+	expectedBits := expectedBits,
+	tolerance := tolerance
+);
+
+IF NOT areEqual THEN
+	failComparison(
+		expected := expected,
+		expectation := "Expected: ",
+		toleranceText := TOF_Core.WideStrings.Concat255(", tolerance: ", TO_WSTRING(tolerance))
+	);
+END_IF
+
+ToBe REF= THIS^;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="failComparison" Id="{79a4b511-4aaa-42af-a679-907c4de932ff}" FolderPath="Service methods\">
+      <Declaration><![CDATA[(*!
+<summary>Formats a failed typed predicate and reports it with the chain message.</summary>
+<description>
+Does not change operands or chain state. The receiver retains its first failure. Reporting exceptions
+propagate to the enclosing test callback handler; an unprepared receiver is a configuration error.
+</description>
+<param name="expected">Typed expected operand used only for this diagnostic.</param>
+<param name="expectation">Prefix identifying the failed predicate.</param>
+<param name="toleranceText">Optional call-local tolerance suffix; empty for strict ordering.</param>
+*)
+METHOD PRIVATE failComparison
+VAR_INPUT
+	expected : REAL;
+	expectation : WSTRING(40);
+	toleranceText : WSTRING(80) := "";
+END_VAR
+VAR
+	actualText : WSTRING(255);
+	expectedText : WSTRING(255);
+	diagnostic : TOF_Core.ERROR_MESSAGE;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[actualText := TO_WSTRING(_Actual);
+expectedText := TO_WSTRING(expected);
+
+diagnostic := TOF_Core.WideStrings.Concat255(
+	expectation,
+	expectedText,
+	", but was: ",
+	actualText,
+	toleranceText
+);
+
+TestServices.ReportAssertionFailure(
+	testCase := _TestCase,
+	message := _Message,
+	sourceClassName := ClassName,
+	defaultMessage := diagnostic
+);]]></ST>
+      </Implementation>
+    </Method>
+  </POU>
+</TcPlcObject>

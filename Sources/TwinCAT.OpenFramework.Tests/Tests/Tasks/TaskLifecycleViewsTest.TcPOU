@@ -1,0 +1,279 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1" ProductVersion="3.1.4026.21">
+  <POU Name="TaskLifecycleViewsTest" Id="{75ca4342-d1e4-4bb4-88ea-7c7e3a8de0e9}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+SPDX-FileCopyrightText: Â© 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+SPDX-License-Identifier: MIT
+License: https://opensource.org/license/mit
+*)
+
+(*!
+<summary>Exercises TaskState, TaskRunningSubstate, TaskStopReason and Task online-change reinitialization.</summary>
+<description>
+Verifies safe unbound view access, live bindings established at initialization, and preservation of state during
+online change reinitialization.
+</description>
+*)
+
+FUNCTION_BLOCK TaskLifecycleViewsTest EXTENDS TcUnit.FB_TestSuite
+VAR
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[UnboundTaskStateDoesNotFault();
+TaskStateTracksLiveVariables();
+UnboundTaskRunningSubstateDoesNotFault();
+TaskRunningSubstateTracksLiveVariables();
+UnboundTaskStopReasonDoesNotFault();
+TaskStopReasonTracksLiveVariables();
+TaskFBReinitRestoresInternalViews();
+TaskNamePreservedByReset();]]></ST>
+    </Implementation>
+    <Method Name="TaskNamePreservedByReset" Id="{76143197-a04d-4d57-9092-3f09183ea5f1}">
+      <Declaration><![CDATA[(*!
+<summary>Verifies constructor naming and name preservation during ordinary Reset.</summary>
+<description>
+Checks the supported runtime operation without explicitly reinvoking FB_init. Actual online change requires
+copy-code relocation and is a separate manual verification, not a direct lifecycle-method call.
+</description>
+*)
+METHOD TaskNamePreservedByReset
+VAR
+	task : CounterTask(name := "CounterTask");
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[TEST(TestName := 'TaskNamePreservedByReset');
+
+AssertEquals_WSTRING(Expected := "CounterTask", Actual := task.Name, Message := 'Constructor copies task name');
+task.Reset();
+AssertEquals_WSTRING(
+	Expected := "CounterTask",
+	Actual := task.Name,
+	Message := 'Reset must preserve the configured task name'
+);
+
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="TaskFBReinitRestoresInternalViews" Id="{48c495ad-a4d5-4751-ba19-4223be718231}">
+      <Declaration><![CDATA[(*!
+<summary>Verifies Task.FB_reinit successfully restores internal subobject view bindings.</summary>
+*)
+METHOD TaskFBReinitRestoresInternalViews
+VAR
+	task : CounterTask("CounterTask");
+	reinitResult : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[TEST(TestName := 'TaskFBReinitRestoresInternalViews');
+
+AssertTrue(Condition := task.State.Ready, Message := 'Task initial state must be Ready');
+AssertTrue(Condition := task.FinalStopReason.WorkDone, Message := 'Task initial stop reason must be WorkDone');
+
+reinitResult := task.FB_reinit();
+AssertTrue(Condition := reinitResult, Message := 'FB_reinit must return TRUE');
+AssertTrue(Condition := task.State.Ready, Message := 'Task state view must remain bound and Ready after FB_reinit');
+AssertTrue(
+	Condition := task.FinalStopReason.WorkDone,
+	Message := 'Task stop reason view must remain bound and WorkDone after FB_reinit'
+);
+
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="TaskRunningSubstateTracksLiveVariables" Id="{ebd1b157-0835-4dc1-8c68-7e6ff138d91a}">
+      <Declaration><![CDATA[(*!
+<summary>Verifies TaskRunningSubstate tracks changes to its backing variable after initialization.</summary>
+*)
+METHOD TaskRunningSubstateTracksLiveVariables
+VAR
+	substate : TOF_Tasks.TASK_RUNNING_SUBSTATE := TOF_Tasks.TASK_RUNNING_SUBSTATE.RESOURCE_ACQUIRING;
+	view : TOF_Tasks.TaskRunningSubstate(taskRunningSubstate := substate);
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[TEST(TestName := 'TaskRunningSubstateTracksLiveVariables');
+
+AssertTrue(
+	Condition := view.ResourceAcquiring,
+	Message := 'Bound substate view must reflect RESOURCE_ACQUIRING'
+);
+
+substate := TOF_Tasks.TASK_RUNNING_SUBSTATE.PROCESSING;
+AssertTrue(Condition := view.Processing, Message := 'Bound substate view must reflect PROCESSING');
+AssertFalse(
+	Condition := view.ResourceAcquiring,
+	Message := 'Bound substate view must no longer be RESOURCE_ACQUIRING'
+);
+
+substate := TOF_Tasks.TASK_RUNNING_SUBSTATE.STOPPING;
+AssertTrue(Condition := view.Stopping, Message := 'Bound substate view must reflect STOPPING');
+
+substate := TOF_Tasks.TASK_RUNNING_SUBSTATE.RESOURCE_RELEASING;
+AssertTrue(
+	Condition := view.ResourceReleasing,
+	Message := 'Bound substate view must reflect RESOURCE_RELEASING'
+);
+
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="TaskStateTracksLiveVariables" Id="{ea5db523-53ca-4b0c-8f46-ff56b13b3139}">
+      <Declaration><![CDATA[(*!
+<summary>Verifies TaskState tracks changes to its backing variables after initialization.</summary>
+*)
+METHOD TaskStateTracksLiveVariables
+VAR
+	state : TOF_Tasks.TASK_STATE := TOF_Tasks.TASK_STATE.READY;
+	stateChanged : BOOL := FALSE;
+	view : TOF_Tasks.TaskState(taskState := state, taskStateChanged := stateChanged);
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[TEST(TestName := 'TaskStateTracksLiveVariables');
+
+AssertTrue(Condition := view.Ready, Message := 'Bound state view must reflect READY');
+AssertFalse(Condition := view.Running, Message := 'Bound state view must not be RUNNING');
+
+state := TOF_Tasks.TASK_STATE.RUNNING;
+stateChanged := TRUE;
+
+AssertFalse(Condition := view.Ready, Message := 'Bound state view must update from READY');
+AssertTrue(Condition := view.Running, Message := 'Bound state view must reflect RUNNING');
+AssertTrue(Condition := view.StateChanged, Message := 'Bound state view must reflect StateChanged');
+AssertEquals_INT(
+	Expected := TO_INT(TOF_Tasks.TASK_STATE.RUNNING),
+	Actual := TO_INT(view.Value),
+	Message := 'Bound state view Value must be RUNNING'
+);
+
+state := TOF_Tasks.TASK_STATE.STOPPED;
+AssertTrue(Condition := view.Stopped, Message := 'Bound state view must reflect STOPPED');
+
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="TaskStopReasonTracksLiveVariables" Id="{75ea6d13-5336-48e6-97ff-ee3511eeddb8}">
+      <Declaration><![CDATA[(*!
+<summary>Verifies TaskStopReason tracks changes to its backing variables after initialization.</summary>
+*)
+METHOD TaskStopReasonTracksLiveVariables
+VAR
+	reason : TOF_Tasks.TASK_STOP_REASON := TOF_Tasks.TASK_STOP_REASON.WORK_DONE;
+	message : TOF_Core.ERROR_MESSAGE := "initial message";
+	view : TOF_Tasks.TaskStopReason(stopReason := reason, stopReasonMessage := message);
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[TEST(TestName := 'TaskStopReasonTracksLiveVariables');
+
+AssertTrue(Condition := view.WorkDone, Message := 'Bound reason view must reflect WORK_DONE');
+AssertFalse(Condition := view.Failure, Message := 'Bound reason view must not be Failure');
+AssertTrue(Condition := __ISVALIDREF(view.Message), Message := 'Bound reason view Message must be valid');
+AssertEquals_WSTRING(
+	Expected := "initial message",
+	Actual := view.Message,
+	Message := 'Bound reason view Message must match backing message'
+);
+
+reason := TOF_Tasks.TASK_STOP_REASON.FAILURE;
+message := "diagnostic failure";
+AssertTrue(Condition := view.Failure, Message := 'Bound reason view must reflect FAILURE');
+AssertFalse(Condition := view.WorkDone, Message := 'Bound reason view must not be WorkDone');
+AssertEquals_WSTRING(
+	Expected := "diagnostic failure",
+	Actual := view.Message,
+	Message := 'Bound reason view Message must update to diagnostic failure'
+);
+
+reason := TOF_Tasks.TASK_STOP_REASON.EXTERNAL_CANCEL;
+AssertTrue(Condition := view.ExternalCancel, Message := 'Bound reason view must reflect EXTERNAL_CANCEL');
+
+reason := TOF_Tasks.TASK_STOP_REASON.INTERNAL_ABORT;
+AssertTrue(Condition := view.InternalAbort, Message := 'Bound reason view must reflect INTERNAL_ABORT');
+
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="UnboundTaskRunningSubstateDoesNotFault" Id="{9a7d6fe1-c2f3-4dbb-b2e1-05f019b8db26}">
+      <Declaration><![CDATA[(*!
+<summary>Verifies accessing unbound TaskRunningSubstate properties does not fault.</summary>
+*)
+METHOD UnboundTaskRunningSubstateDoesNotFault
+VAR
+	unboundSubstate : REFERENCE TO TOF_Tasks.TASK_RUNNING_SUBSTATE;
+	view : TOF_Tasks.TaskRunningSubstate(taskRunningSubstate := unboundSubstate);
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[TEST(TestName := 'UnboundTaskRunningSubstateDoesNotFault');
+
+AssertFalse(Condition := view.Processing, Message := 'Unbound substate view must return FALSE for Processing');
+AssertFalse(
+	Condition := view.ResourceAcquiring,
+	Message := 'Unbound substate view must return FALSE for ResourceAcquiring'
+);
+AssertFalse(
+	Condition := view.ResourceReleasing,
+	Message := 'Unbound substate view must return FALSE for ResourceReleasing'
+);
+AssertFalse(Condition := view.Stopping, Message := 'Unbound substate view must return FALSE for Stopping');
+AssertEquals_INT(
+	Expected := TO_INT(TOF_Tasks.TASK_RUNNING_SUBSTATE.RESOURCE_ACQUIRING),
+	Actual := TO_INT(view.Value),
+	Message := 'Unbound substate view must return default RESOURCE_ACQUIRING'
+);
+
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="UnboundTaskStateDoesNotFault" Id="{3aee275c-faad-4f3a-a404-965ebc11563d}">
+      <Declaration><![CDATA[(*!
+<summary>Verifies accessing unbound TaskState properties does not fault.</summary>
+*)
+METHOD UnboundTaskStateDoesNotFault
+VAR
+	unboundState : REFERENCE TO TOF_Tasks.TASK_STATE;
+	unboundStateChanged : REFERENCE TO BOOL;
+	view : TOF_Tasks.TaskState(taskState := unboundState, taskStateChanged := unboundStateChanged);
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[TEST(TestName := 'UnboundTaskStateDoesNotFault');
+
+AssertFalse(Condition := view.Ready, Message := 'Unbound state view must return FALSE for Ready');
+AssertFalse(Condition := view.Running, Message := 'Unbound state view must return FALSE for Running');
+AssertFalse(Condition := view.Stopped, Message := 'Unbound state view must return FALSE for Stopped');
+AssertFalse(Condition := view.StateChanged, Message := 'Unbound state view must return FALSE for StateChanged');
+AssertEquals_INT(
+	Expected := TO_INT(TOF_Tasks.TASK_STATE.READY),
+	Actual := TO_INT(view.Value),
+	Message := 'Unbound state view must return default READY'
+);
+
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="UnboundTaskStopReasonDoesNotFault" Id="{83cb16ac-0c79-41f0-bef6-083ddd3b3634}">
+      <Declaration><![CDATA[(*!
+<summary>Verifies accessing unbound TaskStopReason properties does not fault.</summary>
+*)
+METHOD UnboundTaskStopReasonDoesNotFault
+VAR
+	unboundReason : REFERENCE TO TOF_Tasks.TASK_STOP_REASON;
+	unboundMessage : REFERENCE TO TOF_Core.ERROR_MESSAGE;
+	view : TOF_Tasks.TaskStopReason(stopReason := unboundReason, stopReasonMessage := unboundMessage);
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[TEST(TestName := 'UnboundTaskStopReasonDoesNotFault');
+
+AssertFalse(Condition := view.ExternalCancel, Message := 'Unbound reason view must return FALSE for ExternalCancel');
+AssertFalse(Condition := view.Failure, Message := 'Unbound reason view must return FALSE for Failure');
+AssertFalse(Condition := view.InternalAbort, Message := 'Unbound reason view must return FALSE for InternalAbort');
+AssertFalse(Condition := view.WorkDone, Message := 'Unbound reason view must return FALSE for WorkDone');
+AssertEquals_INT(
+	Expected := TO_INT(TOF_Tasks.TASK_STOP_REASON.WORK_DONE),
+	Actual := TO_INT(view.Value),
+	Message := 'Unbound reason view must return default WORK_DONE'
+);
+AssertFalse(Condition := __ISVALIDREF(view.Message), Message := 'Unbound reason view Message must be invalid');
+
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+  </POU>
+</TcPlcObject>

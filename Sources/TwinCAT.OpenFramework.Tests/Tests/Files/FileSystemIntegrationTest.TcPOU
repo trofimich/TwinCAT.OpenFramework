@@ -1,0 +1,995 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="FileSystemIntegrationTest" Id="{fc7f1476-e895-4756-a4e8-96d5a4aa7160}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+SPDX-FileCopyrightText: © 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+SPDX-License-Identifier: MIT
+License: https://opensource.org/license/mit
+*)
+
+(*!
+<summary>Exercises native filesystem operations in exclusively owned test directories.</summary>
+<description>
+The controller prepares the common root once. Each case refuses an existing scenario directory and retains
+persistent managers, tasks and buffers through stopping. Both success and failure keep the case active until
+cancel/drain and nonrecursive cleanup finish. Cleanup refusal or a caught cleanup exception fails the case.
+Scenario deadlines report failure without destroying pending native resources. Cleanup bookkeeping does not
+certify physical close after native failure. No terminal OOM is injected.
+</description>
+*)
+
+FUNCTION_BLOCK FileSystemIntegrationTest EXTENDS TcUnit.FB_TestSuite]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[ByteFileOperationsAndGuards();
+BinaryBufferMatrix();
+CaughtCallerExceptionCleanup();]]></ST>
+    </Implementation>
+    <Method Name="ByteFileOperationsAndGuards" Id="{87f7bd97-a5b2-40f7-b6f3-558f0dc739ba}">
+      <Declaration><![CDATA[(*!
+<summary>Exercises byte I/O, guarded counts, EOF/tell, file collisions, load, rename and delete.</summary>
+<description>
+Creates one exclusive directory and writes four known bytes. A short read, an empty EOF read and position
+queries use the same acquired file. Directory operations then reject its file path. A second fixture refuses
+the existing directory without adopting it. Load readback proves that these refusals preserved the sentinel.
+Rename/delete are followed by readback/missing-load checks. Native short-write and close failures need manual
+injection; this successful integration path does not certify physical cleanup.
+TEST_FINISHED is deferred until retained operations and owned cleanup attempts finish. The original failure
+remains recorded; cleanup failures are also reported. Pending native cleanup has no forced deadline.
+</description>
+*)
+METHOD ByteFileOperationsAndGuards
+VAR
+	i : DINT;
+	completedOperations : ARRAY [0..5] OF TOF_Tasks.ITask;
+END_VAR
+VAR_INST
+	lifecycle : FILE_TEST_LIFECYCLE;
+	cleanupExceptionObserved : BOOL;
+	phase : FILE_OPERATIONS_TEST_PHASE;
+	deadline : Tc2_Standard.TON;
+	directory : FileTestDirectory(directoryPath := 'C:\OpenFrameworkTests\FileSystem_Operations');
+	existingDirectory : FileTestDirectory(directoryPath := 'C:\OpenFrameworkTests\FileSystem_Operations');
+	manager : TOF_FileSystem.FileContentManager(name := "byte operations manager");
+	write : TOF_FileSystem.WriteBytesToFile(name := "write four bytes");
+	tellAfterWrite : TOF_FileSystem.GetPositionInFile(name := "tell after write");
+	seek : TOF_FileSystem.SetPositionInFile(name := "rewind binary file");
+	read : TOF_FileSystem.ReadBytesFromFile(name := "short binary read");
+	tellAfterRead : TOF_FileSystem.GetPositionInFile(name := "tell after read");
+	readEof : TOF_FileSystem.ReadBytesFromFile(name := "empty EOF read");
+	checkEof : TOF_FileSystem.CheckEndOfFile(name := "EOF query");
+	checkDirectory : TOF_FileSystem.CheckDirectoryExists(name := "check file as directory");
+	createIfAbsent : TOF_FileSystem.CreateDirectoryIfNotExists(name := "create on file collision");
+	removeIfPresent : TOF_FileSystem.RemoveEmptyDirectoryIfExists(name := "remove on file collision");
+	load : TOF_FileSystem.LoadFile(name := "load byte file");
+	rename : TOF_FileSystem.RenameFile(name := "rename byte file");
+	delete : TOF_FileSystem.DeleteFile(name := "delete byte file");
+	data : ARRAY [0..3] OF BYTE := [BYTE#16#41, BYTE#16#42, BYTE#16#43, BYTE#16#44];
+	readBuffer : ARRAY [0..7] OF BYTE := [8(BYTE#16#A5)];
+	loadBuffer : ARRAY [0..7] OF BYTE := [8(BYTE#16#A5)];
+	eofBuffer : BYTE := BYTE#16#A5;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF lifecycle = FILE_TEST_LIFECYCLE.FINISHED THEN
+	RETURN;
+END_IF
+
+TEST(TestName := __POUNAME());
+
+IF lifecycle = FILE_TEST_LIFECYCLE.CLEANING_UP THEN
+
+	__TRY
+
+		IF manager.State.Running THEN
+			manager.Cancel();
+			manager.Execute();
+		END_IF
+
+		IF checkDirectory.State.Running THEN
+			checkDirectory.Cancel();
+			checkDirectory.Execute();
+		END_IF
+
+		IF createIfAbsent.State.Running THEN
+			createIfAbsent.Cancel();
+			createIfAbsent.Execute();
+		END_IF
+
+		IF removeIfPresent.State.Running THEN
+			removeIfPresent.Cancel();
+			removeIfPresent.Execute();
+		END_IF
+
+		IF load.State.Running THEN
+			load.Cancel();
+			load.Execute();
+		END_IF
+
+		IF rename.State.Running THEN
+			rename.Cancel();
+			rename.Execute();
+		END_IF
+
+		IF delete.State.Running THEN
+			delete.Cancel();
+			delete.Execute();
+		END_IF
+
+		IF NOT manager.State.Running
+			AND_THEN NOT checkDirectory.State.Running
+			AND_THEN NOT createIfAbsent.State.Running
+			AND_THEN NOT removeIfPresent.State.Running
+			AND_THEN NOT load.State.Running
+			AND_THEN NOT rename.State.Running
+			AND_THEN NOT delete.State.Running
+		THEN
+			existingDirectory.Cleanup();
+			directory.Cleanup();
+
+			IF directory.CleanupComplete
+				AND_THEN existingDirectory.CleanupComplete
+			THEN
+				AssertTrue(
+					Condition := directory.CleanupSucceeded,
+					Message := TOF_Core.Strings.Concat255(directory.DirectoryPath, ': ', directory.CleanupMessage)
+				);
+				AssertFalse(
+					Condition := cleanupExceptionObserved,
+					Message := 'An exception interrupted cleanup before the final removal attempt'
+				);
+				lifecycle := FILE_TEST_LIFECYCLE.FINISHED;
+				TEST_FINISHED();
+			END_IF
+		END_IF
+
+	__CATCH
+		cleanupExceptionObserved := TRUE;
+	__ENDTRY
+
+	RETURN;
+END_IF
+
+deadline(IN := TRUE, PT := T#30S);
+
+__TRY
+
+	IF FileTestRoot.FailureMessage <> TOF_Core.Strings.Empty THEN
+		lifecycle := FILE_TEST_LIFECYCLE.CLEANING_UP;
+		AssertTrue(Condition := FALSE, Message := FileTestRoot.FailureMessage);
+		RETURN;
+	END_IF
+
+	IF NOT FileTestRoot.Prepared THEN
+		RETURN;
+	END_IF
+
+	CASE phase OF
+		FILE_OPERATIONS_TEST_PHASE.PREPARE_DIRECTORY:
+			directory.Prepare();
+
+			IF directory.PreparationFailed THEN
+				lifecycle := FILE_TEST_LIFECYCLE.CLEANING_UP;
+				AssertTrue(Condition := FALSE, Message := 'Operations directory must be newly created');
+			ELSIF directory.Prepared THEN
+				phase := FILE_OPERATIONS_TEST_PHASE.START_WRITE;
+			END_IF
+
+		FILE_OPERATIONS_TEST_PHASE.START_WRITE:
+			directory.ExpectFirstFile();
+			manager.FilePath := directory.FirstFilePath;
+			manager.ModeFlags := Tc2_System.Global_Variables.FOPEN_MODEWRITE
+				OR Tc2_System.Global_Variables.FOPEN_MODEPLUS
+				OR Tc2_System.Global_Variables.FOPEN_MODEBINARY;
+			manager.PathType := Tc2_System.E_OpenPath.PATH_GENERIC;
+			manager.Timeout := T#2S;
+			manager.StopWhenNoPendingTasks := TRUE;
+			write.SourceBuffer := ADR(data);
+			write.BytesCountToWrite := SIZEOF(data);
+			write.Timeout := T#2S;
+			seek.Position := TOF_Core.SignedInt32.ZERO;
+			seek.Origin := Tc2_System.E_SeekOrigin.SEEK_SET;
+			seek.Timeout := T#2S;
+			read.TargetBuffer := ADR(readBuffer);
+			read.BytesCountToRead := SIZEOF(readBuffer);
+			read.Timeout := T#2S;
+			readEof.TargetBuffer := ADR(eofBuffer);
+			readEof.BytesCountToRead := 1;
+			readEof.Timeout := T#2S;
+			checkEof.Timeout := T#2S;
+			tellAfterWrite.Timeout := T#2S;
+			tellAfterRead.Timeout := T#2S;
+			manager.Enqueue(fileHandleTask := write);
+			manager.Enqueue(fileHandleTask := tellAfterWrite);
+			manager.Enqueue(fileHandleTask := seek);
+			manager.Enqueue(fileHandleTask := read);
+			manager.Enqueue(fileHandleTask := tellAfterRead);
+			manager.Enqueue(fileHandleTask := readEof);
+			manager.Enqueue(fileHandleTask := checkEof);
+			AssertTrue(
+				Condition := write.ActuallyWrittenBytes = TOF_Core.UnsignedInt32.ZERO,
+				Message := 'READY write result must be zero'
+			);
+			AssertTrue(
+				Condition := read.ActuallyReadBytes = TOF_Core.UnsignedInt32.ZERO,
+				Message := 'READY read result must be zero'
+			);
+			AssertFalse(Condition := read.IsEndOfFile, Message := 'READY read EOF must be FALSE');
+			AssertFalse(Condition := checkEof.IsEndOfFile, Message := 'READY EOF query must be FALSE');
+
+			IF manager.Start() THEN
+				phase := FILE_OPERATIONS_TEST_PHASE.WAIT_FOR_WRITE;
+			ELSE
+				lifecycle := FILE_TEST_LIFECYCLE.CLEANING_UP;
+				AssertTrue(Condition := FALSE, Message := 'Prepared manager must accept Start');
+			END_IF
+
+		FILE_OPERATIONS_TEST_PHASE.WAIT_FOR_WRITE:
+			manager.Execute();
+
+			IF write.State.Running THEN
+				AssertTrue(
+					Condition := write.ActuallyWrittenBytes = TOF_Core.UnsignedInt32.ZERO,
+					Message := 'RUNNING write result must be zero'
+				);
+			END_IF
+
+			IF read.State.Running THEN
+				AssertTrue(
+					Condition := read.ActuallyReadBytes = TOF_Core.UnsignedInt32.ZERO,
+					Message := 'RUNNING read result must be zero'
+				);
+				AssertFalse(Condition := read.IsEndOfFile, Message := 'RUNNING read EOF must be FALSE');
+			END_IF
+
+			IF tellAfterWrite.State.Running THEN
+				AssertTrue(
+					Condition := tellAfterWrite.Position = TOF_Core.SignedInt32.ZERO,
+					Message := 'RUNNING tell result must be zero'
+				);
+			END_IF
+
+			IF manager.State.Stopped THEN
+
+				IF NOT manager.FinalStopReason.WorkDone THEN
+					lifecycle := FILE_TEST_LIFECYCLE.CLEANING_UP;
+					AssertTrue(Condition := FALSE, Message := 'manager failed; inspect its FinalStopReason.Message');
+					RETURN;
+				END_IF
+
+				AssertTrue(Condition := write.ActuallyWrittenBytes = 4, Message := 'Full write must report four bytes');
+				AssertTrue(Condition := read.ActuallyReadBytes = 4, Message := 'Short read must report the actual four bytes');
+				AssertTrue(Condition := tellAfterWrite.Position = 4, Message := 'Tell after write must report position four');
+				AssertTrue(Condition := tellAfterRead.Position = 4, Message := 'Tell after short read must report position four');
+				AssertTrue(
+					Condition := readEof.ActuallyReadBytes = TOF_Core.UnsignedInt32.ZERO,
+					Message := 'EOF read must report zero bytes'
+				);
+				AssertTrue(Condition := readEof.IsEndOfFile, Message := 'Empty read must expose native EOF');
+				AssertTrue(Condition := checkEof.IsEndOfFile, Message := 'EOF query after empty read must report EOF');
+				AssertTrue(Condition := eofBuffer = BYTE#16#A5, Message := 'An empty read must not alter its destination');
+
+				FOR i := 0 TO 3 DO
+					AssertTrue(Condition := readBuffer[i] = data[i], Message := 'Binary readback must preserve byte order');
+				END_FOR
+
+				FOR i := 4 TO 7 DO
+					AssertTrue(Condition := readBuffer[i] = BYTE#16#A5, Message := 'Short read must preserve the unused buffer tail');
+				END_FOR
+
+				completedOperations[0] := write;
+				completedOperations[1] := tellAfterWrite;
+				completedOperations[2] := read;
+				completedOperations[3] := tellAfterRead;
+				completedOperations[4] := readEof;
+				completedOperations[5] := checkEof;
+
+				FOR i := LOWER_BOUND(completedOperations, 1) TO UPPER_BOUND(completedOperations, 1) DO
+					AssertTrue(Condition := completedOperations[i].Reset(), Message := 'Successful operation must accept Reset');
+					AssertTrue(Condition := completedOperations[i].Start(), Message := 'Reset operation must accept Start');
+					AssertTrue(Condition := completedOperations[i].Cancel(), Message := 'Reused operation can cancel before submission');
+					completedOperations[i].Execute();
+					AssertTrue(
+						Condition := completedOperations[i].FinalStopReason.ExternalCancel,
+						Message := 'Reused operation must retain pre-submission cancellation'
+					);
+				END_FOR
+
+				AssertTrue(
+					Condition := write.ActuallyWrittenBytes = TOF_Core.UnsignedInt32.ZERO,
+					Message := 'Cancelled reuse must hide the old successful write count'
+				);
+				AssertTrue(
+					Condition := read.ActuallyReadBytes = TOF_Core.UnsignedInt32.ZERO,
+					Message := 'Cancelled reuse must hide the old successful read count'
+				);
+				AssertTrue(
+					Condition := tellAfterWrite.Position = TOF_Core.SignedInt32.ZERO,
+					Message := 'Cancelled reuse must hide the old successful position'
+				);
+				AssertFalse(Condition := readEof.IsEndOfFile, Message := 'Cancelled reuse must hide the previous TRUE EOF');
+				AssertFalse(Condition := checkEof.IsEndOfFile, Message := 'Cancelled query must hide the previous TRUE EOF');
+				phase := FILE_OPERATIONS_TEST_PHASE.CHECK_COLLISIONS;
+			END_IF
+
+		FILE_OPERATIONS_TEST_PHASE.CHECK_COLLISIONS:
+			checkDirectory.DirectoryPath := directory.FirstFilePath;
+			createIfAbsent.DirectoryPath := directory.FirstFilePath;
+			removeIfPresent.DirectoryPath := directory.FirstFilePath;
+			checkDirectory.PathType := Tc2_System.E_OpenPath.PATH_GENERIC;
+			createIfAbsent.PathType := Tc2_System.E_OpenPath.PATH_GENERIC;
+			removeIfPresent.PathType := Tc2_System.E_OpenPath.PATH_GENERIC;
+			checkDirectory.Timeout := T#2S;
+			createIfAbsent.Timeout := T#2S;
+			removeIfPresent.Timeout := T#2S;
+
+			IF checkDirectory.Start() AND_THEN createIfAbsent.Start() AND_THEN removeIfPresent.Start() THEN
+				phase := FILE_OPERATIONS_TEST_PHASE.WAIT_FOR_COLLISIONS;
+			ELSE
+				lifecycle := FILE_TEST_LIFECYCLE.CLEANING_UP;
+				AssertTrue(Condition := FALSE, Message := 'All collision tasks must accept Start');
+			END_IF
+
+		FILE_OPERATIONS_TEST_PHASE.WAIT_FOR_COLLISIONS:
+			checkDirectory.Execute();
+			createIfAbsent.Execute();
+			removeIfPresent.Execute();
+			existingDirectory.Prepare();
+
+			IF checkDirectory.State.Stopped
+				AND_THEN createIfAbsent.State.Stopped
+				AND_THEN removeIfPresent.State.Stopped
+				AND_THEN existingDirectory.PreparationFailed
+			THEN
+				AssertTrue(
+					Condition := checkDirectory.FinalStopReason.WorkDone,
+					Message := 'File collision is a successful existence check'
+				);
+				AssertFalse(Condition := checkDirectory.DirectoryExists, Message := 'A file must not be reported as a directory');
+				AssertTrue(
+					Condition := createIfAbsent.FinalStopReason.Failure,
+					Message := 'Conditional create must reject a file collision'
+				);
+				AssertTrue(
+					Condition := removeIfPresent.FinalStopReason.Failure,
+					Message := 'Conditional remove must reject a file collision'
+				);
+				AssertFalse(
+					Condition := existingDirectory.Prepared,
+					Message := 'An existing scenario directory must never be adopted'
+				);
+				existingDirectory.Cleanup();
+				phase := FILE_OPERATIONS_TEST_PHASE.START_LOAD;
+			END_IF
+
+		FILE_OPERATIONS_TEST_PHASE.START_LOAD:
+			load.FilePath := directory.FirstFilePath;
+			load.TargetBuffer := ADR(loadBuffer);
+			load.TargetBufferSize := SIZEOF(loadBuffer);
+			load.Timeout := T#2S;
+			AssertTrue(
+				Condition := load.LoadedBytesCount = TOF_Core.UnsignedInt32.ZERO,
+				Message := 'READY load result must be zero'
+			);
+
+			IF load.Start() THEN
+				phase := FILE_OPERATIONS_TEST_PHASE.WAIT_FOR_LOAD;
+			ELSE
+				lifecycle := FILE_TEST_LIFECYCLE.CLEANING_UP;
+				AssertTrue(Condition := FALSE, Message := 'Prepared load must accept Start');
+			END_IF
+
+		FILE_OPERATIONS_TEST_PHASE.WAIT_FOR_LOAD:
+			load.Execute();
+
+			IF load.State.Running THEN
+				AssertTrue(
+					Condition := load.LoadedBytesCount = TOF_Core.UnsignedInt32.ZERO,
+					Message := 'RUNNING load result must be zero'
+				);
+			END_IF
+
+			IF load.State.Stopped THEN
+
+				IF NOT load.FinalStopReason.WorkDone THEN
+					lifecycle := FILE_TEST_LIFECYCLE.CLEANING_UP;
+					AssertTrue(Condition := FALSE, Message := 'load failed; inspect its FinalStopReason.Message');
+					RETURN;
+				END_IF
+
+				AssertTrue(Condition := load.LoadedBytesCount = 4, Message := 'Load must report the actual sentinel byte count');
+
+				FOR i := 0 TO 3 DO
+					AssertTrue(Condition := loadBuffer[i] = data[i], Message := 'Collision refusals must preserve the sentinel file');
+				END_FOR
+
+				FOR i := 4 TO 7 DO
+					AssertTrue(
+						Condition := loadBuffer[i] = BYTE#16#A5,
+						Message := 'Bounded load must preserve its unused buffer tail'
+					);
+				END_FOR
+
+				phase := FILE_OPERATIONS_TEST_PHASE.START_RENAME;
+			END_IF
+
+		FILE_OPERATIONS_TEST_PHASE.START_RENAME:
+			directory.ExpectSecondFile();
+			rename.OldFilePath := directory.FirstFilePath;
+			rename.NewFilePath := directory.SecondFilePath;
+			rename.PathType := Tc2_System.E_OpenPath.PATH_GENERIC;
+			rename.Timeout := T#2S;
+
+			IF rename.Start() THEN
+				phase := FILE_OPERATIONS_TEST_PHASE.WAIT_FOR_RENAME;
+			ELSE
+				lifecycle := FILE_TEST_LIFECYCLE.CLEANING_UP;
+				AssertTrue(Condition := FALSE, Message := 'Prepared rename must accept Start');
+			END_IF
+
+		FILE_OPERATIONS_TEST_PHASE.WAIT_FOR_RENAME:
+			rename.Execute();
+
+			IF rename.State.Stopped THEN
+
+				IF NOT rename.FinalStopReason.WorkDone THEN
+					lifecycle := FILE_TEST_LIFECYCLE.CLEANING_UP;
+					AssertTrue(Condition := FALSE, Message := 'rename failed; inspect its FinalStopReason.Message');
+					RETURN;
+				END_IF
+
+				directory.ConfirmFirstFileAbsent();
+				phase := FILE_OPERATIONS_TEST_PHASE.LOAD_RENAMED_FILE;
+			END_IF
+
+		FILE_OPERATIONS_TEST_PHASE.LOAD_RENAMED_FILE:
+			AssertTrue(Condition := load.Reset(), Message := 'Successful load must accept Reset for reuse');
+			AssertTrue(
+				Condition := load.LoadedBytesCount = TOF_Core.UnsignedInt32.ZERO,
+				Message := 'Reset hides the old load result'
+			);
+			load.FilePath := directory.SecondFilePath;
+
+			FOR i := 0 TO 7 DO
+				loadBuffer[i] := BYTE#16#A5;
+			END_FOR
+
+			IF load.Start() THEN
+				phase := FILE_OPERATIONS_TEST_PHASE.WAIT_FOR_RENAMED_LOAD;
+			ELSE
+				lifecycle := FILE_TEST_LIFECYCLE.CLEANING_UP;
+				AssertTrue(Condition := FALSE, Message := 'Prepared load must accept Start');
+			END_IF
+
+		FILE_OPERATIONS_TEST_PHASE.WAIT_FOR_RENAMED_LOAD:
+			load.Execute();
+
+			IF load.State.Stopped THEN
+
+				IF NOT load.FinalStopReason.WorkDone THEN
+					lifecycle := FILE_TEST_LIFECYCLE.CLEANING_UP;
+					AssertTrue(Condition := FALSE, Message := 'load failed; inspect its FinalStopReason.Message');
+					RETURN;
+				END_IF
+
+				AssertTrue(Condition := load.LoadedBytesCount = 4, Message := 'Renamed file must retain its byte count');
+
+				FOR i := 0 TO 3 DO
+					AssertTrue(Condition := loadBuffer[i] = data[i], Message := 'Renamed file must retain sentinel contents');
+				END_FOR
+
+				phase := FILE_OPERATIONS_TEST_PHASE.START_DELETE;
+			END_IF
+
+		FILE_OPERATIONS_TEST_PHASE.START_DELETE:
+			delete.FilePath := directory.SecondFilePath;
+			delete.PathType := Tc2_System.E_OpenPath.PATH_GENERIC;
+			delete.Timeout := T#2S;
+
+			IF delete.Start() THEN
+				phase := FILE_OPERATIONS_TEST_PHASE.WAIT_FOR_DELETE;
+			ELSE
+				lifecycle := FILE_TEST_LIFECYCLE.CLEANING_UP;
+				AssertTrue(Condition := FALSE, Message := 'Prepared delete must accept Start');
+			END_IF
+
+		FILE_OPERATIONS_TEST_PHASE.WAIT_FOR_DELETE:
+			delete.Execute();
+
+			IF delete.State.Stopped THEN
+
+				IF NOT delete.FinalStopReason.WorkDone THEN
+					lifecycle := FILE_TEST_LIFECYCLE.CLEANING_UP;
+					AssertTrue(Condition := FALSE, Message := 'delete failed; inspect its FinalStopReason.Message');
+					RETURN;
+				END_IF
+
+				directory.ConfirmSecondFileAbsent();
+				phase := FILE_OPERATIONS_TEST_PHASE.LOAD_DELETED_FILE;
+			END_IF
+
+		FILE_OPERATIONS_TEST_PHASE.LOAD_DELETED_FILE:
+			AssertTrue(Condition := load.Reset(), Message := 'Load must accept Reset before checking deletion');
+
+			FOR i := 0 TO 7 DO
+				loadBuffer[i] := BYTE#16#A5;
+			END_FOR
+
+			IF load.Start() THEN
+				phase := FILE_OPERATIONS_TEST_PHASE.WAIT_FOR_MISSING_LOAD;
+			ELSE
+				lifecycle := FILE_TEST_LIFECYCLE.CLEANING_UP;
+				AssertTrue(Condition := FALSE, Message := 'Prepared load must accept Start');
+			END_IF
+
+		FILE_OPERATIONS_TEST_PHASE.WAIT_FOR_MISSING_LOAD:
+			load.Execute();
+
+			IF load.State.Stopped THEN
+				AssertTrue(Condition := load.FinalStopReason.Failure, Message := 'Loading a deleted file must fail');
+				AssertTrue(
+					Condition := load.LoadedBytesCount = TOF_Core.UnsignedInt32.ZERO,
+					Message := 'Failed reuse must hide the old count'
+				);
+
+				FOR i := 0 TO 7 DO
+					AssertTrue(Condition := loadBuffer[i] = BYTE#16#A5, Message := 'Missing-file load must not change its buffer');
+				END_FOR
+
+				phase := FILE_OPERATIONS_TEST_PHASE.CLEANUP;
+			END_IF
+
+		FILE_OPERATIONS_TEST_PHASE.CLEANUP:
+			directory.Cleanup();
+
+			IF directory.CleanupComplete THEN
+				AssertTrue(
+					Condition := directory.CleanupSucceeded,
+					Message := 'Successful scenario must remove its owned directory'
+				);
+				lifecycle := FILE_TEST_LIFECYCLE.CLEANING_UP;
+			END_IF
+
+	END_CASE
+__CATCH
+	lifecycle := FILE_TEST_LIFECYCLE.CLEANING_UP;
+	AssertTrue(
+		Condition := FALSE,
+		Message := 'Exception interrupted the integration scenario; later cycles continue cleanup'
+	);
+__ENDTRY
+
+IF lifecycle = FILE_TEST_LIFECYCLE.RUNNING_SCENARIO AND_THEN deadline.Q THEN
+	lifecycle := FILE_TEST_LIFECYCLE.CLEANING_UP;
+	AssertTrue(Condition := FALSE, Message := 'Filesystem integration scenario exceeded its 30-second deadline');
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="BinaryBufferMatrix" Id="{7484ef55-9c8d-4e0f-9199-6603cb72982e}">
+      <Declaration><![CDATA[(*!
+<summary>Checks the six binary null/zero combinations with an acquired valid read/write resource.</summary>
+<description>
+Each row opens the same owned file, queues one invalid operation and checks failure, diagnostics, no observed
+native busy request and unchanged data. The failed manager must release before Reset/rebinding for the next
+row. Positive byte I/O is exercised independently by ByteFileOperationsAndGuards. Native tracing is still
+needed to independently prove that no request was submitted on each invalid row.
+Diagnostic matching searches for ASCII property identifiers without interpreting Unicode character positions.
+TEST_FINISHED is deferred until retained operations and owned cleanup attempts finish. The original failure
+remains recorded; cleanup failures are also reported. Pending native cleanup has no forced deadline.
+</description>
+*)
+METHOD BinaryBufferMatrix
+VAR
+	message : STRING(255);
+	expectedProperty : STRING(32);
+END_VAR
+VAR_INST
+	lifecycle : FILE_TEST_LIFECYCLE;
+	cleanupExceptionObserved : BOOL;
+	phase : FILE_BUFFER_TEST_PHASE;
+	deadline : Tc2_Standard.TON;
+	directory : FileTestDirectory(directoryPath := 'C:\OpenFrameworkTests\FileSystem_Buffers');
+	manager : TOF_FileSystem.FileContentManager(name := "buffer validation manager");
+	read : TOF_FileSystem.ReadBytesFromFile(name := "invalid read buffer");
+	write : TOF_FileSystem.WriteBytesToFile(name := "invalid write buffer");
+	row : DINT;
+	buffer : BYTE := BYTE#16#A5;
+	operation : TOF_Tasks.ITask;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF lifecycle = FILE_TEST_LIFECYCLE.FINISHED THEN
+	RETURN;
+END_IF
+
+TEST(TestName := __POUNAME());
+
+IF lifecycle = FILE_TEST_LIFECYCLE.CLEANING_UP THEN
+
+	__TRY
+
+		IF manager.State.Running THEN
+			manager.Cancel();
+			manager.Execute();
+		END_IF
+
+		IF NOT manager.State.Running
+		THEN
+			directory.Cleanup();
+
+			IF directory.CleanupComplete THEN
+				AssertTrue(
+					Condition := directory.CleanupSucceeded,
+					Message := TOF_Core.Strings.Concat255(directory.DirectoryPath, ': ', directory.CleanupMessage)
+				);
+				AssertFalse(
+					Condition := cleanupExceptionObserved,
+					Message := 'An exception interrupted cleanup before the final removal attempt'
+				);
+				lifecycle := FILE_TEST_LIFECYCLE.FINISHED;
+				TEST_FINISHED();
+			END_IF
+		END_IF
+
+	__CATCH
+		cleanupExceptionObserved := TRUE;
+	__ENDTRY
+
+	RETURN;
+END_IF
+
+deadline(IN := TRUE, PT := T#30S);
+
+__TRY
+
+	IF FileTestRoot.FailureMessage <> TOF_Core.Strings.Empty THEN
+		lifecycle := FILE_TEST_LIFECYCLE.CLEANING_UP;
+		AssertTrue(Condition := FALSE, Message := FileTestRoot.FailureMessage);
+		RETURN;
+	END_IF
+
+	IF NOT FileTestRoot.Prepared THEN
+		RETURN;
+	END_IF
+
+	CASE phase OF
+		FILE_BUFFER_TEST_PHASE.PREPARE_DIRECTORY:
+			directory.Prepare();
+
+			IF directory.PreparationFailed THEN
+				lifecycle := FILE_TEST_LIFECYCLE.CLEANING_UP;
+				AssertTrue(Condition := FALSE, Message := 'Buffer matrix directory must be newly created');
+			ELSIF directory.Prepared THEN
+				phase := FILE_BUFFER_TEST_PHASE.CREATE_FILE;
+			END_IF
+
+		FILE_BUFFER_TEST_PHASE.CREATE_FILE:
+			directory.ExpectFirstFile();
+			manager.FilePath := directory.FirstFilePath;
+			manager.PathType := Tc2_System.E_OpenPath.PATH_GENERIC;
+			manager.ModeFlags := Tc2_System.Global_Variables.FOPEN_MODEWRITE OR Tc2_System.Global_Variables.FOPEN_MODEBINARY;
+			manager.Timeout := T#2S;
+			manager.StopWhenNoPendingTasks := TRUE;
+
+			IF manager.Start() THEN
+				phase := FILE_BUFFER_TEST_PHASE.WAIT_FOR_FILE;
+			ELSE
+				lifecycle := FILE_TEST_LIFECYCLE.CLEANING_UP;
+				AssertTrue(Condition := FALSE, Message := 'Prepared manager must accept Start');
+			END_IF
+
+		FILE_BUFFER_TEST_PHASE.WAIT_FOR_FILE:
+			manager.Execute();
+
+			IF manager.State.Stopped THEN
+
+				IF NOT manager.FinalStopReason.WorkDone THEN
+					lifecycle := FILE_TEST_LIFECYCLE.CLEANING_UP;
+					AssertTrue(Condition := FALSE, Message := 'manager failed; inspect its FinalStopReason.Message');
+					RETURN;
+				END_IF
+
+				phase := FILE_BUFFER_TEST_PHASE.START_INVALID_OPERATION;
+			END_IF
+
+		FILE_BUFFER_TEST_PHASE.START_INVALID_OPERATION:
+			AssertTrue(Condition := manager.Reset(), Message := 'Manager must reset before the next buffer row');
+			AssertTrue(Condition := read.Reset(), Message := 'Read child must reset before rebinding');
+			AssertTrue(Condition := write.Reset(), Message := 'Write child must reset before rebinding');
+			manager.FilePath := directory.FirstFilePath;
+			manager.ModeFlags := Tc2_System.Global_Variables.FOPEN_MODEREAD
+				OR Tc2_System.Global_Variables.FOPEN_MODEPLUS
+				OR Tc2_System.Global_Variables.FOPEN_MODEBINARY;
+			read.Timeout := T#2S;
+			write.Timeout := T#2S;
+			read.TargetBuffer := TOF_Core.Memory.NULL_ADDRESS;
+			read.BytesCountToRead := TOF_Core.UnsignedInt32.ZERO;
+			write.SourceBuffer := TOF_Core.Memory.NULL_ADDRESS;
+			write.BytesCountToWrite := TOF_Core.UnsignedInt32.ZERO;
+
+			CASE row OF
+				0:
+					read.BytesCountToRead := 1;
+				1:
+					read.TargetBuffer := ADR(buffer);
+				3:
+					write.BytesCountToWrite := 1;
+				4:
+					write.SourceBuffer := ADR(buffer);
+			END_CASE
+
+			IF row < 3 THEN
+				operation := read;
+				manager.Enqueue(fileHandleTask := read);
+			ELSE
+				operation := write;
+				manager.Enqueue(fileHandleTask := write);
+			END_IF
+
+			IF manager.Start() THEN
+				phase := FILE_BUFFER_TEST_PHASE.WAIT_FOR_INVALID_OPERATION;
+			ELSE
+				lifecycle := FILE_TEST_LIFECYCLE.CLEANING_UP;
+				AssertTrue(Condition := FALSE, Message := 'Prepared manager must accept Start');
+			END_IF
+
+		FILE_BUFFER_TEST_PHASE.WAIT_FOR_INVALID_OPERATION:
+			manager.Execute();
+			AssertFalse(
+				Condition := read.FileOperationInProgress,
+				Message := 'Invalid read must not expose a pending native request'
+			);
+			AssertFalse(
+				Condition := write.FileOperationInProgress,
+				Message := 'Invalid write must not expose a pending native request'
+			);
+
+			IF manager.State.Stopped THEN
+				AssertTrue(Condition := manager.FinalStopReason.Failure, Message := 'Invalid buffer row must fail its manager');
+				AssertTrue(Condition := operation.FinalStopReason.Failure, Message := 'Invalid buffer row must fail the child');
+				AssertFalse(
+					Condition := manager.ResourceManager.ResourceAcquired,
+					Message := 'Invalid buffer row must finish release'
+				);
+				AssertTrue(Condition := buffer = BYTE#16#A5, Message := 'Invalid binary buffers must not alter caller data');
+				AssertTrue(
+					Condition := read.ActuallyReadBytes = TOF_Core.UnsignedInt32.ZERO,
+					Message := 'Failed read result must be zero'
+				);
+				AssertFalse(Condition := read.IsEndOfFile, Message := 'Failed read EOF must be FALSE');
+				AssertTrue(
+					Condition := write.ActuallyWrittenBytes = TOF_Core.UnsignedInt32.ZERO,
+					Message := 'Failed write result must be zero'
+				);
+				message := TO_STRING(operation.FinalStopReason.Message);
+
+				CASE row OF
+					0, 2:
+						expectedProperty := 'TargetBuffer';
+					1:
+						expectedProperty := 'BytesCountToRead';
+					3, 5:
+						expectedProperty := 'SourceBuffer';
+					4:
+						expectedProperty := 'BytesCountToWrite';
+				END_CASE
+
+				AssertTrue(
+					Condition := TOF_Core.Strings.Contains(
+						stringToSearchIn := message,
+						stringToFind := expectedProperty
+					),
+					Message := 'Buffer failure must identify the public configuration property'
+				);
+				row := row + 1;
+
+				IF row < 6 THEN
+					phase := FILE_BUFFER_TEST_PHASE.START_INVALID_OPERATION;
+				ELSE
+					phase := FILE_BUFFER_TEST_PHASE.CLEANUP;
+				END_IF
+
+			END_IF
+
+		FILE_BUFFER_TEST_PHASE.CLEANUP:
+			directory.Cleanup();
+
+			IF directory.CleanupComplete THEN
+				AssertTrue(Condition := directory.CleanupSucceeded, Message := 'Buffer matrix must remove its owned artifacts');
+				lifecycle := FILE_TEST_LIFECYCLE.CLEANING_UP;
+			END_IF
+
+	END_CASE
+__CATCH
+	lifecycle := FILE_TEST_LIFECYCLE.CLEANING_UP;
+	AssertTrue(
+		Condition := FALSE,
+		Message := 'Exception interrupted the integration scenario; later cycles continue cleanup'
+	);
+__ENDTRY
+
+IF lifecycle = FILE_TEST_LIFECYCLE.RUNNING_SCENARIO AND_THEN deadline.Q THEN
+	lifecycle := FILE_TEST_LIFECYCLE.CLEANING_UP;
+	AssertTrue(Condition := FALSE, Message := 'Filesystem integration scenario exceeded its 30-second deadline');
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="CaughtCallerExceptionCleanup" Id="{16699e7e-d16c-4809-8cd5-bae4a40d84ff}">
+      <Declaration><![CDATA[(*!
+<summary>Keeps an acquired file manager alive through a deliberately caught caller exception.</summary>
+<description>
+The injected exception occurs outside manager.Execute after successful acquisition. The next phase must keep
+cancelling and executing the manager until release, then remove the owned file and directory. This exercises
+the recovery obligation used by file-test controllers without reporting an intentional failed test.
+TEST_FINISHED is deferred until retained operations and owned cleanup attempts finish. The original failure
+remains recorded; cleanup failures are also reported. Pending native cleanup has no forced deadline.
+</description>
+*)
+METHOD CaughtCallerExceptionCleanup
+VAR
+	exceptionCode : __SYSTEM.ExceptionCode;
+	caughtException : TOF_Core.IException;
+	standardException : TOF_Core.IStandardException;
+END_VAR
+VAR_INST
+	lifecycle : FILE_TEST_LIFECYCLE;
+	cleanupExceptionObserved : BOOL;
+	callerExceptionCaught : BOOL;
+	phase : FILE_CALLER_CLEANUP_TEST_PHASE;
+	deadline : Tc2_Standard.TON;
+	directory : FileTestDirectory(directoryPath := 'C:\OpenFrameworkTests\FileSystem_CallerException');
+	manager : TOF_FileSystem.FileContentManager(name := "caller exception manager");
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF lifecycle = FILE_TEST_LIFECYCLE.FINISHED THEN
+	RETURN;
+END_IF
+
+TEST(TestName := __POUNAME());
+
+IF lifecycle = FILE_TEST_LIFECYCLE.CLEANING_UP THEN
+
+	__TRY
+
+		IF manager.State.Running THEN
+			manager.Cancel();
+			manager.Execute();
+		END_IF
+
+		IF NOT manager.State.Running THEN
+			directory.Cleanup();
+
+			IF directory.CleanupComplete THEN
+				AssertTrue(
+					Condition := directory.CleanupSucceeded,
+					Message := TOF_Core.Strings.Concat255(directory.DirectoryPath, ': ', directory.CleanupMessage)
+				);
+				AssertFalse(
+					Condition := cleanupExceptionObserved,
+					Message := 'An exception interrupted cleanup before the final removal attempt'
+				);
+				lifecycle := FILE_TEST_LIFECYCLE.FINISHED;
+				TEST_FINISHED();
+			END_IF
+		END_IF
+
+	__CATCH
+		cleanupExceptionObserved := TRUE;
+	__ENDTRY
+
+	RETURN;
+END_IF
+
+deadline(IN := TRUE, PT := T#15S);
+
+__TRY
+
+	IF FileTestRoot.FailureMessage <> TOF_Core.Strings.Empty THEN
+		lifecycle := FILE_TEST_LIFECYCLE.CLEANING_UP;
+		AssertTrue(Condition := FALSE, Message := FileTestRoot.FailureMessage);
+		RETURN;
+	END_IF
+
+	IF NOT FileTestRoot.Prepared THEN
+		RETURN;
+	END_IF
+
+	CASE phase OF
+		FILE_CALLER_CLEANUP_TEST_PHASE.PREPARE_DIRECTORY:
+			directory.Prepare();
+
+			IF directory.PreparationFailed THEN
+				lifecycle := FILE_TEST_LIFECYCLE.CLEANING_UP;
+				AssertTrue(Condition := FALSE, Message := 'Caller-exception directory must be newly created');
+			ELSIF directory.Prepared THEN
+				phase := FILE_CALLER_CLEANUP_TEST_PHASE.OPEN_FILE;
+			END_IF
+
+		FILE_CALLER_CLEANUP_TEST_PHASE.OPEN_FILE:
+			directory.ExpectFirstFile();
+			manager.FilePath := directory.FirstFilePath;
+			manager.PathType := Tc2_System.E_OpenPath.PATH_GENERIC;
+			manager.ModeFlags := Tc2_System.Global_Variables.FOPEN_MODEWRITE OR Tc2_System.Global_Variables.FOPEN_MODEBINARY;
+			manager.Timeout := T#2S;
+			manager.StopWhenNoPendingTasks := FALSE;
+
+			IF manager.Start() THEN
+				phase := FILE_CALLER_CLEANUP_TEST_PHASE.INJECT_CALLER_EXCEPTION;
+			ELSE
+				lifecycle := FILE_TEST_LIFECYCLE.CLEANING_UP;
+				AssertTrue(Condition := FALSE, Message := 'Caller-exception manager must accept Start');
+			END_IF
+
+		FILE_CALLER_CLEANUP_TEST_PHASE.INJECT_CALLER_EXCEPTION:
+			manager.Execute();
+
+			IF manager.ResourceManager.ResourceAcquired AND_THEN manager.RunningSubstate.Processing THEN
+				AssertTrue(
+					Condition := manager.State.Running,
+					Message := 'The caller fault must occur while a resource is retained'
+				);
+
+				__TRY
+					TOF_Core.Exceptions.ThrowStandard(
+						sourceNamespaceName := 'Tests',
+						sourceClassName := 'FileSystemIntegrationTest',
+						sourcePOUName := __POUNAME(),
+						sourcePosition := __POSITION(),
+						message := "Synthetic exception in the file-scenario caller"
+					);
+				__CATCH(exceptionCode)
+					caughtException := TOF_Core.ExceptionManager.GetLastException(
+						exceptionCode := exceptionCode,
+						catchPointNamespaceName := 'Tests',
+						catchPointPOUName := __POUNAME(),
+						catchPointPosition := __POSITION()
+					);
+					callerExceptionCaught := __QUERYINTERFACE(caughtException, standardException);
+					phase := FILE_CALLER_CLEANUP_TEST_PHASE.DRAIN_MANAGER;
+				__ENDTRY
+
+			ELSIF manager.State.Stopped THEN
+				lifecycle := FILE_TEST_LIFECYCLE.CLEANING_UP;
+				AssertTrue(Condition := FALSE, Message := 'Caller fault requires successful resource acquisition');
+			END_IF
+
+		FILE_CALLER_CLEANUP_TEST_PHASE.DRAIN_MANAGER:
+			manager.Cancel();
+			manager.Execute();
+
+			IF manager.State.Stopped THEN
+				AssertTrue(Condition := callerExceptionCaught, Message := 'The caller exception must have been caught');
+				AssertTrue(
+					Condition := manager.FinalStopReason.ExternalCancel,
+					Message := 'Caller recovery must cancel the retained manager'
+				);
+				AssertFalse(
+					Condition := manager.ResourceManager.ResourceAcquired,
+					Message := 'Caller recovery must finish the release attempt'
+				);
+				phase := FILE_CALLER_CLEANUP_TEST_PHASE.CLEANUP;
+			END_IF
+
+		FILE_CALLER_CLEANUP_TEST_PHASE.CLEANUP:
+			directory.Cleanup();
+
+			IF directory.CleanupComplete THEN
+				AssertTrue(
+					Condition := directory.CleanupSucceeded,
+					Message := 'Caller recovery must remove owned artifacts after drain'
+				);
+				lifecycle := FILE_TEST_LIFECYCLE.CLEANING_UP;
+			END_IF
+
+	END_CASE
+
+__CATCH
+	lifecycle := FILE_TEST_LIFECYCLE.CLEANING_UP;
+	AssertTrue(Condition := FALSE, Message := 'Unexpected caller recovery failure; later cycles continue cleanup');
+__ENDTRY
+
+IF lifecycle = FILE_TEST_LIFECYCLE.RUNNING_SCENARIO AND_THEN deadline.Q THEN
+	lifecycle := FILE_TEST_LIFECYCLE.CLEANING_UP;
+	AssertTrue(Condition := FALSE, Message := 'Caller-exception recovery exceeded 15 seconds');
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+  </POU>
+</TcPlcObject>

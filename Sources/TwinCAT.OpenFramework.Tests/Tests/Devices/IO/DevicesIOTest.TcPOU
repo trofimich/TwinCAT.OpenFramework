@@ -1,0 +1,674 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1" ProductVersion="3.1.4026.21">
+  <POU Name="DevicesIOTest" Id="{38d24242-5a60-468d-955c-bbf35ec51b93}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+SPDX-FileCopyrightText: Â© 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+SPDX-License-Identifier: MIT
+License: https://opensource.org/license/mit
+*)
+
+(*!
+<summary>Comprehensive test suite for TwinCAT_OpenFramework_Devices_IO components.</summary>
+<description>
+Verifies digital inputs/outputs, contact inversion, analog scaling, status decoding,
+online change preservation, and division-by-zero defense.
+</description>
+*)
+
+FUNCTION_BLOCK DevicesIOTest EXTENDS TcUnit.FB_TestSuite
+VAR_STAT
+	{attribute 'hide'}
+	_ClassName : STRING := __POUNAME();
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[TestDigitalInputNormallyOpen();
+TestDigitalInputNormallyClosed();
+TestDigitalInputUnbound();
+TestDigitalOutputNormallyOpen();
+TestDigitalOutputNormallyClosed();
+TestDirectAnalogValueConverter();
+TestAnalogInputScalingAndScalarBinding();
+TestAnalogInputChannelStatusAndErrorReporting();
+TestAnalogInputStatusBitDecoding();
+TestAnalogOutputScaling();
+TestDynamicRangeAnalogValueConverter();
+TestStaticConverterCopiesLimits();
+TestRangeConverterBoundaryClampingAndZeroDivision();]]></ST>
+    </Implementation>
+    <Folder Name="Tests" Id="{05bec5d2-befe-4cef-97e6-8d538d591d5f}" />
+    <Property Name="ClassName" Id="{28d8276f-144b-4734-bf03-a7bcd2dbd76b}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{efb9b6cb-8bdc-45c6-bce6-8f55ec0576da}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ClassName REF= _ClassName;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="NamespaceName" Id="{9f90b4ab-cf97-42cd-8f96-0d7f48df40b6}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{c1d05b40-90a8-4995-a1de-5e63eacfb1bd}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[NamespaceName REF= CurrentNamespace.Name;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="TestAnalogInputChannelStatusAndErrorReporting" Id="{5a961e5a-271f-46e9-928d-54f0f50a72df}" FolderPath="Tests\">
+      <Declaration><![CDATA[(*!
+<summary>Checks borrowed 16-bit channel binding, live status changes, recovery and unbinding.</summary>
+<description>
+Uses two ordinary words as the Status/Value process image and a typed channel view; no located inputs are written.
+The component and simulated channel live in the same call. Assertions also check that binding leaves source data
+unchanged and that an invalid reference clears the binding before a subsequent valid rebind.
+</description>
+*)
+METHOD PRIVATE TestAnalogInputChannelStatusAndErrorReporting
+VAR
+	converter : TOF_Devices_IO.DirectAnalogValueConverter;
+	ai : TOF_Devices_IO.AnalogInput(name := "AI_Chan", parent := 0, converter := converter);
+	//! <summary>Status word at offset 0 and signed 16-bit value bits at offset 1.</summary>
+	channelData : ARRAY [0..1] OF WORD;
+	channel : POINTER TO TOF_IOModels.ANALOG_INPUT_INT_CHANNEL;
+	unboundChannel : REFERENCE TO TOF_IOModels.ANALOG_INPUT_INT_CHANNEL;
+END_VAR
+VAR_INST
+	testFinished : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN
+	RETURN;
+END_IF
+
+TEST(TestName := 'TestAnalogInputChannelStatusAndErrorReporting');
+
+ai.Initialize();
+channel := ADR(channelData);
+channelData[0] := WORD#16#0000;
+channelData[1] := WORD#1000;
+ai.BindToInt16IO(rawValues := channel^);
+AssertTrue(Condition := ai.BoundToIO, Message := 'A valid simulated channel must bind');
+AssertTrue(
+	Condition := channelData[0] = WORD#16#0000 AND_THEN channelData[1] = WORD#1000,
+	Message := 'Binding must leave both source words unchanged'
+);
+ai.ProcessInput();
+
+AssertFalse(
+	Condition := ai.HasError,
+	Message := 'AnalogInput should not have error when Status is 0'
+);
+
+AssertEquals_LREAL(
+	Expected := LREAL#1000.0,
+	Actual := ai.Value,
+	Delta := LREAL#0.0,
+	Message := 'The bound component must read the simulated raw value'
+);
+
+// Simulate hardware channel error (bit 6 = 1)
+channelData[0] := WORD#16#0040;
+ai.ProcessInput();
+
+AssertTrue(
+	Condition := ai.Status.Error,
+	Message := 'Status.Error should be TRUE on bit 6'
+);
+
+AssertTrue(
+	Condition := ai.HasError,
+	Message := 'AnalogInput.HasError should be TRUE when Status.Error is set'
+);
+
+// Simulate hardware recovery (bit 6 = 0)
+channelData[0] := WORD#16#0000;
+ai.ProcessInput();
+
+AssertFalse(
+	Condition := ai.Status.Error,
+	Message := 'Status.Error should be FALSE after recovery'
+);
+
+AssertFalse(
+	Condition := ai.HasError,
+	Message := 'AnalogInput.HasError should clear automatically'
+);
+
+channelData[0] := WORD#16#0040;
+channelData[1] := WORD#2000;
+ai.BindToInt16IO(rawValues := unboundChannel);
+AssertFalse(Condition := ai.BoundToIO, Message := 'An invalid reference must clear the value binding');
+ai.ProcessInput();
+AssertFalse(Condition := ai.Status.Error, Message := 'An invalid reference must also clear the status binding');
+AssertTrue(
+	Condition := channelData[0] = WORD#16#0040 AND_THEN channelData[1] = WORD#2000,
+	Message := 'Unbinding must leave source data unchanged'
+);
+channelData[0] := WORD#16#0000;
+ai.BindToInt16IO(rawValues := channel^);
+ai.ProcessInput();
+AssertTrue(Condition := ai.BoundToIO, Message := 'A valid channel must bind again after unbinding');
+AssertEquals_LREAL(
+	Expected := LREAL#2000.0,
+	Actual := ai.Value,
+	Delta := LREAL#0.0,
+	Message := 'Rebinding must read the current source value'
+);
+AssertTrue(
+	Condition := channelData[0] = WORD#16#0000 AND_THEN channelData[1] = WORD#2000,
+	Message := 'Input processing and rebinding must leave source data unchanged'
+);
+
+testFinished := TRUE;
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="TestAnalogInputScalingAndScalarBinding" Id="{c581e3af-9611-430d-86c2-cb29575e0e08}" FolderPath="Tests\">
+      <Declaration><![CDATA[METHOD PRIVATE TestAnalogInputScalingAndScalarBinding
+VAR
+	converter : TOF_Devices_IO.DirectAnalogValueConverter;
+	ai : TOF_Devices_IO.AnalogInput("AI_Scalar", parent := 0, converter := converter);
+	rawInt : INT;
+END_VAR
+VAR_INST
+	testFinished : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN
+	RETURN;
+END_IF
+
+TEST(TestName := 'TestAnalogInputScalingAndScalarBinding');
+
+ai.Initialize();
+ai.BindToInt16Value(rawInt);
+
+AssertTrue(
+	Condition := ai.BoundToIO,
+	Message := 'AnalogInput should be BoundToIO after BindToInt16Value'
+);
+
+rawInt := 5678;
+ai.ProcessInput();
+
+AssertEquals_LREAL(
+	Expected := 5678.0,
+	Actual := ai.Value,
+	Delta := 0.001,
+	Message := 'AnalogInput.Value should match raw INT input'
+);
+
+AssertFalse(
+	Condition := ai.HasError,
+	Message := 'AnalogInput should work without error when status is unbound'
+);
+
+testFinished := TRUE;
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="TestAnalogInputStatusBitDecoding" Id="{0af81e5e-f0ce-4444-90a4-51c249db8b35}" FolderPath="Tests\">
+      <Declaration><![CDATA[METHOD PRIVATE TestAnalogInputStatusBitDecoding
+VAR
+	statusFB : TOF_Devices_IO.ANALOG_INPUT_STATUS;
+END_VAR
+VAR_INST
+	testFinished : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN
+	RETURN;
+END_IF
+
+TEST(TestName := 'TestAnalogInputStatusBitDecoding');
+
+statusFB.SetStatus(status := 16#0001);
+AssertTrue(Condition := statusFB.Underrange, Message := 'Bit 0 must be Underrange');
+
+statusFB.SetStatus(status := 16#0002);
+AssertTrue(Condition := statusFB.Overrange, Message := 'Bit 1 must be Overrange');
+
+statusFB.SetStatus(status := 16#0004);
+AssertTrue(Condition := statusFB.ValueSmallerOrEqualLimit1, Message := 'Bit 2 must be Limit 1 smaller');
+
+statusFB.SetStatus(status := 16#0008);
+AssertTrue(Condition := statusFB.ValueBiggerOrEqualLimit1, Message := 'Bit 3 must be Limit 1 bigger');
+
+statusFB.SetStatus(status := 16#0010);
+AssertTrue(Condition := statusFB.ValueSmallerOrEqualLimit2, Message := 'Bit 4 must be Limit 2 smaller');
+
+statusFB.SetStatus(status := 16#0020);
+AssertTrue(Condition := statusFB.ValueBiggerOrEqualLimit2, Message := 'Bit 5 must be Limit 2 bigger');
+
+statusFB.SetStatus(status := 16#0040);
+AssertTrue(Condition := statusFB.Error, Message := 'Bit 6 must be Error');
+AssertFalse(Condition := statusFB.TxPDOState, Message := 'Bit 6 must NOT be TxPDOState');
+
+statusFB.SetStatus(status := 16#4000);
+AssertTrue(Condition := statusFB.TxPDOState, Message := 'Bit 14 must be TxPDOState');
+AssertFalse(Condition := statusFB.Error, Message := 'Bit 14 must NOT be Error');
+
+statusFB.SetStatus(status := 16#8000);
+AssertTrue(Condition := statusFB.TxPDOToggle, Message := 'Bit 15 must be TxPDOToggle');
+
+testFinished := TRUE;
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="TestAnalogOutputScaling" Id="{463c0651-8c73-48f5-a3f4-e4301b9a64b9}" FolderPath="Tests\">
+      <Declaration><![CDATA[METHOD PRIVATE TestAnalogOutputScaling
+VAR
+	converter : TOF_Devices_IO.DirectAnalogValueConverter;
+	ao : TOF_Devices_IO.AnalogOutput("AO_Test", parent := 0, converter := converter);
+	rawInt : INT;
+END_VAR
+VAR_INST
+	testFinished : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN
+	RETURN;
+END_IF
+
+TEST(TestName := 'TestAnalogOutputScaling');
+
+ao.Initialize();
+ao.BindToInt16IO(rawInt);
+
+ao.Value := 750.0;
+ao.ProcessOutput();
+
+AssertEquals_INT(
+	Expected := 750,
+	Actual := rawInt,
+	Message := 'Raw INT output should match 750'
+);
+
+testFinished := TRUE;
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="TestStaticConverterCopiesLimits" Id="{03a71e03-fe32-4124-8d38-f41f4c781972}" FolderPath="Tests\">
+      <Declaration><![CDATA[(*!
+<summary>Checks that static converter construction copies limits independently of the input unions.</summary>
+<description>
+Mutates constructor inputs after construction and checks the original conversion limits remain effective.
+Real online change requires runtime relocation and is verified manually; explicit FB_init is not a simulation.
+</description>
+*)
+METHOD PRIVATE TestStaticConverterCopiesLimits
+VAR
+	minRaw : TOF_Devices_IO.RAW_ANALOG_VALUE;
+	maxRaw : TOF_Devices_IO.RAW_ANALOG_VALUE := TOF_Devices_IO.RawAnalogValues.FromInt16(value := 1000);
+	staticConv : TOF_Devices_IO.StaticRangeAnalogValueConverter(
+		minAnalogValue := 0.0,
+		maxAnalogValue := 100.0,
+		minRawValue := minRaw,
+		maxRawValue := maxRaw
+	);
+	resultRaw : TOF_Devices_IO.RAW_ANALOG_VALUE;
+END_VAR
+VAR_INST
+	testFinished : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN
+	RETURN;
+END_IF
+
+TEST(TestName := 'TestStaticConverterCopiesLimits');
+
+// Changing source unions must not change the stored constructor limits.
+maxRaw.Int32 := 0;
+
+AssertEquals_LREAL(
+	Expected := 100.0,
+	Actual := staticConv.MaxAnalogValue,
+	Delta := 0.001,
+	Message := 'Constructor must preserve the configured analog maximum'
+);
+
+resultRaw := staticConv.ConvertAnalogValueToRawValue(
+	analogValue := 50.0,
+	rawValueType := TOF_Devices_IO.RAW_ANALOG_VALUE_TYPE.INT16
+);
+
+AssertEquals_INT(
+	Expected := 500,
+	Actual := resultRaw.Int16,
+	Message := 'Conversion must use copied raw limits after the source changes'
+);
+
+testFinished := TRUE;
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="TestDigitalInputNormallyClosed" Id="{2167409e-64ee-4888-8669-dade645d3964}" FolderPath="Tests\">
+      <Declaration><![CDATA[METHOD PRIVATE TestDigitalInputNormallyClosed
+VAR
+	input : TOF_Devices_IO.DigitalInput("DI_NC", parent := 0);
+	rawBool : BOOL;
+END_VAR
+VAR_INST
+	testFinished : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN
+	RETURN;
+END_IF
+
+TEST(TestName := 'TestDigitalInputNormallyClosed');
+
+input.Initialize();
+input.ContactType := TOF_Devices_IO.CONTACT_TYPE.NORMALLY_CLOSED;
+input.BindToIO(rawBool);
+
+rawBool := FALSE;
+input.ProcessInput();
+AssertTrue(Condition := input.Value, Message := 'Value should be inverted TRUE for NC contact');
+
+rawBool := TRUE;
+input.ProcessInput();
+AssertFalse(Condition := input.Value, Message := 'Value should be inverted FALSE for NC contact');
+
+testFinished := TRUE;
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="TestDigitalInputNormallyOpen" Id="{97a80229-f525-4940-a93b-c52885970efb}" FolderPath="Tests\">
+      <Declaration><![CDATA[METHOD PRIVATE TestDigitalInputNormallyOpen
+VAR
+	input : TOF_Devices_IO.DigitalInput("DI_NO", parent := 0);
+	rawBool : BOOL;
+END_VAR
+VAR_INST
+	testFinished : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN
+	RETURN;
+END_IF
+
+TEST(TestName := 'TestDigitalInputNormallyOpen');
+
+input.Initialize();
+input.BindToIO(rawBool);
+
+AssertTrue(Condition := input.BoundToIO, Message := 'DigitalInput should be bound to IO');
+
+rawBool := FALSE;
+input.ProcessInput();
+AssertFalse(Condition := input.Value, Message := 'Value should be FALSE');
+
+rawBool := TRUE;
+input.ProcessInput();
+AssertTrue(Condition := input.Value, Message := 'Value should be TRUE');
+AssertTrue(Condition := input.Changed, Message := 'Changed should be TRUE on transition');
+
+input.ProcessInput();
+AssertFalse(Condition := input.Changed, Message := 'Changed should be FALSE when state remains same');
+
+testFinished := TRUE;
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="TestDigitalInputUnbound" Id="{e5a734a7-8b5d-4901-a846-c4ceb69476f6}" FolderPath="Tests\">
+      <Declaration><![CDATA[METHOD PRIVATE TestDigitalInputUnbound
+VAR
+	input : TOF_Devices_IO.DigitalInput("DI_Unbound", parent := 0);
+END_VAR
+VAR_INST
+	testFinished : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN
+	RETURN;
+END_IF
+
+TEST(TestName := 'TestDigitalInputUnbound');
+
+input.Initialize();
+AssertFalse(Condition := input.BoundToIO, Message := 'BoundToIO should be FALSE');
+
+input.ProcessInput();
+AssertFalse(Condition := input.Value, Message := 'Value should default to FALSE');
+AssertFalse(Condition := input.HasError, Message := 'Unbound input should not report error');
+
+testFinished := TRUE;
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="TestDigitalOutputNormallyClosed" Id="{0c8fcbb8-c7fa-4f2e-8492-357d7f39096a}" FolderPath="Tests\">
+      <Declaration><![CDATA[METHOD PRIVATE TestDigitalOutputNormallyClosed
+VAR
+	output : TOF_Devices_IO.DigitalOutput("DO_NC", parent := 0);
+	rawBool : BOOL;
+END_VAR
+VAR_INST
+	testFinished : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN
+	RETURN;
+END_IF
+
+TEST(TestName := 'TestDigitalOutputNormallyClosed');
+
+output.Initialize();
+output.ContactType := TOF_Devices_IO.CONTACT_TYPE.NORMALLY_CLOSED;
+output.BindToIO(rawBool);
+
+output.Value := TRUE;
+output.ProcessOutput();
+AssertFalse(Condition := rawBool, Message := 'rawBool should be inverted FALSE for NC contact');
+
+output.Value := FALSE;
+output.ProcessOutput();
+AssertTrue(Condition := rawBool, Message := 'rawBool should be inverted TRUE for NC contact');
+
+testFinished := TRUE;
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="TestDigitalOutputNormallyOpen" Id="{d2d18fb3-44f6-40f7-81b7-8645fe09312c}" FolderPath="Tests\">
+      <Declaration><![CDATA[(*!
+<summary>Checks logical output changes before processing and their acknowledgement after processing.</summary>
+<description>Changed compares the current value with the last processed value in both transition directions.</description>
+*)
+METHOD PRIVATE TestDigitalOutputNormallyOpen
+VAR
+	output : TOF_Devices_IO.DigitalOutput("DO_NO", parent := 0);
+	rawBool : BOOL;
+END_VAR
+VAR_INST
+	testFinished : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN
+	RETURN;
+END_IF
+
+TEST(TestName := 'TestDigitalOutputNormallyOpen');
+
+output.Initialize();
+output.BindToIO(rawValue := rawBool);
+
+output.Value := TRUE;
+AssertTrue(Condition := output.Changed, Message := 'Changed must be TRUE before processing a new value');
+output.ProcessOutput();
+AssertTrue(Condition := rawBool, Message := 'rawBool should be TRUE');
+AssertFalse(Condition := output.Changed, Message := 'Processing acknowledges the current value');
+
+output.Value := FALSE;
+AssertTrue(Condition := output.Changed, Message := 'The reverse transition must also be pending');
+output.ProcessOutput();
+AssertFalse(Condition := output.Changed, Message := 'Processing acknowledges the reverse transition');
+AssertFalse(Condition := rawBool, Message := 'rawBool should be FALSE');
+
+testFinished := TRUE;
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="TestDirectAnalogValueConverter" Id="{51d606a6-291a-4faf-bed3-2b0ad9e9fb73}" FolderPath="Tests\">
+      <Declaration><![CDATA[METHOD PRIVATE TestDirectAnalogValueConverter
+VAR
+	converter : TOF_Devices_IO.DirectAnalogValueConverter;
+	rawUnion : TOF_Devices_IO.RAW_ANALOG_VALUE;
+	valLReal : LREAL;
+END_VAR
+VAR_INST
+	testFinished : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN
+	RETURN;
+END_IF
+
+TEST(TestName := 'TestDirectAnalogValueConverter');
+
+// INT16
+rawUnion := converter.ConvertAnalogValueToRawValue(
+	analogValue := 1234.0,
+	rawValueType := TOF_Devices_IO.RAW_ANALOG_VALUE_TYPE.INT16
+);
+AssertEquals_INT(Expected := 1234, Actual := rawUnion.Int16, Message := 'INT16 raw value 1:1');
+
+valLReal := converter.ConvertRawValueToAnalogValue(
+	rawValue := rawUnion,
+	rawValueType := TOF_Devices_IO.RAW_ANALOG_VALUE_TYPE.INT16
+);
+AssertEquals_LREAL(Expected := 1234.0, Actual := valLReal, Delta := 0.001, Message := 'INT16 analog value 1:1');
+
+// INT32
+rawUnion := converter.ConvertAnalogValueToRawValue(
+	analogValue := 100000.0,
+	rawValueType := TOF_Devices_IO.RAW_ANALOG_VALUE_TYPE.INT32
+);
+AssertEquals_DINT(Expected := 100000, Actual := rawUnion.Int32, Message := 'INT32 raw value 1:1');
+
+valLReal := converter.ConvertRawValueToAnalogValue(
+	rawValue := rawUnion,
+	rawValueType := TOF_Devices_IO.RAW_ANALOG_VALUE_TYPE.INT32
+);
+AssertEquals_LREAL(Expected := 100000.0, Actual := valLReal, Delta := 0.001, Message := 'INT32 analog value 1:1');
+
+testFinished := TRUE;
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="TestDynamicRangeAnalogValueConverter" Id="{3d70f566-2dfa-4ac4-bb14-e177ec39f47f}" FolderPath="Tests\">
+      <Declaration><![CDATA[METHOD PRIVATE TestDynamicRangeAnalogValueConverter
+VAR
+	minA : LREAL := 0.0;
+	maxA : LREAL := 100.0;
+	minR : TOF_Devices_IO.RAW_ANALOG_VALUE;
+	maxR : TOF_Devices_IO.RAW_ANALOG_VALUE;
+	dynConv : TOF_Devices_IO.DynamicRangeAnalogValueConverter(
+		minA, maxA, minR, maxR
+	);
+	rawUnion : TOF_Devices_IO.RAW_ANALOG_VALUE;
+END_VAR
+VAR_INST
+	testFinished : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN
+	RETURN;
+END_IF
+
+TEST(TestName := 'TestDynamicRangeAnalogValueConverter');
+
+minR.Int32 := 0;
+minR.Int16 := 0;
+maxR.Int32 := 0;
+maxR.Int16 := 1000;
+
+rawUnion := dynConv.ConvertAnalogValueToRawValue(
+	analogValue := 50.0,
+	rawValueType := TOF_Devices_IO.RAW_ANALOG_VALUE_TYPE.INT16
+);
+AssertEquals_INT(Expected := 500, Actual := rawUnion.Int16, Message := 'Initial dynamic scale');
+
+// Modify max range dynamically at runtime
+maxA := 200.0;
+
+rawUnion := dynConv.ConvertAnalogValueToRawValue(
+	analogValue := 50.0,
+	rawValueType := TOF_Devices_IO.RAW_ANALOG_VALUE_TYPE.INT16
+);
+AssertEquals_INT(Expected := 250, Actual := rawUnion.Int16, Message := 'Dynamically updated scale');
+
+testFinished := TRUE;
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="TestRangeConverterBoundaryClampingAndZeroDivision" Id="{5e71ef60-8586-4c7d-9327-9418b0a980ee}" FolderPath="Tests\">
+      <Declaration><![CDATA[(*!
+<summary>Checks clamping and equal-limit conversion with raw limits supplied at construction.</summary>
+<description>Constructor arguments contain the final raw values before the static converter copies them.</description>
+*)
+METHOD PRIVATE TestRangeConverterBoundaryClampingAndZeroDivision
+VAR
+	minRaw : TOF_Devices_IO.RAW_ANALOG_VALUE;
+	clampConv : TOF_Devices_IO.StaticRangeAnalogValueConverter(
+		minAnalogValue := 0.0,
+		maxAnalogValue := 100.0,
+		minRawValue := TOF_Devices_IO.RawAnalogValues.FromInt16(value := 0),
+		maxRawValue := TOF_Devices_IO.RawAnalogValues.FromInt16(value := 1000)
+	);
+	zeroConv : TOF_Devices_IO.StaticRangeAnalogValueConverter(
+		minAnalogValue := 0.0,
+		maxAnalogValue := 0.0,
+		minRawValue := TOF_Devices_IO.RawAnalogValues.FromInt16(value := 0),
+		maxRawValue := TOF_Devices_IO.RawAnalogValues.FromInt16(value := 0)
+	);
+	rawResult : TOF_Devices_IO.RAW_ANALOG_VALUE;
+	analogResult : LREAL;
+END_VAR
+VAR_INST
+	testFinished : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN
+	RETURN;
+END_IF
+
+TEST(TestName := 'TestRangeConverterBoundaryClampingAndZeroDivision');
+
+minRaw.Int32 := 0;
+minRaw.Int16 := 0;
+
+// Test clamping above maximum
+rawResult := clampConv.ConvertAnalogValueToRawValue(
+	analogValue := 150.0,
+	rawValueType := TOF_Devices_IO.RAW_ANALOG_VALUE_TYPE.INT16
+);
+AssertEquals_INT(Expected := 1000, Actual := rawResult.Int16, Message := 'Clamped to max limit');
+
+// Test clamping below minimum
+rawResult := clampConv.ConvertAnalogValueToRawValue(
+	analogValue := -50.0,
+	rawValueType := TOF_Devices_IO.RAW_ANALOG_VALUE_TYPE.INT16
+);
+AssertEquals_INT(Expected := 0, Actual := rawResult.Int16, Message := 'Clamped to min limit');
+
+// Test equal limits (0 to 0) defense against Division by Zero
+analogResult := zeroConv.ConvertRawValueToAnalogValue(
+	rawValue := minRaw,
+	rawValueType := TOF_Devices_IO.RAW_ANALOG_VALUE_TYPE.INT16
+);
+AssertEquals_LREAL(
+	Expected := 0.0,
+	Actual := analogResult,
+	Delta := 0.001,
+	Message := 'Equal limits must safely return without Division by Zero'
+);
+
+testFinished := TRUE;
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+  </POU>
+</TcPlcObject>

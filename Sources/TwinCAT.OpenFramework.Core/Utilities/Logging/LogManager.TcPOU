@@ -8,20 +8,27 @@ License: https://opensource.org/license/mit
 *)
 
 (*!
-<summary>Routes diagnostics through the configured logger with topic filtering and message numbering.</summary>
+<summary>Routes diagnostics and cyclically services loggers in cyclic PLC tasks.</summary>
 <description>
-TryLog calls select an explicit logger first, then the calling cyclic task override, then the shared Logger
-(built-in AdsLogger when unset). Logger references are borrowed and must remain valid during use; routing does
-not transfer ownership or provide synchronization. Counter updates and number snapshots are serialized by
-short critical sections. Filters, backends, configuration changes and external counter reads or writes are not
-protected by this lock. Configure shared Logger, Filter and MessageNumberFormat before parallel logging
-starts. Runtime changes require application-level synchronization with all affected TryLog and Execute calls;
-the manager does not provide it. Keep replaced logger and filter instances alive until their in-flight calls
-finish. A filter shared by tasks must support concurrent ShouldLog calls and synchronize its own mutable state
-and rule updates. The assigned number describes numbering order, not backend delivery order. Total counters
-count requests reaching filtering after the initial null or empty-input guard. PassedFilter counters count
-requests that pass filtering and are incremented before calling the logger, regardless of its result. Message
-numbers use these post-filter counters and can have gaps in successfully written output. Exception logging
+LogManager is intended for logger use and cyclic servicing within PLC tasks. It provides each calling cyclic
+PLC task with its logging destination, topic filtering, message numbering and cyclic logger execution.
+Logging from non-cyclic contexts must be arranged separately by the application, outside LogManager.
+TryLog calls use CurrentTaskLogger: the calling cyclic task's borrowed logger, or its own built-in AdsLogger.
+No shared fallback or explicit per-call destination is provided. Outside a valid cyclic task, TryLog returns
+FALSE before filtering, counters or backend calls, and ExecuteCurrentTaskLogger does no work. Logger references
+must remain valid during use; routing does not transfer ownership. Each ordinary backend belongs to one task;
+use the QueuedLogger wrapper from the Loggers library to share a backend through its owning cyclic task.
+Every task must call ExecuteCurrentTaskLogger cyclically, directly or through AutomationRunner. No manager lock
+spans backend calls. Counter updates and number snapshots are serialized by short critical sections. Filters,
+backends, configuration changes and external counter reads or writes are not protected by this lock. Configure
+shared Filter and MessageNumberFormat before parallel logging starts; runtime changes require application-level
+synchronization with affected calls. Replace CurrentTaskLogger only in its own task between logging and service
+calls, without reentry. Keep replaced logger and filter instances alive until their in-flight calls finish.
+A filter shared by tasks must support concurrent ShouldLog calls and synchronize its own mutable state and
+rule updates. The assigned number describes numbering order, not backend delivery order. Total counters
+count cyclic requests reaching filtering after the initial null or empty-input guard. PassedFilter counters
+count requests that pass filtering and are incremented before calling the logger, regardless of its result.
+Message numbers use these post-filter counters and can have gaps in successfully written output. Exception logging
 accepts IReadOnlyException and reads borrowed diagnostics without transferring ownership. Implementations must
 not retain exception references beyond their task cleanup. A logger or filter invoked by LogManager must not
 call back into that manager, directly or indirectly, while handling the invocation. TryLog methods return
@@ -33,6 +40,7 @@ expand aggregate exceptions.
 </description>
 *)
 
+{attribute 'no_explicit_call' := 'do not call this function block directly'}
 PROGRAM LogManager
 VAR_INPUT
 	(*!
@@ -59,10 +67,10 @@ VAR
 	{attribute 'hide'} 
 	_ClassName : STRING := __POUNAME();
 
+	//! <summary>Independent standard ADS destination and service-failure channel for each cyclic task.</summary>
 	{attribute 'hide'} 
-	_DefaultLogger : AdsLogger;
-	{attribute 'hide'} 
-	_Logger : ILogger;
+	_DefaultLoggers : ARRAY [1..System.TASK_COUNT] OF AdsLogger;
+	//! <summary>Borrowed destinations assigned only by their owning cyclic tasks; zero selects standard ADS.</summary>
 	{attribute 'hide'}
 	_TaskLoggers : ARRAY [1..System.TASK_COUNT] OF ILogger;
 	{attribute 'hide'} 
@@ -74,7 +82,11 @@ END_VAR]]></Declaration>
       <ST><![CDATA[]]></ST>
     </Implementation>
     <Property Name="ClassName" Id="{605c7ee8-fe66-40d6-9aa1-b8b2828392e5}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Borrows the compiler-initialized manager name for diagnostics.</summary>
+<description>Read-only program storage; the caller must not modify the referenced string.</description>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
       <Get Name="Get" Id="{f1ca54d4-2382-4af1-96ca-fc4dbaf9eb4e}">
         <Declaration><![CDATA[]]></Declaration>
@@ -83,24 +95,84 @@ PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
         </Implementation>
       </Get>
     </Property>
-    <Method Name="Execute" Id="{13c3c36e-9fa4-45b8-9a63-156fe14d049b}">
+    <Property Name="CurrentTaskLogger" Id="{8f399577-3e03-44ae-a287-168cdae9d0ec}">
       <Declaration><![CDATA[(*!
-<summary>Advances the shared fallback logger without propagating exceptions.</summary>
+<summary>Gets or assigns the logging destination of the calling cyclic task.</summary>
 <description>
-Uses the shared Logger property, regardless of task overrides or explicit destinations in TryLog calls. The
-caller must arrange Execute separately for other loggers that require cyclic processing. This method does not
-serialize concurrent backend calls. If a backend violates the no-throw contract, attempts independent ADS
-diagnostics. Failures of that diagnostic path are also contained. Does not clear terminal allocation state.
+The getter returns the task's assigned logger or its own built-in AdsLogger. Assigning zero restores that
+standard destination. Outside a valid cyclic task, the getter returns zero and the setter changes nothing;
+no exception is raised. References are borrowed; keep the assigned logger alive while configured and during
+calls using it. Assignment does not initialize, execute or delete either logger. Configure or replace only
+from the owning task between logging and service calls, without reentry; finish pending backend work before
+destruction. An ordinary backend must not be assigned to different tasks. To share a backend, assign the same
+QueuedLogger wrapper from the Loggers library to its producer tasks, including its configured cyclic owner;
+only the wrapper may access the backend. The manager does not synchronize backend callbacks or transfer
+ownership. ExecuteCurrentTaskLogger services the destination returned by this getter.
 </description>
 *)
-METHOD Execute
+PROPERTY CurrentTaskLogger : ILogger]]></Declaration>
+      <Get Name="Get" Id="{c9c1cefb-1091-483c-b6a3-ca70a961903f}">
+        <Declaration><![CDATA[VAR
+	taskIndex : DINT;
+END_VAR]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[taskIndex := System.GetCurrentTaskIndex();
+
+IF taskIndex < 1 OR_ELSE taskIndex > System.TASK_COUNT THEN
+	RETURN;
+END_IF
+
+IF _TaskLoggers[taskIndex] = 0 THEN
+	CurrentTaskLogger := _DefaultLoggers[taskIndex];
+ELSE
+	CurrentTaskLogger := _TaskLoggers[taskIndex];
+END_IF]]></ST>
+        </Implementation>
+      </Get>
+      <Set Name="Set" Id="{82c82d05-b526-431e-b338-c69fda2bdd1a}">
+        <Declaration><![CDATA[VAR
+	taskIndex : DINT;
+END_VAR]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[taskIndex := System.GetCurrentTaskIndex();
+
+IF taskIndex < 1 OR_ELSE taskIndex > System.TASK_COUNT THEN
+	RETURN;
+END_IF
+
+_TaskLoggers[taskIndex] := CurrentTaskLogger;]]></ST>
+        </Implementation>
+      </Set>
+    </Property>
+    <Method Name="ExecuteCurrentTaskLogger" Id="{13c3c36e-9fa4-45b8-9a63-156fe14d049b}">
+      <Declaration><![CDATA[(*!
+<summary>Advances the calling cyclic task's logger without propagating exceptions.</summary>
+<description>
+Uses the same CurrentTaskLogger destination as TryLog calls. Outside a valid cyclic task, returns without
+backend calls or diagnostics. Call cyclically from every task that uses the manager; AutomationRunner does
+this for its task. Does not lock backend callbacks. An ordinary backend must belong to this task; a shared
+QueuedLogger services its backend only in its configured owner task. If a backend violates the no-throw
+contract, attempts independent diagnostics through this task's built-in AdsLogger. Secondary diagnostic
+failures are contained. Does not clear terminal allocation state or replace the task-boundary fatal check.
+</description>
+*)
+METHOD ExecuteCurrentTaskLogger
 VAR
+	taskIndex : DINT;
+	selectedLogger : ILogger;
 	exceptionCode : __SYSTEM.ExceptionCode;
 	exception : IException;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[__TRY
-	Logger.Execute();
+        <ST><![CDATA[taskIndex := System.GetCurrentTaskIndex();
+
+IF taskIndex < 1 OR_ELSE taskIndex > System.TASK_COUNT THEN
+	RETURN;
+END_IF
+
+__TRY
+	selectedLogger := CurrentTaskLogger;
+	selectedLogger.Execute();
 __CATCH(exceptionCode)
 	__TRY
 		exception := ExceptionManager.GetLastException(
@@ -110,7 +182,7 @@ __CATCH(exceptionCode)
 			catchPointPosition := __POSITION()
 		);
 	
-		_DefaultLogger.TryLogException(exception := exception, severity := ERROR_SEVERITY.ERROR);
+		_DefaultLoggers[taskIndex].TryLogException(exception := exception, severity := ERROR_SEVERITY.ERROR);
 	__CATCH
 		// A secondary diagnostic failure must not escape to the caller.
 	__ENDTRY
@@ -142,35 +214,6 @@ PROPERTY FINAL Filter : ILogFilter]]></Declaration>
         </Implementation>
       </Set>
     </Property>
-    <Property Name="Logger" Id="{8f399577-3e03-44ae-a287-168cdae9d0ec}">
-      <Declaration><![CDATA[(*!
-<summary>Gets or sets the shared fallback logger.</summary>
-<description>
-Zero selects the built-in AdsLogger. The getter returns this shared fallback, not a task override. References
-are borrowed; this property does not transfer ownership or synchronize configuration changes. Assign before
-parallel logging starts. Runtime replacement requires application-level synchronization with TryLog and
-Execute calls; keep the old logger alive until all calls using it finish and complete any pending backend work
-before destruction.
-</description>
-*)
-PROPERTY Logger : ILogger]]></Declaration>
-      <Get Name="Get" Id="{c9c1cefb-1091-483c-b6a3-ca70a961903f}">
-        <Declaration><![CDATA[]]></Declaration>
-        <Implementation>
-          <ST><![CDATA[IF _Logger = 0 THEN
-	Logger := _DefaultLogger;
-ELSE
-	Logger := _Logger;
-END_IF]]></ST>
-        </Implementation>
-      </Get>
-      <Set Name="Set" Id="{82c82d05-b526-431e-b338-c69fda2bdd1a}">
-        <Declaration><![CDATA[]]></Declaration>
-        <Implementation>
-          <ST><![CDATA[_Logger := Logger;]]></ST>
-        </Implementation>
-      </Set>
-    </Property>
     <Property Name="NamespaceName" Id="{84be6e8d-e2b5-4bd6-ae4f-31889ab0432e}">
       <Declaration><![CDATA[(*!
 <summary>Provides the library namespace used in diagnostics.</summary>
@@ -187,71 +230,6 @@ PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
         </Implementation>
       </Get>
     </Property>
-    <Method Name="resolveLogger" Id="{c6a68697-2de1-41f3-8bf5-d212c74cb83d}">
-      <Declaration><![CDATA[(*!
-<summary>Selects the destination for a logging call.</summary>
-<description>
-Explicit destination takes precedence over the current cyclic task override and shared fallback. Outside a
-cyclic task, no task override is consulted. Does not allocate or take ownership.
-</description>
-<param name="logger">Explicit destination, or zero for configured routing.</param>
-*)
-METHOD PRIVATE resolveLogger : ILogger
-VAR_INPUT
-	logger : ILogger;
-END_VAR
-VAR
-	taskIndex : DINT;
-END_VAR]]></Declaration>
-      <Implementation>
-        <ST><![CDATA[IF logger <> 0 THEN
-	resolveLogger := logger;
-	RETURN;
-END_IF
-
-taskIndex := System.GetCurrentTaskIndex();
-
-IF taskIndex >= 1 AND_THEN taskIndex <= System.TASK_COUNT THEN
-	IF _TaskLoggers[taskIndex] <> 0 THEN
-		resolveLogger := _TaskLoggers[taskIndex];
-		RETURN;
-	END_IF
-END_IF
-
-resolveLogger := LogManager.Logger;]]></ST>
-      </Implementation>
-    </Method>
-    <Method Name="SetTaskLogger" Id="{cea7a759-8938-4dc3-91eb-626a866c861f}">
-      <Declaration><![CDATA[(*!
-<summary>Assigns the default logging destination for the calling cyclic task.</summary>
-<description>
-Returns TRUE after updating the current task override. Returns FALSE without changing configuration outside a
-valid cyclic task; does not allocate or raise exceptions. Zero removes the override and restores shared
-fallback routing. The logger is borrowed and must remain valid while configured and during calls using it.
-Does not delete the previous logger or arrange cyclic Execute calls. Sharing a logger across tasks requires
-separately synchronized access.
-</description>
-<param name="logger">Borrowed logger for this task, or zero to use the shared fallback.</param>
-*)
-METHOD SetTaskLogger : BOOL
-VAR_INPUT
-	logger : ILogger;
-END_VAR
-VAR
-	taskIndex : DINT;
-END_VAR]]></Declaration>
-      <Implementation>
-        <ST><![CDATA[taskIndex := System.GetCurrentTaskIndex();
-
-IF taskIndex < 1 OR_ELSE taskIndex > System.TASK_COUNT THEN
-	SetTaskLogger := FALSE;
-	RETURN;
-END_IF
-
-_TaskLoggers[taskIndex] := logger;
-SetTaskLogger := TRUE;]]></ST>
-      </Implementation>
-    </Method>
     <Method Name="TryLogError" Id="{f8c266fa-1403-48ca-81af-80709466198a}">
       <Declaration><![CDATA[(*!
 <summary>Attempts to forward an error through topic filtering to the configured logger.</summary>
@@ -260,12 +238,11 @@ Borrows the error for this call. An invalid reference or rejected filter returns
 nested call raises an exception. Does not log the caught exception or roll back counters and backend side
 effects. Counter-lock acquisition failure returns FALSE. Counter increments already made are retained. Logger
 receives a call-local number snapshot. The fatal allocation latch remains set; RaiseIfAllocationFailed must be
-called at the task boundary outside recoverable handlers.
+called at the task boundary outside recoverable handlers. Uses CurrentTaskLogger; outside a valid cyclic
+task, returns FALSE before reading diagnostics, filtering, counter changes or backend calls.
+Returns FALSE when fatal allocation state is observed before work or after nested calls. The latch remains
+set for the caller's task boundary; already accepted or emitted records are not rolled back.
 </description>
-<param name="logger">
-Optional borrowed destination. Zero selects the calling task logger or shared fallback. Manager filtering and
-numbering still apply.
-</param>
 *)
 METHOD TryLogError : BOOL
 VAR_INPUT
@@ -275,7 +252,6 @@ VAR_INPUT
 	topic3 : WSTRING := "";	
 	topic4 : WSTRING := "";	
 	topic5 : WSTRING := "";	
-	logger : ILogger := 0;
 END_VAR
 VAR
 	selectedLogger : ILogger;
@@ -288,11 +264,13 @@ VAR
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[__TRY
-	IF NOT __ISVALIDREF(error) THEN
+	selectedLogger := CurrentTaskLogger;
+
+	IF selectedLogger = 0 OR_ELSE DynamicMemoryManager.HasAllocationFailed OR_ELSE NOT __ISVALIDREF(error) THEN
 		RETURN;
 	END_IF
 
-	category := SEL(error.Severity = ERROR_SEVERITY.CRITICAL, LOG_CATEGORY.ERROR, LOG_CATEGORY.CRITICAL_ERROR); 
+	category := SEL(error.Severity = ERROR_SEVERITY.CRITICAL, LOG_CATEGORY.ERROR, LOG_CATEGORY.CRITICAL_ERROR);
 
 	IF NOT _CounterLock.Enter() THEN
 		RETURN;
@@ -318,7 +296,7 @@ END_VAR]]></Declaration>
 		RETURN;
 	END_IF
 
-	counterLockHeld := TRUE;	
+	counterLockHeld := TRUE;
 	PassedFilterMessageCounter := PassedFilterMessageCounter + 1;
 	PassedFilterMessageByCategoryCounters[category] := PassedFilterMessageByCategoryCounters[category] + 1;
 	sequentialNumber := PassedFilterMessageCounter;
@@ -326,18 +304,20 @@ END_VAR]]></Declaration>
 	_CounterLock.Leave();
 	counterLockHeld := FALSE;
 
-	selectedLogger := resolveLogger(logger := logger);
-
 	CASE MessageNumberFormat OF
 		LOG_MESSAGE_NUMBER_FORMAT.NONE:
 			TryLogError := selectedLogger.TryLogError(error := error);
-			
+
 		LOG_MESSAGE_NUMBER_FORMAT.SEQUENTIAL:
 			TryLogError := selectedLogger.TryLogError(error := error, messageNumber := sequentialNumber);
-		
+
 		LOG_MESSAGE_NUMBER_FORMAT.SEQUENTIAL_BY_CATEGORY:
 			TryLogError := selectedLogger.TryLogError(error := error, messageNumber := categoryNumber);
 	END_CASE
+
+	IF DynamicMemoryManager.HasAllocationFailed THEN
+		TryLogError := FALSE;
+	END_IF
 __CATCH
 	IF counterLockHeld THEN
 		_CounterLock.Leave();
@@ -356,14 +336,13 @@ must remain live while their diagnostics are read. Logging does not extend their
 nested call raises an exception. Does not log the caught exception or roll back counters and backend side
 effects. Counter-lock acquisition failure returns FALSE. Counter increments already made are retained. Logger
 receives a call-local number snapshot. The fatal allocation latch remains set; RaiseIfAllocationFailed must be
-called at the task boundary outside recoverable handlers.
+called at the task boundary outside recoverable handlers. Uses CurrentTaskLogger; outside a valid cyclic
+task, returns FALSE before reading diagnostics, filtering, counter changes or backend calls.
+Returns FALSE when fatal allocation state is observed before work or after nested calls. The latch remains
+set for the caller's task boundary; already accepted or emitted records are not rolled back.
 </description>
 <param name="exception">Exception view to read; null is ignored.</param>
 <param name="severity">Severity used to select the log category.</param>
-<param name="logger">
-Optional borrowed destination. Zero selects the calling task logger or shared fallback. Manager filtering and
-numbering still apply.
-</param>
 *)
 METHOD TryLogException : BOOL
 VAR_INPUT
@@ -373,7 +352,6 @@ VAR_INPUT
 	topic2 : WSTRING := "";	
 	topic3 : WSTRING := "";	
 	topic4 : WSTRING := "";	
-	logger : ILogger := 0;
 END_VAR
 VAR
 	selectedLogger : ILogger;
@@ -386,11 +364,13 @@ VAR
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[__TRY
-	IF exception = 0 THEN
+	selectedLogger := CurrentTaskLogger;
+
+	IF selectedLogger = 0 OR_ELSE DynamicMemoryManager.HasAllocationFailed OR_ELSE exception = 0 THEN
 		RETURN;
 	END_IF
 
-	category := SEL(severity = ERROR_SEVERITY.CRITICAL, LOG_CATEGORY.ERROR, LOG_CATEGORY.CRITICAL_ERROR); 
+	category := SEL(severity = ERROR_SEVERITY.CRITICAL, LOG_CATEGORY.ERROR, LOG_CATEGORY.CRITICAL_ERROR);
 
 	IF NOT _CounterLock.Enter() THEN
 		RETURN;
@@ -424,19 +404,17 @@ END_VAR]]></Declaration>
 	_CounterLock.Leave();
 	counterLockHeld := FALSE;
 
-	selectedLogger := resolveLogger(logger := logger);
-
 	CASE MessageNumberFormat OF
 		LOG_MESSAGE_NUMBER_FORMAT.NONE:
 			TryLogException := selectedLogger.TryLogException(exception := exception, severity := severity);
-			
+
 		LOG_MESSAGE_NUMBER_FORMAT.SEQUENTIAL:
 			TryLogException := selectedLogger.TryLogException(
 				exception := exception,
 				severity := severity,
 				messageNumber := sequentialNumber
 			);
-		
+
 		LOG_MESSAGE_NUMBER_FORMAT.SEQUENTIAL_BY_CATEGORY:
 			TryLogException := selectedLogger.TryLogException(
 				exception := exception,
@@ -444,6 +422,10 @@ END_VAR]]></Declaration>
 				messageNumber := categoryNumber
 			);
 	END_CASE
+
+	IF DynamicMemoryManager.HasAllocationFailed THEN
+		TryLogException := FALSE;
+	END_IF
 __CATCH
 	IF counterLockHeld THEN
 		_CounterLock.Leave();
@@ -462,12 +444,11 @@ variables or literals, and store computed expressions in local variables before 
 nested call raises an exception. Does not log the caught exception or roll back counters and backend side
 effects. Counter-lock acquisition failure returns FALSE. Counter increments already made are retained. Logger
 receives a call-local number snapshot. The fatal allocation latch remains set; RaiseIfAllocationFailed must be
-called at the task boundary outside recoverable handlers.
+called at the task boundary outside recoverable handlers. Uses CurrentTaskLogger; outside a valid cyclic
+task, returns FALSE before reading diagnostics, filtering, counter changes or backend calls.
+Returns FALSE when fatal allocation state is observed before work or after nested calls. The latch remains
+set for the caller's task boundary; already accepted or emitted records are not rolled back.
 </description>
-<param name="logger">
-Optional borrowed destination. Zero selects the calling task logger or shared fallback. Manager filtering and
-numbering still apply.
-</param>
 *)
 METHOD TryLogMessage : BOOL
 VAR_IN_OUT CONSTANT
@@ -480,7 +461,6 @@ VAR_INPUT
 	topic3 : WSTRING := "";	
 	topic4 : WSTRING := "";	
 	topic5 : WSTRING := "";	
-	logger : ILogger := 0;
 END_VAR
 VAR
 	selectedLogger : ILogger;
@@ -492,7 +472,9 @@ VAR
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[__TRY
-	IF message = WideStrings.Empty THEN
+	selectedLogger := CurrentTaskLogger;
+
+	IF selectedLogger = 0 OR_ELSE DynamicMemoryManager.HasAllocationFailed OR_ELSE message = WideStrings.Empty THEN
 		RETURN;
 	END_IF
 
@@ -528,18 +510,28 @@ END_VAR]]></Declaration>
 	_CounterLock.Leave();
 	counterLockHeld := FALSE;
 
-	selectedLogger := resolveLogger(logger := logger);
-
 	CASE MessageNumberFormat OF
 		LOG_MESSAGE_NUMBER_FORMAT.NONE:
 			TryLogMessage := selectedLogger.TryLogMessage(category := category, message := message);
-			
+
 		LOG_MESSAGE_NUMBER_FORMAT.SEQUENTIAL:
-			TryLogMessage := selectedLogger.TryLogMessage(category := category, message := message, messageNumber := sequentialNumber);
-		
+			TryLogMessage := selectedLogger.TryLogMessage(
+				category := category,
+				message := message,
+				messageNumber := sequentialNumber
+			);
+
 		LOG_MESSAGE_NUMBER_FORMAT.SEQUENTIAL_BY_CATEGORY:
-			TryLogMessage := selectedLogger.TryLogMessage(category := category, message := message, messageNumber := categoryNumber);
+			TryLogMessage := selectedLogger.TryLogMessage(
+				category := category,
+				message := message,
+				messageNumber := categoryNumber
+			);
 	END_CASE
+
+	IF DynamicMemoryManager.HasAllocationFailed THEN
+		TryLogMessage := FALSE;
+	END_IF
 __CATCH
 	IF counterLockHeld THEN
 		_CounterLock.Leave();

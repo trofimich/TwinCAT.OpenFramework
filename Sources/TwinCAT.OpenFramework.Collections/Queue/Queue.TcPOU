@@ -20,6 +20,8 @@ ContainsGeneric defaults to releasing its query. Growth checks allocation arithm
 mechanism on null NEW before replacing the old buffer. No locking or mutation-version checks are implemented.
 Generic lookup with requested query release also attempts cleanup on lookup failure before propagating the
 captured exception; terminal OOM takes precedence.
+Instances cannot be assigned by value: copying backing pointers or disposal responsibility would create
+unsafe aliases. Interface references still borrow this instance; copying an interface does not clone storage.
 </description>
 *)
 
@@ -27,17 +29,20 @@ captured exception; terminal OOM takes precedence.
 FUNCTION_BLOCK FINAL Queue 
 VAR_GENERIC CONSTANT
 	{attribute 'hide'} 
-    _StaticCapacity : TOF_Core.DINT_LENGTH := 10;
+	//! <summary>Inline capacity; zero selects dynamic backing storage.</summary>
+	_StaticCapacity : TOF_Core.DINT_LENGTH := 10;
 END_VAR
 EXTENDS TOF_Core.Object IMPLEMENTS IQueue
 VAR_INPUT
 	//! <summary>Number of slots added when dynamic storage is full; must be positive when growth is required.</summary>
 	DefaultDynamicAllocationElementCount : BYTE := 10;	
 END_VAR
-VAR	
+VAR_STAT
+	//! <summary>Class name shared by all instances of this function block.</summary>
 	{attribute 'hide'} 
 	_ClassName : STRING := __POUNAME();
-	
+END_VAR
+VAR	
 	{attribute 'hide'} 
 	_ValueValidator : TOF_Core.IGenericValueValidator;
 
@@ -70,6 +75,7 @@ VAR_INPUT
 	elementCount : TOF_Core.DINT_LENGTH;
 END_VAR
 VAR CONSTANT
+	//! <summary>Bytes per capacity slot, including descriptor storage and any hash-index arrays.</summary>
 	ENTRY_ALLOCATION_SIZE : ULINT := XSIZEOF(TOF_Core.GENERIC_VALUE);
 END_VAR
 VAR
@@ -94,6 +100,7 @@ IF elementCount <= TOF_Core.SignedInt32.ZERO THEN
 END_IF
 
 newCapacity := TO_ULINT(_DynamicCapacity) + TO_ULINT(elementCount);
+
 IF newCapacity > TO_ULINT(TOF_Core.SignedInt32.MAX_VALUE)
 	OR_ELSE newCapacity > TO_ULINT(TOF_Core.UnsignedInt32.MAX_VALUE) / ENTRY_ALLOCATION_SIZE
 THEN
@@ -108,6 +115,7 @@ THEN
 END_IF
 
 newMemory := __NEW(BYTE, TO_UDINT(ENTRY_ALLOCATION_SIZE * newCapacity));
+
 IF newMemory = 0 THEN
 	TOF_Core.DynamicMemoryManager.RaiseAllocationFailure();
 END_IF
@@ -142,7 +150,10 @@ PROPERTY FINAL Capacity : TOF_Core.DINT_LENGTH]]></Declaration>
       </Get>
     </Property>
     <Property Name="ClassName" Id="{eb9d1b47-1697-4ddf-a61e-e55f2e16e9a5}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Borrows the concrete collection class name without transferring storage ownership.</summary>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
       <Get Name="Get" Id="{9b8eca91-7210-4e91-b025-425c7f38327e}">
         <Declaration><![CDATA[]]></Declaration>
@@ -259,6 +270,7 @@ __ENDTRY
 IF releaseValue THEN
 	IF caughtException <> 0 AND_THEN NOT caughtException.IsDynamicInstance THEN
 		__TRY
+			TOF_Core.DynamicMemoryManager.RaiseIfAllocationFailed();
 			__QUERYINTERFACE(caughtException.Clone(), caughtException);
 		__CATCH(exceptionCode)
 			value.Release();
@@ -342,6 +354,9 @@ PROPERTY FINAL Empty : BOOL]]></Declaration>
 Borrows the original during the call. isObject = TRUE requires a live Object FB instance implementing
 ICloneable; other data is copied as bytes without recursively cloning references. A prepared copy is released
 if insertion fails before acceptance; exceptions propagate. Engine-managed exception objects are unsupported.
+The original failure is captured before cleanup so nested cleanup handling cannot replace its payload.
+A static native wrapper is cloned before cleanup; failure to capture still attempts prepared-copy disposal.
+Terminal allocation failure takes precedence and no exception clone is allocated after its latch is set.
 </description>
 *)
 METHOD EnqueueCopy : IQueue
@@ -351,6 +366,7 @@ VAR_INPUT
 END_VAR
 VAR
 	exceptionCode : __SYSTEM.ExceptionCode;
+	caughtException : TOF_Core.IException;
 	genericValue : TOF_Core.GENERIC_VALUE;
 END_VAR]]></Declaration>
       <Implementation>
@@ -364,15 +380,36 @@ genericValue := TOF_Core.GenericValueFactory.FromAnyType(
 __TRY
 	EnqueueCopy := EnqueueGeneric(value := genericValue);
 __CATCH(exceptionCode)
-	genericValue.Release();
-	
-	TOF_Core.ExceptionManager.ReThrowLastException(
+	caughtException := TOF_Core.ExceptionManager.GetLastException(
 		exceptionCode := exceptionCode,
 		catchPointNamespaceName := NamespaceName,
 		catchPointPOUName := __POUNAME(),
 		catchPointPosition := __POSITION()
 	);
-__ENDTRY]]></ST>
+__ENDTRY
+
+IF caughtException <> 0 THEN
+	__TRY
+		TOF_Core.DynamicMemoryManager.RaiseIfAllocationFailed();
+
+		IF NOT caughtException.IsDynamicInstance THEN
+			__QUERYINTERFACE(caughtException.Clone(), caughtException);
+		END_IF
+	__CATCH(exceptionCode)
+		genericValue.Release();
+
+		TOF_Core.ExceptionManager.ReThrowLastException(
+			exceptionCode := exceptionCode,
+			catchPointNamespaceName := NamespaceName,
+			catchPointPOUName := __POUNAME(),
+			catchPointPosition := __POSITION()
+		);
+	__ENDTRY
+
+	genericValue.Release();
+
+	TOF_Core.ExceptionManager.Throw(exception := caughtException);
+END_IF]]></ST>
       </Implementation>
     </Method>
     <Method Name="EnqueueGeneric" Id="{dc2a8154-c6f2-4c3f-bcdd-f986d98a1e58}">
@@ -447,7 +484,7 @@ is implemented.
 METHOD FB_init : BOOL
 VAR_INPUT
 	bInitRetains : BOOL; // TRUE: the retain variables are initialized (reset warm / reset cold)
-	bInCopyCode : BOOL;  // TRUE: the instance will be copied to the copy code afterward (online change)
+	bInCopyCode : BOOL; // TRUE: the instance will be copied to the copy code afterward (online change)
 	valueValidator : TOF_Core.IGenericValueValidator;
 END_VAR
 ]]></Declaration>

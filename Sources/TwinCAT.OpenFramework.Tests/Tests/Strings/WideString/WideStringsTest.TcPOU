@@ -8,7 +8,8 @@ License: https://opensource.org/license/mit
 *)
 
 FUNCTION_BLOCK WideStringsTest EXTENDS TcUnit.FB_TestSuite
-VAR
+VAR_STAT
+	//! <summary>Class name shared by all instances of this function block.</summary>
 	{attribute 'hide'} 
 	_ClassName : STRING := __POUNAME();
 END_VAR]]></Declaration>
@@ -17,8 +18,11 @@ END_VAR]]></Declaration>
 AppendFit();
 ConcatFit255();
 AnyToStringFit255();
+AnyToStringFitLongInputs();
+Contains();
 ReplaceInSource();
 Split();
+SplitterSeparatorBounds();
 Join();
 Trim();]]></ST>
     </Implementation>
@@ -351,15 +355,10 @@ testFinished := TRUE;
 TEST_FINISHED();]]></ST>
       </Implementation>
     </Method>
-    <Method Name="Join" Id="{283221aa-e7f9-4632-bda6-1a9f0368009d}">
-      <Declaration><![CDATA[METHOD Join
+    <Method Name="Contains" Id="{c082999c-0b1a-40bb-8f3c-60a1837eaadf}">
+      <Declaration><![CDATA[METHOD Contains
 VAR
-	stringToSplit : WSTRING := "123 , , 456, 789 ,0";
-	separator : WSTRING := ",";
-	
-	splitter : TOF_Core.WideStringSplittingEnumerator;
-
-	joinedString : WSTRING;
+	containsResult : BOOL;
 END_VAR
 VAR_INST
 	testFinished : BOOL;
@@ -371,7 +370,118 @@ END_IF
 
 TEST(TestName := __POUNAME());
 
+// 1. Substring at start
+containsResult := TOF_Core.WideStrings.Contains(stringToSearchIn := "Hello, world!", stringToFind := "Hello");
+AssertEquals_BOOL(
+	Expected := TRUE,
+	Actual := containsResult,
+	Message := 'Contains must return TRUE for prefix substring'
+);
+
+// 2. Substring in middle
+containsResult := TOF_Core.WideStrings.Contains(stringToSearchIn := "Hello, world!", stringToFind := "world");
+AssertEquals_BOOL(
+	Expected := TRUE,
+	Actual := containsResult,
+	Message := 'Contains must return TRUE for middle substring'
+);
+
+// 3. Substring at end
+containsResult := TOF_Core.WideStrings.Contains(stringToSearchIn := "Hello, world!", stringToFind := "!");
+AssertEquals_BOOL(
+	Expected := TRUE,
+	Actual := containsResult,
+	Message := 'Contains must return TRUE for suffix substring'
+);
+
+// 4. Exact match of whole string
+containsResult := TOF_Core.WideStrings.Contains(stringToSearchIn := "Hello, world!", stringToFind := "Hello, world!");
+AssertEquals_BOOL(
+	Expected := TRUE,
+	Actual := containsResult,
+	Message := 'Contains must return TRUE for identical string'
+);
+
+// 5. Empty substring in non-empty string
+containsResult := TOF_Core.WideStrings.Contains(stringToSearchIn := "Hello, world!", stringToFind := "");
+AssertEquals_BOOL(
+	Expected := TRUE,
+	Actual := containsResult,
+	Message := 'Contains must return TRUE for empty substring in non-empty string'
+);
+
+// 6. Empty substring in empty string
+containsResult := TOF_Core.WideStrings.Contains(stringToSearchIn := "", stringToFind := "");
+AssertEquals_BOOL(
+	Expected := TRUE,
+	Actual := containsResult,
+	Message := 'Contains must return TRUE for empty substring in empty string'
+);
+
+// 7. Non-empty substring in empty string
+containsResult := TOF_Core.WideStrings.Contains(stringToSearchIn := "", stringToFind := "a");
+AssertEquals_BOOL(
+	Expected := FALSE,
+	Actual := containsResult,
+	Message := 'Contains must return FALSE for non-empty substring in empty string'
+);
+
+// 8. Substring not found
+containsResult := TOF_Core.WideStrings.Contains(stringToSearchIn := "Hello, world!", stringToFind := "xyz");
+AssertEquals_BOOL(
+	Expected := FALSE,
+	Actual := containsResult,
+	Message := 'Contains must return FALSE when substring is absent'
+);
+
+// 9. Case sensitivity
+containsResult := TOF_Core.WideStrings.Contains(stringToSearchIn := "Hello, world!", stringToFind := "hello");
+AssertEquals_BOOL(
+	Expected := FALSE,
+	Actual := containsResult,
+	Message := 'Contains must be case-sensitive'
+);
+
+// 10. Substring longer than source
+containsResult := TOF_Core.WideStrings.Contains(stringToSearchIn := "abc", stringToFind := "abcdef");
+AssertEquals_BOOL(
+	Expected := FALSE,
+	Actual := containsResult,
+	Message := 'Contains must return FALSE when substring is longer than source'
+);
+
+testFinished := TRUE;
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="Join" Id="{283221aa-e7f9-4632-bda6-1a9f0368009d}">
+      <Declaration><![CDATA[(*!
+<summary>Exercises string traversal with a persistent splitter and borrowed source.</summary>
+<description>
+The splitter retains ownership across exception propagation; Reset releases current fragments before reuse
+and normal completion. The persistent source remains alive for the entire cursor lifetime.
+</description>
+*)
+METHOD Join
+VAR
+	separator : WSTRING := ",";
+
+	joinedString : WSTRING;
+END_VAR
+VAR_INST
+	stringToSplit : WSTRING := "123 , , 456, 789 ,0";
+	splitter : TOF_Core.WideStringSplittingEnumerator;
+	testFinished : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN 
+	RETURN; 
+END_IF 
+
+TEST(TestName := __POUNAME());
+
 // simple splitting
+splitter.Reset();
 splitter := TOF_Core.WideStrings.CreateSplitter(sourceString := stringToSplit, separator := separator);
 
 // simple joining
@@ -384,6 +494,7 @@ TOF_Core.WideStrings.Join(targetString := joinedString, separator := separator, 
 	);
 
 // splitting with maxCount, trimming and empty string removing 
+splitter.Reset();
 splitter := TOF_Core.WideStrings.CreateSplitter(
 	sourceString := stringToSplit,
 	separator := separator,
@@ -403,6 +514,8 @@ TOF_Core.WideStrings.Join(targetString := joinedString, separator := separator, 
 			TO_STRING(joinedString)
 		)
 	);
+
+splitter.Reset();
 
 testFinished := TRUE;
 TEST_FINISHED();]]></ST>
@@ -530,16 +643,23 @@ TEST_FINISHED();]]></ST>
       </Implementation>
     </Method>
     <Method Name="Split" Id="{71d1bd73-69e5-47d2-9c99-6ebd1c10e55b}">
-      <Declaration><![CDATA[METHOD Split
+      <Declaration><![CDATA[(*!
+<summary>Exercises string traversal with a persistent splitter and borrowed source.</summary>
+<description>
+The splitter retains ownership across exception propagation; Reset releases current fragments before reuse
+and normal completion. The persistent source remains alive for the entire cursor lifetime.
+</description>
+*)
+METHOD Split
 VAR
-	stringToSplit : WSTRING := "123 , 456, 789 ,,0";
 	separator : WSTRING := ",";
 	
-	splitter : TOF_Core.WideStringSplittingEnumerator;
 	currentEntry : WSTRING;
 	i : BYTE;
 END_VAR
 VAR_INST
+	stringToSplit : WSTRING := "123 , 456, 789 ,,0";
+	splitter : TOF_Core.WideStringSplittingEnumerator;
 	testFinished : BOOL;
 END_VAR]]></Declaration>
       <Implementation>
@@ -550,6 +670,7 @@ END_IF
 TEST(TestName := __POUNAME());
 
 // simple splitting
+splitter.Reset();
 splitter := TOF_Core.WideStrings.CreateSplitter(sourceString := stringToSplit, separator := separator);
 
 i := 0;
@@ -573,7 +694,10 @@ WHILE splitter.MoveNext() DO
 	i := i + 1;
 END_WHILE
 
+AssertEquals_BYTE(Expected := 5, Actual := i, Message := 'Unrestricted splitting must return all five fragments');
+
 // splitting with MaxCount, trimming and empty string removing 
+splitter.Reset();
 splitter := TOF_Core.WideStrings.CreateSplitter(
 	sourceString := stringToSplit,
 	separator := separator,
@@ -595,11 +719,15 @@ WHILE splitter.MoveNext() DO
 		2:
 			AssertEquals_WSTRING(Expected := "789", Actual := currentEntry, Message := 'Invalid WideStringSplitter entry #2');
 		ELSE
-			AssertFalse(Condition := i > 3, Message := 'Invalid WideStringSplitter MaxCount handling');
+			AssertEquals_BOOL(Expected := TRUE, Actual := FALSE, Message := 'Invalid WideStringSplitter MaxCount handling');
 	END_CASE	
 	
 	i := i + 1;
 END_WHILE
+
+AssertEquals_BYTE(Expected := 3, Actual := i, Message := 'MaxCount splitting must return exactly three fragments');
+
+splitter.Reset();
 
 testFinished := TRUE; 
 TEST_FINISHED();]]></ST>
@@ -645,6 +773,192 @@ AssertEquals_WSTRING(
 	);			
 
 testFinished := TRUE; 
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="SplitterSeparatorBounds" Id="{754b07fa-8baf-4da5-8b3d-24c901e81fb7}">
+      <Declaration><![CDATA[(*!
+<summary>Checks separator rejection before fixed-size splitter storage can truncate the argument.</summary>
+<description>
+Covers lengths 80, 81, 255 and 256 through throwing and Try APIs. Uses persistent source and splitter storage;
+Reset releases every fragment before reuse. The runner owns caught exception cleanup at the task boundary.
+</description>
+*)
+METHOD SplitterSeparatorBounds
+VAR
+	separatorLength : UINT;
+	missingSource : REFERENCE TO WSTRING;
+	separatorBytes : POINTER TO BYTE;
+	separatorWords : POINTER TO WORD;
+	j : INT;
+	i : INT;
+	caught : BOOL;
+	result : BOOL;
+	exceptionCode : __SYSTEM.ExceptionCode;
+	exception : TOF_Core.IException;
+	rangeException : TOF_Core.IArgumentOutOfRangeException;
+END_VAR
+VAR_INST
+	source : WSTRING := "x";
+	separator : WSTRING(256);
+	splitter : TOF_Core.WideStringSplittingEnumerator;
+	testFinished : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN
+	RETURN;
+END_IF
+
+TEST(TestName := __POUNAME());
+separatorBytes := ADR(separator);
+separatorWords := ADR(separator);
+
+FOR i := 0 TO 3 DO
+	CASE i OF
+		0:
+			separatorLength := 80;
+		1:
+			separatorLength := 81;
+		2:
+			separatorLength := 255;
+		3:
+			separatorLength := 256;
+	END_CASE
+
+	Tc2_System.MEMSET(destAddr := separatorBytes, fillByte := 0, n := SIZEOF(separator));
+	FOR j := 0 TO TO_INT(separatorLength) - 1 DO
+		separatorWords[j] := WORD#16#61;
+	END_FOR
+
+	result := TOF_Core.WideStrings.TryCreateSplitter(sourceString := source, separator := separator, splitter => splitter);
+	AssertEquals_BOOL(
+		Expected := separatorLength = 80,
+		Actual := result,
+		Message := 'TryCreateSplitter must accept 80 and reject every longer separator'
+	);
+	splitter.Reset();
+	caught := FALSE;
+
+	__TRY
+		splitter := TOF_Core.WideStrings.CreateSplitter(sourceString := source, separator := separator);
+	__CATCH(exceptionCode)
+		caught := TRUE;
+		exception := TOF_Core.ExceptionManager.GetLastException(
+			exceptionCode := exceptionCode,
+			catchPointNamespaceName := NamespaceName,
+			catchPointPOUName := __POUNAME(),
+			catchPointPosition := __POSITION()
+		);
+		AssertEquals_BOOL(
+			Expected := TRUE,
+			Actual := __QUERYINTERFACE(exception, rangeException),
+			Message := 'An overlong separator must raise ArgumentOutOfRangeException'
+		);
+	__ENDTRY
+
+	AssertEquals_BOOL(
+		Expected := separatorLength > 80,
+		Actual := caught,
+		Message := 'CreateSplitter must reject overlong separators before initialization'
+	);
+	splitter.Reset();
+END_FOR
+
+caught := FALSE;
+
+__TRY
+	result := TOF_Core.WideStrings.TryCreateSplitter(
+		sourceString := missingSource,
+		separator := ",",
+		splitter => splitter
+	);
+__CATCH
+	caught := TRUE;
+__ENDTRY
+
+AssertEquals_BOOL(Expected := FALSE, Actual := caught, Message := 'TryCreateSplitter must contain source failures');
+AssertEquals_BOOL(Expected := FALSE, Actual := result, Message := 'A missing source must not initialize a splitter');
+
+testFinished := TRUE;
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="AnyToStringFitLongInputs" Id="{f87e62ab-83cc-44a5-af78-6471d4901b48}">
+      <Declaration><![CDATA[(*!
+<summary>Checks that long STRING and WSTRING diagnostics end with one U+2026 code unit.</summary>
+<description>
+Tests 256-character truncation and the exact 255-character boundary through the public ANY formatter.
+The narrow fixture uses ASCII byte offsets; its initialized final byte remains zero until explicitly shortened.
+</description>
+*)
+METHOD AnyToStringFitLongInputs
+VAR
+	narrow : STRING(256);
+	wide : WSTRING(256);
+	wideData : POINTER TO WORD;
+	result : WSTRING(255);
+	resultData : POINTER TO WORD;
+	i : INT;
+END_VAR
+VAR_INST
+	testFinished : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN
+	RETURN;
+END_IF
+
+TEST(TestName := __POUNAME());
+wideData := ADR(wide);
+resultData := ADR(result);
+
+// SA0175: Fill 256 ASCII bytes in STRING(256); its initialized final byte remains the terminator.
+{analysis -175}
+FOR i := 0 TO 255 DO
+	narrow[i] := BYTE#16#61;
+	wideData[i] := WORD#16#61;
+END_FOR
+{analysis +175}
+
+result := TOF_Core.WideStrings.AnyToStringFit255(value := narrow);
+AssertEquals_BOOL(
+	Expected := TRUE,
+	Actual := TOF_Core.WideStrings.GetLength(value := result) = 255
+		AND_THEN resultData[253] = WORD#16#61
+		AND_THEN resultData[254] = WORD#16#2026
+		AND_THEN resultData[255] = WORD#0,
+	Message := 'A long STRING must retain 254 characters and append exactly U+2026'
+);
+
+result := TOF_Core.WideStrings.AnyToStringFit255(value := wide);
+AssertEquals_BOOL(
+	Expected := TRUE,
+	Actual := TOF_Core.WideStrings.GetLength(value := result) = 255
+		AND_THEN resultData[253] = WORD#16#61
+		AND_THEN resultData[254] = WORD#16#2026
+		AND_THEN resultData[255] = WORD#0,
+	Message := 'A long WSTRING must retain 254 characters and append exactly U+2026'
+);
+
+// SA0175: Shorten the ASCII payload to exactly 255 bytes by moving its terminator.
+{analysis -175}
+narrow[255] := BYTE#0;
+{analysis +175}
+wideData[255] := WORD#0;
+result := TOF_Core.WideStrings.AnyToStringFit255(value := narrow);
+AssertEquals_BOOL(
+	Expected := TRUE,
+	Actual := TOF_Core.WideStrings.GetLength(value := result) = 255 AND_THEN resultData[254] = WORD#16#61,
+	Message := 'An exact-fit STRING must keep its final character'
+);
+result := TOF_Core.WideStrings.AnyToStringFit255(value := wide);
+AssertEquals_BOOL(
+	Expected := TRUE,
+	Actual := TOF_Core.WideStrings.GetLength(value := result) = 255 AND_THEN resultData[254] = WORD#16#61,
+	Message := 'An exact-fit WSTRING must keep its final character'
+);
+
+testFinished := TRUE;
 TEST_FINISHED();]]></ST>
       </Implementation>
     </Method>

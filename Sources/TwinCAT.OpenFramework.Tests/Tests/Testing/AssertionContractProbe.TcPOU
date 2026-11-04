@@ -1,0 +1,567 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1" ProductVersion="3.1.4026.21">
+  <POU Name="AssertionContractProbe" Id="{7e6a727b-8e2b-4ff3-a738-41c0af22d22a}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+SPDX-FileCopyrightText: © 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+SPDX-License-Identifier: MIT
+License: https://opensource.org/license/mit
+*)
+
+(*!
+<summary>Exercises typed literal assertions, borrowed values and chain-wide diagnostics.</summary>
+<description>
+Each persistent instance runs one selected scenario. Expected failures are checked by the outer TcUnit suite.
+Raw quiet NaN construction avoids arithmetic that could raise before the assertion begins.
+Independent-context scenarios cover type transitions, native predicates and failed typed diagnostics.
+</description>
+*)
+
+{attribute 'no_explicit_call' := 'do not call this function block directly'}
+FUNCTION_BLOCK AssertionContractProbe EXTENDS TOF_Testing.SingleCycleTest
+VAR_INPUT
+	Scenario : ASSERTION_PROBE_SCENARIO;
+END_VAR
+VAR
+	_Exception : TOF_Core.StandardException;
+END_VAR
+VAR_STAT
+	//! <summary>Class name shared by all instances of this function block.</summary>
+	{attribute 'hide'}
+	_ClassName : STRING := __POUNAME();
+END_VAR
+VAR
+	{attribute 'hide'}
+	{attribute 'init_namespace'}
+	_NamespaceName : STRING;
+END_VAR
+]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[]]></ST>
+    </Implementation>
+    <Method Name="AfterTest" Id="{f6b8c459-3a27-4414-b6e4-5946b52960d6}">
+      <Declaration><![CDATA[(*!
+<summary>Verifies that a later teardown exception cannot replace the first assertion failure.</summary>
+*)
+METHOD PROTECTED AfterTest]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF Scenario = ASSERTION_PROBE_SCENARIO.FIRST_FAILURE THEN
+	_Exception.Throw(
+		sourceNamespaceName := NamespaceName,
+		sourceClassName := ClassName,
+		sourcePOUName := __POUNAME(),
+		sourcePosition := __POSITION(),
+		message := "Later teardown diagnostic"
+	);
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="ClassName" Id="{6d7dd036-c6a5-43f0-808c-ba1ddccfa4f4}">
+      <Declaration><![CDATA[//! <summary>Borrows the concrete class name for the lifetime of this instance; callers must not modify it.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{666ea3e4-3b7a-4135-aab0-f3fd9a190761}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ClassName REF= _ClassName;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="ExecuteTest" Id="{93e11214-3823-451d-ba77-3523d45c472b}">
+      <Declaration><![CDATA[(*!
+<summary>Runs one typed or borrowed assertion scenario with passive call-local operands.</summary>
+<description>
+Expected failures are inspected by the outer TcUnit suite. Typed entries deliberately receive
+literals, properties, arithmetic and method results without intermediate operand variables.
+Long narrow operands contain ASCII only; their wide counterparts use explicit destination buffer capacities.
+</description>
+*)
+METHOD PROTECTED ExecuteTest
+VAR
+	value : DINT;
+	pointer_ : POINTER TO DINT;
+	special : TOF_Core.LREAL_UNION;
+	largeUnsigned : ULINT;
+	smallerUnsigned : ULINT;
+	negativeSigned : LINT;
+	zeroUnsigned : ULINT;
+	actualReal : REAL;
+	expectedReal : REAL;
+	realSpecial : TOF_Core.REAL_UNION;
+	longAscii : STRING(255);
+	longWide : WSTRING(255);
+	otherAscii : STRING(255);
+	otherWide : WSTRING(255);
+	firstLongText : WSTRING(300);
+	secondLongText : WSTRING(300);
+	subnormalValue : LREAL;
+	zeroValue : LREAL;
+	subnormalGeneric : TOF_Core.GENERIC_VALUE;
+	zeroGeneric : TOF_Core.GENERIC_VALUE;
+	subnormalOrder : TOF_Core.COMPARISON_RESULT;
+	i : INT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[CASE Scenario OF
+	ASSERTION_PROBE_SCENARIO.FLOAT_TOLERANCE:
+		Assert.ThatLongReal(actual := LREAL#1.0).ToBe(expected := LREAL#1.0625, tolerance := LREAL#0.125);
+		Assert.ThatReal(actual := REAL#1.0).NotToBe(expected := REAL#1.5, tolerance := LREAL#0.125);
+		Assert.ThatReal(actual := REAL#1.0).ToBe(expected := REAL#1.0625, tolerance := LREAL#0.125);
+		Assert.ThatLongReal(actual := LREAL#1.0).NotToBe(expected := LREAL#1.5, tolerance := LREAL#0.125);
+		Assert.ThatReal(actual := REAL#1.0).IsGreaterThanOrEquals(
+			expected := REAL#1.0625,
+			tolerance := LREAL#0.125
+		).IsLessThanOrEquals(expected := REAL#0.9375, tolerance := LREAL#0.125);
+		Assert.ThatLongReal(actual := LREAL#1.0).IsGreaterThanOrEquals(
+			expected := LREAL#1.0625,
+			tolerance := LREAL#0.125
+		).IsLessThanOrEquals(expected := LREAL#0.9375, tolerance := LREAL#0.125);
+		Assert.ThatLongReal(actual := LREAL#1.0).ToBe(expected := LREAL#1.0, tolerance := TOF_Core.LongReals.ZERO);
+		Assert.ThatReal(actual := REAL#1.0).ToBe(
+			expected := REAL#1.0625,
+			tolerance := LREAL#0.125
+		).NotToBe(expected := REAL#1.0625);
+		Assert.ThatLongReal(actual := LREAL#1.0).ToBe(
+			expected := LREAL#1.0625,
+			tolerance := LREAL#0.125
+		).NotToBe(expected := LREAL#1.0625);
+
+	ASSERTION_PROBE_SCENARIO.INTEGER_EXACT:
+		Assert.ThatULInt(actual := ULINT#9007199254740993).NotToBe(expected := ULINT#9007199254740992);
+		Assert.ThatULInt(actual := ULINT#9007199254740993).IsGreaterThan(expected := ULINT#9007199254740992);
+		Assert.ThatLInt(actual := LINT#-9223372036854775807).IsLessThan(expected := LINT#-9223372036854775806);
+		Assert.ThatULInt(actual := TOF_Core.UnsignedInt64.MAX_VALUE).ToBe(expected := TOF_Core.UnsignedInt64.MAX_VALUE);
+		Assert.ThatLInt(actual := TOF_Core.SignedInt64.MIN_VALUE).ToBe(expected := TOF_Core.SignedInt64.MIN_VALUE);
+		largeUnsigned := ULINT#9007199254740993;
+		smallerUnsigned := ULINT#9007199254740992;
+		negativeSigned := LINT#-1;
+		zeroUnsigned := TOF_Core.UnsignedInt64.ZERO;
+		Assert.That(actual := largeUnsigned).NotToBe(expected := smallerUnsigned);
+		Assert.That(actual := largeUnsigned).IsGreaterThan(expected := smallerUnsigned);
+		Assert.That(actual := negativeSigned).IsLessThan(expected := zeroUnsigned);
+
+	ASSERTION_PROBE_SCENARIO.TYPED_LITERALS:
+		Assert.ThatBool(actual := TRUE).ToBe(expected := TRUE).NotToBe(expected := FALSE).IsTrue();
+		Assert.ThatBool(actual := FALSE).IsFalse();
+		Assert.ThatSInt(actual := SINT#3)
+			.ToBe(expected := SINT#3)
+			.NotToBe(expected := SINT#4)
+			.IsGreaterThan(expected := SINT#2)
+			.IsLessThan(expected := SINT#4)
+			.IsGreaterThanOrEquals(expected := SINT#3)
+			.IsLessThanOrEquals(expected := SINT#3);
+		Assert.ThatInt(actual := INT#3)
+			.ToBe(expected := INT#3)
+			.NotToBe(expected := INT#4)
+			.IsGreaterThan(expected := INT#2)
+			.IsLessThan(expected := INT#4)
+			.IsGreaterThanOrEquals(expected := INT#3)
+			.IsLessThanOrEquals(expected := INT#3);
+		Assert.ThatDInt(actual := DINT#3)
+			.ToBe(expected := DINT#3)
+			.NotToBe(expected := DINT#4)
+			.IsGreaterThan(expected := DINT#2)
+			.IsLessThan(expected := DINT#4)
+			.IsGreaterThanOrEquals(expected := DINT#3)
+			.IsLessThanOrEquals(expected := DINT#3);
+		Assert.ThatLInt(actual := LINT#3)
+			.ToBe(expected := LINT#3)
+			.NotToBe(expected := LINT#4)
+			.IsGreaterThan(expected := LINT#2)
+			.IsLessThan(expected := LINT#4)
+			.IsGreaterThanOrEquals(expected := LINT#3)
+			.IsLessThanOrEquals(expected := LINT#3);
+		Assert.ThatUSInt(actual := USINT#3)
+			.ToBe(expected := USINT#3)
+			.NotToBe(expected := USINT#4)
+			.IsGreaterThan(expected := USINT#2)
+			.IsLessThan(expected := USINT#4)
+			.IsGreaterThanOrEquals(expected := USINT#3)
+			.IsLessThanOrEquals(expected := USINT#3);
+		Assert.ThatUInt(actual := UINT#3)
+			.ToBe(expected := UINT#3)
+			.NotToBe(expected := UINT#4)
+			.IsGreaterThan(expected := UINT#2)
+			.IsLessThan(expected := UINT#4)
+			.IsGreaterThanOrEquals(expected := UINT#3)
+			.IsLessThanOrEquals(expected := UINT#3);
+		Assert.ThatUDInt(actual := UDINT#3)
+			.ToBe(expected := UDINT#3)
+			.NotToBe(expected := UDINT#4)
+			.IsGreaterThan(expected := UDINT#2)
+			.IsLessThan(expected := UDINT#4)
+			.IsGreaterThanOrEquals(expected := UDINT#3)
+			.IsLessThanOrEquals(expected := UDINT#3);
+		Assert.ThatULInt(actual := ULINT#3)
+			.ToBe(expected := ULINT#3)
+			.NotToBe(expected := ULINT#4)
+			.IsGreaterThan(expected := ULINT#2)
+			.IsLessThan(expected := ULINT#4)
+			.IsGreaterThanOrEquals(expected := ULINT#3)
+			.IsLessThanOrEquals(expected := ULINT#3);
+		Assert.ThatByte(actual := BYTE#3)
+			.ToBe(expected := BYTE#3)
+			.NotToBe(expected := BYTE#4)
+			.IsGreaterThan(expected := BYTE#2)
+			.IsLessThan(expected := BYTE#4)
+			.IsGreaterThanOrEquals(expected := BYTE#3)
+			.IsLessThanOrEquals(expected := BYTE#3);
+		Assert.ThatWord(actual := WORD#3)
+			.ToBe(expected := WORD#3)
+			.NotToBe(expected := WORD#4)
+			.IsGreaterThan(expected := WORD#2)
+			.IsLessThan(expected := WORD#4)
+			.IsGreaterThanOrEquals(expected := WORD#3)
+			.IsLessThanOrEquals(expected := WORD#3);
+		Assert.ThatDWord(actual := DWORD#3)
+			.ToBe(expected := DWORD#3)
+			.NotToBe(expected := DWORD#4)
+			.IsGreaterThan(expected := DWORD#2)
+			.IsLessThan(expected := DWORD#4)
+			.IsGreaterThanOrEquals(expected := DWORD#3)
+			.IsLessThanOrEquals(expected := DWORD#3);
+		Assert.ThatLWord(actual := LWORD#3)
+			.ToBe(expected := LWORD#3)
+			.NotToBe(expected := LWORD#4)
+			.IsGreaterThan(expected := LWORD#2)
+			.IsLessThan(expected := LWORD#4)
+			.IsGreaterThanOrEquals(expected := LWORD#3)
+			.IsLessThanOrEquals(expected := LWORD#3);
+		Assert.ThatReal(actual := REAL#3.0)
+			.ToBe(expected := REAL#3.0)
+			.NotToBe(expected := REAL#4.0)
+			.IsGreaterThan(expected := REAL#2.0)
+			.IsLessThan(expected := REAL#4.0)
+			.IsGreaterThanOrEquals(expected := REAL#3.0)
+			.IsLessThanOrEquals(expected := REAL#3.0);
+		Assert.ThatLongReal(actual := LREAL#3.0)
+			.ToBe(expected := LREAL#3.0)
+			.NotToBe(expected := LREAL#4.0)
+			.IsGreaterThan(expected := LREAL#2.0)
+			.IsLessThan(expected := LREAL#4.0)
+			.IsGreaterThanOrEquals(expected := LREAL#3.0)
+			.IsLessThanOrEquals(expected := LREAL#3.0);
+		Assert.ThatString(actual := 'b')
+			.ToBe(expected := 'b')
+			.NotToBe(expected := 'c')
+			.IsGreaterThan(expected := 'a')
+			.IsLessThan(expected := 'c')
+			.IsGreaterThanOrEquals(expected := 'b')
+			.IsLessThanOrEquals(expected := 'b');
+		Assert.ThatWideString(actual := "b")
+			.ToBe(expected := "b")
+			.NotToBe(expected := "c")
+			.IsGreaterThan(expected := "a")
+			.IsLessThan(expected := "c")
+			.IsGreaterThanOrEquals(expected := "b")
+			.IsLessThanOrEquals(expected := "b");
+		Assert.ThatTime(actual := T#3MS)
+			.ToBe(expected := T#3MS)
+			.NotToBe(expected := T#4MS)
+			.IsGreaterThan(expected := T#2MS)
+			.IsLessThan(expected := T#4MS)
+			.IsGreaterThanOrEquals(expected := T#3MS)
+			.IsLessThanOrEquals(expected := T#3MS);
+		Assert.ThatLongTime(actual := LTIME#3NS)
+			.ToBe(expected := LTIME#3NS)
+			.NotToBe(expected := LTIME#4NS)
+			.IsGreaterThan(expected := LTIME#2NS)
+			.IsLessThan(expected := LTIME#4NS)
+			.IsGreaterThanOrEquals(expected := LTIME#3NS)
+			.IsLessThanOrEquals(expected := LTIME#3NS);
+		Assert.ThatDate(actual := D#2026-11-03)
+			.ToBe(expected := D#2026-11-03)
+			.NotToBe(expected := D#2026-11-04)
+			.IsGreaterThan(expected := D#2026-11-02)
+			.IsLessThan(expected := D#2026-11-04)
+			.IsGreaterThanOrEquals(expected := D#2026-11-03)
+			.IsLessThanOrEquals(expected := D#2026-11-03);
+		Assert.ThatLongDate(actual := LDATE#2026-11-03)
+			.ToBe(expected := LDATE#2026-11-03)
+			.NotToBe(expected := LDATE#2026-11-04)
+			.IsGreaterThan(expected := LDATE#2026-11-02)
+			.IsLessThan(expected := LDATE#2026-11-04)
+			.IsGreaterThanOrEquals(expected := LDATE#2026-11-03)
+			.IsLessThanOrEquals(expected := LDATE#2026-11-03);
+		Assert.ThatDateTime(actual := DT#2026-11-03-12:00:00)
+			.ToBe(expected := DT#2026-11-03-12:00:00)
+			.NotToBe(expected := DT#2026-11-03-13:00:00)
+			.IsGreaterThan(expected := DT#2026-11-03-11:00:00)
+			.IsLessThan(expected := DT#2026-11-03-13:00:00)
+			.IsGreaterThanOrEquals(expected := DT#2026-11-03-12:00:00)
+			.IsLessThanOrEquals(expected := DT#2026-11-03-12:00:00);
+		Assert.ThatLongDateTime(actual := LDT#2026-11-03-12:00:00)
+			.ToBe(expected := LDT#2026-11-03-12:00:00)
+			.NotToBe(expected := LDT#2026-11-03-13:00:00)
+			.IsGreaterThan(expected := LDT#2026-11-03-11:00:00)
+			.IsLessThan(expected := LDT#2026-11-03-13:00:00)
+			.IsGreaterThanOrEquals(expected := LDT#2026-11-03-12:00:00)
+			.IsLessThanOrEquals(expected := LDT#2026-11-03-12:00:00);
+		Assert.ThatTimeOfDay(actual := TOD#12:00:00)
+			.ToBe(expected := TOD#12:00:00)
+			.NotToBe(expected := TOD#13:00:00)
+			.IsGreaterThan(expected := TOD#11:00:00)
+			.IsLessThan(expected := TOD#13:00:00)
+			.IsGreaterThanOrEquals(expected := TOD#12:00:00)
+			.IsLessThanOrEquals(expected := TOD#12:00:00);
+		Assert.ThatLongTimeOfDay(actual := LTOD#12:00:00)
+			.ToBe(expected := LTOD#12:00:00)
+			.NotToBe(expected := LTOD#13:00:00)
+			.IsGreaterThan(expected := LTOD#11:00:00)
+			.IsLessThan(expected := LTOD#13:00:00)
+			.IsGreaterThanOrEquals(expected := LTOD#12:00:00)
+			.IsLessThanOrEquals(expected := LTOD#12:00:00);
+		Assert.ThatDInt(actual := 2 + 3).ToBe(expected := 10 / 2);
+		Assert.ThatBool(actual := _Exception.Equals(other := _Exception)).IsTrue();
+		Assert.ThatUDInt(actual := CycleCount).IsGreaterThan(expected := TOF_Core.UnsignedInt32.ZERO);
+		value := 7;
+		Assert.ThatDInt(actual := value).ToBe(expected := replaceValue(value := value));
+		Assert.ThatDInt(actual := value).ToBe(expected := 8);
+
+	ASSERTION_PROBE_SCENARIO.MESSAGE_CHAIN:
+		Assert.ThatReal(actual := REAL#1.0, message := "Chain diagnostic")
+			.IsGreaterThan(expected := REAL#0.5)
+			.IsLessThan(expected := REAL#0.5);
+
+	ASSERTION_PROBE_SCENARIO.NEGATIVE_TOLERANCE:
+		Assert.ThatReal(actual := REAL#1.0).ToBe(expected := REAL#1.0, tolerance := LREAL#-1.0);
+
+	ASSERTION_PROBE_SCENARIO.NAN_TOLERANCE:
+		special.Raw := TOF_Core.LongReals.CANONICAL_NAN_BITS;
+		Assert.ThatLongReal(actual := LREAL#1.0).NotToBe(expected := LREAL#2.0, tolerance := special.Value);
+
+	ASSERTION_PROBE_SCENARIO.INFINITE_TOLERANCE:
+		Assert.ThatLongReal(actual := LREAL#1.0).IsGreaterThanOrEquals(
+			expected := LREAL#0.5,
+			tolerance := TOF_Core.LongReals.POSITIVE_INFINITY.Value
+		);
+
+	ASSERTION_PROBE_SCENARIO.MESSAGE_RESET:
+		Assert.ThatReal(actual := REAL#1.0, message := "Previous diagnostic").ToBe(expected := REAL#1.0);
+		Assert.ThatReal(actual := REAL#1.0).ToBe(expected := REAL#2.0);
+
+	ASSERTION_PROBE_SCENARIO.POINTERS_AND_STRINGS:
+		Assert.ThatPointer(actual := 0).IsNull().ToBe(expected := 0);
+		pointer_ := ADR(value);
+		Assert.ThatPointer(actual := pointer_).IsNotNull().ToBe(expected := ADR(value)).NotToBe(expected := 0);
+		Assert.That(actual := pointer_).IsNotNull();
+		Assert.ThatString(actual := 'abc def').ToContain(substring := 'def');
+		Assert.ThatWideString(actual := "abc $042E").ToContain(substring := "$042E");
+
+	ASSERTION_PROBE_SCENARIO.FIRST_FAILURE:
+		RecordFailure(message := "First diagnostic");
+		Assert.ThatBool(actual := FALSE, message := "Later assertion").IsTrue();
+
+	ASSERTION_PROBE_SCENARIO.SPECIAL_FLOATS:
+		special.Raw := TOF_Core.LongReals.CANONICAL_NAN_BITS;
+		Assert.ThatLongReal(actual := special.Value).ToBe(expected := special.Value);
+		realSpecial.Raw := TOF_Core.Reals.CANONICAL_NAN_BITS;
+		Assert.ThatReal(actual := realSpecial.Value)
+			.ToBe(expected := realSpecial.Value)
+			.IsLessThan(expected := REAL#0.0)
+			.IsLessThanOrEquals(expected := realSpecial.Value);
+		Assert.ThatReal(actual := REAL#0.0).IsGreaterThan(expected := realSpecial.Value);
+		Assert.ThatLongReal(actual := special.Value)
+			.IsLessThan(expected := LREAL#0.0)
+			.IsGreaterThanOrEquals(expected := special.Value);
+		Assert.ThatLongReal(actual := LREAL#0.0).IsGreaterThan(expected := special.Value);
+
+		Assert.ThatLongReal(actual := TOF_Core.LongReals.POSITIVE_INFINITY.Value).ToBe(
+			expected := TOF_Core.LongReals.POSITIVE_INFINITY.Value
+		);
+		Assert.ThatLongReal(actual := TOF_Core.LongReals.POSITIVE_INFINITY.Value).NotToBe(
+			expected := TOF_Core.LongReals.NEGATIVE_INFINITY.Value,
+			tolerance := LREAL#1.0
+		);
+		Assert.ThatLongReal(actual := LREAL#-0.0).ToBe(expected := LREAL#0.0);
+		Assert.ThatReal(actual := REAL#-0.0).ToBe(expected := REAL#0.0);
+		// Binary64 bit 0 encodes the least positive subnormal; default zero tolerance stays canonical.
+		special.Raw := ULINT#1;
+		Assert.ThatLongReal(actual := special.Value).NotToBe(expected := TOF_Core.LongReals.ZERO);
+		subnormalValue := special.Value;
+		zeroValue := TOF_Core.LongReals.ZERO;
+		subnormalGeneric := TOF_Core.GenericValueFactory.FromAny(
+			value := subnormalValue,
+			isObject := FALSE,
+			memoryManagementBehavior := TOF_Core.GENERIC_MEMORY_MANAGEMENT_BEHAVIOR.STORE_ORIGINAL_REFERENCE_AND_NOT_OWNS_MEMORY
+		);
+		zeroGeneric := TOF_Core.GenericValueFactory.FromAny(
+			value := zeroValue,
+			isObject := FALSE,
+			memoryManagementBehavior := TOF_Core.GENERIC_MEMORY_MANAGEMENT_BEHAVIOR.STORE_ORIGINAL_REFERENCE_AND_NOT_OWNS_MEMORY
+		);
+		subnormalOrder := subnormalGeneric.CompareTo(otherValue := zeroGeneric);
+
+		// Core ordering is the oracle for the target's actual handling of subnormal operands.
+		IF subnormalOrder <> TOF_Core.COMPARISON_RESULT.FIRST_LESS_THAN_SECOND THEN
+			Assert.ThatLongReal(actual := subnormalValue).IsGreaterThanOrEquals(expected := zeroValue);
+			Assert.ThatLongReal(actual := zeroValue).IsLessThanOrEquals(expected := subnormalValue);
+		END_IF
+
+		IF subnormalOrder <> TOF_Core.COMPARISON_RESULT.FIRST_GREATER_THAN_SECOND THEN
+			Assert.ThatLongReal(actual := subnormalValue).IsLessThanOrEquals(expected := zeroValue);
+			Assert.ThatLongReal(actual := zeroValue).IsGreaterThanOrEquals(expected := subnormalValue);
+		END_IF
+
+	ASSERTION_PROBE_SCENARIO.OPPOSITE_LIMITS:
+		Assert.ThatLongReal(actual := TOF_Core.LongReals.MAX_VALUE).NotToBe(
+			expected := TOF_Core.LongReals.MIN_VALUE,
+			tolerance := TOF_Core.LongReals.MAX_VALUE
+		);
+
+	ASSERTION_PROBE_SCENARIO.GENERIC_MESSAGE_CHAIN:
+		actualReal := REAL#1.0;
+		expectedReal := REAL#0.5;
+		Assert.That(actual := actualReal, message := "Generic chain diagnostic")
+			.IsGreaterThan(expected := expectedReal)
+			.IsLessThan(expected := expectedReal);
+
+	ASSERTION_PROBE_SCENARIO.GENERIC_MESSAGE_RESET:
+		actualReal := REAL#1.0;
+		expectedReal := REAL#1.0;
+		Assert.That(actual := actualReal, message := "Previous generic diagnostic").ToBe(expected := expectedReal);
+		expectedReal := REAL#2.0;
+		Assert.That(actual := actualReal).ToBe(expected := expectedReal);
+
+	ASSERTION_PROBE_SCENARIO.CONTEXT_TRANSITIONS:
+		value := 1;
+		actualReal := REAL#1.0;
+		Assert.ThatDInt(actual := value, message := "Typed prefix").ToBe(expected := 1);
+		Assert.That(actual := value, message := "Generic prefix").NotToBe(expected := actualReal);
+		Assert.ThatBool(actual := TRUE).IsTrue();
+		Assert.ThatString(actual := 'after generic').ToContain(substring := 'generic');
+		Assert.ThatDInt(actual := value).ToBe(expected := 1);
+
+		FOR i := 1 TO 260 DO
+			TOF_Core.WideStrings.AppendFit(targetString := firstLongText, sourceString := "x");
+		END_FOR
+
+		secondLongText := firstLongText;
+		TOF_Core.WideStrings.AppendFit(targetString := firstLongText, sourceString := "A");
+		TOF_Core.WideStrings.AppendFit(targetString := secondLongText, sourceString := "B");
+		Assert.That(actual := firstLongText).NotToBe(expected := secondLongText);
+		Assert.ThatLongReal(actual := LREAL#1.0).ToBe(expected := LREAL#1.0);
+		longAscii := TOF_Core.Strings.Concat255(
+			'123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890',
+			'A'
+		);
+		otherAscii := TOF_Core.Strings.Concat255(
+			'123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890',
+			'B'
+		);
+		Assert.ThatString(actual := longAscii).IsLessThan(expected := otherAscii).NotToBe(expected := otherAscii);
+		Assert.ThatString(actual := '').IsLessThan(expected := 'a');
+		Assert.ThatString(actual := 'a').IsLessThan(expected := 'aa');
+		// Populate wide operands without an intermediate conversion bounded to 80 characters.
+		// SA0175: Both sources contain only ASCII; destination capacities include their UTF-16 terminators.
+		{analysis -175}
+		Tc2_Utilities.STRING_TO_WSTRING2(
+			pDstWSTRING := ADR(longWide),
+			pSrcSTRING := ADR(longAscii),
+			nDstSize := SIZEOF(longWide)
+		);
+		Tc2_Utilities.STRING_TO_WSTRING2(
+			pDstWSTRING := ADR(otherWide),
+			pSrcSTRING := ADR(otherAscii),
+			nDstSize := SIZEOF(otherWide)
+		);
+		{analysis +175}
+		Assert.ThatWideString(actual := longWide).IsLessThan(expected := otherWide).NotToBe(expected := otherWide);
+		Assert.ThatWideString(actual := "$0100").IsGreaterThan(expected := "$00FF");
+		Assert.ThatWideString(actual := "").IsLessThan(expected := "a");
+
+	ASSERTION_PROBE_SCENARIO.TYPED_MESSAGE_AFTER_GENERIC:
+		value := 1;
+		Assert.That(actual := value, message := "Old generic prefix").ToBe(expected := value);
+		Assert.ThatByte(actual := BYTE#10, message := "Independent typed").ToBe(expected := BYTE#11);
+
+	ASSERTION_PROBE_SCENARIO.GENERIC_MESSAGE_AFTER_TYPED:
+		value := 1;
+		largeUnsigned := 2;
+		Assert.ThatInt(actual := 1, message := "Old typed prefix").ToBe(expected := 1);
+		Assert.That(actual := value, message := "Independent generic").ToBe(expected := largeUnsigned);
+
+	ASSERTION_PROBE_SCENARIO.TYPED_MESSAGE_RESET_AFTER_GENERIC:
+		value := 1;
+		Assert.ThatDInt(actual := value, message := "Old typed prefix").ToBe(expected := 1);
+		Assert.That(actual := value, message := "Old generic prefix").ToBe(expected := value);
+		Assert.ThatDInt(actual := value).ToBe(expected := 2);
+
+	ASSERTION_PROBE_SCENARIO.INTEGER_FAILURE:
+		Assert.ThatInt(actual := -3).ToBe(expected := -2);
+
+	ASSERTION_PROBE_SCENARIO.BITSTRING_FAILURE:
+		Assert.ThatLWord(actual := LWORD#10).ToBe(expected := LWORD#11);
+
+	ASSERTION_PROBE_SCENARIO.POINTER_FAILURE:
+		Assert.ThatPointer(actual := ADR(value)).ToBe(expected := TOF_Core.Memory.NULL_ADDRESS);
+
+	ASSERTION_PROBE_SCENARIO.STRING_LONG_FAILURE:
+		longAscii := TOF_Core.Strings.Concat255(
+			'123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890',
+			' ASCII expected suffix'
+		);
+		Assert.ThatString(actual := 'short').ToBe(expected := longAscii);
+
+	ASSERTION_PROBE_SCENARIO.WIDE_STRING_LONG_FAILURE:
+		longWide := TOF_Core.WideStrings.Concat255(
+			"123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890",
+			" Wide expected suffix"
+		);
+		Assert.ThatWideString(actual := "short").ToBe(expected := longWide);
+
+	ASSERTION_PROBE_SCENARIO.STRING_CONTAINMENT_FAILURE:
+		Assert.ThatString(actual := 'present').ToContain(substring := 'missing');
+
+	ASSERTION_PROBE_SCENARIO.FLOAT_ORDERING_FAILURE:
+		realSpecial.Raw := TOF_Core.Reals.CANONICAL_NAN_BITS;
+		Assert.ThatReal(actual := realSpecial.Value).IsGreaterThan(expected := REAL#0.0);
+
+	ASSERTION_PROBE_SCENARIO.FLOAT_EQUALITY_FAILURE:
+		Assert.ThatReal(actual := REAL#1.0).ToBe(expected := REAL#2.0);
+
+	ASSERTION_PROBE_SCENARIO.TIME_ORDERING_FAILURE:
+		Assert.ThatTime(actual := T#1MS).IsGreaterThanOrEquals(expected := T#2MS);
+END_CASE]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="NamespaceName" Id="{4a03ff74-6cf9-4cc4-ab8b-4bc2c07d14fc}">
+      <Declaration><![CDATA[//! <summary>Borrows the compiler-initialized namespace; callers must not modify the returned reference.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{d45f5254-538a-4fa1-8ec1-48a9de3443f9}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[NamespaceName REF= _NamespaceName;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="replaceValue" Id="{4e03b50a-93c1-4bdf-8dbd-6207f4a1e384}">
+      <Declaration><![CDATA[(*!
+<summary>Changes source storage while returning its original value to a typed expected input.</summary>
+<description>
+Proves that the typed actual operand is a snapshot before evaluation of the next method argument.
+</description>
+<param name="value">Source variable incremented after its original value is captured.</param>
+*)
+METHOD PRIVATE replaceValue : DINT
+VAR_IN_OUT
+	value : DINT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[replaceValue := value;
+value := value + 1;]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="SelfSize" Id="{9f7a42bc-9f6c-49ae-b4f7-a6962695b1b4}">
+      <Declaration><![CDATA[//! <summary>Reports the complete concrete instance size, excluding separately allocated storage.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY SelfSize : ULINT]]></Declaration>
+      <Get Name="Get" Id="{39d82092-21f0-40d1-8680-d79a2bf7f462}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[SelfSize := XSIZEOF(THIS^);]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+  </POU>
+</TcPlcObject>

@@ -18,6 +18,8 @@ the collection unchanged when no match exists, including on an empty dynamic ins
 capacity checks, writes and buffer replacement. Internal sources and overlapping ranges are supported when the
 full source range is readable; growth keeps the old buffer alive until copying completes. Derived callers of
 WriteData must satisfy its validated-input preconditions.
+Instances cannot be assigned by value: copying backing pointers or disposal responsibility would create
+unsafe aliases. Interface references still borrow this instance; copying an interface does not clone storage.
 </description>
 *)
 
@@ -25,16 +27,20 @@ WriteData must satisfy its validated-input preconditions.
 FUNCTION_BLOCK ByteList 
 VAR_GENERIC CONSTANT
 	{attribute 'hide'} 
-    _StaticCapacity : TOF_Core.DINT_LENGTH := 0;
+	//! <summary>Inline capacity; zero selects dynamic backing storage.</summary>
+	_StaticCapacity : TOF_Core.DINT_LENGTH := 0;
 END_VAR
 EXTENDS TOF_Core.Object IMPLEMENTS IByteList
 VAR_OUTPUT
+	//! <summary>Borrows backing bytes; growth or released capacity invalidates the address.</summary>
 	DataAddress : POINTER TO BYTE;
 END_VAR
-VAR
+VAR_STAT
+	//! <summary>Class name shared by all instances of this function block.</summary>
 	{attribute 'hide'} 
 	_ClassName : STRING := __POUNAME();
-	
+END_VAR
+VAR
 	{attribute 'hide'} 
 	_StaticArray : ARRAY [0.._StaticCapacity - 1] OF BYTE;
 	
@@ -78,9 +84,7 @@ METHOD FINAL AppendByte : IByteList
 VAR_INPUT
 	value : BYTE;
 END_VAR
-VAR
-	newMemory : POINTER TO BYTE;
-END_VAR]]></Declaration>
+]]></Declaration>
       <Implementation>
         <ST><![CDATA[AppendByte := AppendData(data := ADR(value), dataSize := 1);]]></ST>
       </Implementation>
@@ -89,8 +93,8 @@ END_VAR]]></Declaration>
       <Declaration><![CDATA[(*!
 <summary>Appends bytes copied from a borrowed memory range.</summary>
 <description>
-For nonzero data and positive dataSize, the source must be readable. Negative sizes and a resulting length
-outside DINT raise ArgumentOutOfRangeException before copying. Null data or zero size remains a no-op. Static
+Null data or zero dataSize is a no-op before size validation. Otherwise the source must be readable and
+negative sizes or a resulting length outside DINT raise ArgumentOutOfRangeException before copying. Static
 capacity exhaustion raises StaticCollectionFullException. Dynamic allocation uses checked growth and terminal
 OOM handling. The existing growth increment (free capacity plus input size) is retained and must also fit. The
 source may refer to this collection buffer, including overlapping ranges. The caller must provide a readable
@@ -179,7 +183,10 @@ PROPERTY FINAL Capacity : TOF_Core.DINT_LENGTH]]></Declaration>
       </Get>
     </Property>
     <Property Name="ClassName" Id="{3b9bf934-b83c-0948-370d-5e8e28db661a}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Borrows the concrete collection class name without transferring storage ownership.</summary>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
       <Get Name="Get" Id="{a74d6b23-00f3-0fef-283c-b96c5cad2f8b}">
         <Declaration><![CDATA[]]></Declaration>
@@ -272,7 +279,7 @@ PROPERTY FINAL Empty : BOOL]]></Declaration>
       <Declaration><![CDATA[(*!
 <summary>Releases dynamic byte storage during destruction.</summary>
 <description>
-Calls Clear(releaseMemory := TRUE); inline storage is not separately deleted. Lifecycle methods must complete without
+Calls Clear(releaseDynamicMemory := TRUE); inline storage is not separately deleted. Lifecycle methods must complete without
 exceptions. No separate copy-code ownership handoff is implemented.
 </description>
 *)
@@ -297,7 +304,7 @@ online-change relocation repair is implemented.
 METHOD FB_init : BOOL
 VAR_INPUT
 	bInitRetains : BOOL; // TRUE: the retain variables are initialized (reset warm / reset cold)
-	bInCopyCode : BOOL;  // TRUE: the instance will be copied to the copy code afterward (online change)
+	bInCopyCode : BOOL; // TRUE: the instance will be copied to the copy code afterward (online change)
 END_VAR
 ]]></Declaration>
       <Implementation>
@@ -761,11 +768,13 @@ THEN
 END_IF
 
 newMemory := __NEW(BYTE, TO_UDINT(requestedCapacity));
+
 IF newMemory = 0 THEN
 	TOF_Core.DynamicMemoryManager.RaiseAllocationFailure();
 END_IF
 
 oldMemory := DataAddress;
+
 IF _Length > TOF_Core.SignedInt32.ZERO THEN
 	Tc2_System.MEMCPY(destAddr := newMemory, srcAddr := oldMemory, n := TO_UDINT(_Length));
 END_IF

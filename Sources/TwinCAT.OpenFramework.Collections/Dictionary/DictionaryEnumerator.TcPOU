@@ -15,16 +15,19 @@ source during traversal. Current is a borrowed view and must not be released or 
 descriptor; it is invalidated by cursor advancement/reset or source mutation. The caller owns and explicitly
 releases a dynamically created cursor. MoveNext stops advancing at the end position of an unchanged source;
 repeated exhausted calls return FALSE until Reset.
+A null constructor source is diagnosed by traversal/current access, never by FB_init.
 </description>
 *)
 
 {attribute 'no_explicit_call' := 'do not call this function block directly'}
 {attribute 'enable_dynamic_creation'}
 FUNCTION_BLOCK DictionaryEnumerator EXTENDS TOF_Core.Object IMPLEMENTS TOF_Core.IEnumerator
-VAR
+VAR_STAT
+	//! <summary>Class name shared by all instances of this function block.</summary>
 	{attribute 'hide'} 
 	_ClassName : STRING := __POUNAME();
-	
+END_VAR
+VAR
 	{attribute 'hide'} 
 	_Dictionary : IReadOnlyDictionary;
 	{attribute 'hide'} 
@@ -39,7 +42,10 @@ END_VAR]]></Declaration>
       <ST><![CDATA[]]></ST>
     </Implementation>
     <Property Name="ClassName" Id="{839d6121-03b1-4336-9ccf-f78a04cd0cb5}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Borrows the concrete cursor class name without transferring storage ownership.</summary>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
       <Get Name="Get" Id="{e0aa9b3a-9a64-4398-b874-5ed4b802f8a8}">
         <Declaration><![CDATA[]]></Declaration>
@@ -56,6 +62,7 @@ Reading Current before the first successful MoveNext, after Reset or after exhau
 descriptor. Otherwise payload is borrowed, with no disposal rights. Do not modify or release the descriptor.
 The view may change on subsequent property access, cursor movement or source mutation. The outer USER_DEFINED
 value points to cursor-local GENERIC_KEY_VALUE_PAIR storage; nested descriptors borrow collection payload.
+Missing source raises DataMemberNotSpecifiedException before source access or cursor advancement.
 </description>
 *)
 {attribute 'monitoring' := 'call'}
@@ -63,7 +70,9 @@ PROPERTY FINAL Current : REFERENCE TO TOF_Core.GENERIC_VALUE]]></Declaration>
       <Get Name="Get" Id="{f0a9af6e-a818-4733-9637-b26e3a47ceb1}">
         <Declaration><![CDATA[]]></Declaration>
         <Implementation>
-          <ST><![CDATA[IF _CurrentIndex >= 0 AND_THEN _CurrentIndex < _Dictionary.Length THEN
+          <ST><![CDATA[requireSource();
+
+IF _CurrentIndex >= 0 AND_THEN _CurrentIndex < _Dictionary.Length THEN
 	_GenericKeyValuePair := _Dictionary.GetKeyValuePairByIndex(index := _CurrentIndex); 
 	_GenericValue := TOF_Core.GenericValueFactory.FromParts(
 		genericTypeClass := TOF_Core.GENERIC_TYPE_CLASS.USER_DEFINED,
@@ -86,13 +95,16 @@ Current REF= _GenericValue;]]></ST>
 Use only after MoveNext returns TRUE and before the next cursor or source change. No result is promised
 outside a valid position. Nested descriptors borrow payload; their owner flags do not transfer disposal
 rights.
+Missing source raises DataMemberNotSpecifiedException before source access or cursor advancement.
 </description>
 *)
 PROPERTY FINAL CurrentKeyValuePair : TOF_Core.GENERIC_KEY_VALUE_PAIR]]></Declaration>
       <Get Name="Get" Id="{587ce946-29e3-488a-a34c-6505b64fa177}">
         <Declaration><![CDATA[]]></Declaration>
         <Implementation>
-          <ST><![CDATA[IF _CurrentIndex >= 0 AND_THEN _CurrentIndex < _Dictionary.Length THEN
+          <ST><![CDATA[requireSource();
+
+IF _CurrentIndex >= 0 AND_THEN _CurrentIndex < _Dictionary.Length THEN
 	CurrentKeyValuePair := _Dictionary.GetKeyValuePairByIndex(index := _CurrentIndex); 
 END_IF ]]></ST>
         </Implementation>
@@ -103,7 +115,8 @@ END_IF ]]></ST>
 <summary>Binds the borrowed source for enumeration.</summary>
 <description>
 The source must be non-null and outlive the cursor. Only the reference is assigned; no allocation, callbacks
-or throwing validation are performed.
+or throwing validation are performed. A null source remains invalid configuration and is reported by
+MoveNext or current-value access without throwing from initialization.
 </description>
 *)
 METHOD FB_init : BOOL
@@ -124,12 +137,15 @@ The source must be live, non-null and structurally unchanged during traversal. T
 entry. The index advances only while below source Length and stops at the end position. Repeated exhausted
 calls return FALSE without incrementing the index; reading Current yields an empty descriptor. Reset allows
 traversal from the beginning again. No snapshot or mutation detection is provided.
+Missing source raises DataMemberNotSpecifiedException before source access or cursor advancement.
 </description>
 *)
 {attribute "object_name" := "MoveNext"}
 METHOD FINAL MoveNext : BOOL]]></Declaration>
       <Implementation>
-        <ST><![CDATA[IF _CurrentIndex < _Dictionary.Length THEN
+        <ST><![CDATA[requireSource();
+
+IF _CurrentIndex < _Dictionary.Length THEN
 	_CurrentIndex := _CurrentIndex + 1;
 END_IF
 
@@ -184,5 +200,26 @@ PROPERTY SelfSize : ULINT]]></Declaration>
         </Implementation>
       </Get>
     </Property>
+    <Method Name="requireSource" Id="{ae3d8648-b07a-445a-902c-01ee2ce8366d}">
+      <Declaration><![CDATA[(*!
+<summary>Requires the configured source before traversal or current-value access.</summary>
+<description>
+A missing mandatory source is configuration failure, not an empty collection. Raises a framework diagnostic
+outside lifecycle methods and before mutation; it does not validate arbitrary pointer lifetime.
+</description>
+*)
+METHOD PRIVATE requireSource]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF _Dictionary = 0 THEN
+	TOF_Core.Exceptions.ThrowDataMemberNotSpecified(
+		sourceNamespaceName := NamespaceName,
+		sourceClassName := ClassName,
+		sourcePOUName := __POUNAME(),
+		sourcePosition := __POSITION(),
+		dataMemberName := 'dictionary'
+	);
+END_IF]]></ST>
+      </Implementation>
+    </Method>
   </POU>
 </TcPlcObject>

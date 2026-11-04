@@ -10,8 +10,12 @@ License: https://opensource.org/license/mit
 (*!
 <summary>Writes diagnostics through TwinCAT EventLogger and expands aggregate exceptions into entries.</summary>
 <description>
+Provide one live event definition per category with a message placeholder {0}; the native event definition
+determines event identity and severity. Constructor arguments are copied, not borrowed. No later
+configuration API or native online-change handoff is provided. Keep initialization/destruction separate
+from application calls; derived implementations must preserve these lifetime and no-throw guarantees.
 Use this backend for TwinCAT EventLogger events with structured source information when logging errors and
-exceptions directly. Use one task for direct calls on each instance; concurrent use of its internal
+exceptions directly. Use one task for direct calls on each instance without same-instance reentry; concurrent use of its internal
 FB_TcEventLogger has no established guarantee here. For callers in multiple tasks, use QueuedLogger and let
 only its owner task access this backend; do not bypass the wrapper with concurrent direct calls. QueuedLogger
 forwards text records, so exception source is included in text rather than the structured source field, and
@@ -29,9 +33,12 @@ handlers.
 
 {attribute 'no_explicit_call' := 'do not call this function block directly'}
 FUNCTION_BLOCK EventLogger EXTENDS TOF_Core.Object IMPLEMENTS TOF_Core.ILogger
-VAR
+VAR_STAT
+	//! <summary>Static type metadata shared by instances without reading mutable instance state.</summary>
 	{attribute 'hide'} 
 	_ClassName : STRING := __POUNAME();
+END_VAR
+VAR
 	
 	_EventLogger : Tc3_EventLogger.FB_TcEventLogger;
 	
@@ -46,7 +53,14 @@ END_VAR]]></Declaration>
     </Implementation>
     <Folder Name="Internal members" Id="{eb43b981-fe0c-4384-9a7e-ded8f887a71f}" />
     <Property Name="ClassName" Id="{8606f867-ab71-4ff0-b44a-b045271484a0}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Provides the concrete logger type name.</summary>
+<description>
+Returns borrowed read-only initialized static storage. Reading has no side effects or exceptions.
+Do not modify the referenced metadata; initialized storage is available before base initialization.
+</description>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
       <Get Name="Get" Id="{3237a013-9364-426b-a2dd-3913256764ad}">
         <Declaration><![CDATA[]]></Declaration>
@@ -103,6 +117,9 @@ _CriticalErrorEventType := criticalErrorEventType;]]></ST>
 When a number is supplied, preserves the number prefix and as much message text as fits ERROR_MESSAGE.
 Truncated text ends with U+2026. Formatting uses local storage and does not raise a size-overflow exception.
 Returns FALSE for an unsupported category or failed send.
+Contains formatting and native exceptions in this frame so local native FB instances exit normally.
+Returns FALSE when fatal allocation state is observed before work or after nested calls. The latch remains
+set for the caller's task boundary; already accepted or emitted records are not rolled back.
 </description>
 *)
 METHOD PROTECTED InternalTryLogMessage : BOOL
@@ -123,89 +140,118 @@ VAR
 	methodResult : HRESULT;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[sourceInfo.sName := source;
+        <ST><![CDATA[__TRY
 
-IF __ISVALIDREF(messageNumber) THEN
-	messageWithNumber := TOF_Core.WideStrings.Concat255(
-		TO_WSTRING(TOF_Core.Exceptions.MESSAGE_NUMBER_PREFIX),
-		TO_WSTRING(messageNumber),
-		TO_WSTRING(TOF_Core.Exceptions.MESSAGE_NUMBER_SUFFIX)
-	);
-	TOF_Core.WideStrings.AppendFit(targetString := messageWithNumber, sourceString := message);
-	arguments.AddWString(value := messageWithNumber);
-ELSE
-	arguments.AddWString(value := message);
-END_IF
+	IF TOF_Core.DynamicMemoryManager.HasAllocationFailed THEN
+		RETURN;
+	END_IF
 
-CASE category OF
-	TOF_Core.LOG_CATEGORY.DEBUG:
-		methodResult := _EventLogger.SendMessageEx(
-			stEventEntry := _DebugEventType,
-			ipSourceInfo := sourceInfo,
-			nTimeStamp := 0,
-			ipArguments := arguments
-		);
-			
-	TOF_Core.LOG_CATEGORY.INFORMATION:
-		methodResult := _EventLogger.SendMessageEx(
-			stEventEntry := _InformationEventType,
-			ipSourceInfo := sourceInfo,
-			nTimeStamp := 0,
-			ipArguments := arguments
-		);
-		
-	TOF_Core.LOG_CATEGORY.WARNING:
-		methodResult := _EventLogger.SendMessageEx(
-			stEventEntry := _WarningEventType,
-			ipSourceInfo := sourceInfo,
-			nTimeStamp := 0,
-			ipArguments := arguments
-		);
-	
-	TOF_Core.LOG_CATEGORY.ERROR:
-		methodResult := _EventLogger.SendMessageEx(
-			stEventEntry := _ErrorEventType,
-			ipSourceInfo := sourceInfo,
-			nTimeStamp := 0,
-			ipArguments := arguments
-		);
+	sourceInfo.sName := source;
 
-	TOF_Core.LOG_CATEGORY.CRITICAL_ERROR:
-		methodResult := _EventLogger.SendMessageEx(
-			stEventEntry := _CriticalErrorEventType,
-			ipSourceInfo := sourceInfo,
-			nTimeStamp := 0,
-			ipArguments := arguments
+	IF __ISVALIDREF(messageNumber) THEN
+		messageWithNumber := TOF_Core.WideStrings.Concat255(
+			TO_WSTRING(TOF_Core.Exceptions.MESSAGE_NUMBER_PREFIX),
+			TO_WSTRING(messageNumber),
+			TO_WSTRING(TOF_Core.Exceptions.MESSAGE_NUMBER_SUFFIX)
 		);
-
+		TOF_Core.WideStrings.AppendFit(targetString := messageWithNumber, sourceString := message);
+		arguments.AddWString(value := messageWithNumber);
 	ELSE
+		arguments.AddWString(value := message);
+	END_IF
+
+	IF TOF_Core.DynamicMemoryManager.HasAllocationFailed THEN
+		RETURN;
+	END_IF
+
+	CASE category OF
+		TOF_Core.LOG_CATEGORY.DEBUG:
+			methodResult := _EventLogger.SendMessageEx(
+				stEventEntry := _DebugEventType,
+				ipSourceInfo := sourceInfo,
+				nTimeStamp := 0,
+				ipArguments := arguments
+			);
+
+		TOF_Core.LOG_CATEGORY.INFORMATION:
+			methodResult := _EventLogger.SendMessageEx(
+				stEventEntry := _InformationEventType,
+				ipSourceInfo := sourceInfo,
+				nTimeStamp := 0,
+				ipArguments := arguments
+			);
+
+		TOF_Core.LOG_CATEGORY.WARNING:
+			methodResult := _EventLogger.SendMessageEx(
+				stEventEntry := _WarningEventType,
+				ipSourceInfo := sourceInfo,
+				nTimeStamp := 0,
+				ipArguments := arguments
+			);
+
+		TOF_Core.LOG_CATEGORY.ERROR:
+			methodResult := _EventLogger.SendMessageEx(
+				stEventEntry := _ErrorEventType,
+				ipSourceInfo := sourceInfo,
+				nTimeStamp := 0,
+				ipArguments := arguments
+			);
+
+		TOF_Core.LOG_CATEGORY.CRITICAL_ERROR:
+			methodResult := _EventLogger.SendMessageEx(
+				stEventEntry := _CriticalErrorEventType,
+				ipSourceInfo := sourceInfo,
+				nTimeStamp := 0,
+				ipArguments := arguments
+			);
+
+		ELSE
+			Tc2_System.ADSLOGSTR(
+				msgCtrlMask := Tc2_System.Global_Variables.ADSLOG_MSGTYPE_ERROR OR Tc2_System.Global_Variables.ADSLOG_MSGTYPE_LOG,
+				msgFmtStr := Tc2_Standard.CONCAT(STR1 := 'Unsupported log category ', STR2 := TO_STRING(category)),
+				strArg := ''
+			);
+
+			RETURN;
+	END_CASE
+
+	IF TOF_Core.DynamicMemoryManager.HasAllocationFailed THEN
+		RETURN;
+	END_IF
+
+	IF Tc3_Module.FAILED(hr := methodResult) THEN
 		Tc2_System.ADSLOGSTR(
-			msgCtrlMask := Tc2_System.Global_Variables.ADSLOG_MSGTYPE_ERROR OR Tc2_System.Global_Variables.ADSLOG_MSGTYPE_LOG, 
-			msgFmtStr := Tc2_Standard.CONCAT(STR1 := 'Unsupported log category ', STR2 := TO_STRING(category)), 
+			msgCtrlMask := Tc2_System.Global_Variables.ADSLOG_MSGTYPE_ERROR OR Tc2_System.Global_Variables.ADSLOG_MSGTYPE_LOG,
+			msgFmtStr := Tc2_Standard.CONCAT(
+				STR1 := 'FB_TcMessage creation failed with HRESULT = ',
+				STR2 := TO_STRING(methodResult)
+			),
 			strArg := ''
 		);
-			
-		RETURN;		
-END_CASE
 
-IF Tc3_Module.FAILED(hr := methodResult) THEN
-	Tc2_System.ADSLOGSTR(
-		msgCtrlMask := Tc2_System.Global_Variables.ADSLOG_MSGTYPE_ERROR OR Tc2_System.Global_Variables.ADSLOG_MSGTYPE_LOG, 
-		msgFmtStr := Tc2_Standard.CONCAT(
-			STR1 := 'FB_TcMessage creation failed with HRESULT = ',
-			STR2 := TO_STRING(methodResult)
-		), 
-		strArg := ''
-	);
-		
-	RETURN;		
-END_IF
+		RETURN;
+	END_IF
 
-InternalTryLogMessage := TRUE;]]></ST>
+	InternalTryLogMessage := TRUE;
+
+	IF TOF_Core.DynamicMemoryManager.HasAllocationFailed THEN
+		InternalTryLogMessage := FALSE;
+	END_IF
+
+__CATCH
+	// Contain failure before local native argument/source objects leave this frame.
+	InternalTryLogMessage := FALSE;
+__ENDTRY]]></ST>
       </Implementation>
     </Method>
     <Property Name="NamespaceName" Id="{75388737-b788-4a16-a31f-a3885f5f2749}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Borrows the library namespace.</summary>
+<description>
+Read-only compiler-initialized storage; do not modify the referenced text.
+</description>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
       <Get Name="Get" Id="{751a8249-a618-42a3-8fb5-6e37489fe438}">
         <Declaration><![CDATA[]]></Declaration>
@@ -215,7 +261,13 @@ PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
       </Get>
     </Property>
     <Property Name="SelfSize" Id="{98e9eadc-01ba-46bc-90cb-368644546c24}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Reports the size of this concrete event logger instance.</summary>
+<description>
+The result includes embedded native state but excludes allocations owned internally by native services.
+</description>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY SelfSize : ULINT]]></Declaration>
       <Get Name="Get" Id="{606ae824-c393-4762-992a-f3ef439dd9fb}">
         <Declaration><![CDATA[]]></Declaration>
@@ -233,6 +285,8 @@ propagate exceptions, including failures while reading or formatting diagnostics
 returns FALSE instead. Already emitted entries are not rolled back, so FALSE may follow partial output. Caught
 exceptions are not logged again. The fatal allocation latch is preserved for RaiseIfAllocationFailed at the
 task boundary outside recoverable handlers.
+Returns FALSE when fatal allocation state is observed before work or after nested calls. The latch remains
+set for the caller's task boundary; already accepted or emitted records are not rolled back.
 </description>
 *)
 METHOD TryLogError : BOOL
@@ -245,6 +299,11 @@ VAR
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[__TRY
+
+	IF TOF_Core.DynamicMemoryManager.HasAllocationFailed THEN
+		RETURN;
+	END_IF
+
 	IF NOT __ISVALIDREF(error) THEN
 		RETURN;
 	END_IF
@@ -254,12 +313,25 @@ END_VAR]]></Declaration>
 		timestampDisplayMode := TOF_Core.TIMESTAMP_DISPLAY_MODE.HIDDEN
 	);
 
+	IF TOF_Core.DynamicMemoryManager.HasAllocationFailed THEN
+		RETURN;
+	END_IF
+
 	TryLogError := InternalTryLogMessage(
-		category := SEL(error.Severity = TOF_Core.ERROR_SEVERITY.CRITICAL, TOF_Core.LOG_CATEGORY.ERROR, TOF_Core.LOG_CATEGORY.CRITICAL_ERROR),
+		category := SEL(
+			error.Severity = TOF_Core.ERROR_SEVERITY.CRITICAL,
+			TOF_Core.LOG_CATEGORY.ERROR,
+			TOF_Core.LOG_CATEGORY.CRITICAL_ERROR
+		),
 		message := message,
 		source := error.GetSource(appendRootSource := TRUE),
 		messageNumber := messageNumber
 	);
+
+	IF TOF_Core.DynamicMemoryManager.HasAllocationFailed THEN
+		TryLogError := FALSE;
+	END_IF
+
 __CATCH
 	TryLogError := FALSE;
 __ENDTRY]]></ST>
@@ -270,11 +342,15 @@ __ENDTRY]]></ST>
 <summary>Attempts to log diagnostic information from a read-only exception view.</summary>
 <description>
 Borrows the exception for the call without clearing it or taking ownership. The exception and its inner causes
-must remain live while their diagnostics are read. Logging does not extend their lifetime. Does not propagate
+must remain live and form an acyclic graph while their diagnostics are read. Nonempty aggregates produce
+separate entries in stored order, sharing the optional request number. Nonfatal FALSE does not suppress later
+entries; a thrown diagnostic failure or observed terminal allocation state stops further processing. Logging does not extend their lifetime. Does not propagate
 exceptions, including failures while reading or formatting diagnostics and calling the backend; returns FALSE
 instead. Already emitted entries are not rolled back, so FALSE may follow partial output. Caught exceptions
 are not logged again. The fatal allocation latch is preserved for RaiseIfAllocationFailed at the task boundary
 outside recoverable handlers.
+Returns FALSE when fatal allocation state is observed before work or after nested calls. The latch remains
+set for the caller's task boundary; already accepted or emitted records are not rolled back.
 </description>
 <param name="exception">Exception view to read; null is ignored.</param>
 <param name="severity">Severity used to select the log category.</param>
@@ -288,16 +364,35 @@ END_VAR
 VAR
 	message : TOF_Core.ERROR_MESSAGE;
 	aggregateException : TOF_Core.IAggregateException;
+	innerExceptionCount : UINT;
 	i : DINT;
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[__TRY
+
+	IF TOF_Core.DynamicMemoryManager.HasAllocationFailed THEN
+		RETURN;
+	END_IF
+
 	IF exception = 0 THEN
 		RETURN;
 	END_IF
 
-	IF NOT __QUERYINTERFACE(exception, aggregateException) OR_ELSE aggregateException.InnerExceptionCount = 0 THEN
+	IF __QUERYINTERFACE(exception, aggregateException) THEN
+		innerExceptionCount := aggregateException.InnerExceptionCount;
+	END_IF
+
+	IF TOF_Core.DynamicMemoryManager.HasAllocationFailed THEN
+		RETURN;
+	END_IF
+
+	IF innerExceptionCount = 0 THEN
 		message := exception.GetMessage(showSource := FALSE, timestampDisplayMode := TOF_Core.TIMESTAMP_DISPLAY_MODE.LOCAL);
+
+		IF TOF_Core.DynamicMemoryManager.HasAllocationFailed THEN
+			RETURN;
+		END_IF
+
 		TryLogException := InternalTryLogMessage(
 			category := SEL(severity = TOF_Core.ERROR_SEVERITY.CRITICAL, TOF_Core.LOG_CATEGORY.ERROR, TOF_Core.LOG_CATEGORY.CRITICAL_ERROR),
 			message := message,
@@ -306,15 +401,33 @@ END_VAR]]></Declaration>
 		);
 	ELSE
 		TryLogException := TRUE;
-		
-		FOR i := 0 TO aggregateException.InnerExceptionCount - 1 DO
+
+		FOR i := 0 TO TO_DINT(innerExceptionCount) - 1 DO
+
+			IF TOF_Core.DynamicMemoryManager.HasAllocationFailed THEN
+				TryLogException := FALSE;
+				RETURN;
+			END_IF
+
 			TryLogException := TryLogException AND THIS^.TryLogException(
 				exception := aggregateException.GetInnerException(index := i),
 				severity := severity,
 				messageNumber := messageNumber
-			);		
+			);
+
+			IF TOF_Core.DynamicMemoryManager.HasAllocationFailed THEN
+				TryLogException := FALSE;
+				RETURN;
+			END_IF
+
 		END_FOR
+
 	END_IF
+
+	IF TOF_Core.DynamicMemoryManager.HasAllocationFailed THEN
+		TryLogException := FALSE;
+	END_IF
+
 __CATCH
 	TryLogException := FALSE;
 __ENDTRY]]></ST>
@@ -329,6 +442,8 @@ propagate exceptions, including failures while reading or formatting diagnostics
 returns FALSE instead. Already emitted entries are not rolled back, so FALSE may follow partial output. Caught
 exceptions are not logged again. The fatal allocation latch is preserved for RaiseIfAllocationFailed at the
 task boundary outside recoverable handlers.
+Returns FALSE when fatal allocation state is observed before work or after nested calls. The latch remains
+set for the caller's task boundary; already accepted or emitted records are not rolled back.
 </description>
 *)
 METHOD TryLogMessage : BOOL
@@ -343,7 +458,17 @@ VAR_INPUT
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[__TRY
+
+	IF TOF_Core.DynamicMemoryManager.HasAllocationFailed THEN
+		RETURN;
+	END_IF
+
 	TryLogMessage := InternalTryLogMessage(category := category, message := message, source := '', messageNumber := messageNumber);
+
+	IF TOF_Core.DynamicMemoryManager.HasAllocationFailed THEN
+		TryLogMessage := FALSE;
+	END_IF
+
 __CATCH
 	TryLogMessage := FALSE;
 __ENDTRY]]></ST>

@@ -1,0 +1,453 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="FileTestDirectory" Id="{f69c3201-e6b2-40bf-bc2b-b9d380ca47f9}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+SPDX-FileCopyrightText: © 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+SPDX-License-Identifier: MIT
+License: https://opensource.org/license/mit
+*)
+
+(*!
+<summary>Owns preparation and nonrecursive cleanup of one filesystem test scenario directory.</summary>
+<description>
+The caller supplies a fixed path below the reserved test root and waits for FileTestRoot.Prepared before
+Prepare. Ordinary creation must succeed before files may be registered or opened. Existing entries are not
+adopted or deleted. One owner task drives the fixture and prevents external changes inside its directory.
+Keep this instance alive and drain all scenario managers before Cleanup. Only registered fixed artifacts are
+deleted. Failed or cancelled creation has unknown effects and grants no ownership; inspect that path manually.
+Cleanup continues over later calls without a forced deadline. CleanupComplete reports completed attempts;
+CleanupSucceeded reports directory removal or that creation was never submitted, not physical handle closure.
+</description>
+*)
+
+{attribute 'no_explicit_call' := 'Use Prepare and Cleanup from the owning scenario'}
+FUNCTION_BLOCK FileTestDirectory
+VAR
+	_DirectoryPath : STRING(255);
+	_Phase : FILE_TEST_DIRECTORY_PHASE;
+	_OwnsDirectory : BOOL;
+	_PreparationFailed : BOOL;
+	_PreparationMessage : STRING(255);
+	_CleanupComplete : BOOL;
+	_CleanupSucceeded : BOOL;
+	_CleanupMessage : STRING(255);
+	_FirstFileMayExist : BOOL;
+	_SecondFileMayExist : BOOL;
+
+	_CreateDirectory : TOF_FileSystem.CreateDirectory(name := "prepareFileScenarioDirectory");
+	_DeleteFirstFile : TOF_FileSystem.DeleteFile(name := "deleteFirstScenarioFile");
+	_DeleteSecondFile : TOF_FileSystem.DeleteFile(name := "deleteSecondScenarioFile");
+	_RemoveDirectory : TOF_FileSystem.RemoveEmptyDirectory(name := "removeFileScenarioDirectory");
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[]]></ST>
+    </Implementation>
+    <Method Name="FB_init" Id="{ab872aad-dc2a-48b9-ae72-faa615ae943d}">
+      <Declaration><![CDATA[(*!
+<summary>Copies the fixed scenario directory path without performing I/O.</summary>
+<description>
+The caller supplies a path below C:\OpenFrameworkTests with enough room for the fixed artifact names.
+The path remains unchanged throughout preparation, scenario execution and cleanup.
+</description>
+<param name="directoryPath">Fixed exclusively reserved scenario path below the prepared test root.</param>
+*)
+METHOD FB_init : BOOL
+VAR_INPUT
+	bInitRetains : BOOL; // TRUE: the retain variables are initialized (reset warm / reset cold)
+	bInCopyCode : BOOL; // TRUE: the instance will be copied to the copy code afterward (online change)
+	directoryPath : STRING(255);
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF NOT bInCopyCode THEN
+	_DirectoryPath := directoryPath;
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="Prepare" Id="{3f583235-9965-4be2-8c0a-183bcf71e0b3}">
+      <Declaration><![CDATA[(*!
+<summary>Advances ordinary directory creation and records ownership only after WORK_DONE.</summary>
+<description>
+Call only after the shared root is prepared. A refusal, native failure or caught exception reports preparation
+failure. Keep invoking Cleanup after a failed scenario to drain an interrupted create; no existing entry is
+adopted. Prepared remains FALSE until creation completes successfully.
+</description>
+*)
+METHOD Prepare]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[__TRY
+
+	CASE _Phase OF
+		FILE_TEST_DIRECTORY_PHASE.CREATE_DIRECTORY:
+			_CreateDirectory.DirectoryPath := _DirectoryPath;
+			_CreateDirectory.PathType := Tc2_System.E_OpenPath.PATH_GENERIC;
+			_CreateDirectory.Timeout := T#2S;
+
+			IF _CreateDirectory.Start() THEN
+				_Phase := FILE_TEST_DIRECTORY_PHASE.WAIT_FOR_DIRECTORY;
+			ELSE
+				_PreparationFailed := TRUE;
+				_PreparationMessage := 'Scenario directory creation: Start refused';
+				_Phase := FILE_TEST_DIRECTORY_PHASE.COMPLETE;
+				_CleanupComplete := TRUE;
+				_CleanupSucceeded := TRUE;
+			END_IF
+
+		FILE_TEST_DIRECTORY_PHASE.WAIT_FOR_DIRECTORY:
+			_CreateDirectory.Execute();
+
+			IF _CreateDirectory.State.Stopped THEN
+
+				IF _CreateDirectory.FinalStopReason.WorkDone THEN
+					_OwnsDirectory := TRUE;
+					_Phase := FILE_TEST_DIRECTORY_PHASE.READY;
+				ELSE
+					_PreparationFailed := TRUE;
+					_PreparationMessage := TO_STRING(_CreateDirectory.FinalStopReason.Message);
+					_CleanupMessage := 'Creation failed; the scenario path is not owned and requires inspection';
+					_Phase := FILE_TEST_DIRECTORY_PHASE.COMPLETE;
+					_CleanupComplete := TRUE;
+				END_IF
+
+			END_IF
+
+	END_CASE
+
+__CATCH
+	_PreparationFailed := TRUE;
+	_PreparationMessage := 'Exception interrupted scenario directory creation';
+__ENDTRY]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="ExpectFirstFile" Id="{feb497f0-de08-4d42-902c-752370be26ef}">
+      <Declaration><![CDATA[(*!
+<summary>Registers the first fixed artifact before a scenario may create it.</summary>
+<description>
+Requires a successfully prepared, exclusively owned directory. Registration grants permission to attempt
+cleanup of this fixed path even if a later open fails; it does not prove that the file exists.
+</description>
+*)
+METHOD ExpectFirstFile]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF NOT _OwnsDirectory OR_ELSE _Phase <> FILE_TEST_DIRECTORY_PHASE.READY THEN
+	TOF_Core.Exceptions.ThrowStandard(
+		sourceNamespaceName := 'Tests',
+		sourceClassName := 'FileTestDirectory',
+		sourcePOUName := __POUNAME(),
+		sourcePosition := __POSITION(),
+		message := "A file artifact requires an owned prepared scenario directory"
+	);
+END_IF
+
+_FirstFileMayExist := TRUE;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="ExpectSecondFile" Id="{59228106-49e6-4a1d-980b-f960e4306182}">
+      <Declaration><![CDATA[(*!
+<summary>Registers the second fixed artifact before a scenario may create it.</summary>
+<description>
+Requires a successfully prepared, exclusively owned directory. Registration grants permission to attempt
+cleanup of this fixed path even if a later open fails; it does not prove that the file exists.
+</description>
+*)
+METHOD ExpectSecondFile]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF NOT _OwnsDirectory OR_ELSE _Phase <> FILE_TEST_DIRECTORY_PHASE.READY THEN
+	TOF_Core.Exceptions.ThrowStandard(
+		sourceNamespaceName := 'Tests',
+		sourceClassName := 'FileTestDirectory',
+		sourcePOUName := __POUNAME(),
+		sourcePosition := __POSITION(),
+		message := "A file artifact requires an owned prepared scenario directory"
+	);
+END_IF
+
+_SecondFileMayExist := TRUE;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="Cleanup" Id="{1202f0de-9dc7-4807-b5f9-def4020ce082}">
+      <Declaration><![CDATA[(*!
+<summary>Drains preparation and attempts deletion of registered artifacts and the owned directory.</summary>
+<description>
+All scenario file managers and content tasks must already have completed stopping/release. Repeated calls
+advance one cleanup phase without starting scenario I/O. A missing registered file can cause a deletion error;
+successful final directory removal still proves that no artifact remains there. CleanupMessage retains any
+intermediate error. No recursive deletion, adoption of existing directories or forced destruction is used.
+</description>
+*)
+METHOD Cleanup]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF _CleanupComplete THEN
+	RETURN;
+END_IF
+
+__TRY
+
+	CASE _Phase OF
+		FILE_TEST_DIRECTORY_PHASE.CREATE_DIRECTORY:
+			_CleanupComplete := TRUE;
+			_CleanupSucceeded := TRUE;
+			_Phase := FILE_TEST_DIRECTORY_PHASE.COMPLETE;
+
+		FILE_TEST_DIRECTORY_PHASE.WAIT_FOR_DIRECTORY:
+			_Phase := FILE_TEST_DIRECTORY_PHASE.DRAIN_CREATION;
+
+		FILE_TEST_DIRECTORY_PHASE.DRAIN_CREATION:
+
+			IF _CreateDirectory.State.Running THEN
+				_CreateDirectory.Cancel();
+				_CreateDirectory.Execute();
+			END_IF
+
+			IF NOT _CreateDirectory.State.Running THEN
+
+				IF _CreateDirectory.State.Stopped AND_THEN _CreateDirectory.FinalStopReason.WorkDone THEN
+					_OwnsDirectory := TRUE;
+					_Phase := FILE_TEST_DIRECTORY_PHASE.READY;
+				ELSE
+					_CleanupMessage := 'Interrupted creation has unknown effects; inspect the unowned directory';
+					_CleanupComplete := TRUE;
+					_Phase := FILE_TEST_DIRECTORY_PHASE.COMPLETE;
+				END_IF
+
+			END_IF
+
+		FILE_TEST_DIRECTORY_PHASE.READY:
+			_Phase := FILE_TEST_DIRECTORY_PHASE.DELETE_FIRST_FILE;
+
+		FILE_TEST_DIRECTORY_PHASE.DELETE_FIRST_FILE:
+
+			IF _FirstFileMayExist THEN
+
+				IF _DeleteFirstFile.State.Ready THEN
+					_DeleteFirstFile.FilePath := FirstFilePath;
+					_DeleteFirstFile.PathType := Tc2_System.E_OpenPath.PATH_GENERIC;
+					_DeleteFirstFile.Timeout := T#2S;
+
+					IF NOT _DeleteFirstFile.Start() THEN
+						_CleanupMessage := 'Artifact deletion: Start refused; inspect the scenario directory';
+						_Phase := FILE_TEST_DIRECTORY_PHASE.DELETE_SECOND_FILE;
+						RETURN;
+					END_IF
+
+				END_IF
+
+				_DeleteFirstFile.Execute();
+
+				IF NOT _DeleteFirstFile.State.Stopped THEN
+					RETURN;
+				END_IF
+
+				IF NOT _DeleteFirstFile.FinalStopReason.WorkDone THEN
+					_CleanupMessage := TO_STRING(_DeleteFirstFile.FinalStopReason.Message);
+				END_IF
+
+			END_IF
+
+			_Phase := FILE_TEST_DIRECTORY_PHASE.DELETE_SECOND_FILE;
+
+		FILE_TEST_DIRECTORY_PHASE.DELETE_SECOND_FILE:
+
+			IF _SecondFileMayExist THEN
+
+				IF _DeleteSecondFile.State.Ready THEN
+					_DeleteSecondFile.FilePath := SecondFilePath;
+					_DeleteSecondFile.PathType := Tc2_System.E_OpenPath.PATH_GENERIC;
+					_DeleteSecondFile.Timeout := T#2S;
+
+					IF NOT _DeleteSecondFile.Start() THEN
+						_CleanupMessage := 'Artifact deletion: Start refused; inspect the scenario directory';
+						_Phase := FILE_TEST_DIRECTORY_PHASE.REMOVE_DIRECTORY;
+						RETURN;
+					END_IF
+
+				END_IF
+
+				_DeleteSecondFile.Execute();
+
+				IF NOT _DeleteSecondFile.State.Stopped THEN
+					RETURN;
+				END_IF
+
+				IF NOT _DeleteSecondFile.FinalStopReason.WorkDone THEN
+					_CleanupMessage := TO_STRING(_DeleteSecondFile.FinalStopReason.Message);
+				END_IF
+
+			END_IF
+
+			_Phase := FILE_TEST_DIRECTORY_PHASE.REMOVE_DIRECTORY;
+
+		FILE_TEST_DIRECTORY_PHASE.REMOVE_DIRECTORY:
+
+			IF _RemoveDirectory.State.Ready THEN
+				_RemoveDirectory.DirectoryPath := _DirectoryPath;
+				_RemoveDirectory.PathType := Tc2_System.E_OpenPath.PATH_GENERIC;
+				_RemoveDirectory.Timeout := T#2S;
+
+				IF NOT _RemoveDirectory.Start() THEN
+					_CleanupMessage := 'Directory cleanup: Start refused';
+					_CleanupComplete := TRUE;
+					_Phase := FILE_TEST_DIRECTORY_PHASE.COMPLETE;
+					RETURN;
+				END_IF
+
+			END_IF
+
+			_RemoveDirectory.Execute();
+
+			IF _RemoveDirectory.State.Stopped THEN
+				_CleanupSucceeded := _RemoveDirectory.FinalStopReason.WorkDone;
+
+				IF _CleanupSucceeded THEN
+					_OwnsDirectory := FALSE;
+				ELSE
+					_CleanupMessage := TO_STRING(_RemoveDirectory.FinalStopReason.Message);
+				END_IF
+
+				_CleanupComplete := TRUE;
+				_Phase := FILE_TEST_DIRECTORY_PHASE.COMPLETE;
+			END_IF
+
+	END_CASE
+
+__CATCH
+	(* Persistent tasks remain available; a later call resumes the interrupted cleanup phase. *)
+	_CleanupMessage := 'Exception interrupted scenario cleanup; keep cycling and inspect the directory';
+__ENDTRY]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="Prepared" Id="{68a95716-2692-4a59-bdca-e1234bbb9419}">
+      <Declaration><![CDATA[(*!
+<summary>Reports exclusive ownership after successful ordinary creation.</summary>
+*)
+PROPERTY Prepared : BOOL]]></Declaration>
+      <Get Name="Get" Id="{00561b38-4d9d-4ac5-a1e4-8256b2c48058}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[Prepared := _Phase = FILE_TEST_DIRECTORY_PHASE.READY AND_THEN _OwnsDirectory;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="PreparationFailed" Id="{4d364337-8659-4b6d-a5ec-82d9072399d0}">
+      <Declaration><![CDATA[(*!
+<summary>Reports refusal, native failure or an exception during preparation.</summary>
+*)
+PROPERTY PreparationFailed : BOOL]]></Declaration>
+      <Get Name="Get" Id="{53b53739-ea30-4b02-a9a0-feab8eb6a5b4}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[PreparationFailed := _PreparationFailed;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="PreparationMessage" Id="{7be275a5-025e-4fbf-898b-f69de9cc5285}">
+      <Declaration><![CDATA[(*!
+<summary>Copies the retained preparation diagnostic.</summary>
+*)
+PROPERTY PreparationMessage : STRING(255)]]></Declaration>
+      <Get Name="Get" Id="{6eda95dc-34f5-4e6e-a74b-5e52cd2ca63f}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[PreparationMessage := _PreparationMessage;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="CleanupComplete" Id="{96cca355-d376-41e4-83f8-f9353dda3a99}">
+      <Declaration><![CDATA[(*!
+<summary>Reports that cleanup attempts ended, including unsuccessful attempts.</summary>
+*)
+PROPERTY CleanupComplete : BOOL]]></Declaration>
+      <Get Name="Get" Id="{839275db-d2f4-4589-b3d0-982b406d8a49}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[CleanupComplete := _CleanupComplete;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="CleanupSucceeded" Id="{c4a35559-5390-41be-9356-33b301685078}">
+      <Declaration><![CDATA[(*!
+<summary>Reports directory removal or cleanup before any creation request.</summary>
+*)
+PROPERTY CleanupSucceeded : BOOL]]></Declaration>
+      <Get Name="Get" Id="{6a4b9b3d-2660-42c5-b4ec-da6b0e694469}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[CleanupSucceeded := _CleanupSucceeded;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="CleanupMessage" Id="{d0f89b54-83f6-433c-82c8-bf8086a98432}">
+      <Declaration><![CDATA[(*!
+<summary>Copies any retained cleanup error; inspect it together with DirectoryPath.</summary>
+*)
+PROPERTY CleanupMessage : STRING(255)]]></Declaration>
+      <Get Name="Get" Id="{22909d26-32ed-4b56-bd50-a2d98c5d83fb}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[CleanupMessage := _CleanupMessage;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="DirectoryPath" Id="{b5f827c5-1ba5-4dd0-9c68-309045ba7470}">
+      <Declaration><![CDATA[(*!
+<summary>Copies the fixed scenario directory path.</summary>
+*)
+PROPERTY DirectoryPath : STRING(255)]]></Declaration>
+      <Get Name="Get" Id="{a456f2a9-7f71-4668-85e7-99fd0e61cb37}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[DirectoryPath := _DirectoryPath;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="FirstFilePath" Id="{7cd8dffd-3ecf-4cc7-9676-5365b4cb76c8}">
+      <Declaration><![CDATA[(*!
+<summary>Copies the first fixed artifact path inside this scenario directory.</summary>
+*)
+PROPERTY FirstFilePath : STRING(255)]]></Declaration>
+      <Get Name="Get" Id="{6c77688d-95cc-425b-ac07-9b77e94505b1}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[FirstFilePath := TOF_Core.Strings.Concat255(_DirectoryPath, '\First.txt');]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="SecondFilePath" Id="{243f695e-df73-463d-80cc-03fb75f8de8a}">
+      <Declaration><![CDATA[(*!
+<summary>Copies the second fixed artifact path inside this scenario directory.</summary>
+*)
+PROPERTY SecondFilePath : STRING(255)]]></Declaration>
+      <Get Name="Get" Id="{adf22f2e-5476-46b9-99c0-58590a771c12}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[SecondFilePath := TOF_Core.Strings.Concat255(_DirectoryPath, '\Second.txt');]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="ConfirmFirstFileAbsent" Id="{9382922b-1e00-441c-9619-caa474454020}">
+      <Declaration><![CDATA[(*!
+<summary>Stops cleanup attempts for the first artifact after confirmed removal.</summary>
+<description>
+The caller has successfully deleted or renamed this artifact while retaining exclusive directory ownership.
+This notification performs no filesystem check and must not be used for an uncertain or cancelled operation.
+</description>
+*)
+METHOD ConfirmFirstFileAbsent]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_FirstFileMayExist := FALSE;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="ConfirmSecondFileAbsent" Id="{64e1757a-0e2c-43ce-b400-ec7773b6dd12}">
+      <Declaration><![CDATA[(*!
+<summary>Stops cleanup attempts for the second artifact after confirmed removal.</summary>
+<description>
+The caller has successfully deleted or renamed this artifact while retaining exclusive directory ownership.
+This notification performs no filesystem check and must not be used for an uncertain or cancelled operation.
+</description>
+*)
+METHOD ConfirmSecondFileAbsent]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_SecondFileMayExist := FALSE;]]></ST>
+      </Implementation>
+    </Method>
+  </POU>
+</TcPlcObject>

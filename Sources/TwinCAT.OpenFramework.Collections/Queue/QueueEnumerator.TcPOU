@@ -14,16 +14,19 @@ The source must be non-null, outlive the cursor and remain structurally unchange
 explicitly releases a dynamically created cursor. Current is borrowed read-only data, never an ownership
 transfer. Supports both fixed-capacity and dynamic queues. MoveNext stops advancing at the end position of an
 unchanged source; repeated exhausted calls return FALSE until Reset.
+A null constructor source is diagnosed by traversal/current access, never by FB_init.
 </description>
 *)
 
 {attribute 'no_explicit_call' := 'do not call this function block directly'}
 {attribute 'enable_dynamic_creation'}
 FUNCTION_BLOCK QueueEnumerator EXTENDS TOF_Core.Object IMPLEMENTS TOF_Core.IEnumerator
-VAR
+VAR_STAT
+	//! <summary>Class name shared by all instances of this function block.</summary>
 	{attribute 'hide'} 
 	_ClassName : STRING := __POUNAME();
-	
+END_VAR
+VAR
 	{attribute 'hide'} 
 	_Queue : IReadOnlyQueue;
 	{attribute 'hide'} 
@@ -36,7 +39,10 @@ END_VAR]]></Declaration>
       <ST><![CDATA[]]></ST>
     </Implementation>
     <Property Name="ClassName" Id="{b096d425-5a24-41f5-a9fe-3bbeb8be1ebf}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Borrows the concrete cursor class name without transferring storage ownership.</summary>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
       <Get Name="Get" Id="{90292bf4-18ed-42e9-9248-88ea86c9b915}">
         <Declaration><![CDATA[]]></Declaration>
@@ -52,6 +58,7 @@ PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
 Reading Current before the first successful MoveNext, after Reset or after exhaustion yields an empty
 descriptor. Otherwise payload is borrowed, with no disposal rights. Do not modify or release the descriptor.
 The view may change on subsequent property access, cursor movement or source mutation.
+Missing source raises DataMemberNotSpecifiedException before source access or cursor advancement.
 </description>
 *)
 {attribute 'monitoring' := 'call'}
@@ -59,7 +66,9 @@ PROPERTY FINAL Current : REFERENCE TO TOF_Core.GENERIC_VALUE]]></Declaration>
       <Get Name="Get" Id="{df392d89-e3bb-4d96-9fe2-7ae3be756909}">
         <Declaration><![CDATA[]]></Declaration>
         <Implementation>
-          <ST><![CDATA[IF _CurrentIndex >= 0 AND_THEN _CurrentIndex < _Queue.Length THEN
+          <ST><![CDATA[requireSource();
+
+IF _CurrentIndex >= 0 AND_THEN _CurrentIndex < _Queue.Length THEN
 	_GenericValue := _Queue.GetByIndex(index := _CurrentIndex); 
 ELSE
 	_GenericValue.Reset();	
@@ -74,7 +83,8 @@ Current REF= _GenericValue;]]></ST>
 <summary>Binds the borrowed source for enumeration.</summary>
 <description>
 The source must be non-null and outlive the cursor. Only the reference is assigned; no allocation, callbacks
-or throwing validation are performed.
+or throwing validation are performed. A null source remains invalid configuration and is reported by
+MoveNext or current-value access without throwing from initialization.
 </description>
 *)
 METHOD FB_init : BOOL
@@ -96,12 +106,15 @@ entry. The index advances only while below source Length and stops at the end po
 calls return FALSE without incrementing the index; reading Current yields an empty descriptor. Reset allows
 traversal from the beginning again. No snapshot or mutation detection is provided. Descendants cannot override
 this cursor operation; advancement, reset and borrowed current views use the same cursor state.
+Missing source raises DataMemberNotSpecifiedException before source access or cursor advancement.
 </description>
 *)
 {attribute "object_name" := "MoveNext"}
 METHOD FINAL MoveNext : BOOL]]></Declaration>
       <Implementation>
-        <ST><![CDATA[IF _CurrentIndex < _Queue.Length THEN
+        <ST><![CDATA[requireSource();
+
+IF _CurrentIndex < _Queue.Length THEN
 	_CurrentIndex := _CurrentIndex + 1;
 END_IF
 
@@ -156,5 +169,26 @@ PROPERTY SelfSize : ULINT]]></Declaration>
         </Implementation>
       </Get>
     </Property>
+    <Method Name="requireSource" Id="{449657f5-316d-4d77-805f-659dc8167a12}">
+      <Declaration><![CDATA[(*!
+<summary>Requires the configured source before traversal or current-value access.</summary>
+<description>
+A missing mandatory source is configuration failure, not an empty collection. Raises a framework diagnostic
+outside lifecycle methods and before mutation; it does not validate arbitrary pointer lifetime.
+</description>
+*)
+METHOD PRIVATE requireSource]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF _Queue = 0 THEN
+	TOF_Core.Exceptions.ThrowDataMemberNotSpecified(
+		sourceNamespaceName := NamespaceName,
+		sourceClassName := ClassName,
+		sourcePOUName := __POUNAME(),
+		sourcePosition := __POSITION(),
+		dataMemberName := 'queue'
+	);
+END_IF]]></ST>
+      </Implementation>
+    </Method>
   </POU>
 </TcPlcObject>

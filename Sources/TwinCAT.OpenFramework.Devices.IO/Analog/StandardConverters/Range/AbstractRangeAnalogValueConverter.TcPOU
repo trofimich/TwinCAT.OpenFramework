@@ -2,16 +2,17 @@
 <TcPlcObject Version="1.1.0.1">
   <POU Name="AbstractRangeAnalogValueConverter" Id="{c2526683-36df-499d-8472-588820322f0f}" SpecialFunc="None">
     <Declaration><![CDATA[(*
-SPDX-FileCopyrightText: © 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+SPDX-FileCopyrightText: Â© 2026 Oleksandr Tiutyk <trofimich@gmail.com>
 SPDX-License-Identifier: MIT
 License: https://opensource.org/license/mit
 *)
 
 (*!
-<summary>Provides range configuration and validation for analog value conversion.</summary>
+<summary>Base converter providing linear interpolation and boundary clamping
+between raw and engineering values.</summary>
 <description>
-Diagnostic string inputs are borrowed only during the call; retained diagnostic text is copied into owned
-storage.
+Maps an input value proportionally between configured minimum and maximum limits.
+Clamps values outside range to boundary limits and defends against division by zero.
 </description>
 *)
 
@@ -32,8 +33,9 @@ END_VAR]]></Declaration>
     </Implementation>
     <Method Name="ConvertAnalogValueToRawValue" Id="{baf39a83-01bf-44c2-8637-07e8713fb214}">
       <Declaration><![CDATA[(*!
-<summary>Prepares diagnostic text locally before passing it to read-only logging or exception parameters.</summary>
-<description>Computed diagnostic strings are held in local buffers for the duration of the receiving call.</description>
+<summary>Converts an engineering unit value to raw hardware representation with boundary clamping.</summary>
+<param name="analogValue">Engineering unit analog value.</param>
+<param name="rawValueType">Target raw data representation.</param>
 *)
 METHOD ConvertAnalogValueToRawValue : RAW_ANALOG_VALUE
 VAR_INPUT
@@ -43,50 +45,58 @@ END_VAR
 VAR
 	formattedExceptionMessage : TOF_Core.ERROR_MESSAGE;
 
-    minRawValueLReal : LREAL;
-    maxRawValueLReal : LREAL;
-    rawValueLReal : LREAL;
+	minRawValueLReal : LREAL;
+	maxRawValueLReal : LREAL;
+	rawValueLReal : LREAL;
 	
 	exceptionCode : __SYSTEM.ExceptionCode;	
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[
-IF _MinAnalogValue = _MaxAnalogValue
-	OR_ELSE Tc2_System.MEMCMP(pBuf1 := ADR(_MinRawValue), pBuf2 := ADR(_MaxRawValue), n := SIZEOF(RAW_ANALOG_VALUE)) = 0
-THEN	
+        <ST><![CDATA[IF NOT __ISVALIDREF(_MinAnalogValue)
+	OR_ELSE NOT __ISVALIDREF(_MaxAnalogValue)
+	OR_ELSE NOT __ISVALIDREF(_MinRawValue)
+	OR_ELSE NOT __ISVALIDREF(_MaxRawValue)
+	OR_ELSE _MinAnalogValue = _MaxAnalogValue
+THEN
 	RETURN;
 END_IF
 
 IF _MaxAnalogValue > _MinAnalogValue THEN
-    IF analogValue >= _MaxAnalogValue THEN
-        analogValue := _MaxAnalogValue;
-    ELSIF analogValue <= _MinAnalogValue THEN
-        analogValue := _MinAnalogValue;
-    END_IF
-ELSIF MaxAnalogValue < _MinAnalogValue THEN
-    IF analogValue <= _MaxAnalogValue THEN
-        analogValue := _MaxAnalogValue;
-    ELSIF analogValue >= _MinAnalogValue THEN
-        analogValue := _MinAnalogValue;
-    END_IF
+	IF analogValue >= _MaxAnalogValue THEN
+		analogValue := _MaxAnalogValue;
+	ELSIF analogValue <= _MinAnalogValue THEN
+		analogValue := _MinAnalogValue;
+	END_IF
+ELSIF _MaxAnalogValue < _MinAnalogValue THEN
+	IF analogValue <= _MaxAnalogValue THEN
+		analogValue := _MaxAnalogValue;
+	ELSIF analogValue >= _MinAnalogValue THEN
+		analogValue := _MinAnalogValue;
+	END_IF
 END_IF
 
 CASE rawValueType OF
-    RAW_ANALOG_VALUE_TYPE.INT16:
-        minRawValueLReal := TO_LREAL(_MinRawValue.Int16);
-        maxRawValueLReal := TO_LREAL(_MaxRawValue.Int16);
+	RAW_ANALOG_VALUE_TYPE.INT16:
+		minRawValueLReal := TO_LREAL(_MinRawValue.Int16);
+		maxRawValueLReal := TO_LREAL(_MaxRawValue.Int16);
 
-    RAW_ANALOG_VALUE_TYPE.INT32:
-        minRawValueLReal := TO_LREAL(_MinRawValue.Int32);
-        maxRawValueLReal := TO_LREAL(_MaxRawValue.Int32);
+	RAW_ANALOG_VALUE_TYPE.INT32:
+		minRawValueLReal := TO_LREAL(_MinRawValue.Int32);
+		maxRawValueLReal := TO_LREAL(_MaxRawValue.Int32);
 
-    RAW_ANALOG_VALUE_TYPE.REAL32:
-        minRawValueLReal := TO_LREAL(_MinRawValue.Real32);
-        maxRawValueLReal := TO_LREAL(_MaxRawValue.Real32);
-		
-    ELSE
-        RETURN;
+	RAW_ANALOG_VALUE_TYPE.REAL32:
+		minRawValueLReal := TO_LREAL(_MinRawValue.Real32);
+		maxRawValueLReal := TO_LREAL(_MaxRawValue.Real32);
+
+	ELSE
+		RETURN;
 END_CASE
+
+IF minRawValueLReal = maxRawValueLReal THEN
+	ConvertAnalogValueToRawValue.Int32 := 0;
+	ConvertAnalogValueToRawValue.Int16 := TO_INT(minRawValueLReal);
+	RETURN;
+END_IF
 
 __TRY
 	rawValueLReal := (analogValue - _MinAnalogValue) / (_MaxAnalogValue - _MinAnalogValue)
@@ -106,22 +116,25 @@ __CATCH(exceptionCode)
 	);
 __ENDTRY
 
+ConvertAnalogValueToRawValue.Int32 := 0;
+
 CASE rawValueType OF
-    RAW_ANALOG_VALUE_TYPE.INT16:
-        ConvertAnalogValueToRawValue.Int16 := TO_INT(rawValueLReal);
+	RAW_ANALOG_VALUE_TYPE.INT16:
+		ConvertAnalogValueToRawValue.Int16 := TO_INT(rawValueLReal);
 
-    RAW_ANALOG_VALUE_TYPE.INT32:
-        ConvertAnalogValueToRawValue.Int32 := TO_DINT(rawValueLReal);
+	RAW_ANALOG_VALUE_TYPE.INT32:
+		ConvertAnalogValueToRawValue.Int32 := TO_DINT(rawValueLReal);
 
-    RAW_ANALOG_VALUE_TYPE.REAL32:
-        ConvertAnalogValueToRawValue.Real32 := TO_REAL(rawValueLReal);
+	RAW_ANALOG_VALUE_TYPE.REAL32:
+		ConvertAnalogValueToRawValue.Real32 := TO_REAL(rawValueLReal);
 END_CASE]]></ST>
       </Implementation>
     </Method>
     <Method Name="ConvertRawValueToAnalogValue" Id="{2b018a58-1ace-42e8-a492-2c6a67a392cf}">
       <Declaration><![CDATA[(*!
-<summary>Prepares diagnostic text locally before passing it to read-only logging or exception parameters.</summary>
-<description>Computed diagnostic strings are held in local buffers for the duration of the receiving call.</description>
+<summary>Converts raw hardware representation to an engineering unit value with boundary clamping.</summary>
+<param name="rawValue">Raw process value union.</param>
+<param name="rawValueType">Source raw data representation.</param>
 *)
 METHOD ConvertRawValueToAnalogValue : LREAL
 VAR_INPUT
@@ -132,55 +145,60 @@ VAR
 	formattedExceptionMessage : TOF_Core.ERROR_MESSAGE;
 
 	rawValueLReal : LREAL;
-    minRawValueLReal : LREAL;
-    maxRawValueLReal : LREAL;
+	minRawValueLReal : LREAL;
+	maxRawValueLReal : LREAL;
 
 	exceptionCode : __SYSTEM.ExceptionCode;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[
-IF _MinAnalogValue = _MaxAnalogValue
-	OR_ELSE Tc2_System.MEMCMP(pBuf1 := ADR(_MinRawValue), pBuf2 := ADR(_MaxRawValue), n := SIZEOF(RAW_ANALOG_VALUE)) = 0
-THEN	
+        <ST><![CDATA[IF NOT __ISVALIDREF(_MinAnalogValue)
+	OR_ELSE NOT __ISVALIDREF(_MaxAnalogValue)
+	OR_ELSE NOT __ISVALIDREF(_MinRawValue)
+	OR_ELSE NOT __ISVALIDREF(_MaxRawValue)
+	OR_ELSE _MinAnalogValue = _MaxAnalogValue
+THEN
 	RETURN;
 END_IF
 
 CASE rawValueType OF
-    RAW_ANALOG_VALUE_TYPE.INT16:
-        rawValueLReal := TO_LREAL(rawValue.Int16);
-        minRawValueLReal := TO_LREAL(MinRawValue.Int16);
-        maxRawValueLReal := TO_LREAL(MaxRawValue.Int16);
+	RAW_ANALOG_VALUE_TYPE.INT16:
+		rawValueLReal := TO_LREAL(rawValue.Int16);
+		minRawValueLReal := TO_LREAL(_MinRawValue.Int16);
+		maxRawValueLReal := TO_LREAL(_MaxRawValue.Int16);
 
-    RAW_ANALOG_VALUE_TYPE.INT32:
-        rawValueLReal := TO_LREAL(rawValue.Int32);
-        minRawValueLReal := TO_LREAL(_MinRawValue.Int32);
-        maxRawValueLReal := TO_LREAL(_MaxRawValue.Int32);
+	RAW_ANALOG_VALUE_TYPE.INT32:
+		rawValueLReal := TO_LREAL(rawValue.Int32);
+		minRawValueLReal := TO_LREAL(_MinRawValue.Int32);
+		maxRawValueLReal := TO_LREAL(_MaxRawValue.Int32);
 
-    RAW_ANALOG_VALUE_TYPE.REAL32:
-        rawValueLReal := TO_LREAL(rawValue.Real32);
-        minRawValueLReal := TO_LREAL(_MinRawValue.Real32);
-        maxRawValueLReal := TO_LREAL(_MaxRawValue.Real32);
+	RAW_ANALOG_VALUE_TYPE.REAL32:
+		rawValueLReal := TO_LREAL(rawValue.Real32);
+		minRawValueLReal := TO_LREAL(_MinRawValue.Real32);
+		maxRawValueLReal := TO_LREAL(_MaxRawValue.Real32);
+
+	ELSE
+		RETURN;
 END_CASE
 
 IF maxRawValueLReal > minRawValueLReal THEN
-    IF rawValueLReal >= maxRawValueLReal THEN
-        ConvertRawValueToAnalogValue := _MaxAnalogValue;
-        RETURN;
-    ELSIF rawValueLReal <= minRawValueLReal THEN
-        ConvertRawValueToAnalogValue := _MinAnalogValue;
-        RETURN;
-    END_IF
+	IF rawValueLReal >= maxRawValueLReal THEN
+		ConvertRawValueToAnalogValue := _MaxAnalogValue;
+		RETURN;
+	ELSIF rawValueLReal <= minRawValueLReal THEN
+		ConvertRawValueToAnalogValue := _MinAnalogValue;
+		RETURN;
+	END_IF
 ELSIF maxRawValueLReal < minRawValueLReal THEN
-    IF rawValueLReal <= maxRawValueLReal THEN
-        ConvertRawValueToAnalogValue := _MaxAnalogValue;
-        RETURN;
-    ELSIF rawValueLReal >= minRawValueLReal THEN
-        ConvertRawValueToAnalogValue := _MinAnalogValue;
-        RETURN;
-    END_IF
+	IF rawValueLReal <= maxRawValueLReal THEN
+		ConvertRawValueToAnalogValue := _MaxAnalogValue;
+		RETURN;
+	ELSIF rawValueLReal >= minRawValueLReal THEN
+		ConvertRawValueToAnalogValue := _MinAnalogValue;
+		RETURN;
+	END_IF
 ELSE
 	ConvertRawValueToAnalogValue := _MinAnalogValue;
-    RETURN;
+	RETURN;
 END_IF
 
 __TRY
@@ -203,7 +221,10 @@ __ENDTRY]]></ST>
       </Implementation>
     </Method>
     <Property Name="MaxAnalogValue" Id="{a941654f-d717-4440-bc44-ed518a303456}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Gets a reference to the maximum engineering unit value.</summary>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY FINAL MaxAnalogValue : REFERENCE TO LREAL]]></Declaration>
       <Get Name="Get" Id="{d8c2c8ae-ba7a-4f28-828a-6d7d272b4399}">
         <Declaration><![CDATA[]]></Declaration>
@@ -213,7 +234,10 @@ PROPERTY FINAL MaxAnalogValue : REFERENCE TO LREAL]]></Declaration>
       </Get>
     </Property>
     <Property Name="MaxRawValue" Id="{3b0fa350-39b1-4e9e-bd2f-9c6f49af8305}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Gets a reference to the maximum raw process value.</summary>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY FINAL MaxRawValue : REFERENCE TO RAW_ANALOG_VALUE]]></Declaration>
       <Get Name="Get" Id="{7cef5b0c-1235-4d8f-a4b6-b6fb9a494744}">
         <Declaration><![CDATA[]]></Declaration>
@@ -223,7 +247,10 @@ PROPERTY FINAL MaxRawValue : REFERENCE TO RAW_ANALOG_VALUE]]></Declaration>
       </Get>
     </Property>
     <Property Name="MinAnalogValue" Id="{c1129997-b2c7-4985-a7e1-2c2a53b652a2}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Gets a reference to the minimum engineering unit value.</summary>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY FINAL MinAnalogValue : REFERENCE TO LREAL]]></Declaration>
       <Get Name="Get" Id="{ba9e5b85-6e7d-4f21-8e43-68be353a5dfe}">
         <Declaration><![CDATA[]]></Declaration>
@@ -233,7 +260,10 @@ PROPERTY FINAL MinAnalogValue : REFERENCE TO LREAL]]></Declaration>
       </Get>
     </Property>
     <Property Name="MinRawValue" Id="{fc2912d7-e9eb-424a-a71c-e00912e1679a}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Gets a reference to the minimum raw process value.</summary>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY FINAL MinRawValue : REFERENCE TO RAW_ANALOG_VALUE]]></Declaration>
       <Get Name="Get" Id="{0bac5199-db63-4ede-964c-b45620359765}">
         <Declaration><![CDATA[]]></Declaration>
@@ -243,7 +273,10 @@ PROPERTY FINAL MinRawValue : REFERENCE TO RAW_ANALOG_VALUE]]></Declaration>
       </Get>
     </Property>
     <Property Name="NamespaceName" Id="{4ac53464-c80d-49f6-9468-789d3c010411}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Gets the namespace name of the converter.</summary>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
       <Get Name="Get" Id="{af413a5a-e5d5-41cd-8275-68368a979eb9}">
         <Declaration><![CDATA[]]></Declaration>

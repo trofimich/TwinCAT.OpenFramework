@@ -1,0 +1,391 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="TestRunner" Id="{211e1548-728c-4e02-864e-9567cc98ff2b}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+SPDX-FileCopyrightText: © 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+SPDX-License-Identifier: MIT
+License: https://opensource.org/license/mit
+*)
+
+(*!
+<summary>Runs a fixed tree of individual tests and nested groups in its owning PLC task.</summary>
+<description>
+Concrete descendants own their persistent root tests, groups and interface-array storage and provide Children.
+Call Execute once per PLC cycle until IsFinished. Each run validates roots in STARTING before any direct Reset
+or report callback. Missing storage or null slots raise DataMemberNotSpecifiedException; duplicates, running
+or group-owned roots raise StandardException. Execute catches these failures and exposes an aborted run.
+Children returns the same valid storage and unchanged list throughout the runner lifetime; do not mutate it.
+After startup the runner advances at most one leaf body per call without repeating topology checks.
+AllPassed is meaningful only after IsFinished. Roots are constructed with parent := 0; Parent is the fixed association with a group.
+Register each root instance with one runner only and keep the tree stable. This is a caller
+precondition: no parent marker or registry detects sharing roots between runners. Empty runs pass with zero tests.
+ExitCode is the failed leaf count, or -1 for a startup failure or an aborted
+external callback. An aborted callback is never retried; partial counts and report output are possible.
+Before Reset of an externally aborted tree, make its user resources safe; Reset does not provide cancellation.
+Use one task without reentry per runner, tree and reporter. Other tasks need disjoint instances and buffers.
+Mutable tested resources and custom callbacks also require task isolation or their own synchronization.
+The default ADS backend has no established concurrent-call guarantee; use a separate JUnitXmlReporter per task
+for independent in-memory reporting, or a reporter backed by a synchronized logging service.
+Execute enforces terminal OOM outside recoverable catches. Standalone execution uses cleanupTaskMemory := TRUE
+(the default) to clean the current task after the last consumer of transient exceptions. Under AutomationRunner
+or any other host that performs this cleanup at the task boundary, pass cleanupTaskMemory := FALSE.
+This runner borrows its children and reporter; never copy it by value or delete dependencies while attached.
+</description>
+*)
+
+{attribute 'no_explicit_call' := 'do not call this function block directly'}
+FUNCTION_BLOCK ABSTRACT TestRunner
+VAR_GENERIC CONSTANT
+	//! <summary>Exact number of root test or group slots.</summary>
+	_ChildCount : TOF_Core.INT_LENGTH := 0;
+END_VAR
+EXTENDS TOF_Core.Object
+VAR_OUTPUT
+	IsFinished : BOOL;
+	AllPassed : BOOL;
+	ExitCode : DINT;
+	//! <summary>Runtime exception code for startup or external callback failure when ExitCode is -1.</summary>
+	CallbackException : __SYSTEM.ExceptionCode;
+	//! <summary>Copied stage and exception diagnostic for the aborted run; empty after Reset.</summary>
+	CallbackMessage : TOF_Core.ERROR_MESSAGE;
+	TotalTests : UDINT;
+	PassedTests : UDINT;
+	FailedTests : UDINT;
+	SkippedTests : UDINT;
+	TotalDuration : TIME;
+END_VAR
+VAR
+	_CurrentChildIndex : TOF_Core.INT_LENGTH;
+	_Duration : LTIME;
+	_Reporter : ITestReporter;
+	_DefaultAdsReporter : AdsLogReporter;
+	_State : TEST_RUN_PHASE;
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[]]></ST>
+    </Implementation>
+    <Folder Name="Service members" Id="{24fef69e-e753-4a84-b5d4-f93712c7f5bb}" />
+    <Property Name="ChildCount" Id="{fb2404b9-8810-47cd-84cc-6c2560676849}">
+      <Declaration><![CDATA[(*!
+<summary>Reports the generic number of direct children.</summary>
+*)
+
+{attribute 'monitoring' := 'call'}
+PROPERTY FINAL ChildCount : TOF_Core.INT_LENGTH]]></Declaration>
+      <Get Name="Get" Id="{2e28b088-60fb-4bf6-b61c-9f2718f88d4b}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ChildCount := _ChildCount;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="Children" Id="{0d5dd638-82a4-4d03-9869-560e24bee9ca}">
+      <Declaration><![CDATA[(*!
+<summary>Borrows the concrete runner's unchanged persistent array of parentless roots.</summary>
+<description>
+Return the same valid storage and unchanged list for the runner lifetime, including an empty array when N is zero.
+The getter has no side effects. Callers may only read the reference; each root belongs to this runner alone.
+The concrete descendant owns persistent roots and array storage. Roots use parent := 0 and outlive every run.
+The base constructor never reads this property. Validation starts in Execute after construction.
+</description>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY ABSTRACT Children : REFERENCE TO ARRAY [0.._ChildCount - 1] OF ITestElement]]></Declaration>
+      <Get Name="Get" Id="{f0e5b674-2d97-42d4-9635-ae7ece984aed}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="Execute" Id="{d3ffeabc-b7c3-4f44-8869-c4e4801b313d}">
+      <Declaration><![CDATA[(*!
+<summary>Drives one root cycle and enforces the terminal allocation latch at the task boundary.</summary>
+<description>
+Catches startup validation and external callback failures to abort with ExitCode -1, then raises terminal OOM
+outside the recoverable catch regardless of cleanupTaskMemory.
+With cleanupTaskMemory TRUE, cleans all registered auto-disposed objects and the exception payload of the current
+PLC task before returning, not only objects created by this runner. Borrowed references to those objects become
+invalid; call after the last consumer of transient exceptions in the task cycle.
+With cleanupTaskMemory FALSE, the host must call DynamicMemoryManager.RaiseIfAllocationFailed outside recoverable
+handlers, then DynamicMemoryManager.CleanupMemory after all transient-exception consumers in each task cycle.
+For multiple runners in one task, pass FALSE to each and let the host provide the shared task boundary.
+</description>
+<param name="cleanupTaskMemory">
+TRUE by default for standalone execution. Pass FALSE under AutomationRunner or any other host that performs
+current-task memory cleanup after all transient-exception consumers.
+</param>
+*)
+METHOD FINAL Execute
+VAR_INPUT
+	cleanupTaskMemory : BOOL := TRUE;
+END_VAR
+VAR
+	exceptionCode : __SYSTEM.ExceptionCode;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[__TRY
+	executeCycle();
+__CATCH(exceptionCode)
+	CallbackException := exceptionCode;
+	CallbackMessage := TestServices.FormatCaughtException(
+		exceptionCode := exceptionCode,
+		stage := TO_STRING(_State),
+		catchPointPOUName := __POUNAME(),
+		catchPointPosition := __POSITION()
+	);
+	AllPassed := FALSE;
+	ExitCode := -1;
+	IsFinished := TRUE;
+	_State := TEST_RUN_PHASE.COMPLETED;
+__ENDTRY
+
+TOF_Core.DynamicMemoryManager.RaiseIfAllocationFailed();
+
+IF cleanupTaskMemory THEN
+	TOF_Core.DynamicMemoryManager.CleanupMemory();
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="executeCycle" Id="{7ad9db35-ffed-4112-af38-569da8694e93}" FolderPath="Service members\">
+      <Declaration><![CDATA[(*!
+<summary>Advances one direct child and synchronously delivers run-level reporter callbacks.</summary>
+<description>
+Validates the fixed roots once in STARTING before direct Reset or reporting; callbacks may partially reset the tree.
+</description>
+*)
+METHOD PRIVATE executeCycle
+VAR
+	activeReporter : ITestReporter;
+	i : INT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF _Reporter <> 0 THEN
+	activeReporter := _Reporter;
+ELSE
+	activeReporter := _DefaultAdsReporter;
+END_IF
+
+CASE _State OF
+	TEST_RUN_PHASE.STARTING:
+		validateChildren(rejectRunningChildren := TRUE);
+
+		_CurrentChildIndex := 0;
+		_Duration := LTIME#0NS;
+
+		FOR i := 0 TO _ChildCount - 1 DO
+			Children[i].Reset(reporter := activeReporter);
+		END_FOR
+
+		activeReporter.ReportRunStart(totalElements := TO_UDINT(_ChildCount));
+		
+		_State := TEST_RUN_PHASE.RUNNING_ELEMENTS;
+
+	TEST_RUN_PHASE.RUNNING_ELEMENTS:
+		_Duration := _Duration + TOF_Core.System.GetTaskCycleTime();
+
+		IF _CurrentChildIndex < _ChildCount THEN
+			Children[_CurrentChildIndex].Execute();
+
+			IF Children[_CurrentChildIndex].IsFinished THEN
+				PassedTests := PassedTests + Children[_CurrentChildIndex].PassedCount;
+				FailedTests := FailedTests + Children[_CurrentChildIndex].FailedCount;
+				SkippedTests := SkippedTests + Children[_CurrentChildIndex].SkippedCount;
+				
+				_CurrentChildIndex := _CurrentChildIndex + 1;
+			END_IF
+
+		END_IF
+
+		TotalTests := PassedTests + FailedTests + SkippedTests;
+		TotalDuration := TO_TIME(_Duration);
+
+		IF _CurrentChildIndex >= _ChildCount THEN
+			_State := TEST_RUN_PHASE.REPORTING_TOTALS;
+		END_IF
+
+	TEST_RUN_PHASE.REPORTING_TOTALS:
+		activeReporter.ReportRunEnd(
+			totalTests := TotalTests,
+			passedTests := PassedTests,
+			failedTests := FailedTests,
+			skippedTests := SkippedTests,
+			duration := TotalDuration
+		);
+		
+		AllPassed := (FailedTests = TOF_Core.UnsignedInt32.ZERO);
+		ExitCode := TO_DINT(FailedTests);
+		IsFinished := TRUE;
+		
+		_State := TEST_RUN_PHASE.COMPLETED;
+
+	TEST_RUN_PHASE.COMPLETED:
+		;
+END_CASE]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="Reporter" Id="{a2dc2354-e134-4a45-b886-a4c0a006bb27}">
+      <Declaration><![CDATA[(*!
+<summary>Gets or configures the borrowed reporter; zero selects the ADS reporter.</summary>
+<description>
+Keep the same reporter alive throughout the run. Mutation during execution raises StandardException;
+the failure concerns the active state rather than the requested reporter value.
+</description>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY Reporter : ITestReporter]]></Declaration>
+      <Get Name="Get" Id="{9d8229b4-f39d-4ff5-a66b-4ce5d2b1e47b}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[Reporter := _Reporter;]]></ST>
+        </Implementation>
+      </Get>
+      <Set Name="Set" Id="{0fbe8444-92d4-4abb-86fd-3d97e90b3774}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[IF _State = TEST_RUN_PHASE.RUNNING_ELEMENTS OR_ELSE _State = TEST_RUN_PHASE.REPORTING_TOTALS THEN
+	TOF_Core.Exceptions.ThrowStandard(
+		sourceNamespaceName := NamespaceName,
+		sourceClassName := ClassName,
+		sourcePOUName := __POUNAME(),
+		sourcePosition := __POSITION(),
+		message := "Cannot change the active reporter"
+	);
+END_IF
+
+_Reporter := Reporter;]]></ST>
+        </Implementation>
+      </Set>
+    </Property>
+    <Method Name="Reset" Id="{24fcff9f-342b-4541-a072-36a164ecc258}">
+      <Declaration><![CDATA[(*!
+<summary>Rearms a completed or not-yet-started runner; calls during a normal run are ignored.</summary>
+<description>
+The next Execute resets the tree. After an external callback abort the caller must first recover any
+user resources not covered by scenario teardown. After abort, Reset validates root storage and topology and recursively
+resets the same tree immediately, without setup, body, teardown or reporter callbacks.
+Running roots are allowed during abort recovery. A validation failure calls no child and retains the aborted observations.
+Custom element Reset callbacks can throw; runner observations remain aborted and recovery can be retried.
+Other tree resets remain deferred until Execute. Reset does not clear terminal allocation failure.
+</description>
+*)
+METHOD FINAL Reset
+VAR
+	i : INT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF _State = TEST_RUN_PHASE.RUNNING_ELEMENTS OR_ELSE _State = TEST_RUN_PHASE.REPORTING_TOTALS THEN
+	RETURN;
+END_IF
+
+IF ExitCode = -1 THEN
+	validateChildren(rejectRunningChildren := FALSE);
+
+	FOR i := 0 TO _ChildCount - 1 DO
+		Children[i].Reset(reporter := 0);
+	END_FOR
+END_IF
+
+TOF_Core.DynamicMemoryManager.RaiseIfAllocationFailed();
+
+IsFinished := FALSE;
+AllPassed := FALSE;
+ExitCode := 0;
+CallbackException := __SYSTEM.ExceptionCode.RTSEXCPT_NOEXCEPTION;
+CallbackMessage := "";
+TotalTests := 0;
+PassedTests := 0;
+FailedTests := 0;
+SkippedTests := 0;
+TotalDuration := T#0S;
+
+_State := TEST_RUN_PHASE.STARTING;
+_CurrentChildIndex := 0;
+_Duration := LTIME#0NS;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="validateChildren" Id="{52fe5a49-60d2-40a8-9277-f34550e65449}" FolderPath="Service members\">
+      <Declaration><![CDATA[(*!
+<summary>Checks the fixed root array before startup or explicit abort recovery.</summary>
+<description>
+Missing storage or null slots raise DataMemberNotSpecifiedException; duplicate or group-owned roots raise
+StandardException. Startup also rejects running roots. Abort recovery permits running roots so their Reset
+callbacks can recover execution state after the caller has made user resources safe. Failures propagate
+without calling any child or changing runner observations. No allocation occurs for a valid composition.
+</description>
+<param name="rejectRunningChildren">TRUE for startup; FALSE for explicit recovery of an aborted tree.</param>
+*)
+METHOD PRIVATE validateChildren
+VAR_INPUT
+	rejectRunningChildren : BOOL;
+END_VAR
+VAR
+	i : INT;
+	j : INT;
+	
+	errorMessage : TOF_Core.ERROR_MESSAGE;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF NOT __ISVALIDREF(Children) THEN
+	TOF_Core.Exceptions.ThrowDataMemberNotSpecified(
+		sourceNamespaceName := NamespaceName,
+		sourceClassName := ClassName,
+		sourcePOUName := __POUNAME(),
+		sourcePosition := __POSITION(),
+		dataMemberName := 'Children'
+	);
+END_IF
+
+FOR i := 0 TO _ChildCount - 1 DO
+	IF Children[i] = 0 THEN
+		TOF_Core.Exceptions.ThrowDataMemberNotSpecified(
+			sourceNamespaceName := NamespaceName,
+			sourceClassName := ClassName,
+			sourcePOUName := __POUNAME(),
+			sourcePosition := __POSITION(),
+			dataMemberName := TOF_Core.Strings.Concat255('Children[', TO_STRING(i), ']')
+		);
+	END_IF
+
+	IF Children[i].Parent <> 0 THEN
+		errorMessage := TOF_Core.WideStrings.Concat255("A root child '", Children[i].Name, "' belongs to a group");
+
+		TOF_Core.Exceptions.ThrowStandard(
+			sourceNamespaceName := NamespaceName,
+			sourceClassName := ClassName,
+			sourcePOUName := __POUNAME(),
+			sourcePosition := __POSITION(),
+			message := errorMessage
+		);
+	END_IF
+
+	IF rejectRunningChildren AND_THEN Children[i].IsRunning THEN
+		errorMessage := TOF_Core.WideStrings.Concat255("A root child '", Children[i].Name, "' is active");
+ 
+		TOF_Core.Exceptions.ThrowStandard(
+			sourceNamespaceName := NamespaceName,
+			sourceClassName := ClassName,
+			sourcePOUName := __POUNAME(),
+			sourcePosition := __POSITION(),
+			message := errorMessage
+		);
+	END_IF
+
+	FOR j := 0 TO i - 1 DO
+		IF Children[i] = Children[j] THEN
+			errorMessage := TOF_Core.WideStrings.Concat255("A root child '", Children[i].Name, "' occupies more than one slot"); 
+			
+			TOF_Core.Exceptions.ThrowStandard(
+				sourceNamespaceName := NamespaceName,
+				sourceClassName := ClassName,
+				sourcePOUName := __POUNAME(),
+				sourcePosition := __POSITION(),
+				message := errorMessage
+			);
+		END_IF
+	END_FOR
+END_FOR]]></ST>
+      </Implementation>
+    </Method>
+  </POU>
+</TcPlcObject>

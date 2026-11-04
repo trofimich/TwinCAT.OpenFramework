@@ -15,7 +15,8 @@ Tests use task-scoped exception cleanup. Borrowed inner views do not own the exc
 *)
 
 FUNCTION_BLOCK ExceptionTest EXTENDS TcUnit.FB_TestSuite
-VAR
+VAR_STAT
+	//! <summary>Class name shared by all instances of this function block.</summary>
 	{attribute 'hide'} 
 	_ClassName : STRING := __POUNAME();	
 END_VAR]]></Declaration>
@@ -26,6 +27,7 @@ AggregateException();
 RethrowSavedFrameworkException();
 RethrowSystemExceptionAfterFramework();
 TimestampFormatting();
+SystemExceptionTimestampFormatting();
 SystemExceptionClone();
 AggregateCloneLifetime();
 ArgumentTypeCloneIdentity();]]></ST>
@@ -35,13 +37,13 @@ ArgumentTypeCloneIdentity();]]></ST>
 <summary>Checks that an aggregate clone owns its array while sharing dynamic causes.</summary>
 <description>
 Reads entries through IReadOnlyException and compares identities through the same interface type. Clearing the
-source aggregate must leave the clone entries available until task cleanup.
+source aggregate must leave the clone entries available until task cleanup. The source array owner is a
+persistent fixture and is cleared before the test completes.
 </description>
 *)
 METHOD AggregateCloneLifetime
 VAR
 	source : TOF_Core.StandardException;
-	aggregate : TOF_Core.AggregateException;
 	dynamicInner : TOF_Core.IReadOnlyException;
 	clonedObject : TOF_Core.IObject;
 	clonedAggregate : TOF_Core.IAggregateException;
@@ -54,6 +56,7 @@ VAR
 	queried : BOOL;
 END_VAR
 VAR_INST
+	aggregate : TOF_Core.AggregateException;
 	testFinished : BOOL;
 END_VAR]]></Declaration>
       <Implementation>
@@ -117,6 +120,7 @@ IF caught THEN
 		Actual := aggregate.InnerExceptionCount,
 		Message := 'Repeated Clear must leave an empty aggregate'
 	);
+
 	IF queried THEN
 		AssertEquals_UINT(
 			Expected := 2,
@@ -136,12 +140,21 @@ IF caught THEN
 END_IF
 
 // All dynamic exception instances are released by the manager at the cycle boundary.
+aggregate.Clear();
+
 testFinished := TRUE;
 TEST_FINISHED();]]></ST>
       </Implementation>
     </Method>
     <Method Name="AggregateException" Id="{a0a36685-039a-455b-9e90-8d283dc9d749}">
-      <Declaration><![CDATA[METHOD AggregateException
+      <Declaration><![CDATA[(*!
+<summary>Checks aggregate propagation with a persistent owner for the reference array.</summary>
+<description>
+Clear releases the array before normal completion and removes borrowed exception references before task
+cleanup. Persistent fixture storage retains ownership if exception propagation aborts the test.
+</description>
+*)
+METHOD AggregateException
 VAR
 	caught : BOOL;
 	exception1Message : WSTRING := "Simple exception 1 thrown";
@@ -157,9 +170,9 @@ VAR
 	exceptionCode : __SYSTEM.ExceptionCode;
 	caughtException : TOF_Core.IException;
 	
-	aggregateException : TOF_Core.AggregateException;
 END_VAR
 VAR_INST
+	aggregateException : TOF_Core.AggregateException;
 	testFinished : BOOL;
 END_VAR]]></Declaration>
       <Implementation>
@@ -170,6 +183,7 @@ END_IF
 TEST(TestName := __POUNAME());
 
 caught := FALSE;
+
 __TRY
 	standardException1.Throw(
 		sourceNamespaceName := NamespaceName,
@@ -190,9 +204,11 @@ __CATCH(exceptionCode)
 	);
 	aggregateException.AddInnerException(innerException := caughtException);
 __ENDTRY
+
 AssertEquals_BOOL(Expected := TRUE, Actual := caught, Message := 'Expected exception was not raised');
 
 caught := FALSE;
+
 __TRY
 	standardException2.Throw(
 		sourceNamespaceName := NamespaceName,
@@ -213,9 +229,11 @@ __CATCH(exceptionCode)
 	);
 	aggregateException.AddInnerException(innerException := caughtException);
 __ENDTRY
+
 AssertEquals_BOOL(Expected := TRUE, Actual := caught, Message := 'Expected exception was not raised');
 
 caught := FALSE;
+
 __TRY
 	standardException3.Throw(
 		sourceNamespaceName := NamespaceName,
@@ -236,12 +254,14 @@ __CATCH(exceptionCode)
 	);
 	aggregateException.AddInnerException(innerException := caughtException);
 __ENDTRY
+
 AssertEquals_BOOL(Expected := TRUE, Actual := caught, Message := 'Expected exception was not raised');
 
 // for breakpoint
 errorMessage := errorMessage;
 
 caught := FALSE;
+
 __TRY
 	aggregateException.Throw(
 		sourceNamespaceName := NamespaceName,
@@ -266,7 +286,10 @@ __CATCH(exceptionCode)
 		Message := 'Wrong aggregate exception message caught'
 	);	
 __ENDTRY
+
 AssertEquals_BOOL(Expected := TRUE, Actual := caught, Message := 'Expected exception was not raised');
+
+aggregateException.Clear();
 
 testFinished := TRUE; 
 TEST_FINISHED();]]></ST>
@@ -456,6 +479,7 @@ savedLocalTime := original.LocalTimestamp;
 savedUtcTime := original.UtcTimestamp;
 
 caught := FALSE;
+
 __TRY
 	TOF_Core.ExceptionManager.Throw(exception := original);
 __CATCH(outerCode)
@@ -717,6 +741,7 @@ __ENDTRY
 AssertEquals_BOOL(Expected := TRUE, Actual := caught, Message := 'Expected exception was not raised');
 
 caught := FALSE;
+
 __TRY
 	standardException2.Throw(
 		sourceNamespaceName := NamespaceName,
@@ -749,6 +774,7 @@ __ENDTRY
 AssertEquals_BOOL(Expected := TRUE, Actual := caught, Message := 'Expected exception was not raised');
 
 caught := FALSE;
+
 __TRY
 	standardException3.Throw(
 		sourceNamespaceName := NamespaceName,
@@ -910,6 +936,103 @@ AssertEquals_WSTRING(
 		Actual := Tc2_Standard.WRIGHT(STR := message, SIZE := 3),
 		Message := 'UTC suffix must survive timestamp truncation'
 	);
+
+testFinished := TRUE;
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="SystemExceptionTimestampFormatting" Id="{dff2c4f4-30ed-4a9c-be93-96aaa22a938d}">
+      <Declaration><![CDATA[(*!
+<summary>Checks timestamp formatting through the native exception wrapper's public message API.</summary>
+<description>
+Compares hidden, local and UTC messages with the wrapper's captured timestamps. The test reads the borrowed
+wrapper before any subsequent native catch can replace it; no native exception is raised by this scenario.
+Contains formatting exceptions to report separate LOCAL and UTC regression failures and continue the suite.
+</description>
+*)
+METHOD SystemExceptionTimestampFormatting
+VAR
+	exception : TOF_Core.IException;
+	hiddenMessage : TOF_Core.ERROR_MESSAGE;
+	message : TOF_Core.ERROR_MESSAGE;
+	expectedMessage : TOF_Core.ERROR_MESSAGE;
+	formattingFailed : BOOL;
+END_VAR
+VAR_INST
+	testFinished : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN
+	RETURN;
+END_IF
+
+TEST(TestName := __POUNAME());
+
+exception := TOF_Core.ExceptionManager.GetLastException(
+	exceptionCode := __SYSTEM.ExceptionCode.RTSEXCPT_ACCESS_VIOLATION,
+	catchPointNamespaceName := 'TimestampTest',
+	catchPointPOUName := 'NativeCatch',
+	catchPointPosition := 'P1'
+);
+hiddenMessage := exception.GetMessage(timestampDisplayMode := TOF_Core.TIMESTAMP_DISPLAY_MODE.HIDDEN);
+
+expectedMessage := TOF_Core.WideStrings.Concat255(
+	hiddenMessage,
+	TOF_Core.Exceptions.TIME_PREFIX,
+	TO_WSTRING(exception.LocalTimestamp)
+);
+formattingFailed := FALSE;
+
+// Contain a formatter regression so the suite can report it and check the other timestamp mode.
+__TRY
+	message := exception.GetMessage(timestampDisplayMode := TOF_Core.TIMESTAMP_DISPLAY_MODE.LOCAL);
+__CATCH
+	formattingFailed := TRUE;
+	message := "";
+__ENDTRY
+
+AssertEquals_BOOL(
+	Expected := FALSE,
+	Actual := formattingFailed,
+	Message := 'LOCAL formatting must pass the WSTRING buffer through the timestamp helper without throwing'
+);
+AssertEquals_WSTRING(
+	Expected := expectedMessage,
+	Actual := message,
+	Message := 'Local native message must preserve its text and append the captured local timestamp'
+);
+
+expectedMessage := TOF_Core.WideStrings.Concat255(
+	hiddenMessage,
+	TOF_Core.Exceptions.TIME_PREFIX,
+	TO_WSTRING(exception.UtcTimestamp),
+	"UTC"
+);
+formattingFailed := FALSE;
+
+// Contain a formatter regression so the suite can report it and check the other timestamp mode.
+__TRY
+	message := exception.GetMessage(timestampDisplayMode := TOF_Core.TIMESTAMP_DISPLAY_MODE.UTC);
+__CATCH
+	formattingFailed := TRUE;
+	message := "";
+__ENDTRY
+
+AssertEquals_BOOL(
+	Expected := FALSE,
+	Actual := formattingFailed,
+	Message := 'UTC formatting must pass the WSTRING buffer through the timestamp helper without throwing'
+);
+AssertEquals_WSTRING(
+	Expected := expectedMessage,
+	Actual := message,
+	Message := 'UTC native message must preserve its text and append the captured UTC timestamp and suffix'
+);
+AssertEquals_WSTRING(
+	Expected := hiddenMessage,
+	Actual := exception.GetMessage(timestampDisplayMode := TOF_Core.TIMESTAMP_DISPLAY_MODE.HIDDEN),
+	Message := 'Timestamp formatting must not mutate the native exception payload'
+);
 
 testFinished := TRUE;
 TEST_FINISHED();]]></ST>

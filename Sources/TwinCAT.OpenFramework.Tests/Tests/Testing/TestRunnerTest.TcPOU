@@ -1,0 +1,2049 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1" ProductVersion="3.1.4026.21">
+  <POU Name="TestRunnerTest" Id="{959461be-86e6-492c-8744-09aecb04c199}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+SPDX-FileCopyrightText: © 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+SPDX-License-Identifier: MIT
+License: https://opensource.org/license/mit
+*)
+
+(*!
+<summary>Checks the element-based testing library from the existing host TcUnit execution path.</summary>
+<description>
+Covers mixed leaf outcomes, nested and empty groups, repeat execution, case isolation, deadline,
+static topology rejection, computed paths, abort recovery, copied diagnostics, floating tolerance, Unicode XML
+and Object metadata.
+Fifteen TcUnit cases include intentional inner failures. Runners defer task cleanup to AutomationRunner.
+Independent runners here execute in one task; actual multi-task behavior requires owner target verification.
+Instances must not be copied because their fixtures contain non-copyable state.
+</description>
+*)
+
+{attribute 'no_assign'}
+{attribute 'no_explicit_call' := 'do not call this function block directly'}
+FUNCTION_BLOCK TestRunnerTest EXTENDS TcUnit.FB_TestSuite
+VAR
+	_Runner : MixedTestRunner;
+	_Reporter : TOF_Testing.JUnitXmlReporter;
+	_Configured : BOOL;
+	_Calls : UDINT;
+	_Repeated : BOOL;
+	_Finished : BOOL;
+
+	_FailingRun : IsolationTestRunner;
+	_PassingRun : AssertionCallerTestRunner;
+	_FailureReport : TOF_Testing.JUnitXmlReporter;
+	_PassReport : TOF_Testing.JUnitXmlReporter;
+	_IsolationConfigured : BOOL;
+	_IsolationSecondRun : BOOL;
+	_IsolationFinished : BOOL;
+	_IsolationCalls : UDINT;
+
+	_EmptyRun : EmptyTestRunner;
+	_EmptyReport : TOF_Testing.JUnitXmlReporter;
+	_EmptyFinished : BOOL;
+	_EmptyConfigured : BOOL;
+	_AbortRun : ReporterAbortTestRunner;
+	_AbortReport : ThrowingTestReporter;
+	_InvalidReport : TOF_Testing.JUnitXmlReporter;
+	_AbortConfigured : BOOL;
+	_AbortFinished : BOOL;
+	_AbortCalls : UDINT;
+	_AbortPostCalls : UDINT;
+
+	_DeadlineRun : DeadlineTestRunner;
+	_DeadlineReport : TOF_Testing.JUnitXmlReporter;
+	_DeadlineConfigured : BOOL;
+	_DeadlineFinished : BOOL;
+	_DeadlineCalls : UDINT;
+	_ActiveConfigurationChecked : BOOL;
+
+	_DuplicateGroup : PairTestGroup(name := "Duplicates", parent := 0);
+	_ParentGroup : SingleChildTestGroup(name := "Parent", parent := _ChildGroup);
+	_ChildGroup : SingleChildTestGroup(name := "Child", parent := _ParentGroup);
+	_TopologyFinished : BOOL;
+	_IndexedChildrenFinished : BOOL;
+	_IndexedGroup : PairTestGroup(name := "Indexed children", parent := 0);
+
+	_AbortRecoveryReport : TOF_Testing.JUnitXmlReporter;
+	_AbortRecovered : BOOL;
+	_ExternalRun : ExternalRecoveryTestRunner;
+	_ExternalReport : TOF_Testing.JUnitXmlReporter;
+	_ExternalConfigured : BOOL;
+	_ExternalRecovered : BOOL;
+	_ExternalFinished : BOOL;
+	_ExternalCalls : UDINT;
+
+	_DiagnosticRun : DiagnosticTestRunner;
+	_DiagnosticReport : TOF_Testing.JUnitXmlReporter;
+	_DiagnosticConfigured : BOOL;
+	_DiagnosticFinished : BOOL;
+	_DiagnosticCalls : UDINT;
+
+	_AssertionRun : AssertionTestRunner;
+	_AssertionReport : TOF_Testing.JUnitXmlReporter;
+	_AssertionsConfigured : BOOL;
+	_AssertionsFinished : BOOL;
+	_AssertionCalls : UDINT;
+
+	_XmlReport : TOF_Testing.JUnitXmlReporter;
+	_XmlFinished : BOOL;
+
+	_RootTopologyRunner : RootTopologyTestRunner;
+	_RootTopologyReport : TOF_Testing.JUnitXmlReporter;
+	_RootTopologyConfigured : BOOL;
+	_RootTopologyFinished : BOOL;
+	_RootTopologyCalls : UDINT;
+
+	_MissingConfigurationGroup : MissingChildrenTestGroup(name := "Missing configuration", parent := 0);
+	_MissingConfigurationRunner : MissingChildrenTestRunner;
+	_ExceptionAdsReporter : TOF_Testing.AdsLogReporter;
+	_ExceptionClassesFinished : BOOL;
+
+	_PathsFinished : BOOL;
+	//! <summary>Synthetic Parent chains for path observation only; these fixtures are not executed as trees.</summary>
+	_PathRoot : EmptyTestGroup(
+		name := "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+		parent := 0
+	);
+	_PathSecond : EmptyTestGroup(
+		name := "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
+		parent := _PathRoot
+	);
+	_PathThird : EmptyTestGroup(
+		name := "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC",
+		parent := _PathSecond
+	);
+	_PathFourth : EmptyTestGroup(
+		name := "DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD",
+		parent := _PathThird
+	);
+	_PathEmpty : EmptyTestGroup(name := "", parent := _PathRoot);
+	_PathUnicode : TestingProbe(name := "Ω", parent := _PathEmpty);
+	//! <summary>Supplies 81 characters to exercise ordinary truncation at the 80-character name input.</summary>
+	_PathLongNameInput : WSTRING(81) := "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB";
+	_PathLongName : EmptyTestGroup(
+		name := _PathLongNameInput,
+		parent := 0
+	);
+	_ReportPathRoot : EmptyTestGroup(name := "Report root", parent := 0);
+	_ReportPathMiddle : EmptyTestGroup(name := "Middle", parent := _ReportPathRoot);
+	_ReportPathInner : EmptyTestGroup(name := "Inner", parent := _ReportPathMiddle);
+	_PathReport : TOF_Testing.JUnitXmlReporter;
+	_ContextObjectsFinished : BOOL;
+	_MetadataBoolAssertionContext : TOF_Testing.BoolAssertionContext;
+	_MetadataByteAssertionContext : TOF_Testing.ByteAssertionContext;
+	_MetadataDateAssertionContext : TOF_Testing.DateAssertionContext;
+	_MetadataDateTimeAssertionContext : TOF_Testing.DateTimeAssertionContext;
+	_MetadataDIntAssertionContext : TOF_Testing.DIntAssertionContext;
+	_MetadataDWordAssertionContext : TOF_Testing.DWordAssertionContext;
+	_MetadataIntAssertionContext : TOF_Testing.IntAssertionContext;
+	_MetadataLIntAssertionContext : TOF_Testing.LIntAssertionContext;
+	_MetadataLongDateAssertionContext : TOF_Testing.LongDateAssertionContext;
+	_MetadataLongDateTimeAssertionContext : TOF_Testing.LongDateTimeAssertionContext;
+	_MetadataLongRealAssertionContext : TOF_Testing.LongRealAssertionContext;
+	_MetadataLongTimeAssertionContext : TOF_Testing.LongTimeAssertionContext;
+	_MetadataLongTimeOfDayAssertionContext : TOF_Testing.LongTimeOfDayAssertionContext;
+	_MetadataLWordAssertionContext : TOF_Testing.LWordAssertionContext;
+	_MetadataPointerAssertionContext : TOF_Testing.PointerAssertionContext;
+	_MetadataRealAssertionContext : TOF_Testing.RealAssertionContext;
+	_MetadataSIntAssertionContext : TOF_Testing.SIntAssertionContext;
+	_MetadataStringAssertionContext : TOF_Testing.StringAssertionContext;
+	_MetadataTimeAssertionContext : TOF_Testing.TimeAssertionContext;
+	_MetadataTimeOfDayAssertionContext : TOF_Testing.TimeOfDayAssertionContext;
+	_MetadataUDIntAssertionContext : TOF_Testing.UDIntAssertionContext;
+	_MetadataUIntAssertionContext : TOF_Testing.UIntAssertionContext;
+	_MetadataULIntAssertionContext : TOF_Testing.ULIntAssertionContext;
+	_MetadataUSIntAssertionContext : TOF_Testing.USIntAssertionContext;
+	_MetadataWideStringAssertionContext : TOF_Testing.WideStringAssertionContext;
+	_MetadataWordAssertionContext : TOF_Testing.WordAssertionContext;
+	_OtherBoolContext : TOF_Testing.BoolAssertionContext;
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[runAndCheck();
+checkCaseIsolation();
+checkEmptyRun();
+checkReporterAbort();
+checkDeadline();
+checkTopology();
+checkExternalRecovery();
+checkDiagnostics();
+checkAssertionContracts();
+checkXmlEncoding();
+checkRunnerTopology();
+checkExceptionClasses();
+checkContextObjects();
+checkPaths();
+checkIndexedChildren();]]></ST>
+    </Implementation>
+    <Method Name="assertCaughtExceptionType" Id="{2c5ab173-8763-452a-b27c-2c2bab737734}">
+      <Declaration><![CDATA[(*!
+<summary>Checks a caught failure through its dedicated exception interface before task cleanup.</summary>
+<description>Only borrows the exception during this call; no exception reference survives the test cycle.</description>
+*)
+METHOD PRIVATE assertCaughtExceptionType
+VAR_INPUT
+	exceptionCode : __SYSTEM.ExceptionCode;
+	expectedTypeName : STRING;
+END_VAR
+VAR
+	exception : TOF_Core.IException;
+	standardException : TOF_Core.IStandardException;
+	argumentNotSpecified : TOF_Core.IArgumentNotSpecifiedException;
+	memberNotSpecified : TOF_Core.IDataMemberNotSpecifiedException;
+	argumentValueNotSupported : TOF_Core.IArgumentValueNotSupportedException;
+	argumentOutOfRange : TOF_Core.IArgumentOutOfRangeException;
+	matchesType : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[exception := TOF_Core.ExceptionManager.GetLastException(
+	exceptionCode := exceptionCode,
+	catchPointNamespaceName := CurrentNamespace.Name,
+	catchPointPOUName := __POUNAME(),
+	catchPointPosition := __POSITION()
+);
+AssertTrue(Condition := exception <> 0, Message := 'Caught failure exposes its exception payload');
+
+IF exception = 0 THEN
+	RETURN;
+END_IF
+
+IF expectedTypeName = 'StandardException' THEN
+	matchesType := __QUERYINTERFACE(exception, standardException);
+ELSIF expectedTypeName = 'ArgumentNotSpecifiedException' THEN
+	matchesType := __QUERYINTERFACE(exception, argumentNotSpecified);
+ELSIF expectedTypeName = 'DataMemberNotSpecifiedException' THEN
+	matchesType := __QUERYINTERFACE(exception, memberNotSpecified);
+ELSIF expectedTypeName = 'ArgumentValueNotSupportedException' THEN
+	matchesType := __QUERYINTERFACE(exception, argumentValueNotSupported);
+ELSIF expectedTypeName = 'ArgumentOutOfRangeException' THEN
+	matchesType := __QUERYINTERFACE(exception, argumentOutOfRange);
+END_IF
+
+AssertTrue(Condition := matchesType, Message := 'Exception interface matches the expected failure category');]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="assertObjectMetadata" Id="{f2a9d741-7838-45f9-aeb9-9fdb28379f63}">
+      <Declaration><![CDATA[(*!
+<summary>Checks concrete metadata through a borrowed Object interface.</summary>
+<description>Checks namespace, class, size and address separately with distinct failure diagnostics.</description>
+<param name="object">Live instance whose metadata is read without preparation.</param>
+<param name="expectedNamespaceName">Namespace of the project declaring the concrete type.</param>
+<param name="expectedClassName">Concrete context class name.</param>
+<param name="expectedSize">Compiler-reported size of the complete concrete context.</param>
+<param name="expectedAddress">Address of the concrete context, without ownership transfer.</param>
+*)
+METHOD PRIVATE assertObjectMetadata
+VAR_INPUT
+	object : TOF_Core.IObject;
+	expectedNamespaceName : STRING;
+	expectedClassName : STRING;
+	expectedSize : ULINT;
+	expectedAddress : PVOID;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[AssertTrue(Condition := object <> 0, Message := expectedClassName);
+
+IF object = 0 THEN
+	RETURN;
+END_IF
+
+AssertTrue(
+	Condition := object.ClassName = expectedClassName,
+	Message := TOF_Core.Strings.Concat255(expectedClassName, ': ClassName')
+);
+AssertTrue(
+	Condition := object.NamespaceName = expectedNamespaceName,
+	Message := TOF_Core.Strings.Concat255(expectedClassName, ': NamespaceName')
+);
+AssertTrue(
+	Condition := object.SelfSize = expectedSize,
+	Message := TOF_Core.Strings.Concat255(expectedClassName, ': SelfSize')
+);
+AssertTrue(
+	Condition := object.SelfAddress = expectedAddress,
+	Message := TOF_Core.Strings.Concat255(expectedClassName, ': SelfAddress')
+);]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="checkAssertionContracts" Id="{445379f9-368e-47ae-8093-2c17c86cd7ba}">
+      <Declaration><![CDATA[(*!
+<summary>Checks independent typed and generic contexts, native predicates and chain-wide diagnostics.</summary>
+<description>Configures the persistent output probes through a local reference without copying them.</description>
+*)
+METHOD PRIVATE checkAssertionContracts
+VAR
+	probe : REFERENCE TO AssertionContractProbe;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF _AssertionsFinished THEN
+	RETURN;
+END_IF
+
+TEST(TestName := 'Independent contexts, typed predicates, snapshots and chain diagnostics');
+
+IF NOT _AssertionsConfigured THEN
+	probe REF= _AssertionRun.Assertion0;
+	probe.Scenario := ASSERTION_PROBE_SCENARIO.FLOAT_TOLERANCE;
+	probe REF= _AssertionRun.Assertion1;
+	probe.Scenario := ASSERTION_PROBE_SCENARIO.INTEGER_EXACT;
+	probe REF= _AssertionRun.Assertion2;
+	probe.Scenario := ASSERTION_PROBE_SCENARIO.TYPED_LITERALS;
+	probe REF= _AssertionRun.Assertion3;
+	probe.Scenario := ASSERTION_PROBE_SCENARIO.MESSAGE_CHAIN;
+	probe REF= _AssertionRun.Assertion4;
+	probe.Scenario := ASSERTION_PROBE_SCENARIO.NEGATIVE_TOLERANCE;
+	probe REF= _AssertionRun.Assertion5;
+	probe.Scenario := ASSERTION_PROBE_SCENARIO.NAN_TOLERANCE;
+	probe REF= _AssertionRun.Assertion6;
+	probe.Scenario := ASSERTION_PROBE_SCENARIO.INFINITE_TOLERANCE;
+	probe REF= _AssertionRun.Assertion7;
+	probe.Scenario := ASSERTION_PROBE_SCENARIO.MESSAGE_RESET;
+	probe REF= _AssertionRun.Assertion8;
+	probe.Scenario := ASSERTION_PROBE_SCENARIO.POINTERS_AND_STRINGS;
+	probe REF= _AssertionRun.Assertion9;
+	probe.Scenario := ASSERTION_PROBE_SCENARIO.FIRST_FAILURE;
+	probe REF= _AssertionRun.Assertion10;
+	probe.Scenario := ASSERTION_PROBE_SCENARIO.SPECIAL_FLOATS;
+	probe REF= _AssertionRun.Assertion11;
+	probe.Scenario := ASSERTION_PROBE_SCENARIO.OPPOSITE_LIMITS;
+	probe REF= _AssertionRun.Assertion12;
+	probe.Scenario := ASSERTION_PROBE_SCENARIO.GENERIC_MESSAGE_CHAIN;
+	probe REF= _AssertionRun.Assertion13;
+	probe.Scenario := ASSERTION_PROBE_SCENARIO.GENERIC_MESSAGE_RESET;
+	probe REF= _AssertionRun.Assertion14;
+	probe.Scenario := ASSERTION_PROBE_SCENARIO.CONTEXT_TRANSITIONS;
+	probe REF= _AssertionRun.Assertion15;
+	probe.Scenario := ASSERTION_PROBE_SCENARIO.TYPED_MESSAGE_AFTER_GENERIC;
+	probe REF= _AssertionRun.Assertion16;
+	probe.Scenario := ASSERTION_PROBE_SCENARIO.GENERIC_MESSAGE_AFTER_TYPED;
+	probe REF= _AssertionRun.Assertion17;
+	probe.Scenario := ASSERTION_PROBE_SCENARIO.TYPED_MESSAGE_RESET_AFTER_GENERIC;
+	probe REF= _AssertionRun.Assertion18;
+	probe.Scenario := ASSERTION_PROBE_SCENARIO.INTEGER_FAILURE;
+	probe REF= _AssertionRun.Assertion19;
+	probe.Scenario := ASSERTION_PROBE_SCENARIO.BITSTRING_FAILURE;
+	probe REF= _AssertionRun.Assertion20;
+	probe.Scenario := ASSERTION_PROBE_SCENARIO.POINTER_FAILURE;
+	probe REF= _AssertionRun.Assertion21;
+	probe.Scenario := ASSERTION_PROBE_SCENARIO.STRING_LONG_FAILURE;
+	probe REF= _AssertionRun.Assertion22;
+	probe.Scenario := ASSERTION_PROBE_SCENARIO.WIDE_STRING_LONG_FAILURE;
+	probe REF= _AssertionRun.Assertion23;
+	probe.Scenario := ASSERTION_PROBE_SCENARIO.STRING_CONTAINMENT_FAILURE;
+	probe REF= _AssertionRun.Assertion24;
+	probe.Scenario := ASSERTION_PROBE_SCENARIO.FLOAT_ORDERING_FAILURE;
+	probe REF= _AssertionRun.Assertion25;
+	probe.Scenario := ASSERTION_PROBE_SCENARIO.FLOAT_EQUALITY_FAILURE;
+	probe REF= _AssertionRun.Assertion26;
+	probe.Scenario := ASSERTION_PROBE_SCENARIO.TIME_ORDERING_FAILURE;
+	_AssertionRun.Reporter := _AssertionReport;
+	_AssertionsConfigured := TRUE;
+END_IF
+
+_AssertionRun.Execute(cleanupTaskMemory := FALSE);
+_AssertionCalls := _AssertionCalls + 1;
+
+IF NOT _AssertionRun.IsFinished AND_THEN _AssertionCalls < 32 THEN
+	RETURN;
+END_IF
+
+AssertTrue(Condition := _AssertionRun.IsFinished, Message := 'Twenty-seven assertion leaves finish within 32 scans');
+AssertEquals_UDINT(Expected := 27, Actual := _AssertionRun.TotalTests, Message := 'Every assertion scenario executes');
+AssertEquals_UDINT(
+	Expected := 7,
+	Actual := _AssertionRun.PassedTests,
+	Message := 'Seven supported assertion scenarios pass'
+);
+AssertEquals_UDINT(
+	Expected := 20,
+	Actual := _AssertionRun.FailedTests,
+	Message := 'Twenty deliberate failures are recorded'
+);
+AssertTrue(
+	Condition := _AssertionRun.Assertion0.Outcome = TOF_Testing.TEST_OUTCOME.PASSED,
+	Message := 'Assertion scenario 0 has its expected passed outcome'
+);
+AssertTrue(
+	Condition := _AssertionRun.Assertion1.Outcome = TOF_Testing.TEST_OUTCOME.PASSED,
+	Message := 'Assertion scenario 1 has its expected passed outcome'
+);
+AssertTrue(
+	Condition := _AssertionRun.Assertion2.Outcome = TOF_Testing.TEST_OUTCOME.PASSED,
+	Message := 'Assertion scenario 2 has its expected passed outcome'
+);
+AssertTrue(
+	Condition := _AssertionRun.Assertion3.Outcome = TOF_Testing.TEST_OUTCOME.FAILED,
+	Message := 'Assertion scenario 3 has its expected failed outcome'
+);
+AssertTrue(
+	Condition := _AssertionRun.Assertion4.Outcome = TOF_Testing.TEST_OUTCOME.FAILED,
+	Message := 'Assertion scenario 4 has its expected failed outcome'
+);
+AssertTrue(
+	Condition := _AssertionRun.Assertion5.Outcome = TOF_Testing.TEST_OUTCOME.FAILED,
+	Message := 'Assertion scenario 5 has its expected failed outcome'
+);
+AssertTrue(
+	Condition := _AssertionRun.Assertion6.Outcome = TOF_Testing.TEST_OUTCOME.FAILED,
+	Message := 'Assertion scenario 6 has its expected failed outcome'
+);
+AssertTrue(
+	Condition := _AssertionRun.Assertion7.Outcome = TOF_Testing.TEST_OUTCOME.FAILED,
+	Message := 'Assertion scenario 7 has its expected failed outcome'
+);
+AssertTrue(
+	Condition := _AssertionRun.Assertion8.Outcome = TOF_Testing.TEST_OUTCOME.PASSED,
+	Message := 'Assertion scenario 8 has its expected passed outcome'
+);
+AssertTrue(
+	Condition := _AssertionRun.Assertion9.Outcome = TOF_Testing.TEST_OUTCOME.FAILED,
+	Message := 'Assertion scenario 9 has its expected failed outcome'
+);
+AssertTrue(
+	Condition := _AssertionRun.Assertion10.Outcome = TOF_Testing.TEST_OUTCOME.PASSED,
+	Message := 'Assertion scenario 10 has its expected passed outcome'
+);
+AssertTrue(
+	Condition := _AssertionRun.Assertion11.Outcome = TOF_Testing.TEST_OUTCOME.PASSED,
+	Message := 'Assertion scenario 11 has its expected passed outcome'
+);
+AssertTrue(
+	Condition := _AssertionRun.Assertion12.Outcome = TOF_Testing.TEST_OUTCOME.FAILED,
+	Message := 'Assertion scenario 12 has its expected failed outcome'
+);
+AssertTrue(
+	Condition := _AssertionRun.Assertion13.Outcome = TOF_Testing.TEST_OUTCOME.FAILED,
+	Message := 'Assertion scenario 13 has its expected failed outcome'
+);
+AssertTrue(
+	Condition := _AssertionRun.Assertion9.FailureMessage = "First diagnostic",
+	Message := 'Later assertion and teardown exception preserve the first failure'
+);
+AssertTrue(
+	Condition := TOF_Core.WideStrings.Contains(
+		stringToSearchIn := _AssertionRun.Assertion3.FailureMessage,
+		stringToFind := "Chain diagnostic: Expected value < "
+	),
+	Message := 'The message survives a successful assertion in the same typed chain'
+);
+AssertTrue(
+	Condition := NOT TOF_Core.WideStrings.Contains(
+		stringToSearchIn := _AssertionRun.Assertion7.FailureMessage,
+		stringToFind := "Previous diagnostic"
+	),
+	Message := 'Omitting the typed entry message clears the previous prefix'
+);
+AssertTrue(
+	Condition := TOF_Core.WideStrings.Contains(
+		stringToSearchIn := _AssertionRun.Assertion12.FailureMessage,
+		stringToFind := "Generic chain diagnostic: Expected value < "
+	),
+	Message := 'Borrowed assertions retain the same chain-wide message contract'
+);
+AssertTrue(
+	Condition := NOT TOF_Core.WideStrings.Contains(
+		stringToSearchIn := _AssertionRun.Assertion13.FailureMessage,
+		stringToFind := "Previous generic diagnostic"
+	),
+	Message := 'Omitting the borrowed entry message clears the previous prefix'
+);
+AssertTrue(
+	Condition := TOF_Core.WideStrings.Contains(
+		stringToSearchIn := _AssertionRun.Assertion4.FailureMessage,
+		stringToFind := "finite nonnegative comparison tolerance"
+	),
+	Message := 'An invalid tolerance fails before a comparison that would otherwise pass'
+);
+AssertTrue(
+	Condition := _AssertionRun.Assertion14.Outcome = TOF_Testing.TEST_OUTCOME.PASSED,
+	Message := 'Independent context scenario CONTEXT_TRANSITIONS has its expected outcome'
+);
+AssertTrue(
+	Condition := _AssertionRun.Assertion15.Outcome = TOF_Testing.TEST_OUTCOME.FAILED,
+	Message := 'Independent context scenario TYPED_MESSAGE_AFTER_GENERIC has its expected outcome'
+);
+AssertTrue(
+	Condition := _AssertionRun.Assertion15.FailureMessage = "Independent typed: Expected: 11, but was: 10",
+	Message := 'Independent context scenario TYPED_MESSAGE_AFTER_GENERIC retains its diagnostic'
+);
+AssertTrue(
+	Condition := _AssertionRun.Assertion16.Outcome = TOF_Testing.TEST_OUTCOME.FAILED,
+	Message := 'Independent context scenario GENERIC_MESSAGE_AFTER_TYPED has its expected outcome'
+);
+AssertTrue(
+	Condition := _AssertionRun.Assertion16.FailureMessage = "Independent generic: Expected: 2, but was: 1",
+	Message := 'Independent context scenario GENERIC_MESSAGE_AFTER_TYPED retains its diagnostic'
+);
+AssertTrue(
+	Condition := _AssertionRun.Assertion17.Outcome = TOF_Testing.TEST_OUTCOME.FAILED,
+	Message := 'Independent context scenario TYPED_MESSAGE_RESET_AFTER_GENERIC has its expected outcome'
+);
+AssertTrue(
+	Condition := _AssertionRun.Assertion17.FailureMessage = "Expected: 2, but was: 1",
+	Message := 'Independent context scenario TYPED_MESSAGE_RESET_AFTER_GENERIC retains its diagnostic'
+);
+AssertTrue(
+	Condition := _AssertionRun.Assertion18.Outcome = TOF_Testing.TEST_OUTCOME.FAILED,
+	Message := 'Independent context scenario INTEGER_FAILURE has its expected outcome'
+);
+AssertTrue(
+	Condition := _AssertionRun.Assertion18.FailureMessage = "Expected: -2, but was: -3",
+	Message := 'Independent context scenario INTEGER_FAILURE retains its diagnostic'
+);
+AssertTrue(
+	Condition := _AssertionRun.Assertion19.Outcome = TOF_Testing.TEST_OUTCOME.FAILED,
+	Message := 'Independent context scenario BITSTRING_FAILURE has its expected outcome'
+);
+AssertTrue(
+	Condition := _AssertionRun.Assertion19.FailureMessage = "Expected: 11, but was: 10",
+	Message := 'Independent context scenario BITSTRING_FAILURE retains its diagnostic'
+);
+AssertTrue(
+	Condition := _AssertionRun.Assertion20.Outcome = TOF_Testing.TEST_OUTCOME.FAILED,
+	Message := 'Independent context scenario POINTER_FAILURE has its expected outcome'
+);
+AssertTrue(
+	Condition := TOF_Core.WideStrings.Contains(
+		stringToSearchIn := _AssertionRun.Assertion20.FailureMessage,
+		stringToFind := "Expected: 0, but was: "
+	),
+	Message := 'Independent context scenario POINTER_FAILURE retains its diagnostic'
+);
+AssertTrue(
+	Condition := _AssertionRun.Assertion21.Outcome = TOF_Testing.TEST_OUTCOME.FAILED,
+	Message := 'Independent context scenario STRING_LONG_FAILURE has its expected outcome'
+);
+AssertTrue(
+	Condition := TOF_Core.WideStrings.Contains(
+		stringToSearchIn := _AssertionRun.Assertion21.FailureMessage,
+		stringToFind := "ASCII expected suffix"
+	),
+	Message := 'Independent context scenario STRING_LONG_FAILURE retains its diagnostic'
+);
+AssertTrue(
+	Condition := _AssertionRun.Assertion22.Outcome = TOF_Testing.TEST_OUTCOME.FAILED,
+	Message := 'Independent context scenario WIDE_STRING_LONG_FAILURE has its expected outcome'
+);
+AssertTrue(
+	Condition := TOF_Core.WideStrings.Contains(
+		stringToSearchIn := _AssertionRun.Assertion22.FailureMessage,
+		stringToFind := "Wide expected suffix"
+	),
+	Message := 'Independent context scenario WIDE_STRING_LONG_FAILURE retains its diagnostic'
+);
+AssertTrue(
+	Condition := _AssertionRun.Assertion23.Outcome = TOF_Testing.TEST_OUTCOME.FAILED,
+	Message := 'Independent context scenario STRING_CONTAINMENT_FAILURE has its expected outcome'
+);
+AssertTrue(
+	Condition := _AssertionRun.Assertion23.FailureMessage = "Expected text to contain 'missing', but was: 'present'",
+	Message := 'Independent context scenario STRING_CONTAINMENT_FAILURE retains its diagnostic'
+);
+AssertTrue(
+	Condition := _AssertionRun.Assertion24.Outcome = TOF_Testing.TEST_OUTCOME.FAILED,
+	Message := 'Independent context scenario FLOAT_ORDERING_FAILURE has its expected outcome'
+);
+AssertTrue(
+	Condition := TOF_Core.WideStrings.Contains(
+		stringToSearchIn := _AssertionRun.Assertion24.FailureMessage,
+		stringToFind := "Expected value > "
+	),
+	Message := 'Independent context scenario FLOAT_ORDERING_FAILURE retains its diagnostic'
+);
+AssertTrue(
+	Condition := _AssertionRun.Assertion25.Outcome = TOF_Testing.TEST_OUTCOME.FAILED,
+	Message := 'Independent context scenario FLOAT_EQUALITY_FAILURE has its expected outcome'
+);
+AssertTrue(
+	Condition := TOF_Core.WideStrings.Contains(
+		stringToSearchIn := _AssertionRun.Assertion25.FailureMessage,
+		stringToFind := ", tolerance: "
+	),
+	Message := 'Independent context scenario FLOAT_EQUALITY_FAILURE retains its diagnostic'
+);
+AssertTrue(
+	Condition := _AssertionRun.Assertion26.Outcome = TOF_Testing.TEST_OUTCOME.FAILED,
+	Message := 'Independent context scenario TIME_ORDERING_FAILURE has its expected outcome'
+);
+AssertTrue(
+	Condition := TOF_Core.WideStrings.Contains(
+		stringToSearchIn := _AssertionRun.Assertion26.FailureMessage,
+		stringToFind := "Expected value >= "
+	),
+	Message := 'Independent context scenario TIME_ORDERING_FAILURE retains its diagnostic'
+);
+_AssertionsFinished := TRUE;
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="checkCaseIsolation" Id="{5f12043f-7cc9-48b6-8546-86418bd2151d}">
+      <Declaration><![CDATA[(*!
+<summary>Checks assertion and direct failure routing between independent active cases.</summary>
+<description>Configures the persistent output probes through local references without copying them.</description>
+*)
+METHOD PRIVATE checkCaseIsolation
+VAR
+	passingProbe : REFERENCE TO AssertionIsolationProbe;
+	failingProbe : REFERENCE TO AssertionIsolationProbe;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF _IsolationFinished THEN
+	RETURN;
+END_IF
+
+TEST(TestName := 'Each failure belongs to its receiving case');
+passingProbe REF= _PassingRun.Child;
+failingProbe REF= _FailingRun.Child;
+
+IF NOT _IsolationConfigured THEN
+	passingProbe.Peer := ADR(failingProbe);
+	failingProbe.Timeout := T#0S;
+	passingProbe.Timeout := T#0S;
+	_FailingRun.Reporter := _FailureReport;
+	_PassingRun.Reporter := _PassReport;
+	_IsolationConfigured := TRUE;
+END_IF
+
+_FailingRun.Execute(cleanupTaskMemory := FALSE);
+_PassingRun.Execute(cleanupTaskMemory := FALSE);
+_IsolationCalls := _IsolationCalls + 1;
+
+IF NOT (_FailingRun.IsFinished AND_THEN _PassingRun.IsFinished) AND_THEN _IsolationCalls < 16 THEN
+	RETURN;
+END_IF
+
+AssertTrue(Condition := _FailingRun.IsFinished AND _PassingRun.IsFinished, Message := 'Both runs finish');
+AssertEquals_UDINT(Expected := 1, Actual := _FailingRun.FailedTests, Message := 'Failure belongs to receiver');
+AssertEquals_UDINT(Expected := 1, Actual := _PassingRun.PassedTests, Message := 'Calling case passes');
+AssertEquals_UDINT(Expected := 0, Actual := _PassingRun.FailedTests, Message := 'Calling case has no peer failure');
+
+IF NOT _IsolationSecondRun AND_THEN _FailingRun.IsFinished AND_THEN _PassingRun.IsFinished THEN
+	_IsolationSecondRun := TRUE;
+	passingProbe.UseDirectFailure := TRUE;
+	_IsolationCalls := 0;
+	_FailingRun.Reset();
+	_PassingRun.Reset();
+	RETURN;
+END_IF
+
+_IsolationFinished := TRUE;
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="checkContextObjects" Id="{010590e9-71b2-41f8-857b-014674c4487c}">
+      <Declaration><![CDATA[(*!
+<summary>Checks all typed contexts through IObject before assertion preparation.</summary>
+<description>
+Persistent contexts retain their default state. Checks metadata, addresses and inherited identity equality;
+no test callback or Prepare call is required to read Object metadata.
+Also checks concrete runner metadata, the inherited INamed signature and the constructor-copied group name.
+Context namespaces are compared with an independent library reporter; runner metadata uses the consumer namespace.
+</description>
+*)
+METHOD PRIVATE checkContextObjects
+VAR
+	first : TOF_Core.IObject;
+	second : TOF_Core.IObject;
+	group : TOF_Core.IObject;
+	named : TOF_Core.INamed;
+	displayName : REFERENCE TO WSTRING;
+	concreteDisplayName : REFERENCE TO WSTRING;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF _ContextObjectsFinished THEN
+	RETURN;
+END_IF
+
+TEST(TestName := 'Typed contexts and concrete runner expose Object metadata and identity');
+
+assertObjectMetadata(
+	object := _Runner,
+	expectedNamespaceName := CurrentNamespace.Name,
+	expectedClassName := 'MixedTestRunner',
+	expectedSize := XSIZEOF(_Runner),
+	expectedAddress := ADR(_Runner)
+);
+
+assertObjectMetadata(
+	object := _MetadataBoolAssertionContext,
+	expectedNamespaceName := _ExceptionAdsReporter.NamespaceName,
+	expectedClassName := 'BoolAssertionContext',
+	expectedSize := XSIZEOF(_MetadataBoolAssertionContext),
+	expectedAddress := ADR(_MetadataBoolAssertionContext)
+);
+assertObjectMetadata(
+	object := _MetadataByteAssertionContext,
+	expectedNamespaceName := _ExceptionAdsReporter.NamespaceName,
+	expectedClassName := 'ByteAssertionContext',
+	expectedSize := XSIZEOF(_MetadataByteAssertionContext),
+	expectedAddress := ADR(_MetadataByteAssertionContext)
+);
+assertObjectMetadata(
+	object := _MetadataDateAssertionContext,
+	expectedNamespaceName := _ExceptionAdsReporter.NamespaceName,
+	expectedClassName := 'DateAssertionContext',
+	expectedSize := XSIZEOF(_MetadataDateAssertionContext),
+	expectedAddress := ADR(_MetadataDateAssertionContext)
+);
+assertObjectMetadata(
+	object := _MetadataDateTimeAssertionContext,
+	expectedNamespaceName := _ExceptionAdsReporter.NamespaceName,
+	expectedClassName := 'DateTimeAssertionContext',
+	expectedSize := XSIZEOF(_MetadataDateTimeAssertionContext),
+	expectedAddress := ADR(_MetadataDateTimeAssertionContext)
+);
+assertObjectMetadata(
+	object := _MetadataDIntAssertionContext,
+	expectedNamespaceName := _ExceptionAdsReporter.NamespaceName,
+	expectedClassName := 'DIntAssertionContext',
+	expectedSize := XSIZEOF(_MetadataDIntAssertionContext),
+	expectedAddress := ADR(_MetadataDIntAssertionContext)
+);
+assertObjectMetadata(
+	object := _MetadataDWordAssertionContext,
+	expectedNamespaceName := _ExceptionAdsReporter.NamespaceName,
+	expectedClassName := 'DWordAssertionContext',
+	expectedSize := XSIZEOF(_MetadataDWordAssertionContext),
+	expectedAddress := ADR(_MetadataDWordAssertionContext)
+);
+assertObjectMetadata(
+	object := _MetadataIntAssertionContext,
+	expectedNamespaceName := _ExceptionAdsReporter.NamespaceName,
+	expectedClassName := 'IntAssertionContext',
+	expectedSize := XSIZEOF(_MetadataIntAssertionContext),
+	expectedAddress := ADR(_MetadataIntAssertionContext)
+);
+assertObjectMetadata(
+	object := _MetadataLIntAssertionContext,
+	expectedNamespaceName := _ExceptionAdsReporter.NamespaceName,
+	expectedClassName := 'LIntAssertionContext',
+	expectedSize := XSIZEOF(_MetadataLIntAssertionContext),
+	expectedAddress := ADR(_MetadataLIntAssertionContext)
+);
+assertObjectMetadata(
+	object := _MetadataLongDateAssertionContext,
+	expectedNamespaceName := _ExceptionAdsReporter.NamespaceName,
+	expectedClassName := 'LongDateAssertionContext',
+	expectedSize := XSIZEOF(_MetadataLongDateAssertionContext),
+	expectedAddress := ADR(_MetadataLongDateAssertionContext)
+);
+assertObjectMetadata(
+	object := _MetadataLongDateTimeAssertionContext,
+	expectedNamespaceName := _ExceptionAdsReporter.NamespaceName,
+	expectedClassName := 'LongDateTimeAssertionContext',
+	expectedSize := XSIZEOF(_MetadataLongDateTimeAssertionContext),
+	expectedAddress := ADR(_MetadataLongDateTimeAssertionContext)
+);
+assertObjectMetadata(
+	object := _MetadataLongRealAssertionContext,
+	expectedNamespaceName := _ExceptionAdsReporter.NamespaceName,
+	expectedClassName := 'LongRealAssertionContext',
+	expectedSize := XSIZEOF(_MetadataLongRealAssertionContext),
+	expectedAddress := ADR(_MetadataLongRealAssertionContext)
+);
+assertObjectMetadata(
+	object := _MetadataLongTimeAssertionContext,
+	expectedNamespaceName := _ExceptionAdsReporter.NamespaceName,
+	expectedClassName := 'LongTimeAssertionContext',
+	expectedSize := XSIZEOF(_MetadataLongTimeAssertionContext),
+	expectedAddress := ADR(_MetadataLongTimeAssertionContext)
+);
+assertObjectMetadata(
+	object := _MetadataLongTimeOfDayAssertionContext,
+	expectedNamespaceName := _ExceptionAdsReporter.NamespaceName,
+	expectedClassName := 'LongTimeOfDayAssertionContext',
+	expectedSize := XSIZEOF(_MetadataLongTimeOfDayAssertionContext),
+	expectedAddress := ADR(_MetadataLongTimeOfDayAssertionContext)
+);
+assertObjectMetadata(
+	object := _MetadataLWordAssertionContext,
+	expectedNamespaceName := _ExceptionAdsReporter.NamespaceName,
+	expectedClassName := 'LWordAssertionContext',
+	expectedSize := XSIZEOF(_MetadataLWordAssertionContext),
+	expectedAddress := ADR(_MetadataLWordAssertionContext)
+);
+assertObjectMetadata(
+	object := _MetadataPointerAssertionContext,
+	expectedNamespaceName := _ExceptionAdsReporter.NamespaceName,
+	expectedClassName := 'PointerAssertionContext',
+	expectedSize := XSIZEOF(_MetadataPointerAssertionContext),
+	expectedAddress := ADR(_MetadataPointerAssertionContext)
+);
+assertObjectMetadata(
+	object := _MetadataRealAssertionContext,
+	expectedNamespaceName := _ExceptionAdsReporter.NamespaceName,
+	expectedClassName := 'RealAssertionContext',
+	expectedSize := XSIZEOF(_MetadataRealAssertionContext),
+	expectedAddress := ADR(_MetadataRealAssertionContext)
+);
+assertObjectMetadata(
+	object := _MetadataSIntAssertionContext,
+	expectedNamespaceName := _ExceptionAdsReporter.NamespaceName,
+	expectedClassName := 'SIntAssertionContext',
+	expectedSize := XSIZEOF(_MetadataSIntAssertionContext),
+	expectedAddress := ADR(_MetadataSIntAssertionContext)
+);
+assertObjectMetadata(
+	object := _MetadataStringAssertionContext,
+	expectedNamespaceName := _ExceptionAdsReporter.NamespaceName,
+	expectedClassName := 'StringAssertionContext',
+	expectedSize := XSIZEOF(_MetadataStringAssertionContext),
+	expectedAddress := ADR(_MetadataStringAssertionContext)
+);
+assertObjectMetadata(
+	object := _MetadataTimeAssertionContext,
+	expectedNamespaceName := _ExceptionAdsReporter.NamespaceName,
+	expectedClassName := 'TimeAssertionContext',
+	expectedSize := XSIZEOF(_MetadataTimeAssertionContext),
+	expectedAddress := ADR(_MetadataTimeAssertionContext)
+);
+assertObjectMetadata(
+	object := _MetadataTimeOfDayAssertionContext,
+	expectedNamespaceName := _ExceptionAdsReporter.NamespaceName,
+	expectedClassName := 'TimeOfDayAssertionContext',
+	expectedSize := XSIZEOF(_MetadataTimeOfDayAssertionContext),
+	expectedAddress := ADR(_MetadataTimeOfDayAssertionContext)
+);
+assertObjectMetadata(
+	object := _MetadataUDIntAssertionContext,
+	expectedNamespaceName := _ExceptionAdsReporter.NamespaceName,
+	expectedClassName := 'UDIntAssertionContext',
+	expectedSize := XSIZEOF(_MetadataUDIntAssertionContext),
+	expectedAddress := ADR(_MetadataUDIntAssertionContext)
+);
+assertObjectMetadata(
+	object := _MetadataUIntAssertionContext,
+	expectedNamespaceName := _ExceptionAdsReporter.NamespaceName,
+	expectedClassName := 'UIntAssertionContext',
+	expectedSize := XSIZEOF(_MetadataUIntAssertionContext),
+	expectedAddress := ADR(_MetadataUIntAssertionContext)
+);
+assertObjectMetadata(
+	object := _MetadataULIntAssertionContext,
+	expectedNamespaceName := _ExceptionAdsReporter.NamespaceName,
+	expectedClassName := 'ULIntAssertionContext',
+	expectedSize := XSIZEOF(_MetadataULIntAssertionContext),
+	expectedAddress := ADR(_MetadataULIntAssertionContext)
+);
+assertObjectMetadata(
+	object := _MetadataUSIntAssertionContext,
+	expectedNamespaceName := _ExceptionAdsReporter.NamespaceName,
+	expectedClassName := 'USIntAssertionContext',
+	expectedSize := XSIZEOF(_MetadataUSIntAssertionContext),
+	expectedAddress := ADR(_MetadataUSIntAssertionContext)
+);
+assertObjectMetadata(
+	object := _MetadataWideStringAssertionContext,
+	expectedNamespaceName := _ExceptionAdsReporter.NamespaceName,
+	expectedClassName := 'WideStringAssertionContext',
+	expectedSize := XSIZEOF(_MetadataWideStringAssertionContext),
+	expectedAddress := ADR(_MetadataWideStringAssertionContext)
+);
+assertObjectMetadata(
+	object := _MetadataWordAssertionContext,
+	expectedNamespaceName := _ExceptionAdsReporter.NamespaceName,
+	expectedClassName := 'WordAssertionContext',
+	expectedSize := XSIZEOF(_MetadataWordAssertionContext),
+	expectedAddress := ADR(_MetadataWordAssertionContext)
+);
+
+first := _MetadataBoolAssertionContext;
+second := _OtherBoolContext;
+AssertTrue(Condition := first.Equals(other := first), Message := 'A context equals itself');
+AssertFalse(Condition := first.Equals(other := second), Message := 'Equal snapshots do not merge context identity');
+AssertFalse(Condition := first.Equals(other := 0), Message := 'A context is distinct from null');
+
+group := _Runner.Empty;
+AssertTrue(Condition := group.ClassName <> '', Message := 'A concrete group provides its class name');
+AssertTrue(
+	Condition := group.NamespaceName = _Runner.NamespaceName,
+	Message := 'Group and runner share the consumer namespace'
+);
+AssertTrue(Condition := group.SelfSize = XSIZEOF(_Runner.Empty), Message := 'Group size includes its concrete storage');
+AssertTrue(
+	Condition := group.SelfAddress = ADR(_Runner.Empty),
+	Message := 'Group identity points to the concrete instance'
+);
+
+named := _Runner.Empty;
+displayName REF= named.Name;
+concreteDisplayName REF= _Runner.Empty.Name;
+AssertTrue(Condition := __ISVALIDREF(displayName), Message := 'INamed provides a valid name reference');
+AssertTrue(Condition := ADR(displayName) = ADR(concreteDisplayName), Message := 'INamed borrows the same name storage');
+AssertTrue(Condition := displayName = "Empty", Message := 'INamed exposes the constructor-copied group name');
+
+_ContextObjectsFinished := TRUE;
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="checkDeadline" Id="{0888955c-9f21-487f-840a-fe1dbcd675d8}">
+      <Declaration><![CDATA[(*!
+<summary>Checks deadline completion and runner mutation guards with an owned static group.</summary>
+<description>Configures the persistent output leaf through a local reference without copying it.</description>
+*)
+METHOD PRIVATE checkDeadline
+VAR
+	deadlineProbe : REFERENCE TO AssertionIsolationProbe;
+	exceptionCode : __SYSTEM.ExceptionCode;
+	rejected : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF _DeadlineFinished THEN
+	RETURN;
+END_IF
+
+TEST(TestName := 'A pending multi-cycle test fails at its deadline');
+deadlineProbe REF= _DeadlineRun.DeadlineGroup.Child;
+
+IF NOT _DeadlineConfigured THEN
+	deadlineProbe.CompleteAfterCycle := 0;
+	deadlineProbe.Timeout := T#1MS;
+	_DeadlineRun.Reporter := _DeadlineReport;
+	_DeadlineConfigured := TRUE;
+END_IF
+
+_DeadlineRun.Execute(cleanupTaskMemory := FALSE);
+_DeadlineCalls := _DeadlineCalls + 1;
+
+IF deadlineProbe.IsRunning AND_THEN NOT _ActiveConfigurationChecked THEN
+
+	__TRY
+		deadlineProbe.Timeout := T#2S;
+	__CATCH(exceptionCode)
+		assertCaughtExceptionType(
+			exceptionCode := exceptionCode,
+			expectedTypeName := 'StandardException'
+		);
+		rejected := TRUE;
+	__ENDTRY
+
+	AssertTrue(Condition := rejected, Message := 'An active deadline cannot be changed');
+	AssertTrue(
+		Condition := deadlineProbe.Timeout = T#1MS,
+		Message := 'Rejected mutation preserves the deadline'
+	);
+	_DeadlineRun.Reset();
+	AssertFalse(Condition := _DeadlineRun.IsFinished, Message := 'Active Reset does not finish the runner');
+	rejected := FALSE;
+
+	__TRY
+		_DeadlineRun.Reporter := _DeadlineReport;
+	__CATCH(exceptionCode)
+		assertCaughtExceptionType(
+			exceptionCode := exceptionCode,
+			expectedTypeName := 'StandardException'
+		);
+		rejected := TRUE;
+	__ENDTRY
+
+	AssertTrue(Condition := rejected, Message := 'Active runner rejects Reporter mutation');
+	AssertTrue(
+		Condition := deadlineProbe.Parent = _DeadlineRun.Children[0],
+		Message := 'The active leaf retains its constructor-assigned parent'
+	);
+	_ActiveConfigurationChecked := TRUE;
+END_IF
+
+IF NOT _DeadlineRun.IsFinished AND_THEN _DeadlineCalls < 20000 THEN
+	RETURN;
+END_IF
+
+AssertTrue(Condition := _DeadlineRun.IsFinished, Message := 'A one-millisecond nominal deadline terminates');
+AssertEquals_UDINT(Expected := 1, Actual := _DeadlineRun.FailedTests, Message := 'Deadline is one failed leaf');
+AssertEquals_UDINT(
+	Expected := 1,
+	Actual := deadlineProbe.TeardownCalls,
+	Message := 'Deadline cleanup occurs once'
+);
+_DeadlineFinished := TRUE;
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="checkDiagnostics" Id="{ef7d79d6-1f1e-4050-8724-5f19af5a6c7f}">
+      <Declaration><![CDATA[(*!
+<summary>Checks copied native, fallback and long diagnostics after earlier task-cycle cleanup.</summary>
+*)
+METHOD PRIVATE checkDiagnostics
+VAR
+	probe : REFERENCE TO DiagnosticProbe;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF _DiagnosticFinished THEN
+	RETURN;
+END_IF
+
+TEST(TestName := 'Native and framework diagnostics outlive their exception objects');
+
+IF NOT _DiagnosticConfigured THEN
+	probe REF= _DiagnosticRun.NativeDiagnostic;
+	probe.ThrowNative := TRUE;
+	probe REF= _DiagnosticRun.FormatterDiagnostic;
+	probe.ThrowOnGetMessage := TRUE;
+	_DiagnosticRun.Reporter := _DiagnosticReport;
+	_DiagnosticConfigured := TRUE;
+END_IF
+
+_DiagnosticRun.Execute(cleanupTaskMemory := FALSE);
+_DiagnosticCalls := _DiagnosticCalls + 1;
+
+IF NOT _DiagnosticRun.IsFinished AND_THEN _DiagnosticCalls < 16 THEN
+	RETURN;
+END_IF
+
+AssertEquals_UDINT(
+	Expected := 3,
+	Actual := _DiagnosticRun.FailedTests,
+	Message := 'All injected errors are failed leaves'
+);
+AssertTrue(
+	Condition := TOF_Core.WideStrings.Contains(stringToSearchIn := _DiagnosticRun.NativeDiagnostic.FailureMessage,
+		stringToFind := "ExecuteTest"),
+	Message := 'Native diagnostic has the interrupted stage'
+);
+AssertTrue(
+	Condition := TOF_Core.WideStrings.Contains(stringToSearchIn := _DiagnosticRun.FormatterDiagnostic.FailureMessage,
+		stringToFind := "diagnostic unavailable"),
+	Message := 'Failing GetMessage retains stage/code fallback'
+);
+AssertTrue(
+	Condition := TOF_Core.WideStrings.Contains(stringToSearchIn := _DiagnosticRun.LongDiagnostic.FailureMessage,
+		stringToFind := "END_OF_LONG_DIAGNOSTIC"),
+	Message := 'Long copied exception message is not narrowed to 255'
+);
+AssertEquals_UDINT(
+	Expected := 1,
+	Actual := _DiagnosticRun.FormatterDiagnostic.TeardownCalls,
+	Message := 'Fallback still tears down once'
+);
+_DiagnosticFinished := TRUE;
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="checkEmptyRun" Id="{6aa07d21-0bd6-45eb-b362-9f72cd7ddcb6}">
+      <Declaration><![CDATA[(*!
+<summary>Checks a zero-child runner completes successfully with zero tests.</summary>
+*)
+METHOD PRIVATE checkEmptyRun]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF _EmptyFinished THEN
+	RETURN;
+END_IF
+
+TEST(TestName := 'An empty root passes with zero tests');
+
+IF NOT _EmptyConfigured THEN
+	_EmptyRun.Reporter := _EmptyReport;
+	_EmptyConfigured := TRUE;
+END_IF
+
+IF NOT _EmptyRun.IsFinished THEN
+	_EmptyRun.Execute(cleanupTaskMemory := FALSE);
+END_IF
+
+IF NOT _EmptyRun.IsFinished THEN
+	RETURN;
+END_IF
+
+AssertTrue(Condition := _EmptyRun.AllPassed, Message := 'An empty run passes');
+AssertEquals_UDINT(Expected := 0, Actual := _EmptyRun.TotalTests, Message := 'No synthetic empty test');
+_EmptyFinished := TRUE;
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="checkExceptionClasses" Id="{f02fb2a9-94f5-4abe-83c4-7b493ece78c6}">
+      <Declaration><![CDATA[(*!
+<summary>Checks missing static storage, safe abort recovery rejection and invalid reporter outcomes.</summary>
+*)
+METHOD PRIVATE checkExceptionClasses
+VAR
+	exceptionCode : __SYSTEM.ExceptionCode;
+	rejected : BOOL;
+	diagnostic : TOF_Core.ERROR_MESSAGE;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF _ExceptionClassesFinished THEN
+	RETURN;
+END_IF
+
+TEST(TestName := 'Missing static storage is diagnosed before child access');
+
+__TRY
+	_MissingConfigurationGroup.Reset(reporter := 0);
+__CATCH(exceptionCode)
+	assertCaughtExceptionType(exceptionCode := exceptionCode, expectedTypeName := 'DataMemberNotSpecifiedException');
+	rejected := TRUE;
+__ENDTRY
+
+AssertTrue(Condition := rejected, Message := 'Group Reset rejects missing child-array storage');
+_MissingConfigurationRunner.Execute(cleanupTaskMemory := FALSE);
+AssertEquals_DINT(
+	Expected := -1,
+	Actual := _MissingConfigurationRunner.ExitCode,
+	Message := 'Missing runner storage aborts'
+);
+assertCaughtExceptionType(
+	exceptionCode := _MissingConfigurationRunner.CallbackException,
+	expectedTypeName := 'DataMemberNotSpecifiedException'
+);
+rejected := FALSE;
+
+__TRY
+	_MissingConfigurationRunner.Reset();
+__CATCH(exceptionCode)
+	assertCaughtExceptionType(exceptionCode := exceptionCode, expectedTypeName := 'DataMemberNotSpecifiedException');
+	rejected := TRUE;
+__ENDTRY
+
+AssertTrue(Condition := rejected, Message := 'Recovery rejects missing storage before any child access');
+AssertEquals_DINT(
+	Expected := -1,
+	Actual := _MissingConfigurationRunner.ExitCode,
+	Message := 'Invalid recovery retains abort'
+);
+rejected := FALSE;
+
+__TRY
+	_ExceptionAdsReporter.ReportTestCaseResult(
+		groupPath := "",
+		testName := "Invalid ADS outcome",
+		outcome := TOF_Testing.TEST_OUTCOME.RUNNING,
+		duration := T#0S,
+		message := diagnostic
+	);
+__CATCH(exceptionCode)
+	assertCaughtExceptionType(exceptionCode := exceptionCode, expectedTypeName := 'ArgumentValueNotSupportedException');
+	rejected := TRUE;
+__ENDTRY
+
+AssertTrue(Condition := rejected, Message := 'Reporter rejects the actual nonterminal enum value');
+_ExceptionClassesFinished := TRUE;
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="checkExternalRecovery" Id="{bd472c8f-25a1-42e5-a7dc-60d425d791ce}">
+      <Declaration><![CDATA[(*!
+<summary>Recovers a throwing external child, including a failed first recovery attempt.</summary>
+<description>Explicitly releases the modeled resource before requesting reset recovery.</description>
+*)
+METHOD PRIVATE checkExternalRecovery
+VAR
+	exceptionCode : __SYSTEM.ExceptionCode;
+	rejected : BOOL;
+	externalCase : REFERENCE TO ExternalElementProbe;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF _ExternalFinished THEN
+	RETURN;
+END_IF
+
+TEST(TestName := 'External abort recovery can be retried for the same static tree');
+
+IF NOT _ExternalConfigured THEN
+	_ExternalRun.Reporter := _ExternalReport;
+	_ExternalConfigured := TRUE;
+END_IF
+
+_ExternalRun.Execute(cleanupTaskMemory := FALSE);
+_ExternalCalls := _ExternalCalls + 1;
+
+IF NOT _ExternalRun.IsFinished AND_THEN _ExternalCalls < 16 THEN
+	RETURN;
+END_IF
+
+IF NOT _ExternalRecovered THEN
+	AssertEquals_DINT(Expected := -1, Actual := _ExternalRun.ExitCode, Message := 'External child aborts');
+	AssertTrue(
+		Condition := _ExternalRun.ExternalCase.ResourceActive,
+		Message := 'Abort does not silently release user resources'
+	);
+	_ExternalRun.Execute(cleanupTaskMemory := FALSE);
+	AssertEquals_UDINT(
+		Expected := 1,
+		Actual := _ExternalRun.ExternalCase.ExecuteCalls,
+		Message := 'The aborted callback is not retried before explicit recovery'
+	);
+	externalCase REF= _ExternalRun.ExternalCase;
+	externalCase.ReleaseResource();
+	AssertFalse(
+		Condition := externalCase.ResourceActive,
+		Message := 'Explicit resource release completes before reset recovery'
+	);
+	externalCase.ThrowOnReset := TRUE;
+
+	__TRY
+		_ExternalRun.Reset();
+	__CATCH(exceptionCode)
+		assertCaughtExceptionType(
+			exceptionCode := exceptionCode,
+			expectedTypeName := 'StandardException'
+		);
+		rejected := TRUE;
+	__ENDTRY
+
+	AssertTrue(Condition := rejected, Message := 'Custom recovery Reset failure propagates');
+	AssertEquals_DINT(Expected := -1, Actual := _ExternalRun.ExitCode, Message := 'Failed recovery retains abort');
+	externalCase.ThrowOnReset := FALSE;
+	externalCase.ThrowOnExecute := FALSE;
+	_ExternalRun.Reset();
+	AssertTrue(Condition := _ExternalRun.ExternalCase.Parent = 0, Message := 'The recovered root remains parentless');
+	AssertEquals_UDINT(
+		Expected := 3,
+		Actual := _ExternalRun.ExternalCase.ResetCalls,
+		Message := 'Failed reset was retried'
+	);
+	_ExternalRecovered := TRUE;
+	_ExternalCalls := 0;
+	RETURN;
+END_IF
+
+AssertTrue(Condition := _ExternalRun.AllPassed, Message := 'The same static tree succeeds after explicit recovery');
+AssertEquals_UDINT(Expected := 1, Actual := _ExternalRun.PassedTests, Message := 'The recovered root contributes one leaf');
+AssertTrue(Condition := _ExternalReport.IsReady, Message := 'The recovered run completes its report');
+AssertEquals_UDINT(
+	Expected := 2,
+	Actual := _ExternalRun.ExternalCase.ExecuteCalls,
+	Message := 'Execute resumes only in the new run'
+);
+_ExternalFinished := TRUE;
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="checkIndexedChildren" Id="{e543ef22-a347-4abd-b4a9-1a9d1fb9439e}">
+      <Declaration><![CDATA[(*!
+<summary>Checks direct-child interface dispatch, fixed ordering and explicit accessor failures.</summary>
+<description>
+Borrows persistent fixtures before execution and after a rejected Reset. Test-only slot corruption is restored
+before returning. Child identity is compared through ITestElement on both sides; indexed observation
+invokes no child body.
+</description>
+*)
+METHOD PRIVATE checkIndexedChildren
+VAR
+	element : TOF_Testing.ITestElement;
+	parentElement : TOF_Testing.IParentTestElement;
+	child : TOF_Testing.ITestElement;
+	expectedChild : TOF_Testing.ITestElement;
+	supportsChildren : BOOL;
+	exceptionCode : __SYSTEM.ExceptionCode;
+	rejected : BOOL;
+	firstBodyCalls : UDINT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF _IndexedChildrenFinished THEN
+	RETURN;
+END_IF
+
+TEST(TestName := 'Indexed children preserve order and reject missing storage or invalid indices');
+element := _IndexedGroup;
+supportsChildren := __QUERYINTERFACE(element, parentElement);
+AssertTrue(Condition := supportsChildren, Message := 'A group exposes the direct-child capability');
+
+IF NOT supportsChildren THEN
+	_IndexedChildrenFinished := TRUE;
+	TEST_FINISHED();
+	RETURN;
+END_IF
+
+firstBodyCalls := _IndexedGroup.First.BodyCalls;
+AssertTrue(Condition := parentElement.ChildCount = 2, Message := 'The capability reports the fixed direct count');
+expectedChild := _IndexedGroup.First;
+child := parentElement.GetChildByIndex(index := 0);
+AssertTrue(Condition := child = expectedChild, Message := 'Index zero borrows the first child');
+expectedChild := _IndexedGroup.Second;
+child := parentElement.GetChildByIndex(index := 1);
+AssertTrue(Condition := child = expectedChild, Message := 'The last valid index borrows the last child');
+
+__TRY
+	child := parentElement.GetChildByIndex(index := 2);
+__CATCH(exceptionCode)
+	assertCaughtExceptionType(exceptionCode := exceptionCode, expectedTypeName := 'ArgumentOutOfRangeException');
+	rejected := TRUE;
+__ENDTRY
+
+AssertTrue(Condition := rejected, Message := 'Index equal to ChildCount is rejected');
+rejected := FALSE;
+
+__TRY
+	child := parentElement.GetChildByIndex(index := TOF_Core.SignedInt16.MAX_VALUE);
+__CATCH(exceptionCode)
+	assertCaughtExceptionType(exceptionCode := exceptionCode, expectedTypeName := 'ArgumentOutOfRangeException');
+	rejected := TRUE;
+__ENDTRY
+
+AssertTrue(Condition := rejected, Message := 'The largest representable index is rejected before indexing');
+parentElement := _Runner.Empty;
+AssertTrue(Condition := parentElement.ChildCount = TOF_Core.SignedInt16.ZERO, Message := 'An empty group reports zero direct children');
+rejected := FALSE;
+
+__TRY
+	child := parentElement.GetChildByIndex(index := 0);
+__CATCH(exceptionCode)
+	assertCaughtExceptionType(exceptionCode := exceptionCode, expectedTypeName := 'ArgumentOutOfRangeException');
+	rejected := TRUE;
+__ENDTRY
+
+AssertTrue(Condition := rejected, Message := 'A valid empty array has no valid child index');
+parentElement := _MissingConfigurationGroup;
+rejected := FALSE;
+
+__TRY
+	child := parentElement.GetChildByIndex(index := TOF_Core.SignedInt16.MAX_VALUE);
+__CATCH(exceptionCode)
+	assertCaughtExceptionType(exceptionCode := exceptionCode, expectedTypeName := 'DataMemberNotSpecifiedException');
+	rejected := TRUE;
+__ENDTRY
+
+AssertTrue(Condition := rejected, Message := 'Missing storage is diagnosed before an invalid index');
+
+// A failed Reset does not prevent observing an existing slot; the missing selected slot remains an error.
+_IndexedGroup.Children[1] := 0;
+rejected := FALSE;
+
+__TRY
+	_IndexedGroup.Reset(reporter := 0);
+__CATCH(exceptionCode)
+	assertCaughtExceptionType(exceptionCode := exceptionCode, expectedTypeName := 'DataMemberNotSpecifiedException');
+	rejected := TRUE;
+__ENDTRY
+
+AssertTrue(Condition := rejected, Message := 'The injected missing slot rejects Reset');
+parentElement := _IndexedGroup;
+expectedChild := _IndexedGroup.First;
+child := parentElement.GetChildByIndex(index := 0);
+AssertTrue(Condition := child = expectedChild, Message := 'An existing slot can be observed after failed Reset');
+rejected := FALSE;
+
+__TRY
+	child := parentElement.GetChildByIndex(index := 1);
+__CATCH(exceptionCode)
+	assertCaughtExceptionType(exceptionCode := exceptionCode, expectedTypeName := 'DataMemberNotSpecifiedException');
+	rejected := TRUE;
+__ENDTRY
+
+AssertTrue(Condition := rejected, Message := 'A null selected slot is a missing member');
+_IndexedGroup.Children[1] := _IndexedGroup.Second;
+AssertEquals_UDINT(
+	Expected := firstBodyCalls,
+	Actual := _IndexedGroup.First.BodyCalls,
+	Message := 'Indexed observation invokes no child body'
+);
+_IndexedGroup.Reset(reporter := 0);
+_IndexedChildrenFinished := TRUE;
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="checkPaths" Id="{b8024ef8-0ff5-46b4-b12f-c684f3e90dc6}">
+      <Declaration><![CDATA[(*!
+<summary>Checks live root-to-element paths independently of Reset and reporting.</summary>
+<description>
+Checks interface dispatch, own-name inclusion, empty names, Unicode, root-prefix truncation and cycles among ancestors.
+Synthetic parent-only chains isolate GetPath; they are never registered or executed as group compositions.
+The existing nested and repeated-run cases independently check JUnit group paths without the leaf name.
+</description>
+*)
+METHOD PRIVATE checkPaths
+VAR
+	element : TOF_Testing.ITestElement;
+	named : TOF_Core.INamed;
+	actualPath : WSTRING(255);
+	expectedPath : WSTRING(255);
+	exceptionCode : __SYSTEM.ExceptionCode;
+	rejected : BOOL;
+	diagnostic : TOF_Core.ERROR_MESSAGE;
+	content : POINTER TO STRING;
+	longName : WSTRING(81);
+	expectedXmlName : STRING(255);
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF _PathsFinished THEN
+	RETURN;
+END_IF
+
+TEST(TestName := 'Paths follow live Parent links without Reset context');
+
+expectedPath := "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+named := _PathLongName;
+AssertTrue(Condition := named.Name = expectedPath, Message := 'INamed retains the first 80 name characters');
+actualPath := _PathLongName.GetPath();
+AssertTrue(Condition := actualPath = expectedPath, Message := 'A root path observes the same bounded name');
+longName := "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB";
+_PathReport.ReportRunStart(totalElements := 1);
+_PathReport.ReportTestCaseResult(
+	groupPath := "",
+	testName := longName,
+	outcome := TOF_Testing.TEST_OUTCOME.PASSED,
+	duration := T#0S,
+	message := diagnostic
+);
+_PathReport.ReportRunEnd(totalTests := 1, passedTests := 1, failedTests := 0, skippedTests := 0, duration := T#0S);
+content := _PathReport.ContentAddress;
+expectedXmlName := TOF_Core.Strings.Concat255('name="', TO_STRING(expectedPath), '"');
+AssertTrue(Condition := _PathReport.IsReady AND_THEN content <> 0, Message := 'The bounded-name report completes');
+
+IF content <> 0 THEN
+	AssertTrue(
+		Condition := TOF_Core.Strings.Contains(stringToSearchIn := content^, stringToFind := expectedXmlName),
+		Message := 'Reporter input retains exactly the first 80 name characters'
+	);
+END_IF
+
+element := _DuplicateGroup;
+actualPath := element.GetPath();
+AssertTrue(Condition := actualPath = "Duplicates", Message := 'A root path contains its own name');
+actualPath := _DuplicateGroup.First.GetPath();
+AssertTrue(Condition := actualPath = "Duplicates/First", Message := 'A child path includes its group and own name');
+actualPath := _Runner.FailureOuter.Failures.BodyFailure.GetPath();
+AssertTrue(
+	Condition := actualPath = "Nested/Failures/Body failure",
+	Message := 'Ancestor names are ordered from the root'
+);
+actualPath := _Runner.Pass.GetPath();
+AssertTrue(Condition := actualPath = "", Message := 'A nameless root has an empty path');
+actualPath := _PathEmpty.GetPath();
+expectedPath := "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+AssertTrue(Condition := actualPath = expectedPath, Message := 'An empty own name adds no separator');
+actualPath := _PathUnicode.GetPath();
+expectedPath := "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/Ω";
+AssertTrue(Condition := actualPath = expectedPath, Message := 'Empty ancestors are skipped and Unicode is preserved');
+actualPath := _PathFourth.GetPath();
+expectedPath := Tc2_Utilities.WCONCAT(
+	STR1 := "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/",
+	STR2 := "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB/"
+);
+expectedPath := Tc2_Utilities.WCONCAT(
+	STR1 := expectedPath,
+	STR2 := "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC/DDDDDDDDDDD…"
+);
+AssertTrue(Condition := actualPath = expectedPath, Message := 'Overflow retains the root prefix and final ellipsis');
+
+__TRY
+	actualPath := _ParentGroup.Child.GetPath();
+__CATCH(exceptionCode)
+	assertCaughtExceptionType(exceptionCode := exceptionCode, expectedTypeName := 'StandardException');
+	rejected := TRUE;
+__ENDTRY
+
+AssertTrue(Condition := rejected, Message := 'A cycle among ancestors is rejected without endless traversal');
+actualPath := _ReportPathInner.GetPath();
+_PathReport.ReportRunStart(totalElements := 1);
+_PathReport.ReportTestCaseResult(
+	groupPath := actualPath,
+	testName := "Leaf",
+	outcome := TOF_Testing.TEST_OUTCOME.PASSED,
+	duration := T#0S,
+	message := diagnostic
+);
+_PathReport.ReportRunEnd(totalTests := 1, passedTests := 1, failedTests := 0, skippedTests := 0, duration := T#0S);
+content := _PathReport.ContentAddress;
+AssertTrue(Condition := _PathReport.IsReady AND_THEN content <> 0, Message := 'The deep-path report completes');
+
+IF content <> 0 THEN
+	AssertTrue(
+		Condition := TOF_Core.Strings.Contains(
+			stringToSearchIn := content^,
+			stringToFind := 'name="Leaf" classname="Report root/Middle/Inner"'
+		),
+		Message := 'JUnit preserves all three group ancestors and keeps the leaf name separate'
+	);
+END_IF
+
+_PathsFinished := TRUE;
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="checkReporterAbort" Id="{0ac0f4cf-cc45-4fa9-a4ed-781e6c83f408}">
+      <Declaration><![CDATA[(*!
+<summary>Verifies external callback failure aborts once after leaf teardown.</summary>
+*)
+METHOD PRIVATE checkReporterAbort
+VAR
+	exceptionCode : __SYSTEM.ExceptionCode;
+	rejected : BOOL;
+	diagnostic : TOF_Core.ERROR_MESSAGE;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF _AbortFinished THEN
+	RETURN;
+END_IF
+
+TEST(TestName := 'A throwing reporter aborts without retry');
+
+IF _AbortRecovered THEN
+	_AbortRun.Execute(cleanupTaskMemory := FALSE);
+	_AbortCalls := _AbortCalls + 1;
+
+	IF NOT _AbortRun.IsFinished AND_THEN _AbortCalls < 16 THEN
+		RETURN;
+	END_IF
+
+	AssertTrue(Condition := _AbortRun.AllPassed, Message := 'The same static tree passes after reporter abort');
+	AssertEquals_UDINT(
+		Expected := 1,
+		Actual := _AbortRun.AbortCase.BodyCalls,
+		Message := 'The same root executes once in the new run'
+	);
+	AssertEquals_UDINT(Expected := 1, Actual := _AbortReport.ResultCalls, Message := 'Old reporter is not retried');
+	_AbortFinished := TRUE;
+	TEST_FINISHED();
+	RETURN;
+END_IF
+
+IF NOT _AbortConfigured THEN
+
+	__TRY
+		_InvalidReport.ReportTestCaseResult(
+			groupPath := "",
+			testName := "Invalid outcome",
+			outcome := TOF_Testing.TEST_OUTCOME.NOT_RUN,
+			duration := T#0S,
+			message := diagnostic
+		);
+	__CATCH(exceptionCode)
+		assertCaughtExceptionType(
+			exceptionCode := exceptionCode,
+			expectedTypeName := 'ArgumentValueNotSupportedException'
+		);
+		rejected := TRUE;
+	__ENDTRY
+
+	AssertTrue(Condition := rejected, Message := 'A reporter rejects a nonterminal outcome');
+	_AbortRun.Reporter := _AbortReport;
+	_AbortConfigured := TRUE;
+END_IF
+
+_AbortRun.Execute(cleanupTaskMemory := FALSE);
+_AbortCalls := _AbortCalls + 1;
+
+IF NOT _AbortRun.IsFinished AND_THEN _AbortCalls < 16 THEN
+	RETURN;
+END_IF
+
+IF _AbortRun.IsFinished AND_THEN _AbortPostCalls < 2 THEN
+	_AbortPostCalls := _AbortPostCalls + 1;
+	RETURN;
+END_IF
+
+AssertTrue(Condition := _AbortRun.IsFinished, Message := 'Callback abort terminates the run');
+AssertEquals_DINT(Expected := -1, Actual := _AbortRun.ExitCode, Message := 'Callback abort has a distinct exit code');
+AssertEquals_UDINT(Expected := 1, Actual := _AbortReport.ResultCalls, Message := 'The callback is never retried');
+AssertEquals_UDINT(
+	Expected := 1,
+	Actual := _AbortRun.AbortCase.TeardownCalls,
+	Message := 'Cleanup precedes result reporting'
+);
+AssertFalse(Condition := _AbortReport.IsReady, Message := 'An aborted report remains incomplete');
+AssertTrue(
+	Condition := TOF_Core.WideStrings.Contains(stringToSearchIn := _AbortRun.CallbackMessage,
+		stringToFind := "Reporter failed"),
+	Message := 'External callback diagnostic is copied'
+);
+_AbortRun.Reset();
+AssertTrue(Condition := _AbortRun.CallbackMessage = "", Message := 'Reset clears copied callback diagnostic');
+AssertTrue(Condition := _AbortRun.AbortCase.Parent = 0, Message := 'The same root remains parentless after recovery');
+_AbortRun.Reporter := _AbortRecoveryReport;
+_AbortRecovered := TRUE;
+_AbortCalls := 0;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="checkRunnerTopology" Id="{134f559a-f4ee-42c2-83d8-8fbd217803f0}">
+      <Declaration><![CDATA[(*!
+<summary>Checks static root validation, recovery guards and absence of cyclic topology scans.</summary>
+<description>Deliberately corrupts test-only slots, restoring them before valid recovery and before execution reaches them.</description>
+*)
+METHOD PRIVATE checkRunnerTopology
+VAR
+	exceptionCode : __SYSTEM.ExceptionCode;
+	rejected : BOOL;
+	runningRoot : REFERENCE TO AssertionIsolationProbe;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF _RootTopologyFinished THEN
+	RETURN;
+END_IF
+
+TEST(TestName := 'Static runner validates roots at startup and executes without rescanning');
+
+IF NOT _RootTopologyConfigured THEN
+	_RootTopologyRunner.Reporter := _RootTopologyReport;
+	_RootTopologyRunner.RootTopologyFirst.Reset(reporter := 0);
+	_RootTopologyRunner.RootTopologyFirst.Execute();
+	_RootTopologyRunner.Children[1] := 0;
+	_RootTopologyRunner.Execute(cleanupTaskMemory := FALSE);
+	AssertEquals_DINT(Expected := -1, Actual := _RootTopologyRunner.ExitCode, Message := 'A null root aborts startup');
+	assertCaughtExceptionType(
+		exceptionCode := _RootTopologyRunner.CallbackException,
+		expectedTypeName := 'DataMemberNotSpecifiedException'
+	);
+	AssertTrue(
+		Condition := _RootTopologyRunner.RootTopologyFirst.IsFinished,
+		Message := 'All direct roots are validated before the first Reset'
+	);
+	AssertFalse(Condition := _RootTopologyReport.IsReady, Message := 'Invalid startup produces no completed report');
+	AssertTrue(
+		Condition := _RootTopologyReport.ContentLength = TOF_Core.UnsignedInt32.ZERO,
+		Message := 'Invalid startup does not call ReportRunStart'
+	);
+	rejected := FALSE;
+
+	__TRY
+		_RootTopologyRunner.Reset();
+	__CATCH(exceptionCode)
+		assertCaughtExceptionType(exceptionCode := exceptionCode, expectedTypeName := 'DataMemberNotSpecifiedException');
+		rejected := TRUE;
+	__ENDTRY
+
+	AssertTrue(Condition := rejected, Message := 'Recovery validates slots before dereferencing an invalid tree');
+	AssertEquals_DINT(
+		Expected := -1,
+		Actual := _RootTopologyRunner.ExitCode,
+		Message := 'Failed recovery retains abort'
+	);
+	_RootTopologyRunner.Children[1] := _RootTopologyRunner.RootTopologyGroup;
+	_RootTopologyRunner.Reset();
+	_RootTopologyRunner.Children[1] := _RootTopologyRunner.RootTopologyFirst;
+	_RootTopologyRunner.Execute(cleanupTaskMemory := FALSE);
+	AssertEquals_DINT(
+		Expected := -1,
+		Actual := _RootTopologyRunner.ExitCode,
+		Message := 'Duplicate roots abort startup'
+	);
+	assertCaughtExceptionType(exceptionCode := _RootTopologyRunner.CallbackException, expectedTypeName := 'StandardException');
+	_RootTopologyRunner.Children[1] := _RootTopologyRunner.RootTopologyGroup;
+	_RootTopologyRunner.Reset();
+	_RootTopologyRunner.Children[0] := _RootTopologyRunner.RootTopologyGroup.Child;
+	_RootTopologyRunner.Execute(cleanupTaskMemory := FALSE);
+	AssertEquals_DINT(
+		Expected := -1,
+		Actual := _RootTopologyRunner.ExitCode,
+		Message := 'A group-owned root aborts startup'
+	);
+	assertCaughtExceptionType(exceptionCode := _RootTopologyRunner.CallbackException, expectedTypeName := 'StandardException');
+	_RootTopologyRunner.Children[0] := _RootTopologyRunner.RootTopologyFirst;
+	_RootTopologyRunner.Reset();
+	_RootTopologyRunner.RootTopologyFirst.Execute();
+	_RootTopologyRunner.Children[1] := _Runner.FailureOuter.Failures;
+	_RootTopologyRunner.Execute(cleanupTaskMemory := FALSE);
+	AssertEquals_DINT(
+		Expected := -1,
+		Actual := _RootTopologyRunner.ExitCode,
+		Message := 'A nested group cannot also occupy a root slot'
+	);
+	assertCaughtExceptionType(exceptionCode := _RootTopologyRunner.CallbackException, expectedTypeName := 'StandardException');
+	AssertTrue(
+		Condition := _RootTopologyRunner.RootTopologyFirst.IsFinished,
+		Message := 'Owned-group rejection occurs before the first direct Reset'
+	);
+	AssertTrue(
+		Condition := _RootTopologyReport.ContentLength = TOF_Core.UnsignedInt32.ZERO,
+		Message := 'Owned-group rejection does not start reporting'
+	);
+	rejected := FALSE;
+
+	__TRY
+		_RootTopologyRunner.Reset();
+	__CATCH(exceptionCode)
+		assertCaughtExceptionType(exceptionCode := exceptionCode, expectedTypeName := 'StandardException');
+		rejected := TRUE;
+	__ENDTRY
+
+	AssertTrue(Condition := rejected, Message := 'Abort recovery also rejects a group-owned root');
+	AssertEquals_DINT(Expected := -1, Actual := _RootTopologyRunner.ExitCode, Message := 'Invalid recovery retains abort');
+	_RootTopologyRunner.Children[1] := _RootTopologyRunner.RootTopologyGroup;
+	_RootTopologyRunner.Reset();
+	runningRoot REF= _RootTopologyRunner.RunningRoot;
+	runningRoot.Timeout := T#0S;
+	_RootTopologyRunner.RunningRoot.Reset(reporter := 0);
+	_RootTopologyRunner.RunningRoot.Execute();
+	AssertTrue(Condition := _RootTopologyRunner.RunningRoot.IsRunning, Message := 'The active-root fixture is pending');
+	_RootTopologyRunner.Children[0] := _RootTopologyRunner.RunningRoot;
+	_RootTopologyRunner.Execute(cleanupTaskMemory := FALSE);
+	AssertEquals_DINT(
+		Expected := -1,
+		Actual := _RootTopologyRunner.ExitCode,
+		Message := 'An active root aborts startup'
+	);
+	assertCaughtExceptionType(exceptionCode := _RootTopologyRunner.CallbackException, expectedTypeName := 'StandardException');
+	_RootTopologyRunner.RunningRoot.Reset(reporter := 0);
+	_RootTopologyRunner.Children[0] := _RootTopologyRunner.RootTopologyFirst;
+	_RootTopologyRunner.Reset();
+	_RootTopologyRunner.Execute(cleanupTaskMemory := FALSE);
+	AssertFalse(Condition := _RootTopologyRunner.IsFinished, Message := 'Valid startup prepares the static roots');
+
+	// Fault injection: restore the unused slot immediately after driving the first root.
+	_RootTopologyRunner.Children[1] := 0;
+	_RootTopologyRunner.Execute(cleanupTaskMemory := FALSE);
+	_RootTopologyRunner.Children[1] := _RootTopologyRunner.RootTopologyGroup;
+	AssertEquals_DINT(
+		Expected := 0,
+		Actual := _RootTopologyRunner.ExitCode,
+		Message := 'Execution does not rescan root slots'
+	);
+	_RootTopologyConfigured := TRUE;
+END_IF
+
+_RootTopologyRunner.Execute(cleanupTaskMemory := FALSE);
+_RootTopologyCalls := _RootTopologyCalls + 1;
+
+IF NOT _RootTopologyRunner.IsFinished AND_THEN _RootTopologyCalls < 16 THEN
+	RETURN;
+END_IF
+
+AssertTrue(Condition := _RootTopologyRunner.AllPassed, Message := 'The owned static roots execute successfully');
+AssertEquals_UDINT(
+	Expected := 2,
+	Actual := _RootTopologyRunner.PassedTests,
+	Message := 'Two direct or nested leaves pass'
+);
+AssertEquals_UDINT(
+	Expected := 1,
+	Actual := _RootTopologyRunner.RootTopologyFirst.BodyCalls,
+	Message := 'The first root executes once in the valid run'
+);
+AssertEquals_UDINT(
+	Expected := 1,
+	Actual := _RootTopologyRunner.RootTopologyGroup.Child.BodyCalls,
+	Message := 'The nested group executes its owned leaf'
+);
+AssertTrue(Condition := _RootTopologyRunner.RootTopologyFirst.Parent = 0, Message := 'Runner roots remain parentless');
+AssertTrue(
+	Condition := _RootTopologyRunner.RootTopologyGroup.Child.Parent <> 0,
+	Message := 'A nested leaf retains its constructor-assigned parent'
+);
+_RootTopologyFinished := TRUE;
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="checkTopology" Id="{52367c43-310b-4218-8fef-fcb2593a0af7}">
+      <Declaration><![CDATA[(*!
+<summary>Checks fixed parents, missing or repeated children, parent mismatch, cycles, ordered dispatch and repeat execution.</summary>
+<description>
+Fault injection deliberately mutates a test-only array between rejected operations and briefly during execution
+to detect redundant validation. Restore every unused slot before execution reaches it.
+</description>
+*)
+METHOD PRIVATE checkTopology
+VAR
+	exceptionCode : __SYSTEM.ExceptionCode;
+	rejected : BOOL;
+	expectedParent : TOF_Testing.ITestElement;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF _TopologyFinished THEN
+	RETURN;
+END_IF
+
+TEST(TestName := 'Static group topology is validated before child callbacks');
+expectedParent := _DuplicateGroup;
+AssertTrue(Condition := _DuplicateGroup.First.Parent = expectedParent, Message := 'Parent is assigned at construction');
+AssertTrue(Condition := _DuplicateGroup.Parent = 0, Message := 'A root is constructed without a parent');
+
+// Deliberately corrupt the borrowed test-only array to inject topology faults.
+// A later execution probe restores its unused slot before that slot is reached.
+_DuplicateGroup.Children[1] := 0;
+
+__TRY
+	_DuplicateGroup.Reset(reporter := 0);
+__CATCH(exceptionCode)
+	assertCaughtExceptionType(exceptionCode := exceptionCode, expectedTypeName := 'DataMemberNotSpecifiedException');
+	rejected := TRUE;
+__ENDTRY
+
+AssertTrue(Condition := rejected, Message := 'A null fixed child is rejected by Reset');
+AssertEquals_UDINT(
+	Expected := 0,
+	Actual := _DuplicateGroup.First.BodyCalls,
+	Message := 'No earlier child body executes'
+);
+rejected := FALSE;
+_DuplicateGroup.Children[1] := _DuplicateGroup.First;
+
+__TRY
+	_DuplicateGroup.Reset(reporter := 0);
+__CATCH(exceptionCode)
+	assertCaughtExceptionType(exceptionCode := exceptionCode, expectedTypeName := 'StandardException');
+	rejected := TRUE;
+__ENDTRY
+
+AssertTrue(Condition := rejected, Message := 'Duplicate fixed slots are rejected');
+rejected := FALSE;
+_DuplicateGroup.Children[1] := _RootTopologyRunner.RootTopologyGroup.Child;
+
+__TRY
+	_DuplicateGroup.Reset(reporter := 0);
+__CATCH(exceptionCode)
+	assertCaughtExceptionType(exceptionCode := exceptionCode, expectedTypeName := 'StandardException');
+	rejected := TRUE;
+__ENDTRY
+
+AssertTrue(Condition := rejected, Message := 'A child assigned to another group is rejected');
+AssertTrue(Condition := _DuplicateGroup.First.Parent = expectedParent, Message := 'Rejection never changes Parent');
+_DuplicateGroup.Children[1] := _DuplicateGroup.Second;
+rejected := FALSE;
+
+__TRY
+	_ParentGroup.Reset(reporter := 0);
+__CATCH(exceptionCode)
+	assertCaughtExceptionType(exceptionCode := exceptionCode, expectedTypeName := 'StandardException');
+	rejected := TRUE;
+__ENDTRY
+
+AssertTrue(Condition := rejected, Message := 'A cycle assigned by constructors is rejected before recursion');
+
+_DuplicateGroup.Reset(reporter := 0);
+// Fault injection: an unused slot must not be rescanned in Execute; restore before that slot is reached.
+_DuplicateGroup.Children[1] := 0;
+_DuplicateGroup.Execute();
+AssertEquals_UDINT(
+	Expected := 1,
+	Actual := _DuplicateGroup.First.BodyCalls,
+	Message := 'The first Execute reaches the first owned child through Children'
+);
+AssertEquals_UDINT(
+	Expected := 0,
+	Actual := _DuplicateGroup.Second.BodyCalls,
+	Message := 'The first Execute does not reach the second owned child'
+);
+_DuplicateGroup.Children[1] := _DuplicateGroup.Second;
+_DuplicateGroup.Execute();
+AssertTrue(Condition := _DuplicateGroup.IsFinished, Message := 'A valid static group finishes without Configure');
+AssertEquals_UDINT(Expected := 2, Actual := _DuplicateGroup.PassedCount, Message := 'Both owned leaves pass');
+_DuplicateGroup.Reset(reporter := 0);
+_DuplicateGroup.Execute();
+_DuplicateGroup.Execute();
+AssertEquals_UDINT(
+	Expected := 2,
+	Actual := _DuplicateGroup.PassedCount,
+	Message := 'Reset supports another fixed-tree run'
+);
+AssertEquals_UDINT(
+	Expected := 1,
+	Actual := _DuplicateGroup.First.BodyCalls,
+	Message := 'A repeated leaf executes once'
+);
+AssertTrue(Condition := _DuplicateGroup.First.Parent = expectedParent, Message := 'Repeated runs preserve Parent');
+_DuplicateGroup.Children[1] := 0;
+rejected := FALSE;
+
+__TRY
+	_DuplicateGroup.Reset(reporter := 0);
+__CATCH(exceptionCode)
+	assertCaughtExceptionType(exceptionCode := exceptionCode, expectedTypeName := 'DataMemberNotSpecifiedException');
+	rejected := TRUE;
+__ENDTRY
+
+AssertTrue(Condition := rejected, Message := 'Invalid topology is rejected on a later Reset too');
+AssertTrue(
+	Condition := _DuplicateGroup.First.IsFinished,
+	Message := 'Validation precedes the first direct child Reset'
+);
+_DuplicateGroup.Children[1] := _DuplicateGroup.Second;
+_TopologyFinished := TRUE;
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="checkXmlEncoding" Id="{dfeb99ca-1d55-4e2c-87e9-de2afac19fb1}">
+      <Declaration><![CDATA[(*!
+<summary>Checks long XML diagnostics, supplementary Unicode, isolated surrogates and XML controls.</summary>
+*)
+METHOD PRIVATE checkXmlEncoding
+VAR
+	diagnostic : TOF_Core.ERROR_MESSAGE;
+	characters : POINTER TO WORD;
+	content : POINTER TO STRING;
+	i : UDINT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF _XmlFinished THEN
+	RETURN;
+END_IF
+
+TEST(TestName := 'JUnit preserves long text and replaces forbidden Unicode sequences');
+// U+1F600 is a surrogate pair; it is followed by an isolated high surrogate, U+0001, TAB and ampersand.
+characters := ADR(diagnostic);
+characters[0] := 16#D83D;
+characters[1] := 16#DE00;
+characters[2] := 16#D800;
+characters[3] := 16#0001;
+characters[4] := 16#0009;
+characters[5] := 16#0026;
+
+FOR i := 6 TO 405 DO
+	characters[i] := 16#0078;
+END_FOR
+
+characters[406] := TOF_Core.UnsignedInt16.MIN_VALUE;
+TOF_Core.WideStrings.AppendFit(targetString := diagnostic, sourceString := "END_OF_XML_DIAGNOSTIC");
+_XmlReport.ReportRunStart(totalElements := 1);
+_XmlReport.ReportTestCaseResult(
+	groupPath := "Wide",
+	testName := "",
+	outcome := TOF_Testing.TEST_OUTCOME.FAILED,
+	duration := T#1250MS,
+	message := diagnostic
+);
+_XmlReport.ReportRunEnd(totalTests := 1, passedTests := 0, failedTests := 1, skippedTests := 0, duration := T#1250MS);
+content := _XmlReport.ContentAddress;
+AssertTrue(Condition := _XmlReport.IsReady AND_THEN content <> 0, Message := 'Completed Unicode XML has a buffer');
+
+IF content <> 0 THEN
+	AssertTrue(
+		Condition := TOF_Core.Strings.Contains(stringToSearchIn := content^,
+			stringToFind := '&#128512;&#65533;&#65533;&#9;&amp;'),
+		Message := 'Surrogate pair, isolated surrogate, forbidden control and tab are encoded'
+	);
+	AssertTrue(
+		Condition := TOF_Core.Strings.Contains(stringToSearchIn := content^, stringToFind := 'END_OF_XML_DIAGNOSTIC'),
+		Message := 'Diagnostic suffix beyond 255 characters survives'
+	);
+	AssertTrue(
+		Condition := TOF_Core.Strings.Contains(stringToSearchIn := content^, stringToFind := 'time="1.250"'),
+		Message := 'JUnit duration uses decimal seconds'
+	);
+END_IF
+
+_XmlFinished := TRUE;
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="runAndCheck" Id="{73105358-f3d3-45da-9219-7fbdb37727ce}">
+      <Declaration><![CDATA[(*!
+<summary>Repeats a nested run and checks leaf counts, cleanup and escaped JUnit output.</summary>
+<description>Configures owned fixtures through borrowed references without copying their state.</description>
+*)
+METHOD PRIVATE runAndCheck
+VAR
+	content : POINTER TO STRING;
+	probe : REFERENCE TO TestingProbe;
+	multiCycleProbe : REFERENCE TO AssertionIsolationProbe;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF _Finished THEN
+	RETURN;
+END_IF
+
+TEST(TestName := 'Element tree, lifecycle, repeated run and JUnit');
+
+IF NOT _Configured THEN
+	probe REF= _Runner.FailureOuter.Failures.SetupFailure;
+	probe.ThrowBeforeTest := TRUE;
+	probe REF= _Runner.FailureOuter.Failures.BodyFailure;
+	probe.ThrowBody := TRUE;
+	probe REF= _Runner.FailureOuter.Failures.TeardownFailure;
+	probe.ThrowAfterTest := TRUE;
+	probe REF= _Runner.FailureOuter.Failures.ComparisonFailure;
+	probe.InvalidComparison := TRUE;
+	probe REF= _Runner.FailureOuter.Failures.DiagnosticFailure;
+	probe.DiagnosticFailure := TRUE;
+	_Runner.Reporter := _Reporter;
+	multiCycleProbe REF= _Runner.Multi;
+	multiCycleProbe.Timeout := T#0S;
+	_Configured := TRUE;
+END_IF
+
+_Runner.Execute(cleanupTaskMemory := FALSE);
+_Calls := _Calls + 1;
+
+IF NOT _Runner.IsFinished AND_THEN _Calls < 32 THEN
+	RETURN;
+END_IF
+
+AssertTrue(Condition := _Runner.IsFinished, Message := 'The tree finishes within 32 scans');
+AssertEquals_UDINT(Expected := 2, Actual := _Runner.PassedTests, Message := 'Single and multi-cycle leaves pass');
+AssertEquals_UDINT(Expected := 5, Actual := _Runner.FailedTests, Message := 'Five distinct leaf failures');
+AssertEquals_UDINT(Expected := 7, Actual := _Runner.TotalTests, Message := 'Groups add no synthetic tests');
+AssertEquals_UDINT(
+	Expected := 0,
+	Actual := _Runner.FailureOuter.Failures.SetupFailure.BodyCalls,
+	Message := 'Failed setup suppresses body'
+);
+AssertEquals_UDINT(
+	Expected := 1,
+	Actual := _Runner.FailureOuter.Failures.SetupFailure.TeardownCalls,
+	Message := 'Failed setup still cleans up'
+);
+AssertEquals_UDINT(
+	Expected := 1,
+	Actual := _Runner.FailureOuter.Failures.BodyFailure.TeardownCalls,
+	Message := 'Thrown body cleans up'
+);
+AssertEquals_UDINT(
+	Expected := 1,
+	Actual := _Runner.FailureOuter.Failures.TeardownFailure.TeardownCalls,
+	Message := 'Thrown teardown is not retried'
+);
+AssertEquals_UDINT(
+	Expected := 1,
+	Actual := _Runner.Pass.BodyCalls,
+	Message := 'Single-cycle body executes once per run'
+);
+AssertEquals_UDINT(
+	Expected := 3,
+	Actual := _Runner.Multi.BodyCalls,
+	Message := 'Multi-cycle state survives three scans'
+);
+AssertEquals_UDINT(
+	Expected := 0,
+	Actual := _Runner.Empty.FailedCount,
+	Message := 'An empty group passes without tests'
+);
+AssertTrue(Condition := _Reporter.IsReady, Message := 'JUnit output is complete');
+AssertTrue(
+	Condition := TOF_Core.WideStrings.Contains(stringToSearchIn := _Runner.FailureOuter.Failures.SetupFailure.FailureMessage,
+		stringToFind := "BeforeTest: "),
+	Message := 'Preparation stage survives exception capture'
+);
+AssertTrue(
+	Condition := TOF_Core.WideStrings.Contains(stringToSearchIn := _Runner.FailureOuter.Failures.BodyFailure.FailureMessage,
+		stringToFind := "Body failed"),
+	Message := 'Framework payload survives task cleanup'
+);
+AssertTrue(
+	Condition := TOF_Core.WideStrings.Contains(stringToSearchIn := _Runner.FailureOuter.Failures.BodyFailure.FailureMessage,
+		stringToFind := "ExecuteTest"),
+	Message := 'Framework source survives task cleanup'
+);
+AssertTrue(
+	Condition := TOF_Core.WideStrings.Contains(stringToSearchIn := _Runner.FailureOuter.Failures.TeardownFailure.FailureMessage,
+		stringToFind := "Teardown failed"),
+	Message := 'Teardown payload is copied'
+);
+
+content := _Reporter.ContentAddress;
+AssertTrue(Condition := content <> 0, Message := 'Completed XML exposes a buffer');
+
+IF content <> 0 THEN
+	AssertTrue(
+		Condition := TOF_Core.Strings.Contains(
+			stringToSearchIn := content^,
+			stringToFind := 'Expected value &lt; '
+		),
+		Message := 'An incompatible borrowed comparison remains an assertion failure'
+	);
+	AssertTrue(
+		Condition := TOF_Core.Strings.Contains(stringToSearchIn := content^, stringToFind := '&#1070;&amp;&lt;'),
+		Message := 'Cyrillic and XML markup are preserved'
+	);
+	AssertTrue(
+		Condition := TOF_Core.Strings.Contains(stringToSearchIn := content^, stringToFind := 'name=""'),
+		Message := 'Empty test name serializes safely'
+	);
+	AssertTrue(
+		Condition := TOF_Core.Strings.Contains(stringToSearchIn := content^, stringToFind := 'classname="Nested/Failures"'),
+		Message := 'The nested group path is preserved'
+	);
+END_IF
+
+IF NOT _Repeated AND_THEN _Runner.IsFinished THEN
+	_Repeated := TRUE;
+	_Calls := 0;
+	_Runner.Reset();
+	RETURN;
+END_IF
+
+_Finished := TRUE;
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+  </POU>
+</TcPlcObject>

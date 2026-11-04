@@ -1,0 +1,335 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="TestCase" Id="{a31ba67b-3136-4955-a98e-c221d790c630}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+SPDX-FileCopyrightText: © 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+SPDX-License-Identifier: MIT
+License: https://opensource.org/license/mit
+*)
+
+(*!
+<summary>Owns the lifecycle and copied diagnostic of one leaf test.</summary>
+<description>
+BeforeTest runs once; ExecuteTest runs according to the concrete single-cycle or multi-cycle strategy.
+AfterTest runs once after normal completion, assertion failure, deadline or a caught scenario exception,
+including failed preparation. Teardown must tolerate partially prepared resources. Assertions record failure
+without interrupting the remaining statements of the callback. The first failure diagnostic is retained, including copied exception text/source and callback stage.
+A failing exception formatter produces a stage/code fallback without replacing an earlier failure.
+Exceptions from scenario hooks become one failed leaf result; catches do not roll back user side effects.
+Terminal OOM propagates outside recoverable handlers and stops normal execution; teardown is not promised then.
+Throwing callbacks must not use method-local resource-owning FBs that require stack unwinding.
+Path-provider and reporter exceptions propagate after terminal state is committed; completed callbacks are never retried.
+</description>
+*)
+
+{attribute 'no_explicit_call' := 'do not call this function block directly'}
+FUNCTION_BLOCK ABSTRACT TestCase EXTENDS TestElement IMPLEMENTS ITestCase
+VAR
+	//! <summary>Assertions bound to this case; finish one chain before starting another.</summary>
+	_Assert : Assertions;	
+	_Outcome : TEST_OUTCOME;
+	_FailureMessage : TOF_Core.ERROR_MESSAGE;
+	_CompletionRequested : BOOL;
+	_Elapsed : LTIME;
+	_CycleCount : UDINT;
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[]]></ST>
+    </Implementation>
+    <Folder Name="Methods to override" Id="{5136f98f-fe73-45aa-9aa8-22fc26b71a68}" />
+    <Folder Name="Service methods" Id="{a7e21a9c-64f7-4859-ad66-8eb61fb453c5}" />
+    <Method Name="AfterTest" Id="{ea6eb74d-6d37-4a53-884b-9735d2cee6ec}" FolderPath="Methods to override\">
+      <Declaration><![CDATA[(*!
+<summary>Cleans up this scenario once, including after preparation or body failure.</summary>
+*)
+METHOD PROTECTED AfterTest]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="Assert" Id="{209df581-8555-4d90-9e92-4e9dd23c4753}">
+      <Declaration><![CDATA[(*!
+<summary>Borrows the assertions bound to this running test case.</summary>
+<description>Complete one immediate chain at a time; do not retain it or mutate the provider.</description>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY FINAL Assert : REFERENCE TO Assertions]]></Declaration>
+      <Get Name="Get" Id="{86dff3d0-5eca-434a-b68f-a96d761b4a2f}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[Assert REF= _Assert;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="BeforeTest" Id="{2155d21e-4893-47d7-a4aa-172c4bed74ea}" FolderPath="Methods to override\">
+      <Declaration><![CDATA[(*!
+<summary>Prepares this scenario once per run; teardown must handle partial preparation.</summary>
+*)
+METHOD PROTECTED BeforeTest]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="Complete" Id="{6a5972f5-f3c9-4541-96ff-81c140c47eb8}" FolderPath="Methods to override\">
+      <Declaration><![CDATA[(*!
+<summary>Requests successful completion after the current callback returns.</summary>
+<description>
+An assertion, runtime exception or teardown failure still produces FAILED. Calls do not stop callback statements.
+</description>
+*)
+METHOD PROTECTED FINAL Complete]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_CompletionRequested := TRUE;]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="CycleCount" Id="{69d97284-2fd9-4495-807c-167c0304b62d}">
+      <Declaration><![CDATA[(*!
+<summary>Counts scheduling cycles, including a deadline cycle; saturates at the UDINT maximum.</summary>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY FINAL CycleCount : UDINT]]></Declaration>
+      <Get Name="Get" Id="{85a86a48-0389-4120-9928-ff6ad4053e71}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[CycleCount := _CycleCount;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="Elapsed" Id="{c3068984-8158-4fa4-ac8a-6768192d6f61}">
+      <Declaration><![CDATA[(*!
+<summary>Reports nominal time since the first scheduling cycle, initially zero.</summary>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY FINAL Elapsed : TIME]]></Declaration>
+      <Get Name="Get" Id="{786808eb-177a-4daa-b8e0-a818cdcfa138}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[Elapsed := TO_TIME(_Elapsed);]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="Execute" Id="{5bb5d072-e228-486f-a80c-68bdefbeb2ea}">
+      <Declaration><![CDATA[(*!
+<summary>Schedules one leaf cycle and commits one result after teardown.</summary>
+<description>
+Scenario exceptions are converted to FAILED so the containing sequence can continue. Reporter failures propagate.
+</description>
+*)
+METHOD FINAL Execute
+VAR
+	groupPath : WSTRING(255);
+	exceptionCode : __SYSTEM.ExceptionCode;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF IsFinished THEN
+	RETURN;
+END_IF
+
+IF _State = TEST_ELEMENT_STATE.READY THEN
+	_State := TEST_ELEMENT_STATE.RUNNING;
+	_Outcome := TEST_OUTCOME.RUNNING;
+	_CycleCount := 1;
+	
+	_Assert.Bind(testCase := THIS^);
+
+	__TRY
+		BeforeTest();
+	__CATCH(exceptionCode)
+		recordRuntimeException(
+			exceptionCode := exceptionCode,
+			stage := 'BeforeTest',
+			catchPointPOUName := __POUNAME(),
+			catchPointPosition := __POSITION()
+		);
+	__ENDTRY
+
+	TOF_Core.DynamicMemoryManager.RaiseIfAllocationFailed();
+ELSE
+	IF _CycleCount < TOF_Core.UnsignedInt32.MAX_VALUE THEN
+		_CycleCount := _CycleCount + 1;
+	END_IF
+
+	_Elapsed := _Elapsed + TOF_Core.System.GetTaskCycleTime();
+END_IF
+
+_Duration := _Duration + TOF_Core.System.GetTaskCycleTime();
+
+IF NOT _CompletionRequested AND_THEN _Outcome <> TEST_OUTCOME.FAILED THEN
+	__TRY
+		RunCycle();
+	__CATCH(exceptionCode)
+		recordRuntimeException(
+			exceptionCode := exceptionCode,
+			stage := 'ExecuteTest',
+			catchPointPOUName := __POUNAME(),
+			catchPointPosition := __POSITION()
+		);
+	__ENDTRY
+END_IF
+
+TOF_Core.DynamicMemoryManager.RaiseIfAllocationFailed();
+
+IF NOT _CompletionRequested AND_THEN _Outcome <> TEST_OUTCOME.FAILED THEN
+	RETURN;
+END_IF
+
+__TRY
+	AfterTest();
+__CATCH(exceptionCode)
+	recordRuntimeException(
+		exceptionCode := exceptionCode,
+		stage := 'AfterTest',
+		catchPointPOUName := __POUNAME(),
+		catchPointPosition := __POSITION()
+	);
+__ENDTRY
+
+TOF_Core.DynamicMemoryManager.RaiseIfAllocationFailed();
+
+IF _Outcome = TEST_OUTCOME.FAILED THEN
+	_FailedCount := 1;
+ELSE
+	_Outcome := TEST_OUTCOME.PASSED;
+	_PassedCount := 1;
+END_IF
+
+_State := TEST_ELEMENT_STATE.COMPLETED;
+
+IF _Reporter <> 0 THEN
+	IF _Parent <> 0 THEN
+		groupPath := _Parent.GetPath();
+	END_IF
+
+	_Reporter.ReportTestCaseResult(
+		groupPath := groupPath,
+		testName := _Name,
+		outcome := _Outcome,
+		duration := Duration,
+		message := _FailureMessage
+	);
+END_IF
+
+_Reporter := 0;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="ExecuteTest" Id="{9170641c-a31b-46b1-9341-7f398205fb19}" FolderPath="Methods to override\">
+      <Declaration><![CDATA[(*!
+<summary>Implements the scenario body without runner guards or enumeration.</summary>
+<description>
+Keep persistent state in instance fields. Reporting a failure does not abort the current callback.
+</description>
+*)
+METHOD PROTECTED ABSTRACT ExecuteTest]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="FailureMessage" Id="{53c0c4a4-1fd1-47f9-96b9-2c4bd55bf1c2}">
+      <Declaration><![CDATA[(*!
+<summary>Borrows the first copied failure diagnostic.</summary>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY FINAL FailureMessage : REFERENCE TO TOF_Core.ERROR_MESSAGE]]></Declaration>
+      <Get Name="Get" Id="{526478cc-8970-4240-a61c-23c1c29c5f99}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[FailureMessage REF= _FailureMessage;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="Outcome" Id="{71cd7688-473e-43fc-8a0b-ac294ef60307}">
+      <Declaration><![CDATA[(*!
+<summary>Reports this leaf execution outcome.</summary>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY FINAL Outcome : TEST_OUTCOME]]></Declaration>
+      <Get Name="Get" Id="{66c3a560-7801-4af4-af5c-0868b5ecb0cf}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[Outcome := _Outcome;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="RecordFailure" Id="{a03fefe8-c08c-4d3a-b48b-b06fb20f50f9}">
+      <Declaration><![CDATA[(*!
+<summary>Copies the first failure while the case is running.</summary>
+<description>
+Does not throw for a test failure, interrupt the current callback, or change an already completed result.
+</description>
+*)
+METHOD FINAL RecordFailure
+VAR_IN_OUT CONSTANT
+	message : TOF_Core.ERROR_MESSAGE;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF _State <> TEST_ELEMENT_STATE.RUNNING OR_ELSE _Outcome = TEST_OUTCOME.FAILED THEN
+	RETURN;
+END_IF
+
+_Outcome := TEST_OUTCOME.FAILED;
+_FailureMessage := message;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="recordRuntimeException" Id="{60e6ea7f-fc70-40d6-b27c-b3fd7c82ea53}" FolderPath="Service methods\">
+      <Declaration><![CDATA[(*!
+<summary>Copies a caught hook exception as a leaf failure without retaining its object.</summary>
+<description>Preserves an earlier failure and forwards the actual catch location to diagnostic formatting.</description>
+*)
+METHOD PRIVATE recordRuntimeException
+VAR_INPUT
+	exceptionCode : __SYSTEM.ExceptionCode;
+	stage : STRING;
+	catchPointPOUName : STRING;
+	catchPointPosition : STRING;
+END_VAR
+VAR
+	diagnostic : TOF_Core.ERROR_MESSAGE;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF _Outcome = TEST_OUTCOME.FAILED THEN
+	RETURN;
+END_IF
+
+diagnostic := TestServices.FormatCaughtException(
+	exceptionCode := exceptionCode,
+	stage := stage,
+	catchPointPOUName := catchPointPOUName,
+	catchPointPosition := catchPointPosition
+);
+RecordFailure(message := diagnostic);]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="Reset" Id="{7a096545-a5c2-4d84-90ff-b8fd64826a32}">
+      <Declaration><![CDATA[(*!
+<summary>Prepares fresh leaf observations without running scenario hooks.</summary>
+<description>
+Does not run teardown or release user resources. Call only at the lifecycle boundaries in ITestElement.
+The reporter is borrowed until completion; no locks or cross-task transfer are provided.
+Clears this case's outcome, diagnostic, completion request and nominal timing after common state is reset.
+</description>
+*)
+METHOD FINAL Reset
+VAR_INPUT
+	reporter : ITestReporter;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[SUPER^.Reset(reporter := reporter);
+
+_Outcome := TEST_OUTCOME.NOT_RUN;
+_FailureMessage := "";
+_CompletionRequested := FALSE;
+_Elapsed := LTIME#0NS;
+_CycleCount := 0;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="RunCycle" Id="{c9126064-fe17-4451-994d-9a5faf603d40}" FolderPath="Methods to override\">
+      <Declaration><![CDATA[(*!
+<summary>Applies the concrete scheduling and completion strategy to this body.</summary>
+*)
+METHOD PROTECTED ABSTRACT RunCycle]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[]]></ST>
+      </Implementation>
+    </Method>
+  </POU>
+</TcPlcObject>

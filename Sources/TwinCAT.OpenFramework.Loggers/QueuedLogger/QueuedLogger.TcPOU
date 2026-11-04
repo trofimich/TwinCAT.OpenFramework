@@ -19,7 +19,7 @@ exception formatting may allocate through their existing implementations. A full
 FALSE. TRUE means queued, not written. Errors and exceptions are formatted in the sending task, including
 source and local timestamp; aggregate causes become separate records and can interleave with other callers.
 Structured backend source fields and backend-specific aggregate markers are not preserved. Plain messages
-retain their supplied text. Execute attempts each dequeued record once without retry, even after backend FALSE
+retain their supplied text. Execute attempts each dequeued record once without retry, even after nonfatal backend FALSE
 or exception. FailedDeliveryCount records those failed attempts, not confirmed message loss or durable-write
 failures. No callback runs under the queue lock. Queue lock contention may block briefly. All TryLog methods
 and Execute contain exceptions and preserve terminal allocation state. PendingMessageCount exposes queued
@@ -30,9 +30,12 @@ destruction; destruction does not flush pending records. Online-change behavior 
 
 {attribute 'no_explicit_call' := 'Use Configure, TryLog methods and Execute'}
 FUNCTION_BLOCK FINAL QueuedLogger EXTENDS TOF_Core.Object IMPLEMENTS TOF_Core.ILogger
-VAR
+VAR_STAT
+	//! <summary>Static type metadata shared by instances without reading mutable instance state.</summary>
 	{attribute 'hide'}
 	_ClassName : STRING := __POUNAME();
+END_VAR
+VAR
 
 	_Backend : TOF_Core.ILogger;
 	_OwnerTaskIndex : DINT;
@@ -50,7 +53,14 @@ END_VAR]]></Declaration>
       <ST><![CDATA[]]></ST>
     </Implementation>
     <Property Name="ClassName" Id="{4e07e9c8-ae76-4432-b4d6-c4bf5d4594a6}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Provides the concrete logger type name.</summary>
+<description>
+Returns borrowed read-only initialized static storage. Reading has no side effects or exceptions.
+Do not modify the referenced metadata; initialized storage is available before base initialization.
+</description>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
       <Get Name="Get" Id="{47c4d366-ef9b-46f6-973f-a50ac03601e9}">
         <Declaration><![CDATA[]]></Declaration>
@@ -114,6 +124,8 @@ without the lock. Backend FALSE or exception increments FailedDeliveryCount once
 or logging another error. Backend Execute failures and enqueue rejections are excluded. Backend must borrow
 the record only for the call and must not reenter this wrapper. Concurrent producers may refill released
 slots. Does not guarantee durable output or a fixed execution time; backend and lock latency still apply.
+Backend Execute still advances cleanup. Observed fatal allocation state stops further dequeue/delivery,
+including after a contained backend failure; the task boundary remains responsible for the fatal raise.
 </description>
 *)
 METHOD Execute
@@ -128,6 +140,7 @@ END_VAR]]></Declaration>
         <ST><![CDATA[taskIndex := TOF_Core.System.GetCurrentTaskIndex();
 
 __TRY
+
 	IF NOT _QueueLock.Enter() THEN
 		RETURN;
 	END_IF
@@ -150,7 +163,16 @@ __TRY
 		// Backend failure must not escape or trigger recursive diagnostics.
 	__ENDTRY
 
+	IF TOF_Core.DynamicMemoryManager.HasAllocationFailed THEN
+		RETURN;
+	END_IF
+
 	FOR i := 1 TO messagesToProcess DO
+
+		IF TOF_Core.DynamicMemoryManager.HasAllocationFailed THEN
+			RETURN;
+		END_IF
+
 		IF NOT _QueueLock.Enter() THEN
 			RETURN;
 		END_IF
@@ -168,6 +190,7 @@ __TRY
 		lockHeld := FALSE;
 
 		__TRY
+
 			IF _CurrentMessage.HasMessageNumber THEN
 				delivered := _Backend.TryLogMessage(
 					category := _CurrentMessage.Category,
@@ -177,27 +200,40 @@ __TRY
 			ELSE
 				delivered := _Backend.TryLogMessage(category := _CurrentMessage.Category, message := _CurrentMessage.Message);
 			END_IF
+
 		__CATCH
 			delivered := FALSE;
 		__ENDTRY
 
+		IF TOF_Core.DynamicMemoryManager.HasAllocationFailed THEN
+			delivered := FALSE;
+		END_IF
+
 		IF NOT delivered AND_THEN _FailedDeliveryCount < TOF_Core.UnsignedInt64.MAX_VALUE THEN
 			_FailedDeliveryCount := _FailedDeliveryCount + 1;
 		END_IF
+
+		IF TOF_Core.DynamicMemoryManager.HasAllocationFailed THEN
+			RETURN;
+		END_IF
+
 	END_FOR
+
 __CATCH
 	IF lockHeld THEN
 		_QueueLock.Leave();
 	END_IF
+
 __ENDTRY]]></ST>
       </Implementation>
     </Method>
     <Property Name="FailedDeliveryCount" Id="{e941ff7a-fc15-4ef1-9c3b-f0b926f0c9ca}">
       <Declaration><![CDATA[(*!
-<summary>Counts dequeued records whose single delivery attempt returned FALSE or raised an exception.</summary>
+<summary>Counts dequeued records whose delivery failed or observed terminal allocation state.</summary>
 <description>
 Read from the owner task, or with application-level synchronization against Execute. Updated only by
-owner-task Execute. Starts at zero and saturates at UnsignedInt64.MAX_VALUE; no reset is provided. Excludes
+owner-task Execute. A contained terminal allocation failure counts as a failed attempt even if a hostile
+backend returned TRUE. Starts at zero and saturates at UnsignedInt64.MAX_VALUE; no reset is provided. Excludes
 enqueue rejection and backend Execute errors. A failed attempt may have produced partial output; successful
 acceptance does not guarantee durable storage.
 </description>
@@ -271,6 +307,8 @@ PROPERTY SelfSize : ULINT]]></Declaration>
 Copies source and local timestamp into the text using ERROR.ToString. Retains no reference to ERROR. Returns
 FALSE for an invalid reference, failed admission or caught formatting exception. Does not clear terminal
 allocation state.
+Returns FALSE when fatal allocation state is observed before work or after nested calls. The latch remains
+set for the caller's task boundary; already accepted or emitted records are not rolled back.
 </description>
 <param name="error">Live error formatted during this call.</param>
 <param name="messageNumber">Optional number copied with the formatted message.</param>
@@ -285,6 +323,11 @@ VAR
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[__TRY
+
+	IF TOF_Core.DynamicMemoryManager.HasAllocationFailed THEN
+		RETURN;
+	END_IF
+
 	IF NOT __ISVALIDREF(error) THEN
 		RETURN;
 	END_IF
@@ -294,10 +337,19 @@ END_VAR]]></Declaration>
 		timestampDisplayMode := TOF_Core.TIMESTAMP_DISPLAY_MODE.LOCAL
 	);
 	TryLogError := TryLogMessage(
-		category := SEL(error.Severity = TOF_Core.ERROR_SEVERITY.CRITICAL, TOF_Core.LOG_CATEGORY.ERROR, TOF_Core.LOG_CATEGORY.CRITICAL_ERROR),
+		category := SEL(
+			error.Severity = TOF_Core.ERROR_SEVERITY.CRITICAL,
+			TOF_Core.LOG_CATEGORY.ERROR,
+			TOF_Core.LOG_CATEGORY.CRITICAL_ERROR
+		),
 		message := message,
 		messageNumber := messageNumber
 	);
+
+	IF TOF_Core.DynamicMemoryManager.HasAllocationFailed THEN
+		TryLogError := FALSE;
+	END_IF
+
 __CATCH
 	TryLogError := FALSE;
 __ENDTRY]]></ST>
@@ -312,6 +364,8 @@ the supplied optional request number. Stops on the first failure; already accept
 FALSE may mean partial admission. Concurrent callers may interleave aggregate entries. Empty aggregates are
 formatted as ordinary exceptions. Input graphs must be valid and acyclic. No exception reference or clone is
 retained; terminal allocation state is preserved.
+Returns FALSE when fatal allocation state is observed before work or after nested calls. The latch remains
+set for the caller's task boundary; already accepted or emitted records are not rolled back.
 </description>
 <param name="exception">Live, acyclic exception graph borrowed for formatting.</param>
 <param name="severity">Severity used to choose the queued category.</param>
@@ -326,23 +380,51 @@ END_VAR
 VAR
 	message : TOF_Core.ERROR_MESSAGE;
 	aggregateException : TOF_Core.IAggregateException;
+	innerExceptionCount : UINT;
 	i : DINT;
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[__TRY
+
+	IF TOF_Core.DynamicMemoryManager.HasAllocationFailed THEN
+		RETURN;
+	END_IF
+
 	IF exception = 0 THEN
 		RETURN;
 	END_IF
 
-	IF __QUERYINTERFACE(exception, aggregateException) AND_THEN aggregateException.InnerExceptionCount > 0 THEN
-		FOR i := 0 TO TO_DINT(aggregateException.InnerExceptionCount) - 1 DO
+	IF __QUERYINTERFACE(exception, aggregateException) THEN
+		innerExceptionCount := aggregateException.InnerExceptionCount;
+	END_IF
+
+	IF TOF_Core.DynamicMemoryManager.HasAllocationFailed THEN
+		RETURN;
+	END_IF
+
+	IF innerExceptionCount > 0 THEN
+
+		FOR i := 0 TO TO_DINT(innerExceptionCount) - 1 DO
+
+			IF TOF_Core.DynamicMemoryManager.HasAllocationFailed THEN
+				TryLogException := FALSE;
+				RETURN;
+			END_IF
+
 			IF NOT THIS^.TryLogException(
 				exception := aggregateException.GetInnerException(index := i),
 				severity := severity,
 				messageNumber := messageNumber
-			) THEN
+			)
+			THEN
 				RETURN;
 			END_IF
+
+			IF TOF_Core.DynamicMemoryManager.HasAllocationFailed THEN
+				TryLogException := FALSE;
+				RETURN;
+			END_IF
+
 		END_FOR
 
 		TryLogException := TRUE;
@@ -354,6 +436,11 @@ END_VAR]]></Declaration>
 			messageNumber := messageNumber
 		);
 	END_IF
+
+	IF TOF_Core.DynamicMemoryManager.HasAllocationFailed THEN
+		TryLogException := FALSE;
+	END_IF
+
 __CATCH
 	TryLogException := FALSE;
 __ENDTRY]]></ST>
@@ -366,6 +453,8 @@ __ENDTRY]]></ST>
 Borrows inputs only for this call; the caller must keep them stable while copied. Returns FALSE before
 configuration, at capacity, on lock failure or on a caught exception. Commits the entry only after copying its
 contents. Does not call the backend or allocate text storage.
+Returns FALSE when fatal allocation state is observed before work or after nested calls. The latch remains
+set for the caller's task boundary; already accepted or emitted records are not rolled back.
 </description>
 <param name="category">Category copied into the queued record.</param>
 <param name="message">Text copied into owned queue storage.</param>
@@ -386,6 +475,11 @@ VAR
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[__TRY
+
+	IF TOF_Core.DynamicMemoryManager.HasAllocationFailed THEN
+		RETURN;
+	END_IF
+
 	IF NOT _QueueLock.Enter() THEN
 		RETURN;
 	END_IF
@@ -413,6 +507,11 @@ END_VAR]]></Declaration>
 
 	_QueueLock.Leave();
 	lockHeld := FALSE;
+
+	IF TOF_Core.DynamicMemoryManager.HasAllocationFailed THEN
+		TryLogMessage := FALSE;
+	END_IF
+
 __CATCH
 	IF lockHeld THEN
 		_QueueLock.Leave();

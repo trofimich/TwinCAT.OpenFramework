@@ -12,12 +12,13 @@ License: https://opensource.org/license/mit
 <description>
 FB_init stores the workflow association and default name only. Dynamic instances require explicit
 RegisterChild after construction; static instances remain caller-owned. Named variable lookup searches local,
-parent condition, parent activity and workflow scopes without propagating exceptions.
+parent condition, parent activity and workflow scopes without propagating exceptions. Variable conditions
+use TryResolveVariable to search local scopes, then the evaluating activity hierarchy, before workflow fallback.
 </description>
 *)
 
 {attribute 'no_explicit_call' := 'do not call this function block directly'}
-FUNCTION_BLOCK ABSTRACT Condition EXTENDS TOF_Core.Object IMPLEMENTS ICondition
+FUNCTION_BLOCK ABSTRACT Condition EXTENDS TOF_Core.Object IMPLEMENTS ICondition, ILocalVariableContainer
 VAR
 	{attribute 'hide'} 
 	_Name : WSTRING;
@@ -62,7 +63,7 @@ END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[IF OnEvaluate(activity := activity) THEN
 	Evaluate := TRUE;
-	
+
 	formattedLogMessage := TOF_Core.WideStrings.Concat255(
 		"Condition '",
 		Name,
@@ -148,7 +149,12 @@ END_IF]]></ST>
     </Property>
     <Property Name="ParentActivity" Id="{b6256e22-b8a0-4cc3-a832-607b87034c7f}">
       <Declaration><![CDATA[(*!
-<summary>Gets or sets the borrowed parent activity.</summary>
+<summary>Gets the inherited activity context or establishes a direct borrowed parent activity.</summary>
+<description>
+An unchanged direct link is a no-op. Attachment validates topology and readiness before mutation. An existing
+activity or condition parent cannot be detached or replaced. No ownership transfer or cross-task safety is
+provided; borrowed parents must remain live for the tree lifetime.
+</description>
 *)
 {attribute 'monitoring' := 'call'}
 PROPERTY FINAL ParentActivity : IActivity]]></Declaration>
@@ -165,14 +171,34 @@ END_IF]]></ST>
       <Set Name="Set" Id="{41b8ec15-87fc-4bba-8ef5-a5827c202fef}">
         <Declaration><![CDATA[]]></Declaration>
         <Implementation>
-          <ST><![CDATA[_ParentActivity := ParentActivity;
-_ParentCondition := 0;]]></ST>
+          <ST><![CDATA[IF _ParentCondition = 0 AND_THEN _ParentActivity = ParentActivity THEN
+	RETURN;
+END_IF
+
+IF _ParentCondition <> 0 OR_ELSE _ParentActivity <> 0 OR_ELSE ParentActivity = 0 THEN
+	WorkflowExceptions.ThrowWorkflowAttachment(
+		sourceNamespaceName := NamespaceName,
+		sourceClassName := ClassName,
+		sourcePOUName := __POUNAME(),
+		sourcePosition := __POSITION(),
+		message := "Condition parent cannot be detached or replaced"
+	);
+END_IF
+
+Workflows.ValidateElementAttachment(parent := ParentActivity, child := THIS^);
+
+_ParentActivity := ParentActivity;]]></ST>
         </Implementation>
       </Set>
     </Property>
     <Property Name="ParentCondition" Id="{c33d6432-48ad-41c4-919b-becbef5c626f}">
       <Declaration><![CDATA[(*!
-<summary>Gets or sets the borrowed parent composite condition.</summary>
+<summary>Gets or establishes the borrowed parent composite condition.</summary>
+<description>
+An unchanged link is a no-op. Topology and readiness are validated before mutation; an existing activity or
+condition parent cannot be detached or replaced. Activity context is resolved through the live parent chain,
+without caching a second parent link. No ownership transfer or cross-task safety is provided.
+</description>
 *)
 {attribute 'monitoring' := 'call'}
 PROPERTY FINAL ParentCondition : ICondition]]></Declaration>
@@ -185,20 +211,159 @@ PROPERTY FINAL ParentCondition : ICondition]]></Declaration>
       <Set Name="Set" Id="{dc850025-6a74-45a0-9116-b83341f47346}">
         <Declaration><![CDATA[]]></Declaration>
         <Implementation>
-          <ST><![CDATA[_ParentCondition := ParentCondition;
+          <ST><![CDATA[IF _ParentActivity = 0 AND_THEN _ParentCondition = ParentCondition THEN
+	RETURN;
+END_IF
 
-IF ParentCondition <> 0 THEN
-	_ParentActivity := ParentCondition.ParentActivity;
-END_IF]]></ST>
+IF _ParentActivity <> 0 OR_ELSE _ParentCondition <> 0 OR_ELSE ParentCondition = 0 THEN
+	WorkflowExceptions.ThrowWorkflowAttachment(
+		sourceNamespaceName := NamespaceName,
+		sourceClassName := ClassName,
+		sourcePOUName := __POUNAME(),
+		sourcePosition := __POSITION(),
+		message := "Condition parent cannot be detached or replaced"
+	);
+END_IF
+
+Workflows.ValidateElementAttachment(parent := ParentCondition, child := THIS^);
+
+_ParentCondition := ParentCondition;]]></ST>
         </Implementation>
       </Set>
     </Property>
+    <Method Name="RegisterVariable" Id="{6f5798da-6c21-457a-b2ca-224f01c47000}">
+      <Declaration><![CDATA[(*!
+<summary>Registers a named PLC variable reference in this condition's local scope.</summary>
+<description>
+Stores a borrowed reference to the supplied PLC variable in the condition variable dictionary under a unique name.
+Fails if the workflow is busy, the name is empty, the name already exists in this condition, or the variable resides
+in stack memory.
+Type mapping precedes allocation of the owned name key. Failure before dictionary acceptance releases
+that key and propagates the exception; successful registration transfers key ownership to the dictionary.
+The variable storage remains borrowed and must outlive its binding.
+</description>
+<param name="name">Unique non-empty variable name.</param>
+<param name="plcVariable">PLC variable to bind (instance field or global variable).</param>
+<param name="plcVariableIsObject">TRUE if the variable is an FB instance implementing IObject.</param>
+*)
+METHOD RegisterVariable : BOOL
+VAR_INPUT
+	name : STRING;
+	plcVariable : ANY;
+	plcVariableIsObject : BOOL := FALSE;
+END_VAR
+VAR
+	formattedExceptionMessage : TOF_Core.ERROR_MESSAGE;
+	variableKey : TOF_Core.GENERIC_VALUE;
+	variableValue : TOF_Core.GENERIC_VALUE;
+	existingVariable : TOF_Core.GENERIC_VALUE;
+	exceptionCode : __SYSTEM.ExceptionCode;
+END_VAR
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF name = '' THEN
+	WorkflowExceptions.ThrowWorkflowConfiguration(
+		sourceNamespaceName := NamespaceName,
+		sourceClassName := ClassName,
+		sourcePOUName := __POUNAME(),
+		sourcePosition := __POSITION(),
+		message := "Variable name cannot be empty"
+	);
+END_IF
+
+IF Workflow <> 0 AND_THEN Workflow.Busy THEN
+	formattedExceptionMessage := TOF_Core.WideStrings.Concat255(
+		"Unable to register variable '",
+		TO_WSTRING(name),
+		"' in condition '",
+		THIS^.Name,
+		"': workflow is busy"
+	);
+
+	WorkflowExceptions.ThrowWorkflowConfiguration(
+		sourceNamespaceName := NamespaceName,
+		sourceClassName := ClassName,
+		sourcePOUName := __POUNAME(),
+		sourcePosition := __POSITION(),
+		message := formattedExceptionMessage
+	);
+END_IF
+
+IF TOF_Core.Memory.IsStackData(dataAddress := plcVariable.pValue, dataSize := TO_UDINT(plcVariable.diSize)) THEN
+	formattedExceptionMessage := TOF_Core.WideStrings.Concat255(
+		"Unable to register variable '",
+		TO_WSTRING(name),
+		"' in condition '",
+		THIS^.Name,
+		"': variable resides in stack memory"
+	);
+
+	WorkflowExceptions.ThrowWorkflowConfiguration(
+		sourceNamespaceName := NamespaceName,
+		sourceClassName := ClassName,
+		sourcePOUName := __POUNAME(),
+		sourcePosition := __POSITION(),
+		message := formattedExceptionMessage
+	);
+END_IF
+
+IF _Variables.TryGetValueByKey(key := name, value => existingVariable) THEN
+	formattedExceptionMessage := TOF_Core.WideStrings.Concat255(
+		"Variable with name '",
+		TO_WSTRING(name),
+		"' is already registered in condition '",
+		THIS^.Name,
+		"'"
+	);
+
+	WorkflowExceptions.ThrowWorkflowConfiguration(
+		sourceNamespaceName := NamespaceName,
+		sourceClassName := ClassName,
+		sourcePOUName := __POUNAME(),
+		sourcePosition := __POSITION(),
+		message := formattedExceptionMessage
+	);
+END_IF
+
+variableValue := TOF_Core.GenericValueFactory.FromParts(
+	genericTypeClass := TOF_Core.GenericTypeClassConvertor.GetGenericTypeClassBySystemAnyType(
+		systemAnyType := plcVariable,
+		isObject := plcVariableIsObject
+	),
+	address := plcVariable.pValue,
+	size := TO_ULINT(plcVariable.diSize),
+	memoryManagementBehavior := TOF_Core.GENERIC_MEMORY_MANAGEMENT_BEHAVIOR.STORE_ORIGINAL_REFERENCE_AND_NOT_OWNS_MEMORY
+);
+
+variableKey := TOF_Core.GenericValueFactory.FromStringValue(value := name);
+
+// The dictionary accepts key ownership only after validation and storage growth succeed.
+
+__TRY
+	_Variables.SetGeneric(key := variableKey, value := variableValue);
+__CATCH(exceptionCode)
+	variableKey.Release();
+
+	TOF_Core.ExceptionManager.ReThrowLastException(
+		exceptionCode := exceptionCode,
+		catchPointNamespaceName := NamespaceName,
+		catchPointPOUName := __POUNAME(),
+		catchPointPosition := __POSITION()
+	);
+__ENDTRY
+
+variableKey.Reset();
+
+RegisterVariable := TRUE;]]></ST>
+      </Implementation>
+    </Method>
     <Method Name="TryGetVariable" Id="{54c0b438-a23e-4e9d-a1fa-12698a06e3ed}">
       <Declaration><![CDATA[(*!
 <summary>Attempts to resolve a named variable from this condition, its parent hierarchy or the workflow.</summary>
 <description>
 Returns FALSE when resolution fails or a nested call raises an exception. Use the output only when TRUE is
-returned. Does not propagate exceptions or clear terminal allocation state.
+returned. Does not propagate exceptions or clear terminal allocation state. A latched allocation failure returns FALSE
+without entering further lookup callbacks, including when a nested callback contained the allocation exception.
 </description>
 <param name="name">Case-sensitive variable name to look up.</param>
 <param name="variable">Resolved variable value when TRUE is returned.</param>
@@ -215,27 +380,39 @@ VAR
 END_VAR
 ]]></Declaration>
       <Implementation>
-        <ST><![CDATA[__TRY
-	IF TryGetVariable := _Variables.TryGetValueByKey(key := name, value => variable) THEN
-		RETURN;
+        <ST><![CDATA[IF TOF_Core.DynamicMemoryManager.HasAllocationFailed THEN
+	RETURN;
+END_IF
+
+__TRY
+	TryGetVariable := _Variables.TryGetValueByKey(key := name, value => variable);
+
+	IF NOT TryGetVariable AND_THEN NOT TOF_Core.DynamicMemoryManager.HasAllocationFailed
+		AND_THEN _ParentCondition <> 0
+	THEN
+		TryGetVariable := _ParentCondition.TryGetVariable(name := name, variable => variable);
 	END_IF
 
-	IF _ParentCondition <> 0 AND_THEN (TryGetVariable := _ParentCondition.TryGetVariable(name := name, variable => variable)) THEN
-		RETURN;
+	IF NOT TryGetVariable AND_THEN NOT TOF_Core.DynamicMemoryManager.HasAllocationFailed
+		AND_THEN _ParentActivity <> 0
+	THEN
+		TryGetVariable := _ParentActivity.TryGetVariable(name := name, variable => variable);
 	END_IF
 
-	IF _ParentActivity <> 0 AND_THEN (TryGetVariable := _ParentActivity.TryGetVariable(name := name, variable => variable)) THEN
-		RETURN;
-	END_IF
+	IF NOT TryGetVariable AND_THEN NOT TOF_Core.DynamicMemoryManager.HasAllocationFailed THEN
+		ownerWorkflow := Workflow;
 
-	ownerWorkflow := Workflow;
-
-	IF ownerWorkflow <> 0 THEN
-		TryGetVariable := ownerWorkflow.TryGetVariable(name := name, variable => variable);
+		IF ownerWorkflow <> 0 THEN
+			TryGetVariable := ownerWorkflow.TryGetVariable(name := name, variable => variable);
+		END_IF
 	END_IF
 __CATCH
 	TryGetVariable := FALSE;
-__ENDTRY]]></ST>
+__ENDTRY
+
+IF TOF_Core.DynamicMemoryManager.HasAllocationFailed THEN
+	TryGetVariable := FALSE;
+END_IF]]></ST>
       </Implementation>
     </Method>
     <Property Name="Workflow" Id="{b14cf224-5c49-4763-9197-5e142173c022}">
@@ -257,5 +434,193 @@ END_IF]]></ST>
         </Implementation>
       </Get>
     </Property>
+    <Method Name="TryGetLocalVariable" Id="{35e9d3c1-3375-44e2-b1d7-293ce4afb018}">
+      <Declaration><![CDATA[(*!
+<summary>Attempts to find a binding registered directly on this instance.</summary>
+<description>
+Does not inspect parents or workflow fallback. Returns a borrowed descriptor only on TRUE.
+Returns FALSE for absence, callback exceptions or terminal allocation failure without clearing the fatal latch.
+The owner keeps the registered PLC storage alive; use one task without concurrent reconfiguration.
+</description>
+<param name="name">Case-sensitive name registered directly on this instance.</param>
+<param name="variable">Borrowed binding descriptor, usable only on TRUE.</param>
+*)
+METHOD TryGetLocalVariable : BOOL
+VAR_INPUT
+	name : STRING;
+END_VAR
+VAR_OUTPUT
+	variable : TOF_Core.GENERIC_VALUE;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF TOF_Core.DynamicMemoryManager.HasAllocationFailed THEN
+	RETURN;
+END_IF
+
+__TRY
+	TryGetLocalVariable := _Variables.TryGetValueByKey(key := name, value => variable);
+__CATCH
+	TryGetLocalVariable := FALSE;
+__ENDTRY
+
+IF TOF_Core.DynamicMemoryManager.HasAllocationFailed THEN
+	TryGetLocalVariable := FALSE;
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="tryGetHierarchyVariable" Id="{0f916c1d-490f-4bd7-9055-aaa0242fb7fc}">
+      <Declaration><![CDATA[(*!
+<summary>Searches one stable parent chain for direct bindings or legacy lookup providers.</summary>
+<description>
+The local pass queries only ILocalVariableContainer. The legacy pass calls TryGetVariable only on
+elements without that capability. All callbacks are contained; a fatal allocation observation stops traversal.
+Parent links must remain acyclic and unchanged during lookup. Output is borrowed and usable only on TRUE.
+</description>
+<param name="scope">First element of the borrowed stable parent chain, or zero.</param>
+<param name="name">Case-sensitive binding name.</param>
+<param name="localLookup">TRUE searches direct bindings; FALSE consults only legacy providers.</param>
+<param name="variable">Borrowed resolved descriptor, usable only on TRUE.</param>
+*)
+METHOD PRIVATE tryGetHierarchyVariable : BOOL
+VAR_INPUT
+	scope : IWorkflowElement;
+	name : STRING;
+	localLookup : BOOL;
+END_VAR
+VAR_OUTPUT
+	variable : TOF_Core.GENERIC_VALUE;
+END_VAR
+VAR
+	currentScope : IWorkflowElement;
+	localContainer : ILocalVariableContainer;
+	hasLocalLookup : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF TOF_Core.DynamicMemoryManager.HasAllocationFailed THEN
+	RETURN;
+END_IF
+
+__TRY
+	currentScope := scope;
+
+	WHILE currentScope <> 0 AND_THEN NOT TOF_Core.DynamicMemoryManager.HasAllocationFailed DO
+		hasLocalLookup := __QUERYINTERFACE(currentScope, localContainer);
+
+		IF localLookup AND_THEN hasLocalLookup THEN
+			tryGetHierarchyVariable := localContainer.TryGetLocalVariable(name := name, variable => variable);
+		ELSIF NOT localLookup AND_THEN NOT hasLocalLookup THEN
+			tryGetHierarchyVariable := currentScope.TryGetVariable(name := name, variable => variable);
+		END_IF
+
+		IF tryGetHierarchyVariable OR_ELSE TOF_Core.DynamicMemoryManager.HasAllocationFailed THEN
+			EXIT;
+		END_IF
+
+		currentScope := currentScope.Parent;
+	END_WHILE
+__CATCH
+	tryGetHierarchyVariable := FALSE;
+__ENDTRY
+
+IF TOF_Core.DynamicMemoryManager.HasAllocationFailed THEN
+	tryGetHierarchyVariable := FALSE;
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="TryResolveVariable" Id="{b472ac93-f74b-43bc-a428-8805683e1486}">
+      <Declaration><![CDATA[(*!
+<summary>Resolves a variable for condition evaluation with workflow fallback last.</summary>
+<description>
+Searches this condition and its parent chain for direct bindings, then the evaluating activity and its
+ancestors. Legacy providers without ILocalVariableContainer are consulted afterward using their opaque
+lookup policy. Finally searches this condition's workflow, then a distinct evaluating activity workflow.
+Preserves nearest-scope shadowing for standard elements. The graph and registered storage must remain
+alive and stable in one owner task. Returns FALSE without exception escape or clearing terminal OOM;
+the borrowed output is usable only on TRUE.
+</description>
+<param name="name">Case-sensitive binding name.</param>
+<param name="activity">Optional evaluating activity supplying additional local scopes and fallback.</param>
+<param name="variable">Borrowed resolved descriptor, usable only on TRUE.</param>
+*)
+METHOD PROTECTED TryResolveVariable : BOOL
+VAR_INPUT
+	name : STRING;
+	activity : IActivity;
+END_VAR
+VAR_OUTPUT
+	variable : TOF_Core.GENERIC_VALUE;
+END_VAR
+VAR
+	ownerWorkflow : IWorkflow;
+	contextWorkflow : IWorkflow;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF TOF_Core.DynamicMemoryManager.HasAllocationFailed THEN
+	RETURN;
+END_IF
+
+__TRY
+	TryResolveVariable := tryGetHierarchyVariable(
+		scope := THIS^,
+		name := name,
+		localLookup := TRUE,
+		variable => variable
+	);
+
+	IF NOT TryResolveVariable AND_THEN NOT TOF_Core.DynamicMemoryManager.HasAllocationFailed THEN
+		TryResolveVariable := tryGetHierarchyVariable(
+			scope := activity,
+			name := name,
+			localLookup := TRUE,
+			variable => variable
+		);
+	END_IF
+
+	IF NOT TryResolveVariable AND_THEN NOT TOF_Core.DynamicMemoryManager.HasAllocationFailed THEN
+		TryResolveVariable := tryGetHierarchyVariable(
+			scope := THIS^,
+			name := name,
+			localLookup := FALSE,
+			variable => variable
+		);
+	END_IF
+
+	IF NOT TryResolveVariable AND_THEN NOT TOF_Core.DynamicMemoryManager.HasAllocationFailed THEN
+		TryResolveVariable := tryGetHierarchyVariable(
+			scope := activity,
+			name := name,
+			localLookup := FALSE,
+			variable => variable
+		);
+	END_IF
+
+	IF NOT TryResolveVariable AND_THEN NOT TOF_Core.DynamicMemoryManager.HasAllocationFailed THEN
+		ownerWorkflow := Workflow;
+
+		IF ownerWorkflow <> 0 AND_THEN NOT TOF_Core.DynamicMemoryManager.HasAllocationFailed THEN
+			TryResolveVariable := ownerWorkflow.TryGetVariable(name := name, variable => variable);
+		END_IF
+	END_IF
+
+	IF NOT TryResolveVariable AND_THEN NOT TOF_Core.DynamicMemoryManager.HasAllocationFailed
+		AND_THEN activity <> 0
+	THEN
+		contextWorkflow := activity.Workflow;
+
+		IF contextWorkflow <> 0 AND_THEN contextWorkflow <> ownerWorkflow
+			AND_THEN NOT TOF_Core.DynamicMemoryManager.HasAllocationFailed
+		THEN
+			TryResolveVariable := contextWorkflow.TryGetVariable(name := name, variable => variable);
+		END_IF
+	END_IF
+__CATCH
+	TryResolveVariable := FALSE;
+__ENDTRY
+
+IF TOF_Core.DynamicMemoryManager.HasAllocationFailed THEN
+	TryResolveVariable := FALSE;
+END_IF]]></ST>
+      </Implementation>
+    </Method>
   </POU>
 </TcPlcObject>

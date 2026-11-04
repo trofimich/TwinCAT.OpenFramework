@@ -32,14 +32,21 @@ accepted messages and best-effort file release; continue Execute until STOPPED o
 finishes. Start resumes only STOPPED, retaining the file counter and opening the next generated file when a
 message arrives. New messages are rejected from Stop until Start. Lifecycle calls belong to the same owner
 task as Execute. STOPPED means the close attempt and buffer cleanup finished, not certified physical closure
-after a native close error; the underlying resource manager retains its best-effort policy.
+after a native close error; the underlying resource manager retains its best-effort policy. Embedded task
+and resource diagnostics use an owned AdsLogger directly, bypassing LogManager filters/counters and avoiding
+feedback into this logger or its QueuedLogger wrapper. maxRecordsPerFile must be positive; zero rejects
+admission and the first Execute enters FAILED before any filesystem operation. The configured timeout
+applies to directory, open, write and close requests, not to the whole logger lifecycle.
 </description>
 *)
 
 {attribute 'no_explicit_call' := 'do not call this function block directly'}
 FUNCTION_BLOCK SimpleTextFileLogger EXTENDS TOF_Core.Object IMPLEMENTS TOF_Core.ILogger
-VAR
+VAR_STAT
+	//! <summary>Static type metadata shared by instances without reading mutable instance state.</summary>
 	_ClassName : STRING := __POUNAME();
+END_VAR
+VAR
 	
 	{attribute 'hide'} 
 	_State : SIMPLE_TEXT_FILE_LOGGER_STATE;
@@ -55,11 +62,14 @@ VAR
 	
 	_LogFilePrefix : STRING(32);
 
-	_CreateDirectoryIfNotExists : TOF_FileSystem.CreateDirectoryIfNotExists("CreateDirectoryIfNotExists");	
+	//! <summary>Independent owner-task channel for embedded task and file-resource diagnostics.</summary>
+	_InternalDiagnosticLogger : TOF_Core.AdsLogger;
+
+	_CreateDirectoryIfNotExists : TOF_FileSystem.CreateDirectoryIfNotExists(name := "CreateDirectoryIfNotExists");	
 	
-	_FileContentManager : TOF_FileSystem.FileContentManager("FileContentManager");
+	_FileContentManager : TOF_FileSystem.FileContentManager(name := "FileContentManager");
 	_RecordsPerFile : UINT;
-	_WriteBytesTask : TOF_FileSystem.WriteBytesToFile("WriteBytesTask");
+	_WriteBytesTask : TOF_FileSystem.WriteBytesToFile(name := "WriteBytesTask");
 	
 	_MaxRecordsPerFile : UINT := 100;
 	
@@ -78,7 +88,13 @@ END_VAR]]></Declaration>
     <Folder Name="Service members" Id="{31f4dc51-0481-47a0-9f27-e4a804e1bc51}" />
     <Folder Name="Settings" Id="{a5c9b4b6-8ecf-4d2a-aad7-cca7912de4af}" />
     <Property Name="AmsNetId" Id="{db9518e6-7a39-4ac8-867a-92c65be113ea}" FolderPath="Settings\">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Reports the ADS target copied at construction.</summary>
+<description>
+Directory and file operations use this target; an empty value selects the local system. No I/O is performed.
+</description>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY AmsNetId : Tc2_System.T_AmsNetID]]></Declaration>
       <Get Name="Get" Id="{530d554b-478f-4d22-919b-d8853b880ece}">
         <Declaration><![CDATA[]]></Declaration>
@@ -117,7 +133,14 @@ PROPERTY Busy : BOOL]]></Declaration>
       </Get>
     </Property>
     <Property Name="ClassName" Id="{6c5a9607-3c00-4c0a-8401-629f2e4ee076}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Provides the concrete logger type name.</summary>
+<description>
+Returns borrowed read-only initialized static storage. Reading has no side effects or exceptions.
+Do not modify the referenced metadata; initialized storage is available before base initialization.
+</description>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
       <Get Name="Get" Id="{0de335d9-e75a-41b2-898b-58ea3af1863b}">
         <Declaration><![CDATA[]]></Declaration>
@@ -178,7 +201,14 @@ createCurrentFilePath := TOF_Core.Strings.Concat255(
       </Implementation>
     </Method>
     <Property Name="DirectoryPath" Id="{28aea964-b2f7-4d34-9438-82c3e54285f7}" FolderPath="Settings\">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Reports the copied output directory.</summary>
+<description>
+The native target resolves this path with DirectoryPathType. Filename generation retains the configured
+directory and rejects overflow rather than silently truncating the generated path.
+</description>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY DirectoryPath : Tc2_System.T_MaxString]]></Declaration>
       <Get Name="Get" Id="{4d97eb27-ef49-4b43-a312-0269a99b3764}">
         <Declaration><![CDATA[]]></Declaration>
@@ -188,7 +218,13 @@ PROPERTY DirectoryPath : Tc2_System.T_MaxString]]></Declaration>
       </Get>
     </Property>
     <Property Name="DirectoryPathType" Id="{e71793a7-aadb-4558-8862-be98618eea47}" FolderPath="Settings\">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Reports the native path context copied at construction.</summary>
+<description>
+Used by both directory creation and file opening; this observation does not validate or open a path.
+</description>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY DirectoryPathType : Tc2_System.E_OpenPath]]></Declaration>
       <Get Name="Get" Id="{d6c43e3e-9d0c-4541-99cd-2e8c4518ca4c}">
         <Declaration><![CDATA[]]></Declaration>
@@ -198,7 +234,15 @@ PROPERTY DirectoryPathType : Tc2_System.E_OpenPath]]></Declaration>
       </Get>
     </Property>
     <Property Name="ErrorMessage" Id="{5a7d9063-33f0-46e9-a8be-787b9c0b94fb}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Borrows the retained terminal failure diagnostic.</summary>
+<description>
+Meaningful after State becomes FAILED; cleanup preserves the original diagnostic. The reference remains
+valid while this instance lives. Treat it as read-only: ST reference assignment can otherwise mutate it.
+Read only from the logger owner task or with external synchronization; no cross-task snapshot is provided.
+</description>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY ErrorMessage : REFERENCE TO TOF_Core.ERROR_MESSAGE]]></Declaration>
       <Get Name="Get" Id="{8798ddfa-1ff2-4292-a2e0-f047127f13ab}">
         <Declaration><![CDATA[]]></Declaration>
@@ -233,7 +277,18 @@ VAR
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[__TRY
+	stopAfterAllocationFailure();
+
+	IF _State = SIMPLE_TEXT_FILE_LOGGER_STATE.INITIAL
+		AND_THEN _MaxRecordsPerFile = TOF_Core.UnsignedInt16.MIN_VALUE
+	THEN
+		_ErrorMessage := "MaxRecordsPerFile must be greater than zero.";
+		_State := SIMPLE_TEXT_FILE_LOGGER_STATE.FAILED;
+		_CleanupPending := TRUE;
+	END_IF
+
 	IF _State = SIMPLE_TEXT_FILE_LOGGER_STATE.FAILED THEN
+
 		IF NOT _CleanupPending THEN
 			RETURN;
 		END_IF
@@ -270,23 +325,38 @@ END_VAR]]></Declaration>
 
 	CASE _State OF
 		SIMPLE_TEXT_FILE_LOGGER_STATE.INITIAL:
+
 			IF _StopRequested AND_THEN _QueueCount = TOF_Core.UnsignedInt32.ZERO THEN
 				_State := SIMPLE_TEXT_FILE_LOGGER_STATE.STOPPED;
 				RETURN;
 			END_IF
 
 			_CreateDirectoryIfNotExists.Reset();
+
+			IF stopAfterAllocationFailure() THEN
+				RETURN;
+			END_IF
+
 			_CreateDirectoryIfNotExists.Start();
-			
+
+			IF stopAfterAllocationFailure() THEN
+				RETURN;
+			END_IF
+
 			_State := SIMPLE_TEXT_FILE_LOGGER_STATE.CREATING_DIRECTORY;
-		
-		SIMPLE_TEXT_FILE_LOGGER_STATE.CREATING_DIRECTORY:	
+
+		SIMPLE_TEXT_FILE_LOGGER_STATE.CREATING_DIRECTORY:
 			_CreateDirectoryIfNotExists.Execute();
-			
+
+			IF stopAfterAllocationFailure() THEN
+				RETURN;
+			END_IF
+
 			IF _CreateDirectoryIfNotExists.State.Stopped THEN
-				IF _CreateDirectoryIfNotExists.FinalStopReason.WorkDone THEN					
+
+				IF _CreateDirectoryIfNotExists.FinalStopReason.WorkDone THEN
 					_State := SIMPLE_TEXT_FILE_LOGGER_STATE.LOGGING;
-				ELSE			
+				ELSE
 					TOF_Core.Exceptions.ThrowStandard(
 						sourceNamespaceName := NamespaceName,
 						sourceClassName := ClassName,
@@ -295,12 +365,17 @@ END_VAR]]></Declaration>
 						message := "Log directory not created"
 					);
 				END_IF
-			END_IF	
-			
+
+			END_IF
+
 		SIMPLE_TEXT_FILE_LOGGER_STATE.LOGGING:
 			_FileContentManager.Execute();
-			
-			IF _FileContentManager.State.Stopped AND_THEN _FileContentManager.FinalStopReason.Failure THEN					
+
+			IF stopAfterAllocationFailure() THEN
+				RETURN;
+			END_IF
+
+			IF _FileContentManager.State.Stopped AND_THEN _FileContentManager.FinalStopReason.Failure THEN
 				formattedExceptionMessage := _FileContentManager.FinalStopReason.Message;
 
 				TOF_Core.Exceptions.ThrowStandard(
@@ -310,9 +385,13 @@ END_VAR]]></Declaration>
 					sourcePosition := __POSITION(),
 					message := formattedExceptionMessage
 				);
-			END_IF	
-			
+			END_IF
+
 			processPendingMessages();
+
+			IF stopAfterAllocationFailure() THEN
+				RETURN;
+			END_IF
 
 			IF _StopRequested
 				AND_THEN _QueueCount = TOF_Core.UnsignedInt32.ZERO
@@ -325,6 +404,10 @@ END_VAR]]></Declaration>
 		SIMPLE_TEXT_FILE_LOGGER_STATE.STOPPING:
 			_FileContentManager.Execute();
 
+			IF stopAfterAllocationFailure() THEN
+				RETURN;
+			END_IF
+
 			IF _FileContentManager.State.Stopped AND_THEN _FileContentManager.FinalStopReason.Failure THEN
 				_ErrorMessage := _FileContentManager.FinalStopReason.Message;
 				_State := SIMPLE_TEXT_FILE_LOGGER_STATE.FAILED;
@@ -335,8 +418,18 @@ END_VAR]]></Declaration>
 			IF NOT _FileContentManager.State.Running THEN
 				(* No queued write or native I/O remains; borrowed buffer storage may now be released. *)
 				_FileContentManager.Reset();
+
+				IF stopAfterAllocationFailure() THEN
+					RETURN;
+				END_IF
+
 				_FileContentManager.StopWhenNoPendingTasks := FALSE;
 				_WriteBytesTask.Reset();
+
+				IF stopAfterAllocationFailure() THEN
+					RETURN;
+				END_IF
+
 				_WriteBytesTask.SourceBuffer := TOF_Core.Memory.NULL_ADDRESS;
 				_WriteBytesTask.BytesCountToWrite := TOF_Core.UnsignedInt32.ZERO;
 				_SendBuffer.Clear(releaseDynamicMemory := TRUE);
@@ -344,7 +437,9 @@ END_VAR]]></Declaration>
 
 				_State := SIMPLE_TEXT_FILE_LOGGER_STATE.STOPPED;
 			END_IF
+
 	END_CASE
+
 __CATCH(exceptionCode)
 	IF _State <> SIMPLE_TEXT_FILE_LOGGER_STATE.FAILED THEN
 		_State := SIMPLE_TEXT_FILE_LOGGER_STATE.FAILED;
@@ -361,18 +456,29 @@ __CATCH(exceptionCode)
 		__CATCH
 			_ErrorMessage := "File logger failed; diagnostic information is unavailable.";
 		__ENDTRY
+
 	END_IF
+
 __ENDTRY]]></ST>
       </Implementation>
     </Method>
     <Method Name="FB_init" Id="{bc5368c5-4e8b-4212-a2e8-e686311d988e}">
-      <Declaration><![CDATA[
-
-//!<param name="directoryPathType">use Tc2_System.E_OpenPath.PATH_GENERIC by default</param>
-
-//!<param name="timeout">use Tc2_System.Global_Variables.DEFAULT_ADS_TIMEOUT by default</param>
-
-//!<param name="amsNetId">use '' for local system</param>
+      <Declaration><![CDATA[(*!
+<summary>Copies logger configuration and binds an independent diagnostic route without performing I/O.</summary>
+<description>
+All additional constructor arguments must be supplied explicitly. directoryPath and logFilePrefix determine
+the existing timestamp/counter filename policy; instances must use separate output files. maxRecordsPerFile
+must be positive. Zero is retained without throwing here; TryLog rejects it and Execute reports FAILED before
+filesystem I/O. timeout applies to directory, open, write and close requests. Lifecycle initialization only
+copies configuration and borrowed routes; it does not create exceptions or invoke diagnostic callbacks.
+</description>
+<param name="directoryPath">Output directory resolved on the configured ADS target.</param>
+<param name="logFilePrefix">Filename prefix copied for this instance.</param>
+<param name="maxRecordsPerFile">Positive record count; zero is reported by Execute before I/O.</param>
+<param name="directoryPathType">Native path context for directory and file operations.</param>
+<param name="timeout">Per-request native timeout for directory, open, write and close.</param>
+<param name="amsNetId">ADS target; empty selects the local system.</param>
+*)
 METHOD FB_init : BOOL
 VAR_INPUT
 	bInitRetains : BOOL; // TRUE: the retain variables are initialized (reset warm / reset cold)
@@ -380,13 +486,18 @@ VAR_INPUT
 	directoryPath : Tc2_System.T_MaxString;
 	logFilePrefix : STRING(32);
 	maxRecordsPerFile : UINT;
-	directoryPathType : Tc2_System.E_OpenPath := Tc2_System.E_OpenPath.PATH_GENERIC; 
-	timeout : TIME := Tc2_System.Global_Variables.DEFAULT_ADS_TIMEOUT; 
-	amsNetId : Tc2_System.T_AmsNetID := ''; 
+	directoryPathType : Tc2_System.E_OpenPath; 
+	timeout : TIME; 
+	amsNetId : Tc2_System.T_AmsNetID; 
 END_VAR
 ]]></Declaration>
       <Implementation>
-        <ST><![CDATA[_CreateDirectoryIfNotExists.DirectoryPath := directoryPath;
+        <ST><![CDATA[_CreateDirectoryIfNotExists.DiagnosticLogger := _InternalDiagnosticLogger;
+_FileContentManager.DiagnosticLogger := _InternalDiagnosticLogger;
+_WriteBytesTask.DiagnosticLogger := _InternalDiagnosticLogger;
+_WriteBytesTask.Timeout := timeout;
+
+_CreateDirectoryIfNotExists.DirectoryPath := directoryPath;
 _CreateDirectoryIfNotExists.PathType := directoryPathType;
 _CreateDirectoryIfNotExists.Timeout := timeout;
 _CreateDirectoryIfNotExists.AmsNetId := amsNetId;
@@ -400,11 +511,18 @@ _FileContentManager.AmsNetId := amsNetId;
 
 _LogFilePrefix := logFilePrefix;
 
-_MaxRecordsPerFile := maxRecordsPerFile; ]]></ST>
+_MaxRecordsPerFile := maxRecordsPerFile;]]></ST>
       </Implementation>
     </Method>
     <Property Name="LogFilePrefix" Id="{146ab0f3-3bee-4300-b03e-e0ac8f4dcd78}" FolderPath="Settings\">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Reports the filename prefix copied at construction.</summary>
+<description>
+Combined with local timestamp and the retained counter; it does not establish exclusive creation or
+global uniqueness. Use separate output files for independent logger instances.
+</description>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY LogFilePrefix : STRING(32)]]></Declaration>
       <Get Name="Get" Id="{a928530e-14c6-4320-a490-9478edb8bdec}">
         <Declaration><![CDATA[]]></Declaration>
@@ -414,7 +532,14 @@ PROPERTY LogFilePrefix : STRING(32)]]></Declaration>
       </Get>
     </Property>
     <Property Name="MaxRecordsPerFile" Id="{beb3d3d9-cff4-4690-9465-35ffe8503203}" FolderPath="Settings\">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Reports the positive number of diagnostic records permitted in one generated file.</summary>
+<description>
+Zero is a configuration error: TryLog rejects admission and Execute records FAILED before filesystem I/O.
+The limit counts diagnostic records, not physical lines inside a message; rotation advances on Execute.
+</description>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY MaxRecordsPerFile : UINT]]></Declaration>
       <Get Name="Get" Id="{7fa1b082-aa9d-4ae5-b1bc-a908672be28a}">
         <Declaration><![CDATA[]]></Declaration>
@@ -424,7 +549,13 @@ PROPERTY MaxRecordsPerFile : UINT]]></Declaration>
       </Get>
     </Property>
     <Property Name="NamespaceName" Id="{4431f0cd-01ee-42e1-822b-47c557994012}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Borrows the library namespace.</summary>
+<description>
+Read-only compiler-initialized namespace storage; do not modify the referenced text.
+</description>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
       <Get Name="Get" Id="{629e0b94-319d-499b-9f3c-7a384bc3cd7b}">
         <Declaration><![CDATA[]]></Declaration>
@@ -468,7 +599,7 @@ IF NOT _WriteBytesTask.State.Ready AND_THEN NOT _WriteBytesTask.State.Stopped TH
 		message := formattedExceptionMessage
 	);
 END_IF
- 
+
 IF _WriteBytesTask.State.Stopped AND_THEN NOT _WriteBytesTask.FinalStopReason.WorkDone THEN
 	formattedExceptionMessage := TOF_Core.WideStrings.Concat255(
 		"WriteBytesTask has invalid stop reason '",
@@ -482,17 +613,19 @@ IF _WriteBytesTask.State.Stopped AND_THEN NOT _WriteBytesTask.FinalStopReason.Wo
 		sourcePOUName := __POUNAME(),
 		sourcePosition := __POSITION(),
 		message := formattedExceptionMessage
-	);	
+	);
 END_IF
 
 IF _RecordsPerFile >= _MaxRecordsPerFile AND_THEN _FileContentManager.State.Running THEN
+
 	IF NOT _FileContentManager.RunningSubstate.ResourceReleasing THEN
 		_FileContentManager.Cancel();
 	END_IF
 
 	IF _FileContentManager.State.Running THEN
 		RETURN;
-	END_IF	
+	END_IF
+
 END_IF
 
 _SendBuffer.Clear();
@@ -500,13 +633,21 @@ _SendBuffer.Clear();
 IF _FileContentManager.FilePath = '' OR_ELSE _RecordsPerFile >= _MaxRecordsPerFile THEN
 	_RecordsPerFile := 0;
 	_LogFileCounter := _LogFileCounter + 1;
-	
+
 	_FileContentManager.Reset();
-	
+
+	IF stopAfterAllocationFailure() THEN
+		RETURN;
+	END_IF
+
 	_FileContentManager.FilePath := createCurrentFilePath();
-	
+
 	_FileContentManager.Start();
-	
+
+	IF stopAfterAllocationFailure() THEN
+		RETURN;
+	END_IF
+
 	_SendBuffer.AppendData(
 		data := ADR(TOF_Core.WideStrings.ByteOrderMark),
 		dataSize := SIZEOF(TOF_Core.WideStrings.ByteOrderMark)
@@ -522,21 +663,29 @@ WHILE _QueueCount > 0 DO
 		data := ADR(TOF_Core.WideStrings.NewLine),
 		dataSize := TO_DINT(SIZEOF(TOF_Core.WideStrings.NewLine) - TOF_Core.WideStrings.CharSize)
 	);
-	
+
 	_ReadIndex := _ReadIndex + 1;
+
 	IF _ReadIndex >= Parameters.MAX_PENDING_LOG_MESSAGES THEN
 		_ReadIndex := 0;
 	END_IF
+
 	_QueueCount := _QueueCount - 1;
-	
+
 	_RecordsPerFile := _RecordsPerFile + 1;
-	
+
 	IF _RecordsPerFile >= _MaxRecordsPerFile THEN
 		EXIT;
 	END_IF
+
 END_WHILE
 
 _WriteBytesTask.Reset();
+
+IF stopAfterAllocationFailure() THEN
+	RETURN;
+END_IF
+
 _WriteBytesTask.SourceBuffer := _SendBuffer.DataAddress;
 _WriteBytesTask.BytesCountToWrite := TO_UDINT(_SendBuffer.Length);
 
@@ -544,7 +693,13 @@ _FileContentManager.Enqueue(fileHandleTask := _WriteBytesTask);]]></ST>
       </Implementation>
     </Method>
     <Property Name="SelfSize" Id="{b9231c56-1285-4e63-ad5b-c9e11184018f}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Reports the size of the concrete logger instance in bytes.</summary>
+<description>
+Includes the fixed queue and embedded instances; separately allocated dynamic buffers are excluded.
+</description>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY SelfSize : ULINT]]></Declaration>
       <Get Name="Get" Id="{52d3ef31-002b-4f65-8047-d3dfbc84d9a8}">
         <Declaration><![CDATA[]]></Declaration>
@@ -619,7 +774,14 @@ Stop := TRUE;]]></ST>
       </Implementation>
     </Method>
     <Property Name="Timeout" Id="{99ab8e8d-9dc9-4652-a5a8-5bf0cbecebc1}" FolderPath="Settings\">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Reports the per-request native timeout copied at construction.</summary>
+<description>
+Applies to directory enumeration/creation and file open, write and close requests. It is not a deadline
+for the whole logger lifecycle or a guarantee of physical release after native failure.
+</description>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY Timeout : TIME]]></Declaration>
       <Get Name="Get" Id="{c080a9e4-56eb-4735-8797-b6726b7c34d3}">
         <Declaration><![CDATA[]]></Declaration>
@@ -636,6 +798,8 @@ Returns FALSE after Stop or in FAILED state, or when the message queue is full b
 the error. An invalid reference is ignored. Otherwise delegates to TryLogMessage; TRUE confirms buffering, not
 completion of the file write. Exceptions are caught and reported as FALSE without further logging. The
 terminal allocation latch is preserved.
+Returns FALSE when fatal allocation state is observed before work or after nested calls. The latch remains
+set for the caller's task boundary; already accepted or emitted records are not rolled back.
 </description>
 <param name="error">Borrowed error to format.</param>
 <param name="messageNumber">Optional borrowed number to include in the buffered text.</param>
@@ -650,7 +814,13 @@ VAR
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[__TRY
-	IF _StopRequested
+
+	IF TOF_Core.DynamicMemoryManager.HasAllocationFailed THEN
+		RETURN;
+	END_IF
+
+	IF _MaxRecordsPerFile = TOF_Core.UnsignedInt16.MIN_VALUE
+		OR_ELSE _StopRequested
 		OR_ELSE _State = SIMPLE_TEXT_FILE_LOGGER_STATE.FAILED
 		OR_ELSE _QueueCount >= Parameters.MAX_PENDING_LOG_MESSAGES
 	THEN
@@ -668,10 +838,19 @@ END_VAR]]></Declaration>
 	);
 
 	TryLogError := TryLogMessage(
-		category := SEL(error.Severity = TOF_Core.ERROR_SEVERITY.CRITICAL, TOF_Core.LOG_CATEGORY.ERROR, TOF_Core.LOG_CATEGORY.CRITICAL_ERROR),
+		category := SEL(
+			error.Severity = TOF_Core.ERROR_SEVERITY.CRITICAL,
+			TOF_Core.LOG_CATEGORY.ERROR,
+			TOF_Core.LOG_CATEGORY.CRITICAL_ERROR
+		),
 		message := message,
 		messageNumber := messageNumber
 	);
+
+	IF TOF_Core.DynamicMemoryManager.HasAllocationFailed THEN
+		TryLogError := FALSE;
+	END_IF
+
 __CATCH
 	TryLogError := FALSE;
 __ENDTRY]]></ST>
@@ -686,6 +865,8 @@ must remain live while their diagnostics are read. Logging does not extend their
 Stop or in FAILED state, or when the message queue is full before reading or formatting the exception.
 Otherwise TRUE confirms buffering, not completion of the file write. Exceptions are caught and reported as
 FALSE without further logging. The terminal allocation latch is preserved.
+Returns FALSE when fatal allocation state is observed before work or after nested calls. The latch remains
+set for the caller's task boundary; already accepted or emitted records are not rolled back.
 </description>
 <param name="exception">Exception view to read; null is ignored.</param>
 <param name="severity">Severity used to select the log category.</param>
@@ -701,7 +882,13 @@ VAR
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[__TRY
-	IF _StopRequested
+
+	IF TOF_Core.DynamicMemoryManager.HasAllocationFailed THEN
+		RETURN;
+	END_IF
+
+	IF _MaxRecordsPerFile = TOF_Core.UnsignedInt16.MIN_VALUE
+		OR_ELSE _StopRequested
 		OR_ELSE _State = SIMPLE_TEXT_FILE_LOGGER_STATE.FAILED
 		OR_ELSE _QueueCount >= Parameters.MAX_PENDING_LOG_MESSAGES
 	THEN
@@ -720,6 +907,11 @@ END_VAR]]></Declaration>
 		message := message,
 		messageNumber := messageNumber
 	);
+
+	IF TOF_Core.DynamicMemoryManager.HasAllocationFailed THEN
+		TryLogException := FALSE;
+	END_IF
+
 __CATCH
 	TryLogException := FALSE;
 __ENDTRY]]></ST>
@@ -733,10 +925,11 @@ Returns FALSE after Stop or in FAILED state, or when the queue reaches Parameter
 before formatting or allocating buffered text. Queue rejection does not discard previously accepted messages.
 Otherwise formats an optional message number followed by the category and message. Preserves the prefixes and
 marks truncated text with an ellipsis. Formatting uses local storage without raising a size-overflow
-exception; creating and queuing the owned text still requires memory. Returns TRUE after successful insertion
+exception. Text admission copies into fixed instance-owned queue storage without heap allocation. Returns TRUE after successful insertion
 into the message buffer; this confirms acceptance, not completion of the asynchronous file write. Exceptions
-are caught and reported as FALSE without further logging. The terminal allocation latch is preserved. An owned
-text copy is released if insertion fails before ownership transfers to the queue.
+are caught and reported as FALSE without further logging. The terminal allocation latch is preserved.
+Returns FALSE when fatal allocation state is observed before work or after nested calls. The latch remains
+set for the caller's task boundary; already accepted or emitted records are not rolled back.
 </description>
 *)
 METHOD TryLogMessage : BOOL
@@ -754,7 +947,13 @@ VAR
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[__TRY
-	IF _StopRequested
+
+	IF TOF_Core.DynamicMemoryManager.HasAllocationFailed THEN
+		RETURN;
+	END_IF
+
+	IF _MaxRecordsPerFile = TOF_Core.UnsignedInt16.MIN_VALUE
+		OR_ELSE _StopRequested
 		OR_ELSE _State = SIMPLE_TEXT_FILE_LOGGER_STATE.FAILED
 		OR_ELSE _QueueCount >= Parameters.MAX_PENDING_LOG_MESSAGES
 	THEN
@@ -775,15 +974,46 @@ END_VAR]]></Declaration>
 
 	_Queue[_WriteIndex] := textToLog;
 	_WriteIndex := _WriteIndex + 1;
+
 	IF _WriteIndex >= Parameters.MAX_PENDING_LOG_MESSAGES THEN
 		_WriteIndex := 0;
 	END_IF
+
 	_QueueCount := _QueueCount + 1;
 
 	TryLogMessage := TRUE;
+
+	IF TOF_Core.DynamicMemoryManager.HasAllocationFailed THEN
+		TryLogMessage := FALSE;
+	END_IF
+
 __CATCH
 	TryLogMessage := FALSE;
 __ENDTRY]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="stopAfterAllocationFailure" Id="{2ce8d69a-5d3b-40c8-bf1b-d96e3d759f40}">
+      <Declaration><![CDATA[(*!
+<summary>Records terminal allocation state without raising or replacing an earlier failure.</summary>
+<description>
+Returns TRUE when the application fatal latch is observed. Marks the logger FAILED and requests cleanup,
+preserving an existing failure diagnostic. No allocation or exception creation occurs. Execute must still
+advance already pending I/O before releasing its borrowed buffer; the caller supplies the fatal task boundary.
+</description>
+*)
+METHOD PRIVATE stopAfterAllocationFailure : BOOL]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF NOT TOF_Core.DynamicMemoryManager.HasAllocationFailed THEN
+	RETURN;
+END_IF
+
+IF _State <> SIMPLE_TEXT_FILE_LOGGER_STATE.FAILED THEN
+	_ErrorMessage := "File logger stopped after a terminal allocation failure.";
+	_State := SIMPLE_TEXT_FILE_LOGGER_STATE.FAILED;
+	_CleanupPending := TRUE;
+END_IF
+
+stopAfterAllocationFailure := TRUE;]]></ST>
       </Implementation>
     </Method>
   </POU>

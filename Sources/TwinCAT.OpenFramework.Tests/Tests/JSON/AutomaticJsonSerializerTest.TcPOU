@@ -1,0 +1,1080 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="AutomaticJsonSerializerTest" Id="{72bccfe4-4bcf-4001-ad0a-0007736f3d7f}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+SPDX-FileCopyrightText: © 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+SPDX-License-Identifier: MIT
+License: https://opensource.org/license/mit
+*)
+
+(*!
+<summary>Exercises native JSON conversion, callback boundaries, capacity and reuse.</summary>
+<description>
+All native serializers, extenders, output buffers and structures are persistent instance fields.
+Uses live static structures with native type metadata and explicit PVOID addresses for ByVarInfo calls.
+The single-field regression clears descriptor ByteAddress for all four conversion paths.
+No cleanup depends on exception stack unwinding.
+Runs twelve TcUnit cases once. Terminal OOM and reported ResetDocument failure require isolated owner
+verification and are not injected by this suite. The caller provides task-boundary exception cleanup.
+</description>
+*)
+
+FUNCTION_BLOCK AutomaticJsonSerializerTest EXTENDS TcUnit.FB_TestSuite
+VAR
+	_Serializer : TOF_JSON.AutomaticJsonSerializer;
+	_Extender : JsonExtenderProbe;
+	_Source : JSON_TEST_VALUE;
+	_Target : JSON_TEST_VALUE;
+	_SingleSource : JSON_TEST_SINGLE_VALUE;
+	_SingleTarget : JSON_TEST_SINGLE_VALUE;
+	_LargeSource : JSON_TEST_LARGE_VALUE;
+	_LargeTarget : JSON_TEST_LARGE_VALUE;
+	_Json : TOF_Core.JSON_DOCUMENT;
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[TryAnyRoundTrip();
+ThrowingAnyRoundTrip();
+SingleFieldVarInfoRoundTrip();
+TryArgumentRejection();
+ThrowingArgumentCategories();
+MalformedJsonAndReuse();
+WrappedCallbacks();
+CallbackContainmentAndReuse();
+ThrowingCallbackPropagation();
+CapacityOverflowAndReuse();
+LongUtf8RoundTrip();
+DecimalPlacesReadback();]]></ST>
+    </Implementation>
+    <Method Name="prepareValues" Id="{f4b3509c-0b37-4451-8174-6c0c83d940d4}">
+      <Declaration><![CDATA[(*!
+<summary>Restores the small payload and disables recoverable callback failure injection.</summary>
+<description>
+Does not allocate, copy serializer instances, retain borrowed exceptions or clear application fatal state.
+</description>
+*)
+METHOD PRIVATE prepareValues]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_Source.Number := 42;
+_Source.Ready := TRUE;
+_Target.Number := 0;
+_Target.Ready := FALSE;
+_Json := '';
+_Extender.Reset();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="TryAnyRoundTrip" Id="{c1d8d259-644e-4072-b24a-8ccf74dc6703}">
+      <Declaration><![CDATA[(*!
+<summary>Checks successful ANY Try conversion and copied byte count.</summary>
+<description>
+Runs once through TcUnit using persistent serializer, callback and structure storage.
+Any caught exception is inspected in the current task before normal task-boundary cleanup.
+</description>
+*)
+METHOD TryAnyRoundTrip
+VAR
+	success : BOOL;
+	jsonSize : UDINT;
+END_VAR
+VAR_INST
+	testFinished : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN
+	RETURN;
+END_IF
+
+TEST(TestName := __POUNAME());
+prepareValues();
+success := _Serializer.TryCreateJsonFromStructure(
+	sourceStructure := _Source,
+	extender := 0,
+	targetJson := _Json,
+	jsonSize => jsonSize
+);
+AssertEquals_BOOL(
+	Expected := TRUE,
+	Actual := success,
+	Message := 'ANY TryCreate must succeed'
+);
+AssertEquals_UDINT(
+	Expected := TO_UDINT(Tc2_Standard.LEN(STR := _Json)) + 1,
+	Actual := jsonSize,
+	Message := 'Copy count must include the terminator'
+);
+success := _Serializer.TryFillStructureFromJson(json := _Json, targetStructure := _Target);
+AssertEquals_BOOL(
+	Expected := TRUE,
+	Actual := success,
+	Message := 'ANY TryFill must succeed'
+);
+AssertEquals_DINT(
+	Expected := 42,
+	Actual := _Target.Number,
+	Message := 'Integer payload must round-trip'
+);
+AssertEquals_BOOL(
+	Expected := TRUE,
+	Actual := _Target.Ready,
+	Message := 'Boolean payload must round-trip'
+);
+
+testFinished := TRUE;
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="ThrowingAnyRoundTrip" Id="{98bbbde3-19bf-4510-95ab-2f58d59e95eb}">
+      <Declaration><![CDATA[(*!
+<summary>Checks successful throwing ANY serialization and restoration.</summary>
+<description>
+Runs once through TcUnit using persistent serializer, callback and structure storage.
+Any caught exception is inspected in the current task before normal task-boundary cleanup.
+</description>
+*)
+METHOD ThrowingAnyRoundTrip
+VAR
+	jsonSize : UDINT;
+END_VAR
+VAR_INST
+	testFinished : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN
+	RETURN;
+END_IF
+
+TEST(TestName := __POUNAME());
+prepareValues();
+_Serializer.CreateJsonFromStructure(
+	sourceStructure := _Source,
+	extender := 0,
+	targetJson := _Json,
+	jsonSize => jsonSize
+);
+_Serializer.FillStructureFromJson(json := _Json, targetStructure := _Target);
+AssertEquals_DINT(
+	Expected := 42,
+	Actual := _Target.Number,
+	Message := 'Integer payload must round-trip'
+);
+AssertEquals_BOOL(
+	Expected := TRUE,
+	Actual := _Target.Ready,
+	Message := 'Boolean payload must round-trip'
+);
+
+testFinished := TRUE;
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="SingleFieldVarInfoRoundTrip" Id="{296b86c2-c43f-478d-ba80-8423bd05c077}">
+      <Declaration><![CDATA[(*!
+<summary>Checks both throwing and Try VAR_INFO paths for a single-field structure.</summary>
+<description>
+Runs once through TcUnit using persistent serializer, callback and structure storage.
+ByVarInfo calls pass explicit PVOID addresses independently of descriptor ByteAddress.
+Any caught exception is inspected in the current task before normal task-boundary cleanup.
+</description>
+*)
+METHOD SingleFieldVarInfoRoundTrip
+VAR
+	sourceInfo : __SYSTEM.VAR_INFO;
+	targetInfo : __SYSTEM.VAR_INFO;
+	success : BOOL;
+	jsonSize : UDINT;
+END_VAR
+VAR_INST
+	testFinished : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN
+	RETURN;
+END_IF
+
+TEST(TestName := __POUNAME());
+prepareValues();
+_SingleSource.Number := -17;
+_SingleTarget.Number := 0;
+sourceInfo := __VARINFO(_SingleSource);
+targetInfo := __VARINFO(_SingleTarget);
+// Regression: explicit pointers must drive all four paths when descriptor addresses are absent.
+sourceInfo.ByteAddress := TOF_Core.UnsignedInt32.ZERO;
+targetInfo.ByteAddress := TOF_Core.UnsignedInt32.ZERO;
+success := _Serializer.TryCreateJsonFromStructureByVarInfo(
+	sourceStructureVarInfo := sourceInfo,
+	sourceStructureAddress := ADR(_SingleSource),
+	extender := 0,
+	targetJson := _Json,
+	jsonSize => jsonSize
+);
+AssertEquals_BOOL(
+	Expected := TRUE,
+	Actual := success,
+	Message := 'Explicit single-field TryCreate must succeed'
+);
+_Serializer.FillStructureByVarInfoFromJson(
+	json := _Json,
+	targetStructureVarInfo := targetInfo,
+	targetStructureAddress := ADR(_SingleTarget)
+);
+AssertEquals_DINT(
+	Expected := -17,
+	Actual := _SingleTarget.Number,
+	Message := 'Explicit type must restore the structure'
+);
+_SingleSource.Number := 91;
+_Serializer.CreateJsonFromStructureByVarInfo(
+	sourceStructureVarInfo := sourceInfo,
+	sourceStructureAddress := ADR(_SingleSource),
+	extender := 0,
+	targetJson := _Json,
+	jsonSize => jsonSize
+);
+success := _Serializer.TryFillStructureByVarInfoFromJson(
+	json := _Json,
+	targetStructureVarInfo := targetInfo,
+	targetStructureAddress := ADR(_SingleTarget)
+);
+AssertEquals_BOOL(
+	Expected := TRUE,
+	Actual := success,
+	Message := 'Explicit single-field TryFill must succeed'
+);
+AssertEquals_DINT(
+	Expected := 91,
+	Actual := _SingleTarget.Number,
+	Message := 'Try must use the supplied type'
+);
+
+testFinished := TRUE;
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="TryArgumentRejection" Id="{c33c6ec8-3b74-4a6c-8c1c-0db0324f6110}">
+      <Declaration><![CDATA[(*!
+<summary>Checks ordinary Try refusals without leaking exceptions or invoking hooks.</summary>
+<description>
+Runs once through TcUnit using persistent serializer, callback and structure storage.
+ByVarInfo calls pass explicit PVOID addresses independently of descriptor ByteAddress.
+Any caught exception is inspected in the current task before normal task-boundary cleanup.
+</description>
+*)
+METHOD TryArgumentRejection
+VAR
+	scalar : DINT;
+	structureAddress : PVOID;
+	sourceInfo : __SYSTEM.VAR_INFO;
+	success : BOOL;
+	jsonSize : UDINT;
+	leaked : BOOL;
+END_VAR
+VAR_INST
+	testFinished : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN
+	RETURN;
+END_IF
+
+TEST(TestName := __POUNAME());
+prepareValues();
+scalar := 3;
+_Json := '{"Number":42,"Ready":true}';
+
+__TRY
+	success := _Serializer.TryCreateJsonFromStructure(
+		sourceStructure := scalar,
+		extender := _Extender,
+		targetJson := _Json,
+		jsonSize => jsonSize
+	);
+	AssertEquals_BOOL(
+		Expected := FALSE,
+		Actual := success,
+		Message := 'Scalar ANY must be rejected'
+	);
+	success := _Serializer.TryFillStructureFromJson(json := _Json, targetStructure := scalar);
+	AssertEquals_BOOL(
+		Expected := FALSE,
+		Actual := success,
+		Message := 'Scalar ANY destination must be rejected'
+	);
+	sourceInfo := __VARINFO(scalar);
+	structureAddress := ADR(scalar);
+	success := _Serializer.TryCreateJsonFromStructureByVarInfo(
+		sourceStructureVarInfo := sourceInfo,
+		sourceStructureAddress := structureAddress,
+		extender := _Extender,
+		targetJson := _Json,
+		jsonSize => jsonSize
+	);
+	AssertEquals_BOOL(
+		Expected := FALSE,
+		Actual := success,
+		Message := 'Scalar descriptor must be rejected'
+	);
+	success := _Serializer.TryFillStructureByVarInfoFromJson(
+		json := _Json,
+		targetStructureVarInfo := sourceInfo,
+		targetStructureAddress := structureAddress
+	);
+	AssertEquals_BOOL(
+		Expected := FALSE,
+		Actual := success,
+		Message := 'Scalar descriptor destination must be rejected'
+	);
+	sourceInfo := __VARINFO(_Source);
+	structureAddress := TOF_Core.Memory.NULL_ADDRESS;
+	success := _Serializer.TryCreateJsonFromStructureByVarInfo(
+		sourceStructureVarInfo := sourceInfo,
+		sourceStructureAddress := structureAddress,
+		extender := _Extender,
+		targetJson := _Json,
+		jsonSize => jsonSize
+	);
+	AssertEquals_BOOL(
+		Expected := FALSE,
+		Actual := success,
+		Message := 'Null source address must be rejected'
+	);
+	success := _Serializer.TryFillStructureByVarInfoFromJson(
+		json := _Json,
+		targetStructureVarInfo := sourceInfo,
+		targetStructureAddress := structureAddress
+	);
+	AssertEquals_BOOL(
+		Expected := FALSE,
+		Actual := success,
+		Message := 'Null destination address must be rejected'
+	);
+__CATCH
+	leaked := TRUE;
+__ENDTRY
+
+AssertEquals_BOOL(
+	Expected := FALSE,
+	Actual := leaked,
+	Message := 'Try argument failures must not escape'
+);
+AssertEquals_UDINT(
+	Expected := 0,
+	Actual := _Extender.StartCount,
+	Message := 'Rejected arguments must skip start'
+);
+AssertEquals_UDINT(
+	Expected := 0,
+	Actual := _Extender.FinishCount,
+	Message := 'Rejected arguments must skip finish'
+);
+
+testFinished := TRUE;
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="ThrowingArgumentCategories" Id="{9ef6b1f9-256d-474a-a1fc-a919dace9da4}">
+      <Declaration><![CDATA[(*!
+<summary>Checks null source and target addresses and unsupported-type exception categories.</summary>
+<description>
+Runs once through TcUnit using persistent serializer, callback and structure storage.
+ByVarInfo calls pass explicit PVOID addresses independently of descriptor ByteAddress.
+Any caught exception is inspected in the current task before normal task-boundary cleanup.
+</description>
+*)
+METHOD ThrowingArgumentCategories
+VAR
+	caught : BOOL;
+	exceptionCode : __SYSTEM.ExceptionCode;
+	caughtException : TOF_Core.IException;
+	scalar : DINT;
+	sourceInfo : __SYSTEM.VAR_INFO;
+	jsonSize : UDINT;
+	missing : TOF_Core.IArgumentNotSpecifiedException;
+	unsupported : TOF_Core.IArgumentTypeClassNotSupportedException;
+END_VAR
+VAR_INST
+	testFinished : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN
+	RETURN;
+END_IF
+
+TEST(TestName := __POUNAME());
+prepareValues();
+sourceInfo := __VARINFO(_Source);
+sourceInfo.ByteAddress := TOF_Core.UnsignedInt32.ZERO;
+
+__TRY
+	_Serializer.CreateJsonFromStructureByVarInfo(
+		sourceStructureVarInfo := sourceInfo,
+		sourceStructureAddress := TOF_Core.Memory.NULL_ADDRESS,
+		extender := 0,
+		targetJson := _Json,
+		jsonSize => jsonSize
+	);
+__CATCH(exceptionCode)
+	caught := TRUE;
+	caughtException := TOF_Core.ExceptionManager.GetLastException(
+		exceptionCode := exceptionCode,
+		catchPointNamespaceName := CurrentNamespace.Name,
+		catchPointPOUName := __POUNAME(),
+		catchPointPosition := __POSITION()
+	);
+	AssertEquals_BOOL(
+		Expected := TRUE,
+		Actual := __QUERYINTERFACE(caughtException, missing),
+		Message := 'Null source must retain the required-argument category'
+	);
+__ENDTRY
+
+AssertEquals_BOOL(
+	Expected := TRUE,
+	Actual := caught,
+	Message := 'Throwing API must reject a null source'
+);
+caught := FALSE;
+
+// Verify the address guard without entering native conversion.
+__TRY
+	_Serializer.FillStructureByVarInfoFromJson(
+		json := _Json,
+		targetStructureVarInfo := sourceInfo,
+		targetStructureAddress := TOF_Core.Memory.NULL_ADDRESS
+	);
+__CATCH(exceptionCode)
+	caught := TRUE;
+	caughtException := TOF_Core.ExceptionManager.GetLastException(
+		exceptionCode := exceptionCode,
+		catchPointNamespaceName := CurrentNamespace.Name,
+		catchPointPOUName := __POUNAME(),
+		catchPointPosition := __POSITION()
+	);
+	AssertEquals_BOOL(
+		Expected := TRUE,
+		Actual := __QUERYINTERFACE(caughtException, missing),
+		Message := 'Null target must retain the required-argument category'
+	);
+__ENDTRY
+
+AssertEquals_BOOL(
+	Expected := TRUE,
+	Actual := caught,
+	Message := 'Throwing API must reject a null target'
+);
+caught := FALSE;
+
+__TRY
+	_Serializer.FillStructureFromJson(json := _Json, targetStructure := scalar);
+__CATCH(exceptionCode)
+	caught := TRUE;
+	caughtException := TOF_Core.ExceptionManager.GetLastException(
+		exceptionCode := exceptionCode,
+		catchPointNamespaceName := CurrentNamespace.Name,
+		catchPointPOUName := __POUNAME(),
+		catchPointPosition := __POSITION()
+	);
+	AssertEquals_BOOL(
+		Expected := TRUE,
+		Actual := __QUERYINTERFACE(caughtException, unsupported),
+		Message := 'Scalar target must retain the unsupported-type category'
+	);
+__ENDTRY
+
+AssertEquals_BOOL(
+	Expected := TRUE,
+	Actual := caught,
+	Message := 'Throwing API must reject a scalar target'
+);
+
+testFinished := TRUE;
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="MalformedJsonAndReuse" Id="{1fc67793-fe6c-4a21-a3b0-aaa590fa2540}">
+      <Declaration><![CDATA[(*!
+<summary>Checks malformed-input refusal and successful reuse of both fill paths.</summary>
+<description>
+Runs once through TcUnit using persistent serializer, callback and structure storage.
+ByVarInfo calls pass explicit PVOID addresses independently of descriptor ByteAddress.
+Any caught exception is inspected in the current task before normal task-boundary cleanup.
+</description>
+*)
+METHOD MalformedJsonAndReuse
+VAR
+	targetInfo : __SYSTEM.VAR_INFO;
+	success : BOOL;
+END_VAR
+VAR_INST
+	testFinished : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN
+	RETURN;
+END_IF
+
+TEST(TestName := __POUNAME());
+prepareValues();
+_Json := '{';
+targetInfo := __VARINFO(_Target);
+success := _Serializer.TryFillStructureFromJson(json := _Json, targetStructure := _Target);
+AssertEquals_BOOL(
+	Expected := FALSE,
+	Actual := success,
+	Message := 'Malformed JSON must fail ANY TryFill'
+);
+success := _Serializer.TryFillStructureByVarInfoFromJson(
+	json := _Json,
+	targetStructureVarInfo := targetInfo,
+	targetStructureAddress := ADR(_Target)
+);
+AssertEquals_BOOL(
+	Expected := FALSE,
+	Actual := success,
+	Message := 'Malformed JSON must fail explicit TryFill'
+);
+_Json := '{"Number":42,"Ready":true}';
+success := _Serializer.TryFillStructureFromJson(json := _Json, targetStructure := _Target);
+AssertEquals_BOOL(
+	Expected := TRUE,
+	Actual := success,
+	Message := 'ANY fill must recover on the next valid call'
+);
+AssertEquals_DINT(
+	Expected := 42,
+	Actual := _Target.Number,
+	Message := 'Integer payload must round-trip'
+);
+AssertEquals_BOOL(
+	Expected := TRUE,
+	Actual := _Target.Ready,
+	Message := 'Boolean payload must round-trip'
+);
+_Target.Number := 0;
+_Target.Ready := FALSE;
+success := _Serializer.TryFillStructureByVarInfoFromJson(
+	json := _Json,
+	targetStructureVarInfo := targetInfo,
+	targetStructureAddress := ADR(_Target)
+);
+AssertEquals_BOOL(
+	Expected := TRUE,
+	Actual := success,
+	Message := 'Explicit fill must recover on the next valid call'
+);
+AssertEquals_DINT(
+	Expected := 42,
+	Actual := _Target.Number,
+	Message := 'Integer payload must round-trip'
+);
+AssertEquals_BOOL(
+	Expected := TRUE,
+	Actual := _Target.Ready,
+	Message := 'Boolean payload must round-trip'
+);
+
+testFinished := TRUE;
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="WrappedCallbacks" Id="{4808c226-3a22-40e4-8107-cf09e0ea3be9}">
+      <Declaration><![CDATA[(*!
+<summary>Checks prefix/value/suffix order and callback counts.</summary>
+<description>
+Runs once through TcUnit using persistent serializer, callback and structure storage.
+Any caught exception is inspected in the current task before normal task-boundary cleanup.
+</description>
+*)
+METHOD WrappedCallbacks
+VAR
+	success : BOOL;
+	jsonSize : UDINT;
+END_VAR
+VAR_INST
+	testFinished : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN
+	RETURN;
+END_IF
+
+TEST(TestName := __POUNAME());
+prepareValues();
+success := _Serializer.TryCreateJsonFromStructure(
+	sourceStructure := _Source,
+	extender := _Extender,
+	targetJson := _Json,
+	jsonSize => jsonSize
+);
+AssertEquals_BOOL(
+	Expected := TRUE,
+	Actual := success,
+	Message := 'Balanced callbacks must produce a document'
+);
+AssertEquals_STRING(
+	Expected := '[{"Number":42,"Ready":true}]',
+	Actual := _Json,
+	Message := 'Callbacks must surround exactly one structure value'
+);
+AssertEquals_UDINT(
+	Expected := 1,
+	Actual := _Extender.StartCount,
+	Message := 'Start must run once'
+);
+AssertEquals_UDINT(
+	Expected := 1,
+	Actual := _Extender.FinishCount,
+	Message := 'Finish must run once'
+);
+
+testFinished := TRUE;
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="CallbackContainmentAndReuse" Id="{9d8be903-9339-4c86-8a2a-192a74f9546a}">
+      <Declaration><![CDATA[(*!
+<summary>Checks exceptions from each hook in both TryCreate paths and writer reset on reuse.</summary>
+<description>
+Runs once through TcUnit using persistent serializer, callback and structure storage.
+ByVarInfo calls pass explicit PVOID addresses independently of descriptor ByteAddress.
+Any caught exception is inspected in the current task before normal task-boundary cleanup.
+</description>
+*)
+METHOD CallbackContainmentAndReuse
+VAR
+	i : INT;
+	sourceInfo : __SYSTEM.VAR_INFO;
+	success : BOOL;
+	leaked : BOOL;
+	jsonSize : UDINT;
+END_VAR
+VAR_INST
+	testFinished : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN
+	RETURN;
+END_IF
+
+TEST(TestName := __POUNAME());
+prepareValues();
+sourceInfo := __VARINFO(_Source);
+
+FOR i := 0 TO 3 DO
+	_Extender.Reset();
+	_Extender.ThrowAtStart := (i MOD 2) = 0;
+	_Extender.ThrowAtFinish := NOT _Extender.ThrowAtStart;
+	leaked := FALSE;
+
+	__TRY
+
+		IF i < 2 THEN
+			success := _Serializer.TryCreateJsonFromStructure(
+				sourceStructure := _Source,
+				extender := _Extender,
+				targetJson := _Json,
+				jsonSize => jsonSize
+			);
+		ELSE
+			success := _Serializer.TryCreateJsonFromStructureByVarInfo(
+				sourceStructureVarInfo := sourceInfo,
+				sourceStructureAddress := ADR(_Source),
+				extender := _Extender,
+				targetJson := _Json,
+				jsonSize => jsonSize
+			);
+		END_IF
+
+	__CATCH
+		leaked := TRUE;
+	__ENDTRY
+
+	AssertEquals_BOOL(
+		Expected := FALSE,
+		Actual := leaked,
+		Message := 'Callback exception must not escape Try'
+	);
+	AssertEquals_BOOL(
+		Expected := FALSE,
+		Actual := success,
+		Message := 'Each callback exception must fail Try'
+	);
+	AssertEquals_UDINT(
+		Expected := 1,
+		Actual := _Extender.StartCount,
+		Message := 'Start must be observed'
+	);
+
+	IF _Extender.ThrowAtStart THEN
+		AssertEquals_UDINT(
+			Expected := 0,
+			Actual := _Extender.FinishCount,
+			Message := 'Failed start must skip finish'
+		);
+	ELSE
+		AssertEquals_UDINT(
+			Expected := 1,
+			Actual := _Extender.FinishCount,
+			Message := 'Finish failure must be observed'
+		);
+	END_IF
+
+	_Extender.Reset();
+	success := _Serializer.TryCreateJsonFromStructure(
+		sourceStructure := _Source,
+		extender := _Extender,
+		targetJson := _Json,
+		jsonSize => jsonSize
+	);
+	AssertEquals_BOOL(
+		Expected := TRUE,
+		Actual := success,
+		Message := 'Writer must be reusable after either callback failure'
+	);
+	AssertEquals_STRING(
+		Expected := '[{"Number":42,"Ready":true}]',
+		Actual := _Json,
+		Message := 'Reuse must discard the previous partial document'
+	);
+END_FOR
+
+testFinished := TRUE;
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="ThrowingCallbackPropagation" Id="{e39f4e72-98f4-449e-b482-6a752e648010}">
+      <Declaration><![CDATA[(*!
+<summary>Checks that throwing Create APIs propagate callback failures with their category.</summary>
+<description>
+Runs once through TcUnit using persistent serializer, callback and structure storage.
+ByVarInfo calls pass explicit PVOID addresses independently of descriptor ByteAddress.
+Any caught exception is inspected in the current task before normal task-boundary cleanup.
+</description>
+*)
+METHOD ThrowingCallbackPropagation
+VAR
+	caught : BOOL;
+	exceptionCode : __SYSTEM.ExceptionCode;
+	caughtException : TOF_Core.IException;
+	standard : TOF_Core.IStandardException;
+	sourceInfo : __SYSTEM.VAR_INFO;
+	jsonSize : UDINT;
+	i : INT;
+END_VAR
+VAR_INST
+	testFinished : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN
+	RETURN;
+END_IF
+
+TEST(TestName := __POUNAME());
+prepareValues();
+sourceInfo := __VARINFO(_Source);
+
+FOR i := 0 TO 1 DO
+	_Extender.Reset();
+	_Extender.ThrowAtStart := i = 0;
+	_Extender.ThrowAtFinish := i = 1;
+	caught := FALSE;
+
+	__TRY
+
+		IF i = 0 THEN
+			_Serializer.CreateJsonFromStructure(
+				sourceStructure := _Source,
+				extender := _Extender,
+				targetJson := _Json,
+				jsonSize => jsonSize
+			);
+		ELSE
+			_Serializer.CreateJsonFromStructureByVarInfo(
+				sourceStructureVarInfo := sourceInfo,
+				sourceStructureAddress := ADR(_Source),
+				extender := _Extender,
+				targetJson := _Json,
+				jsonSize => jsonSize
+			);
+		END_IF
+
+	__CATCH(exceptionCode)
+		caught := TRUE;
+		caughtException := TOF_Core.ExceptionManager.GetLastException(
+			exceptionCode := exceptionCode,
+			catchPointNamespaceName := CurrentNamespace.Name,
+			catchPointPOUName := __POUNAME(),
+			catchPointPosition := __POSITION()
+		);
+		AssertEquals_BOOL(
+			Expected := TRUE,
+			Actual := __QUERYINTERFACE(caughtException, standard),
+			Message := 'Callback failure must remain a StandardException'
+		);
+	__ENDTRY
+
+	AssertEquals_BOOL(
+		Expected := TRUE,
+		Actual := caught,
+		Message := 'Throwing Create must propagate the callback exception'
+	);
+END_FOR
+
+testFinished := TRUE;
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="CapacityOverflowAndReuse" Id="{5e9819e1-9cce-4448-a137-5bd827a4c514}">
+      <Declaration><![CDATA[(*!
+<summary>Checks the full 25000-byte text boundary, overflow refusal and subsequent reset.</summary>
+<description>
+Runs once through TcUnit using persistent serializer, callback and structure storage.
+ASCII byte counts define the boundary and overflow payloads; both terminators fit the large source buffer.
+Any caught exception is inspected in the current task before normal task-boundary cleanup.
+</description>
+*)
+METHOD CapacityOverflowAndReuse
+VAR
+	caught : BOOL;
+	exceptionCode : __SYSTEM.ExceptionCode;
+	caughtException : TOF_Core.IException;
+	standard : TOF_Core.IStandardException;
+	jsonSize : UDINT;
+	success : BOOL;
+	payloadLength : DINT;
+	i : DINT;
+END_VAR
+VAR_INST
+	testFinished : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN
+	RETURN;
+END_IF
+
+TEST(TestName := __POUNAME());
+prepareValues();
+_LargeSource.Text := '';
+_LargeSource.Marker := 7;
+success := _Serializer.TryCreateJsonFromStructure(
+	sourceStructure := _LargeSource,
+	extender := 0,
+	targetJson := _Json,
+	jsonSize => jsonSize
+);
+AssertEquals_BOOL(
+	Expected := TRUE,
+	Actual := success,
+	Message := 'Empty large structure must serialize'
+);
+
+IF success AND_THEN jsonSize < TO_UDINT(SIZEOF(_Json)) THEN
+	payloadLength := TO_DINT(TO_UDINT(SIZEOF(_Json)) - jsonSize);
+
+	// SA0175: ASCII byte counts exercise document capacity; the large source also fits the overflow byte.
+	{analysis -175}
+	FOR i := 0 TO payloadLength - 1 DO
+		_LargeSource.Text[i] := BYTE#16#61;
+	END_FOR
+
+	_LargeSource.Text[payloadLength] := BYTE#0;
+	{analysis +175}
+	success := _Serializer.TryCreateJsonFromStructure(
+		sourceStructure := _LargeSource,
+		extender := 0,
+		targetJson := _Json,
+		jsonSize => jsonSize
+	);
+	AssertEquals_BOOL(
+		Expected := TRUE,
+		Actual := success,
+		Message := 'Exact-capacity document must fit with its terminator'
+	);
+	AssertEquals_UDINT(
+		Expected := TO_UDINT(SIZEOF(_Json)),
+		Actual := jsonSize,
+		Message := 'Exact-capacity copy must include all 25001 bytes'
+	);
+	// SA0175: Append exactly one ASCII byte and its terminator within the large source buffer.
+	{analysis -175}
+	_LargeSource.Text[payloadLength] := BYTE#16#61;
+	_LargeSource.Text[payloadLength + 1] := BYTE#0;
+	{analysis +175}
+	success := _Serializer.TryCreateJsonFromStructure(
+		sourceStructure := _LargeSource,
+		extender := 0,
+		targetJson := _Json,
+		jsonSize => jsonSize
+	);
+	AssertEquals_BOOL(
+		Expected := FALSE,
+		Actual := success,
+		Message := 'One byte beyond capacity must fail Try'
+	);
+
+	__TRY
+		_Serializer.CreateJsonFromStructure(
+			sourceStructure := _LargeSource,
+			extender := 0,
+			targetJson := _Json,
+			jsonSize => jsonSize
+		);
+	__CATCH(exceptionCode)
+		caught := TRUE;
+		caughtException := TOF_Core.ExceptionManager.GetLastException(
+			exceptionCode := exceptionCode,
+			catchPointNamespaceName := CurrentNamespace.Name,
+			catchPointPOUName := __POUNAME(),
+			catchPointPosition := __POSITION()
+		);
+		AssertEquals_BOOL(
+			Expected := TRUE,
+			Actual := __QUERYINTERFACE(caughtException, standard),
+			Message := 'Overflow must report StandardException'
+		);
+	__ENDTRY
+
+	AssertEquals_BOOL(
+		Expected := TRUE,
+		Actual := caught,
+		Message := 'Throwing Create must reject overflow'
+	);
+END_IF
+
+success := _Serializer.TryCreateJsonFromStructure(
+	sourceStructure := _Source,
+	extender := 0,
+	targetJson := _Json,
+	jsonSize => jsonSize
+);
+AssertEquals_BOOL(
+	Expected := TRUE,
+	Actual := success,
+	Message := 'A small document must succeed after overflow'
+);
+AssertEquals_STRING(
+	Expected := '{"Number":42,"Ready":true}',
+	Actual := _Json,
+	Message := 'Overflow reuse must contain only the new document'
+);
+
+testFinished := TRUE;
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="LongUtf8RoundTrip" Id="{5e6df6cf-df2c-49f1-afe5-3481ba89bae6}">
+      <Declaration><![CDATA[(*!
+<summary>Checks long UTF-8 text and escaped characters by independent byte comparison.</summary>
+<description>
+Runs once through TcUnit using persistent serializer, callback and structure storage.
+Constructs and compares exact UTF-8 bytes, including escapes and the terminator, rather than character indexes.
+Any caught exception is inspected in the current task before normal task-boundary cleanup.
+</description>
+*)
+METHOD LongUtf8RoundTrip
+VAR
+	i : DINT;
+	success : BOOL;
+	equal : BOOL;
+	jsonSize : UDINT;
+END_VAR
+VAR_INST
+	testFinished : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN
+	RETURN;
+END_IF
+
+TEST(TestName := __POUNAME());
+prepareValues();
+_LargeSource.Text := '';
+_LargeSource.Marker := 7;
+_LargeTarget.Text := '';
+_LargeTarget.Marker := 0;
+
+// SA0175: Construct exact UTF-8 and escape bytes at offsets 0..305 within the large text buffer.
+{analysis -175}
+FOR i := 0 TO 299 DO
+	_LargeSource.Text[i] := BYTE#16#61;
+END_FOR
+
+// UTF-8 U+00E9 followed by quote, backslash, newline and the terminator.
+_LargeSource.Text[300] := BYTE#16#C3;
+_LargeSource.Text[301] := BYTE#16#A9;
+_LargeSource.Text[302] := BYTE#16#22;
+_LargeSource.Text[303] := BYTE#16#5C;
+_LargeSource.Text[304] := BYTE#16#0A;
+_LargeSource.Text[305] := BYTE#0;
+{analysis +175}
+success := _Serializer.TryCreateJsonFromStructure(
+	sourceStructure := _LargeSource,
+	extender := 0,
+	targetJson := _Json,
+	jsonSize => jsonSize
+);
+AssertEquals_BOOL(
+	Expected := TRUE,
+	Actual := success,
+	Message := 'Long UTF-8 text must serialize'
+);
+success := _Serializer.TryFillStructureFromJson(json := _Json, targetStructure := _LargeTarget);
+AssertEquals_BOOL(
+	Expected := TRUE,
+	Actual := success,
+	Message := 'Long UTF-8 text must deserialize'
+);
+equal := TRUE;
+
+// SA0175: The oracle compares all payload bytes and the terminator, not Unicode character positions.
+{analysis -175}
+FOR i := 0 TO 305 DO
+	equal := equal AND (_LargeSource.Text[i] = _LargeTarget.Text[i]);
+END_FOR
+{analysis +175}
+
+AssertEquals_BOOL(
+	Expected := TRUE,
+	Actual := equal,
+	Message := 'All bytes beyond 255 and escaped characters must round-trip'
+);
+AssertEquals_DINT(
+	Expected := 7,
+	Actual := _LargeTarget.Marker,
+	Message := 'Long text must preserve the adjacent field'
+);
+
+testFinished := TRUE;
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="DecimalPlacesReadback" Id="{b4abe368-84ba-4cef-9b82-35f18e2cb9d8}">
+      <Declaration><![CDATA[(*!
+<summary>Checks native decimal-place configuration and readback without inventing a clamp policy.</summary>
+<description>
+Runs once through TcUnit using persistent serializer, callback and structure storage.
+Any caught exception is inspected in the current task before normal task-boundary cleanup.
+</description>
+*)
+METHOD DecimalPlacesReadback
+VAR_INST
+	testFinished : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN
+	RETURN;
+END_IF
+
+TEST(TestName := __POUNAME());
+prepareValues();
+_Serializer.DecimalPlaces := 3;
+AssertEquals_DINT(
+	Expected := 3,
+	Actual := _Serializer.DecimalPlaces,
+	Message := 'Native decimal setting must be readable'
+);
+
+testFinished := TRUE;
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+  </POU>
+</TcPlcObject>

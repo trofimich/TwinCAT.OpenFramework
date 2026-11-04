@@ -1,0 +1,464 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1" ProductVersion="3.1.4026.21">
+  <POU Name="LoggerTestDirectory" Id="{be5bd226-a0c7-4d51-8629-9154f11cdc07}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+SPDX-FileCopyrightText: © 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+SPDX-License-Identifier: MIT
+License: https://opensource.org/license/mit
+*)
+(*!
+<summary>Reads and removes generated log files from a newly owned test directory.</summary>
+<description>
+Inherits ordinary directory creation and refuses pre-existing paths. Only files matching the configured
+prefix and .log suffix are registered after ownership; other entries are left untouched. The caller prevents
+external directory changes and drains every logger before Cleanup. Enumeration runs to completion before
+loading or deleting files. Expected short records are matched exactly once, including number and category.
+Persistent native state and buffers remain alive during cleanup. Discovery is
+bounded to 32 generated files; byte readback is limited to files smaller than the 8192-byte buffer.
+Errors are retained for owner inspection; no recursive deletion, adoption or terminal OOM injection occurs.
+</description>
+*)
+
+{attribute 'no_explicit_call' := 'do not call this function block directly'}
+FUNCTION_BLOCK LoggerTestDirectory EXTENDS FileTestDirectory
+VAR_STAT
+	//! <summary>Concrete fixture metadata.</summary>
+	_ClassName : STRING := __POUNAME();
+END_VAR
+VAR CONSTANT
+	//! <summary>Maximum discovered artifacts; later entries remain unregistered and are not deleted.</summary>
+	_MaxFiles : UINT := 32;
+	//! <summary>Expected short diagnostic records retained for exact byte-readback matching.</summary>
+	_MaxExpectedRecords : UINT := 50;
+	//! <summary>Maximum payload code units accepted by this short-record regression fixture.</summary>
+	_MaxRecordCharacters : DINT := 255;
+END_VAR
+VAR
+	_LogFilePrefix : STRING(32);
+	_LogCleanupPhase : LOGGER_DIRECTORY_CLEANUP_PHASE;
+	_Enum : Tc2_Utilities.FB_EnumFindFileEntry;
+	_Paths : ARRAY [0.._MaxFiles - 1] OF STRING(255);
+	_FileCount : UINT;
+	_FileIndex : UINT;
+	_RecordCount : UDINT;
+	_ExpectedText : ARRAY [0.._MaxExpectedRecords - 1] OF WSTRING(255);
+	_Matched : ARRAY [0.._MaxExpectedRecords - 1] OF BOOL;
+	_ExpectedCount : UINT;
+	_MatchedCount : UINT;
+	_ReadBuffer : ARRAY [0..4095] OF WORD;
+	_Load : TOF_FileSystem.LoadFile(name := "read generated log file");
+	_Delete : TOF_FileSystem.DeleteFile(name := "delete owned generated log file");
+	_CleanupError : STRING(255);
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[]]></ST>
+    </Implementation>
+    <Property Name="ClassName" Id="{0e159dcc-a395-418d-a3c6-50fde3c9e001}">
+      <Declaration><![CDATA[(*!
+<summary>Borrows the concrete fixture type name.</summary>
+<description>
+Returns initialized static metadata; do not modify the referenced string.
+</description>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{93188e60-3e52-4daf-9b58-c1404ffdcd85}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ClassName REF= _ClassName;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="Cleanup" Id="{7577f3dc-317e-43bf-87cd-4b631a345ccc}">
+      <Declaration><![CDATA[(*!
+<summary>Advances discovery, byte readback and deletion after every scenario logger has drained.</summary>
+<description>
+Keeps incomplete native operations alive across calls. Searches only the exclusively owned directory,
+registers matching regular files, then reads and deletes only those registered paths. The final inherited
+cleanup attempts nonrecursive directory removal. CleanupComplete does not certify physical native release.
+Matching uses exact prefix bytes and ASCII suffix/separators without computing Unicode character positions.
+</description>
+*)
+METHOD Cleanup
+VAR
+	fileName : STRING(255);
+	prefix : STRING(33);
+	i : DINT;
+	recordStart : DINT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF _LogCleanupPhase = LOGGER_DIRECTORY_CLEANUP_PHASE.COMPLETE THEN
+	RETURN;
+END_IF
+
+IF NOT Prepared THEN
+	SUPER^.Cleanup();
+	RETURN;
+END_IF
+
+__TRY
+
+	CASE _LogCleanupPhase OF
+		LOGGER_DIRECTORY_CLEANUP_PHASE.ENUMERATE_FIRST:
+			_Enum(
+				bExecute := FALSE,
+				sNetId := '',
+				sPathName := TOF_Core.Strings.Concat255(DirectoryPath, '\*'),
+				ePath := Tc2_System.E_OpenPath.PATH_GENERIC,
+				tTimeout := T#2S
+			);
+			_LogCleanupPhase := LOGGER_DIRECTORY_CLEANUP_PHASE.ENUMERATE_WAIT;
+			_Enum(bExecute := TRUE, eCmd := Tc2_Utilities.E_EnumCmdType.eEnumCmd_First);
+
+		LOGGER_DIRECTORY_CLEANUP_PHASE.ENUMERATE_WAIT:
+			_Enum(bExecute := FALSE);
+
+			IF NOT _Enum.bBusy THEN
+
+				IF _Enum.bError THEN
+					_CleanupError := TOF_Core.Strings.Concat255('Log discovery error: ', TO_STRING(_Enum.nErrId));
+					_LogCleanupPhase := LOGGER_DIRECTORY_CLEANUP_PHASE.COMPLETE;
+				ELSIF _Enum.bEOE THEN
+					_LogCleanupPhase := LOGGER_DIRECTORY_CLEANUP_PHASE.LOAD_FILE;
+				ELSE
+					fileName := _Enum.stFindFile.sFileName;
+					prefix := TOF_Core.Strings.Concat255(_LogFilePrefix, '_');
+
+					IF fileName <> '.' AND_THEN fileName <> '..' THEN
+
+						// SA0175: Exact prefix bytes and ASCII suffix/separators do not require UTF-8 character positions.
+						{analysis -175}
+						IF NOT _Enum.stFindFile.fileAttributes.bDirectory
+							AND_THEN Tc2_Standard.LEFT(STR := fileName, SIZE := Tc2_Standard.LEN(STR := prefix)) = prefix
+							AND_THEN Tc2_Standard.RIGHT(STR := fileName, SIZE := 4) = '.log'
+							AND_THEN Tc2_Standard.FIND(STR1 := fileName, STR2 := '\') = 0
+							AND_THEN Tc2_Standard.FIND(STR1 := fileName, STR2 := '/') = 0
+							AND_THEN _FileCount < _MaxFiles
+						THEN
+							_Paths[_FileCount] := TOF_Core.Strings.Concat255(DirectoryPath, '\', fileName);
+							_FileCount := _FileCount + 1;
+						ELSE
+							_CleanupError := 'Unknown or excess entry left untouched in owned log directory';
+						END_IF
+						{analysis +175}
+
+					END_IF
+
+					_LogCleanupPhase := LOGGER_DIRECTORY_CLEANUP_PHASE.ENUMERATE_NEXT;
+				END_IF
+
+			END_IF
+
+		LOGGER_DIRECTORY_CLEANUP_PHASE.ENUMERATE_NEXT:
+			_LogCleanupPhase := LOGGER_DIRECTORY_CLEANUP_PHASE.ENUMERATE_WAIT;
+			_Enum(bExecute := TRUE, eCmd := Tc2_Utilities.E_EnumCmdType.eEnumCmd_Next);
+
+		LOGGER_DIRECTORY_CLEANUP_PHASE.LOAD_FILE:
+
+			IF _FileIndex >= _FileCount THEN
+				_LogCleanupPhase := LOGGER_DIRECTORY_CLEANUP_PHASE.REMOVE_DIRECTORY;
+			ELSE
+				_Load.Reset();
+				_Load.FilePath := _Paths[_FileIndex];
+				_Load.TargetBuffer := ADR(_ReadBuffer);
+				_Load.TargetBufferSize := SIZEOF(_ReadBuffer);
+				_Load.Timeout := T#2S;
+
+				IF _Load.Start() THEN
+					_LogCleanupPhase := LOGGER_DIRECTORY_CLEANUP_PHASE.WAIT_FOR_LOAD;
+				ELSE
+					_CleanupError := 'Log readback Start refused';
+					_LogCleanupPhase := LOGGER_DIRECTORY_CLEANUP_PHASE.DELETE_FILE;
+				END_IF
+
+			END_IF
+
+		LOGGER_DIRECTORY_CLEANUP_PHASE.WAIT_FOR_LOAD:
+			_Load.Execute();
+
+			IF _Load.State.Stopped THEN
+
+				IF NOT _Load.FinalStopReason.WorkDone THEN
+					_CleanupError := 'Log byte readback failed';
+				ELSIF _Load.LoadedBytesCount < 4
+					OR_ELSE _Load.LoadedBytesCount >= SIZEOF(_ReadBuffer)
+					OR_ELSE (_Load.LoadedBytesCount MOD 2) <> 0
+					OR_ELSE _ReadBuffer[0] <> TOF_Core.WideStrings.ByteOrderMark
+				THEN
+					_CleanupError := 'Log bytes must contain a complete bounded UTF-16 file with BOM';
+				ELSE
+
+					recordStart := 1;
+
+					FOR i := 1 TO TO_DINT(_Load.LoadedBytesCount / 2) - 1 DO
+
+						IF _ReadBuffer[i] = WORD#16#000D THEN
+							_RecordCount := _RecordCount + 1;
+
+							IF NOT matchExpectedRecord(startIndex := recordStart, characterCount := i - recordStart) THEN
+								_CleanupError := 'Readback record differs from the expected text, category or number';
+							END_IF
+
+							recordStart := i + 1;
+						END_IF
+
+					END_FOR
+
+					IF _ReadBuffer[_Load.LoadedBytesCount / 2 - 1] <> WORD#16#000D THEN
+						_CleanupError := 'Generated record must end with the current wide CR separator';
+					END_IF
+
+				END_IF
+
+				_LogCleanupPhase := LOGGER_DIRECTORY_CLEANUP_PHASE.DELETE_FILE;
+			END_IF
+
+		LOGGER_DIRECTORY_CLEANUP_PHASE.DELETE_FILE:
+			_Delete.Reset();
+			_Delete.FilePath := _Paths[_FileIndex];
+			_Delete.Timeout := T#2S;
+
+			IF _Delete.Start() THEN
+				_LogCleanupPhase := LOGGER_DIRECTORY_CLEANUP_PHASE.WAIT_FOR_DELETE;
+			ELSE
+				_CleanupError := 'Owned log deletion Start refused';
+				_FileIndex := _FileIndex + 1;
+				_LogCleanupPhase := LOGGER_DIRECTORY_CLEANUP_PHASE.LOAD_FILE;
+			END_IF
+
+		LOGGER_DIRECTORY_CLEANUP_PHASE.WAIT_FOR_DELETE:
+			_Delete.Execute();
+
+			IF _Delete.State.Stopped THEN
+
+				IF NOT _Delete.FinalStopReason.WorkDone THEN
+					_CleanupError := 'Owned log deletion failed';
+				END_IF
+
+				_FileIndex := _FileIndex + 1;
+				_LogCleanupPhase := LOGGER_DIRECTORY_CLEANUP_PHASE.LOAD_FILE;
+			END_IF
+
+		LOGGER_DIRECTORY_CLEANUP_PHASE.REMOVE_DIRECTORY:
+			SUPER^.Cleanup();
+
+			IF SUPER^.CleanupComplete THEN
+				_LogCleanupPhase := LOGGER_DIRECTORY_CLEANUP_PHASE.COMPLETE;
+			END_IF
+
+	END_CASE
+
+__CATCH
+	// Keep native instances and their current phase alive for the next cleanup call.
+	_CleanupError := 'Exception interrupted log cleanup; keep cycling and inspect retained fixture state';
+__ENDTRY]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="CleanupComplete" Id="{e8d6c6eb-db29-431f-909d-8052f0b033af}">
+      <Declaration><![CDATA[(*!
+<summary>Reports the owned log fixture CleanupComplete observation.</summary>
+<description>
+Read from the owner task. Retained results remain available after cleanup; completion does not prove
+physical native resource release after an error.
+</description>
+*)
+PROPERTY CleanupComplete : BOOL]]></Declaration>
+      <Get Name="Get" Id="{de93c413-9f94-4c8c-ac88-e1f3298aa6df}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[CleanupComplete := _LogCleanupPhase = LOGGER_DIRECTORY_CLEANUP_PHASE.COMPLETE OR_ELSE SUPER^.CleanupComplete;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="CleanupMessage" Id="{970990f6-8767-4f8f-a8cd-669b00d7dd97}">
+      <Declaration><![CDATA[(*!
+<summary>Reports the owned log fixture CleanupMessage observation.</summary>
+<description>
+Read from the owner task. Retained results remain available after cleanup; completion does not prove
+physical native resource release after an error.
+</description>
+*)
+PROPERTY CleanupMessage : STRING(255)]]></Declaration>
+      <Get Name="Get" Id="{0aebe742-8cda-419c-bc61-8f06f5eb55bf}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[IF _CleanupError <> '' THEN
+	CleanupMessage := _CleanupError;
+ELSIF _MatchedCount <> _ExpectedCount THEN
+	CleanupMessage := 'Some expected log records were not found in the generated files';
+ELSE
+	CleanupMessage := SUPER^.CleanupMessage;
+END_IF]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="CleanupSucceeded" Id="{2f4f21e3-4298-4a98-8018-bf0fb9c43ac1}">
+      <Declaration><![CDATA[(*!
+<summary>Reports the owned log fixture CleanupSucceeded observation.</summary>
+<description>
+Read from the owner task. Retained results remain available after cleanup; completion does not prove
+physical native resource release after an error.
+</description>
+*)
+PROPERTY CleanupSucceeded : BOOL]]></Declaration>
+      <Get Name="Get" Id="{36a19486-ca24-4111-9e95-f69726aa2b83}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[CleanupSucceeded := SUPER^.CleanupSucceeded
+	AND_THEN _CleanupError = ''
+	AND_THEN _MatchedCount = _ExpectedCount;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="ExpectRecord" Id="{18fee2ff-4cd2-4e0c-a7e6-63f64420e280}">
+      <Declaration><![CDATA[(*!
+<summary>Registers one independently specified short record before the logger may write it.</summary>
+<description>
+Call only after directory ownership is established and before Cleanup. Copies up to 255 code units; returns
+FALSE before preparation or when fifty expected records are already stored. Readback matches every record
+exactly once, independently of native enumeration order. Inputs in these scenarios contain no embedded CR.
+</description>
+*)
+METHOD ExpectRecord : BOOL
+VAR_INPUT
+	text : WSTRING(255);
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF NOT Prepared OR_ELSE _ExpectedCount >= _MaxExpectedRecords THEN
+	RETURN;
+END_IF
+
+_ExpectedText[_ExpectedCount] := text;
+_ExpectedCount := _ExpectedCount + 1;
+ExpectRecord := TRUE;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="FB_init" Id="{ac85da5f-4cae-4996-9800-cb5d9b83111a}">
+      <Declaration><![CDATA[(*!
+<summary>Copies the permitted artifact prefix without performing I/O.</summary>
+<description>
+The base receives directoryPath implicitly. Both additional arguments are mandatory at initialization;
+logFilePrefix must equal the logger prefix used exclusively inside the owned scenario directory.
+</description>
+*)
+METHOD FB_init : BOOL
+VAR_INPUT
+	bInitRetains : BOOL; // TRUE: the retain variables are initialized (reset warm / reset cold)
+	bInCopyCode : BOOL; // TRUE: the instance will be copied to the copy code afterward (online change)
+	directoryPath : STRING(255);
+	logFilePrefix : STRING(32);
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF NOT bInCopyCode THEN
+	_LogFilePrefix := logFilePrefix;
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="FileCount" Id="{0d9787fe-4120-44f5-b12f-36ad123dad9b}">
+      <Declaration><![CDATA[(*!
+<summary>Reports the owned log fixture FileCount observation.</summary>
+<description>
+Read from the owner task. Retained results remain available after cleanup; completion does not prove
+physical native resource release after an error.
+</description>
+*)
+PROPERTY FileCount : UINT]]></Declaration>
+      <Get Name="Get" Id="{7a2f2687-b2b0-4eb2-b7e5-51cec6e1b939}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[FileCount := _FileCount;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="matchExpectedRecord" Id="{727a458b-a65c-417e-9198-ed7b19c84f95}">
+      <Declaration><![CDATA[(*!
+<summary>Matches one complete short UTF-16 record to a not-yet-consumed expected value.</summary>
+<description>
+Called only with a validated byte buffer and the range between two observed wide CR separators. Copies
+no more than 255 code units into local passive storage and writes its terminator explicitly. Enumeration
+order does not affect matching; each expected value can be consumed at most once.
+</description>
+*)
+METHOD PRIVATE matchExpectedRecord : BOOL
+VAR_INPUT
+	startIndex : DINT;
+	characterCount : DINT;
+END_VAR
+VAR
+	record : WSTRING(255);
+	recordWords : POINTER TO WORD;
+	j : DINT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF characterCount > _MaxRecordCharacters THEN
+	RETURN;
+END_IF
+
+Tc2_System.MEMCPY(
+	destAddr := ADR(record),
+	srcAddr := ADR(_ReadBuffer[startIndex]),
+	n := TO_UDINT(characterCount * TOF_Core.WideStrings.CharSize)
+);
+recordWords := ADR(record);
+// Terminate the copied UTF-16 record independently of previous buffer contents.
+recordWords[characterCount] := 0;
+
+FOR j := 0 TO TO_DINT(_ExpectedCount) - 1 DO
+
+	IF NOT _Matched[j] AND_THEN _ExpectedText[j] = record THEN
+		_Matched[j] := TRUE;
+		_MatchedCount := _MatchedCount + 1;
+		matchExpectedRecord := TRUE;
+		RETURN;
+	END_IF
+
+END_FOR]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="NamespaceName" Id="{e548daee-fbf5-4bad-9cd0-31fad8a9d8a3}">
+      <Declaration><![CDATA[(*!
+<summary>Borrows the test namespace.</summary>
+<description>
+Returns compiler-initialized library storage without ownership transfer.
+</description>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{7148fe76-9e04-401e-a38e-e776d5b2e103}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[NamespaceName REF= CurrentNamespace.Name;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="RecordCount" Id="{f0b3b1ee-22e7-4890-a29f-c6cec9b62661}">
+      <Declaration><![CDATA[(*!
+<summary>Reports the owned log fixture RecordCount observation.</summary>
+<description>
+Read from the owner task. Retained results remain available after cleanup; completion does not prove
+physical native resource release after an error.
+</description>
+*)
+PROPERTY RecordCount : UDINT]]></Declaration>
+      <Get Name="Get" Id="{da793aaf-4ce7-405e-b5e1-887c97e56e16}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[RecordCount := _RecordCount;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="SelfSize" Id="{28fd8a18-7ea2-4918-bef5-06eba6abd4c3}">
+      <Declaration><![CDATA[(*!
+<summary>Reports the concrete fixture size in bytes.</summary>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY SelfSize : ULINT]]></Declaration>
+      <Get Name="Get" Id="{3fdbcdf5-e9c0-45e0-ae4b-f39a989db3de}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[SelfSize := XSIZEOF(THIS^);]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+  </POU>
+</TcPlcObject>

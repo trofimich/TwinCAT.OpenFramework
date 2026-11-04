@@ -19,7 +19,9 @@ into stop diagnostics where handled. If obtaining their messages fails, phase-sp
 the intended failure transition; preparation and reset use the same fallback policy for refusal. The first
 stopping exception is submitted to the log; later stopping exceptions retry without repeated log attempts.
 This is not a universal no-throw boundary. The caller still provides exception cleanup and terminal
-allocation-failure checks at its PLC task boundary.
+allocation-failure checks at its PLC task boundary. DiagnosticLogger optionally selects an independent
+diagnostic channel; zero preserves LogManager routing. Configure it before Start and keep it stable until
+STOPPED, including Reset diagnostics, with no concurrent access.
 </description>
 *)
 
@@ -28,9 +30,9 @@ FUNCTION_BLOCK ABSTRACT Task EXTENDS TOF_Core.Object IMPLEMENTS ITask
 VAR
 	{attribute 'hide'} 
 	_Name : WSTRING;
-	//! <summary>TRUE once an explicit name is stored or first access successfully caches the default.</summary>
-	{attribute 'hide'} 
-	_NameInitialized : BOOL;
+
+	//! <summary>Optional borrowed destination for this task's internal diagnostics.</summary>
+	_DiagnosticLogger : TOF_Core.ILogger;
 	
 	{attribute 'hide'} 
 	_State : TASK_STATE;	
@@ -139,26 +141,61 @@ END_IF]]></ST>
     </Method>
     <Method Name="FB_init" Id="{4a40010f-36b0-4b8e-9bdb-42fc8f2b04c7}">
       <Declaration><![CDATA[(*!
-<summary>Stores an explicit diagnostic name and defers default-name creation.</summary>
+<summary>Stores an explicit diagnostic name or constructs the default name during initialization.</summary>
 <description>
-Copies a nonempty name into task-owned storage and marks it initialized. With an empty name, the initially
-FALSE marker leaves default-name creation to the first Name read after construction. Does not read overridden
-metadata, start work or acquire resources. Start and Reset preserve the name.
+Copies a nonempty name into task-owned storage. For an empty name, stores Object.GetDefaultName using ClassName
+and the instance address. Overridden ClassName must be ready during base initialization, use initialized static
+storage without derived instance dependencies, and neither raise exceptions nor recursively read Name.
+Does not start work or acquire resources. Start and Reset preserve the name. Skipped during online change copy
+code so the copied name remains unchanged.
 </description>
 <param name="name">Diagnostic name to copy, or empty to request the default name.</param>
 *)
 METHOD FB_init : BOOL
 VAR_INPUT	
-	bInitRetains	: BOOL;	
-	bInCopyCode	: BOOL;
+	bInitRetains : BOOL; // TRUE: the retain variables are initialized (reset warm / reset cold)
+	bInCopyCode : BOOL;  // TRUE: the instance will be copied to the copy code afterward (online change)
 	name : WSTRING;
 END_VAR
 ]]></Declaration>
       <Implementation>
-        <ST><![CDATA[IF name <> TOF_Core.WideStrings.Empty THEN
-	_Name := name;
-	_NameInitialized := TRUE;
+        <ST><![CDATA[IF NOT bInCopyCode THEN
+	IF name <> TOF_Core.WideStrings.Empty THEN
+		_Name := name;
+	ELSE
+		_Name := GetDefaultName();
+	END_IF
 END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="FB_reinit" Id="{5874bf73-fae3-4e53-bfd1-1a63a501941f}">
+      <Declaration><![CDATA[(*!
+<summary>Restores internal view bindings after an online change.</summary>
+<description>
+Implicitly called by the runtime after instance copy code completes. Rebinds internal view objects to
+the current instance fields to repair any references relocated during the online change.
+</description>
+*)
+METHOD FB_reinit : BOOL
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_OriginalStopReasonObject.Rebind(
+	stopReason := _OriginalStopReason,
+	stopReasonMessage := ADR(_OriginalStopReasonMessage)
+);
+_FinalStopReasonObject.Rebind(
+	stopReason := _FinalStopReason,
+	stopReasonMessage := ADR(_FinalStopReasonMessage)
+);
+_StateObject.Rebind(
+	taskState := _State,
+	taskStateChanged := _StateChanged
+);
+_RunningSubstateObject.Rebind(
+	taskRunningSubstate := _RunningSubstate
+);
+
+FB_reinit := TRUE;]]></ST>
       </Implementation>
     </Method>
     <Property Name="FinalStopReason" Id="{2700e19c-2cd2-4878-bd36-35fddbc83862}">
@@ -274,16 +311,18 @@ VAR
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[__TRY
+
 	CASE _RunningSubstate OF
 		TASK_RUNNING_SUBSTATE.RESOURCE_ACQUIRING:
+
 			IF NOT _ResourceOperationStarted THEN
 				_ResourceOperationStarted := TRUE;
-				
+
 				ResourceManager.StartAcquire();
 			END_IF
 
 			ResourceManager.Execute();
-			
+
 			IF ResourceManager.ResourceAcquired THEN
 				setRunningSubstate(runningSubState := TASK_RUNNING_SUBSTATE.PROCESSING);
 			END_IF
@@ -297,34 +336,41 @@ END_VAR]]></Declaration>
 			END_IF
 
 		TASK_RUNNING_SUBSTATE.RESOURCE_RELEASING:
+
 			IF NOT _ResourceOperationStarted THEN
 				_ResourceOperationStarted := TRUE;
-				
+
 				ResourceManager.StartRelease();
 			END_IF
 
 			ResourceManager.Execute();
-			
+
 			IF NOT ResourceManager.ResourceAcquired THEN
 				setStoppedState(finalStopReason := _OriginalStopReason, finalStopReasonMessage := _OriginalStopReasonMessage);
 				safeCallOnAfterStop();
 			END_IF
+
 	END_CASE
 
 	IF _State = TASK_STATE.RUNNING AND_THEN _RunningSubstate = TASK_RUNNING_SUBSTATE.STOPPING THEN
 		OnStopping(readyToRelease => readyToRelease);
 
 		IF readyToRelease THEN
+
 			IF ReleaseResourceRequired THEN
 				setRunningSubstate(runningSubState := TASK_RUNNING_SUBSTATE.RESOURCE_RELEASING);
 			ELSE
 				setStoppedState(finalStopReason := _OriginalStopReason, finalStopReasonMessage := _OriginalStopReasonMessage);
 				safeCallOnAfterStop();
 			END_IF
+
 		END_IF
+
 	END_IF
+
 __CATCH(exceptionCode)
 	IF _RunningSubstate = TASK_RUNNING_SUBSTATE.STOPPING THEN
+
 		IF _StoppingExceptionReportAttempted THEN
 			// Continue the interrupted hook on a later Execute without repeated logging.
 			RETURN;
@@ -363,11 +409,12 @@ __CATCH(exceptionCode)
 			_TemporaryErrorMessage := phaseFailureMessage;
 			_TemporaryErrorMessage := TOF_Core.WideStrings.Concat255("Task '", Name, "' ", phaseFailureMessage);
 		END_IF
+
 	__CATCH
 		// Keep the named or fixed phase fallback and any terminal allocation-failure latch.
 	__ENDTRY
 
-	TOF_Core.LogManager.TryLogMessage(
+	TryLogDiagnosticMessage(
 		message := _TemporaryErrorMessage,
 		category := TOF_Core.LOG_CATEGORY.ERROR,
 		topic1 := "Task",
@@ -386,9 +433,10 @@ __CATCH(exceptionCode)
 		ELSE
 			_OriginalStopReason := TASK_STOP_REASON.FAILURE;
 			_OriginalStopReasonMessage := _TemporaryErrorMessage;
-			
+
 			setRunningSubstate(runningSubState := TASK_RUNNING_SUBSTATE.STOPPING);
 	END_CASE
+
 __ENDTRY]]></ST>
       </Implementation>
     </Method>
@@ -396,14 +444,11 @@ __ENDTRY]]></ST>
       <Declaration><![CDATA[(*!
 <summary>Provides the task's diagnostic name.</summary>
 <description>
-FB_init copies a nonempty supplied name. For an empty name, the first read caches Object.GetDefaultName,
-including ClassName and the instance address. First access to a default name must occur after the most-derived
-FB has completed initialization, from the task's owner. The getter does not detect construction completion or
-synchronize callers. ClassName overrides must not recursively read Name. If metadata access fails, the
-exception propagates and initialization remains pending for a later read. Successful initialization happens
-once; later reads do not recompute metadata. Start and Reset preserve the name and its storage. The returned
-reference remains valid while the task lives; do not write through it. The name is diagnostic text, not a
-persistent identifier; later ClassName changes do not rename the task.
+FB_init stores the supplied name or constructs the default from ClassName and the instance address. Reading
+only borrows the stored buffer; it does not initialize or recompute metadata, start work or synchronize callers.
+Start and Reset preserve the name and its storage. The returned reference remains valid while the task lives;
+do not write through it. The name is diagnostic text, not a persistent identifier; later ClassName changes or
+instance relocation do not rename the task.
 </description>
 *)
 
@@ -412,12 +457,7 @@ PROPERTY FINAL Name : REFERENCE TO WSTRING]]></Declaration>
       <Get Name="Get" Id="{758bcc09-602f-41b4-b11f-e8268c4f3c3a}">
         <Declaration><![CDATA[]]></Declaration>
         <Implementation>
-          <ST><![CDATA[IF NOT _NameInitialized THEN
-	_Name := GetDefaultName();
-	_NameInitialized := TRUE;
-END_IF
-
-Name REF= _Name;]]></ST>
+          <ST><![CDATA[Name REF= _Name;]]></ST>
         </Implementation>
       </Get>
     </Property>
@@ -669,7 +709,7 @@ __CATCH(exceptionCode)
 		catchPointPosition := __POSITION()
 	);
 
-	TOF_Core.LogManager.TryLogException(
+	TryLogDiagnosticException(
 		exception := exception,
 		severity := TOF_Core.ERROR_SEVERITY.ERROR,
 		topic1 := TO_WSTRING(ClassName),
@@ -742,7 +782,7 @@ __CATCH(exceptionCode)
 		catchPointPosition := __POSITION()
 	);
 
-	TOF_Core.LogManager.TryLogException(
+	TryLogDiagnosticException(
 		exception := exception,
 		severity := TOF_Core.ERROR_SEVERITY.ERROR,
 		topic1 := TO_WSTRING(ClassName),
@@ -819,7 +859,7 @@ END_VAR]]></Declaration>
 		"'"
 	);
 
-	TOF_Core.LogManager.TryLogMessage(
+	TryLogDiagnosticMessage(
 		message := formattedLogMessage,
 		category := TOF_Core.LOG_CATEGORY.INFORMATION,
 		topic1 := TO_WSTRING(ClassName),
@@ -828,17 +868,17 @@ END_VAR]]></Declaration>
 	);
 
 	_State := NEW_STATE;
-	_StateChanged := TRUE;	
-END_IF 
+	_StateChanged := TRUE;
+END_IF
 
 _RunningSubstate := TASK_RUNNING_SUBSTATE.PROCESSING;
 _ResourceOperationStarted := FALSE;
 
 _OriginalStopReason := TASK_STOP_REASON.WORK_DONE;
-_OriginalStopReasonMessage := "";	
+_OriginalStopReasonMessage := "";
 
 _FinalStopReason := TASK_STOP_REASON.WORK_DONE;
-_FinalStopReasonMessage := "";	]]></ST>
+_FinalStopReasonMessage := "";]]></ST>
       </Implementation>
     </Method>
     <Method Name="setRunningState" Id="{1d4e1480-16f7-42b7-b601-af024b62cfc3}" FolderPath="Service members\">
@@ -879,8 +919,8 @@ IF _State <> NEW_STATE THEN
 		TO_WSTRING(NEW_STATE),
 		"'"
 	);
- 
-	TOF_Core.LogManager.TryLogMessage(
+
+	TryLogDiagnosticMessage(
 		message := formattedLogMessage,
 		category := TOF_Core.LOG_CATEGORY.INFORMATION,
 		topic1 := TO_WSTRING(ClassName),
@@ -960,7 +1000,7 @@ END_VAR]]></Declaration>
 		"'"
 	);
 
-	TOF_Core.LogManager.TryLogMessage(
+	TryLogDiagnosticMessage(
 		message := formattedLogMessage,
 		category := TOF_Core.LOG_CATEGORY.INFORMATION,
 		topic1 := TO_WSTRING(ClassName),
@@ -969,8 +1009,8 @@ END_VAR]]></Declaration>
 	);
 
 	_State := NEW_STATE;
-	_StateChanged := TRUE;	
-END_IF 
+	_StateChanged := TRUE;
+END_IF
 
 _FinalStopReason := finalStopReason;
 
@@ -983,17 +1023,19 @@ ELSE
 		CASE _FinalStopReason OF
 			TASK_STOP_REASON.WORK_DONE:
 				_FinalStopReasonMessage := "Work done";
-		
+
 			TASK_STOP_REASON.INTERNAL_ABORT:
 				_FinalStopReasonMessage := "Stopped by internal logic";
-				
+
 			TASK_STOP_REASON.EXTERNAL_CANCEL:
 				_FinalStopReasonMessage := "Stopped by external logic";
-		
+
 			TASK_STOP_REASON.FAILURE:
 				_FinalStopReasonMessage := "Exception occured";
-		END_CASE	
+		END_CASE
+
 	END_IF
+
 END_IF]]></ST>
       </Implementation>
     </Method>
@@ -1051,5 +1093,123 @@ PROPERTY FINAL State : REFERENCE TO TaskState]]></Declaration>
         </Implementation>
       </Get>
     </Property>
+    <Property Name="DiagnosticLogger" Id="{74dde6bb-38e6-4f05-bcfc-8692be6595e8}">
+      <Declaration><![CDATA[(*!
+<summary>Selects a borrowed independent destination for internal task diagnostics.</summary>
+<description>
+Zero uses the existing LogManager filtering, numbering and routing. A nonzero destination is called directly,
+without LogManager or its filter/counters, and must not return to the active logging chain. Configure before
+Start and keep it stable and alive through STOPPED and Reset. The task does not own, configure or execute
+the destination. Assignment performs no I/O or callbacks; one owner task provides synchronization.
+</description>
+*)
+PROPERTY FINAL DiagnosticLogger : TOF_Core.ILogger]]></Declaration>
+      <Get Name="Get" Id="{6ee7e9dc-2c0a-42d3-ad4b-ddc0774ad426}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[DiagnosticLogger := _DiagnosticLogger;]]></ST>
+        </Implementation>
+      </Get>
+      <Set Name="Set" Id="{b9918464-3550-4ac5-81fb-38cbfbe30ec8}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[_DiagnosticLogger := DiagnosticLogger;]]></ST>
+        </Implementation>
+      </Set>
+    </Property>
+    <Method Name="TryLogDiagnosticMessage" Id="{e6d60818-db10-42b7-a497-97d729ef44c3}">
+      <Declaration><![CDATA[(*!
+<summary>Reports an internal message through the configured diagnostic route.</summary>
+<description>
+Uses the borrowed DiagnosticLogger directly when present; otherwise retains LogManager topics and routing.
+Contains destination exceptions without recursive logging. Returns FALSE on observed terminal allocation
+failure; prior diagnostic effects are not rolled back and the fatal latch remains set.
+</description>
+*)
+METHOD PROTECTED FINAL TryLogDiagnosticMessage : BOOL
+VAR_IN_OUT CONSTANT
+	message : TOF_Core.ERROR_MESSAGE;
+END_VAR
+VAR_INPUT
+	category : TOF_Core.LOG_CATEGORY;
+	topic1 : WSTRING := "";
+	topic2 : WSTRING := "";
+	topic3 : WSTRING := "";
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[__TRY
+
+	IF TOF_Core.DynamicMemoryManager.HasAllocationFailed THEN
+		RETURN;
+	END_IF
+
+	IF _DiagnosticLogger <> 0 THEN
+		TryLogDiagnosticMessage := _DiagnosticLogger.TryLogMessage(category := category, message := message);
+	ELSE
+		TryLogDiagnosticMessage := TOF_Core.LogManager.TryLogMessage(
+			category := category,
+			message := message,
+			topic1 := topic1,
+			topic2 := topic2,
+			topic3 := topic3
+		);
+	END_IF
+
+	IF TOF_Core.DynamicMemoryManager.HasAllocationFailed THEN
+		TryLogDiagnosticMessage := FALSE;
+	END_IF
+
+__CATCH
+	// Diagnostic failure must not replace the task lifecycle outcome.
+	TryLogDiagnosticMessage := FALSE;
+__ENDTRY]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="TryLogDiagnosticException" Id="{f710c784-6374-4482-917a-d135dc3d17cd}">
+      <Declaration><![CDATA[(*!
+<summary>Reports an internal exception through the configured diagnostic route.</summary>
+<description>
+Uses the borrowed DiagnosticLogger directly when present; otherwise retains LogManager topics and routing.
+Contains destination exceptions without recursive logging. Returns FALSE on observed terminal allocation
+failure; prior diagnostic effects are not rolled back and the fatal latch remains set.
+</description>
+*)
+METHOD PROTECTED FINAL TryLogDiagnosticException : BOOL
+VAR_INPUT
+	exception : TOF_Core.IReadOnlyException;
+	severity : TOF_Core.ERROR_SEVERITY;
+	topic1 : WSTRING := "";
+	topic2 : WSTRING := "";
+	topic3 : WSTRING := "";
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[__TRY
+
+	IF TOF_Core.DynamicMemoryManager.HasAllocationFailed THEN
+		RETURN;
+	END_IF
+
+	IF _DiagnosticLogger <> 0 THEN
+		TryLogDiagnosticException := _DiagnosticLogger.TryLogException(exception := exception, severity := severity);
+	ELSE
+		TryLogDiagnosticException := TOF_Core.LogManager.TryLogException(
+			exception := exception,
+			severity := severity,
+			topic1 := topic1,
+			topic2 := topic2,
+			topic3 := topic3
+		);
+	END_IF
+
+	IF TOF_Core.DynamicMemoryManager.HasAllocationFailed THEN
+		TryLogDiagnosticException := FALSE;
+	END_IF
+
+__CATCH
+	// Diagnostic failure must not replace the task lifecycle outcome.
+	TryLogDiagnosticException := FALSE;
+__ENDTRY]]></ST>
+      </Implementation>
+    </Method>
   </POU>
 </TcPlcObject>

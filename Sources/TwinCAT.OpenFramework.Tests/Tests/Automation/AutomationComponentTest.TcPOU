@@ -1,0 +1,534 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1" ProductVersion="3.1.4026.21">
+  <POU Name="AutomationComponentTest" Id="{868ccbaa-9d67-4f69-9202-500917194d54}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+SPDX-FileCopyrightText: Â© 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+SPDX-License-Identifier: MIT
+License: https://opensource.org/license/mit
+*)
+
+(*!
+<summary>Exercises automation component lifecycle, policies, event routing and runner execution.</summary>
+<description>
+Owns the timeout root and composite as persistent instance fields so their constructor dependency is valid.
+The composite borrows its root for the suite lifetime; instances must not be copied with this binding.
+</description>
+*)
+
+FUNCTION_BLOCK AutomationComponentTest EXTENDS TcUnit.FB_TestSuite
+VAR_STAT
+	{attribute 'hide'}
+	_ClassName : STRING := __POUNAME();
+END_VAR
+VAR
+	//! <summary>Persistent parent dependency for the initialization-timeout composite.</summary>
+	_TimeoutRoot : MockAutomationController(name := "TimeoutRoot");
+	//! <summary>Persistent composite borrowing the suite-owned root throughout the timeout scenario.</summary>
+	_TimeoutComposite : MockCompositeAutomationComponent(name := "CompTimeout", parent := _TimeoutRoot);
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[TestLifecycleTransitions();
+TestInitializationTimeout();
+TestEnableDisable();
+TestChildErrorPolicyIgnore();
+TestChildErrorPolicySetErrorAndContinue();
+TestChildErrorPolicySetErrorAndStop();
+TestEventBubbling();
+TestEventBubblingStopPropagation();
+TestEventBroadcasting();
+TestInputOutputPhases();
+TestRunnerHappyPath();
+TestRunnerNullComponentGuard();]]></ST>
+    </Implementation>
+    <Folder Name="Tests" Id="{fb544209-7e1e-40ef-9afd-dd619da7a44f}" />
+    <Property Name="ClassName" Id="{8d30d36f-229f-45b8-98a3-42f3c16137ca}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{da1ce19b-635a-4944-a338-87161ce3b2c1}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ClassName REF= _ClassName;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="NamespaceName" Id="{fbb21eda-3e59-4edf-9ec4-e41100b95e70}">
+      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{fc26d2d6-436b-45af-b43c-7338982e90f7}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[NamespaceName REF= CurrentNamespace.Name;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="TestChildErrorPolicyIgnore" Id="{01202040-14b9-4360-9fc7-0264cddb1bf0}" FolderPath="Tests\">
+      <Declaration><![CDATA[METHOD PRIVATE TestChildErrorPolicyIgnore
+VAR
+	composite : MockCompositeAutomationComponent("CompIgnore", parent := 0);
+END_VAR
+VAR_INST
+	testFinished : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN
+	RETURN;
+END_IF
+
+TEST(TestName := 'TestChildErrorPolicyIgnore');
+
+composite.Initialize();
+composite.ChildCriticalErrorHandlingPolicy := TOF_Automation.ChildCriticalErrorHandlingPolicies.Ignore;
+composite.ChildA.FailOnWorking := TRUE;
+
+composite.Execute();
+
+AssertEquals_DINT(
+	Expected := TO_DINT(TOF_Automation.OPERATIONAL_STATE.STOPPED),
+	Actual := TO_DINT(composite.ChildA.OperationalState),
+	Message := 'ChildA should stop on critical error'
+);
+
+AssertEquals_DINT(
+	Expected := TO_DINT(TOF_Automation.OPERATIONAL_STATE.WORKING),
+	Actual := TO_DINT(composite.OperationalState),
+	Message := 'Composite should remain WORKING when policy is Ignore'
+);
+
+AssertFalse(
+	Condition := composite.HasError,
+	Message := 'Composite should not have error when policy is Ignore'
+);
+
+testFinished := TRUE;
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="TestChildErrorPolicySetErrorAndContinue" Id="{ede5e672-f08d-4357-b967-6ee4a24ae31f}" FolderPath="Tests\">
+      <Declaration><![CDATA[METHOD PRIVATE TestChildErrorPolicySetErrorAndContinue
+VAR
+	composite : MockCompositeAutomationComponent("CompContinue", parent := 0);
+END_VAR
+VAR_INST
+	testFinished : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN
+	RETURN;
+END_IF
+
+TEST(TestName := 'TestChildErrorPolicySetErrorAndContinue');
+
+composite.Initialize();
+composite.ChildCriticalErrorHandlingPolicy := TOF_Automation.ChildCriticalErrorHandlingPolicies.SetErrorAndContinue;
+composite.ChildA.FailOnWorking := TRUE;
+
+composite.Execute();
+
+AssertTrue(
+	Condition := composite.HasError,
+	Message := 'Composite should record error when child fails with SetErrorAndContinue'
+);
+
+AssertEquals_DINT(
+	Expected := TO_DINT(TOF_Automation.OPERATIONAL_STATE.WORKING),
+	Actual := TO_DINT(composite.OperationalState),
+	Message := 'Composite should remain WORKING when policy is SetErrorAndContinue'
+);
+
+testFinished := TRUE;
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="TestChildErrorPolicySetErrorAndStop" Id="{8f5eecc9-b753-4312-80a1-234c98becebc}" FolderPath="Tests\">
+      <Declaration><![CDATA[METHOD PRIVATE TestChildErrorPolicySetErrorAndStop
+VAR
+	composite : MockCompositeAutomationComponent("CompStop", parent := 0);
+END_VAR
+VAR_INST
+	testFinished : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN
+	RETURN;
+END_IF
+
+TEST(TestName := 'TestChildErrorPolicySetErrorAndStop');
+
+composite.Initialize();
+composite.ChildCriticalErrorHandlingPolicy := TOF_Automation.ChildCriticalErrorHandlingPolicies.SetErrorAndStop;
+composite.ChildA.FailOnWorking := TRUE;
+
+composite.Execute();
+
+AssertTrue(
+	Condition := composite.HasError,
+	Message := 'Composite should record error when child fails with SetErrorAndStop'
+);
+
+AssertEquals_DINT(
+	Expected := TO_DINT(TOF_Automation.OPERATIONAL_STATE.STOPPED),
+	Actual := TO_DINT(composite.OperationalState),
+	Message := 'Composite should transition to STOPPED when policy is SetErrorAndStop'
+);
+
+testFinished := TRUE;
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="TestEnableDisable" Id="{60fcbd9b-6f61-4137-ad52-69213214cdde}" FolderPath="Tests\">
+      <Declaration><![CDATA[METHOD PRIVATE TestEnableDisable
+VAR
+	leaf : MockLeafAutomationComponent("EnDisLeaf", parent := 0);
+END_VAR
+VAR_INST
+	testFinished : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN
+	RETURN;
+END_IF
+
+TEST(TestName := 'TestEnableDisable');
+
+leaf.Initialize();
+
+leaf.Disable();
+AssertFalse(Condition := leaf.Enabled, Message := 'Leaf should be disabled');
+AssertEquals_INT(Expected := 1, Actual := leaf.DisableCount, Message := 'DisableCount should be 1');
+
+leaf.Execute();
+AssertEquals_INT(Expected := 0, Actual := leaf.WorkingCount, Message := 'Disabled leaf must not execute OnWorking');
+
+leaf.Enable(includeChildren := TRUE);
+AssertTrue(Condition := leaf.Enabled, Message := 'Leaf should be enabled');
+AssertEquals_INT(Expected := 1, Actual := leaf.EnableCount, Message := 'EnableCount should be 1');
+
+leaf.Execute();
+AssertEquals_INT(Expected := 1, Actual := leaf.WorkingCount, Message := 'Enabled leaf should execute OnWorking');
+
+testFinished := TRUE;
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="TestEventBroadcasting" Id="{6c47ad67-a55f-4e2f-8c93-70b3f7837080}" FolderPath="Tests\">
+      <Declaration><![CDATA[METHOD PRIVATE TestEventBroadcasting
+VAR
+	composite : MockCompositeAutomationComponent("CompBcast", parent := 0);
+	broadcastEv : MockAutomationEvent(sourceObject := 0, eventId := 30, payload := "BcastPayload");
+END_VAR
+VAR_INST
+	testFinished : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN
+	RETURN;
+END_IF
+
+TEST(TestName := 'TestEventBroadcasting');
+
+composite.BroadcastEvent(event := broadcastEv);
+
+AssertEquals_INT(
+	Expected := 30,
+	Actual := composite.ChildA.LastReceivedEventId,
+	Message := 'ChildA should receive broadcast event'
+);
+
+AssertEquals_INT(
+	Expected := 30,
+	Actual := composite.ChildB.LastReceivedEventId,
+	Message := 'ChildB should receive broadcast event'
+);
+
+testFinished := TRUE;
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="TestEventBubbling" Id="{68fd4f50-9ab3-4228-a047-fa46671d58ac}" FolderPath="Tests\">
+      <Declaration><![CDATA[METHOD PRIVATE TestEventBubbling
+VAR
+	composite : MockCompositeAutomationComponent("CompBubble", parent := 0);
+	bubbleEv : MockAutomationEvent(sourceObject := 0, eventId := 10, payload := "BubblePayload");
+END_VAR
+VAR_INST
+	testFinished : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN
+	RETURN;
+END_IF
+
+TEST(TestName := 'TestEventBubbling');
+
+composite.ChildA.BubbleEvent(event := bubbleEv);
+
+AssertEquals_INT(
+	Expected := 10,
+	Actual := composite.ChildA.LastReceivedEventId,
+	Message := 'ChildA should receive event locally'
+);
+
+AssertEquals_INT(
+	Expected := 10,
+	Actual := composite.LastReceivedEventId,
+	Message := 'Parent composite should receive bubbled event'
+);
+
+testFinished := TRUE;
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="TestEventBubblingStopPropagation" Id="{37edd6d1-b15f-43b4-8391-65e1a53b400e}" FolderPath="Tests\">
+      <Declaration><![CDATA[METHOD PRIVATE TestEventBubblingStopPropagation
+VAR
+	composite : MockCompositeAutomationComponent("CompStopBubble", parent := 0);
+	stopEv : MockAutomationEvent(sourceObject := 0, eventId := 20, payload := "StopPayload");
+END_VAR
+VAR_INST
+	testFinished : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN
+	RETURN;
+END_IF
+
+TEST(TestName := 'TestEventBubblingStopPropagation');
+
+composite.ChildA.StopPropagationOnEvent := TRUE;
+composite.ChildA.BubbleEvent(event := stopEv);
+
+AssertEquals_INT(
+	Expected := 20,
+	Actual := composite.ChildA.LastReceivedEventId,
+	Message := 'ChildA should receive event locally'
+);
+
+AssertEquals_INT(
+	Expected := 0,
+	Actual := composite.EventReceivedCount,
+	Message := 'Parent composite must not receive event when propagation stopped'
+);
+
+testFinished := TRUE;
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="TestInitializationTimeout" Id="{cee43c71-6ec2-459a-9e23-5031e9b1235a}" FolderPath="Tests\">
+      <Declaration><![CDATA[(*!
+<summary>Checks that an incomplete child initialization records an error on timeout.</summary>
+<description>
+Uses suite instance fields for the root controller and composite with a constructor-bound parent. The composite is initialized directly;
+the root supplies the parent dependency without driving the scenario. Child timeout must record an error
+and enter INVALID. Reports child/parent state, configured timeout and hook count on failure.
+The fifty-call bound detects lack of progress without claiming to measure elapsed wall time.
+</description>
+*)
+METHOD PRIVATE TestInitializationTimeout
+VAR_INST
+	testFinished : BOOL;
+	initialized : BOOL;
+	cycleCount : INT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN
+	RETURN;
+END_IF
+
+TEST(TestName := 'TestInitializationTimeout');
+
+IF NOT initialized THEN
+	_TimeoutComposite.ChildA.InitReturnValue := FALSE;
+	_TimeoutComposite.ChildA.InitializationTimeout := T#1MS;
+	_TimeoutComposite.InitializationTimeout := T#5S;
+	initialized := TRUE;
+END_IF
+
+cycleCount := cycleCount + 1;
+_TimeoutComposite.Initialize();
+
+IF _TimeoutComposite.ChildA.OperationalState = TOF_Automation.OPERATIONAL_STATE.INVALID OR_ELSE cycleCount >= 50 THEN
+	AssertTrue(
+		Condition := _TimeoutComposite.ChildA.HasError,
+		Message := TOF_Core.Strings.Concat255(
+			'Child timeout: child=', TO_STRING(_TimeoutComposite.ChildA.OperationalState),
+			', parent=', TO_STRING(_TimeoutComposite.OperationalState),
+			', PT=', TO_STRING(_TimeoutComposite.ChildA.InitializationTimeout),
+			', init calls=', TO_STRING(_TimeoutComposite.ChildA.InitializeCount),
+			', returns=', TO_STRING(_TimeoutComposite.ChildA.InitReturnValue)
+		)
+	);
+	AssertEquals_DINT(
+		Expected := TO_DINT(TOF_Automation.OPERATIONAL_STATE.INVALID),
+		Actual := TO_DINT(_TimeoutComposite.ChildA.OperationalState),
+		Message := 'Initialization timeout must put the child in INVALID'
+	);
+	AssertTrue(
+		Condition := _TimeoutComposite.ChildA.InitializeCount > 1,
+		Message := 'The parent must allow repeated child initialization before timeout'
+	);
+
+	testFinished := TRUE;
+	TEST_FINISHED();
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="TestInputOutputPhases" Id="{b867a494-236c-4c7d-bf99-09a73a9b9f29}" FolderPath="Tests\">
+      <Declaration><![CDATA[METHOD PRIVATE TestInputOutputPhases
+VAR
+	leaf : MockLeafAutomationComponent("IOLeaf", parent := 0);
+END_VAR
+VAR_INST
+	testFinished : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN
+	RETURN;
+END_IF
+
+TEST(TestName := 'TestInputOutputPhases');
+
+leaf.Initialize();
+
+leaf.ProcessInput();
+AssertEquals_INT(Expected := 1, Actual := leaf.ProcessInputCount, Message := 'ProcessInputCount should be 1');
+
+leaf.Execute();
+AssertEquals_INT(Expected := 1, Actual := leaf.WorkingCount, Message := 'WorkingCount should be 1');
+
+leaf.ProcessOutput();
+AssertEquals_INT(Expected := 1, Actual := leaf.ProcessOutputCount, Message := 'ProcessOutputCount should be 1');
+
+testFinished := TRUE;
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="TestLifecycleTransitions" Id="{fda17b75-15fd-48cb-8e63-bcb35e03deac}" FolderPath="Tests\">
+      <Declaration><![CDATA[METHOD PRIVATE TestLifecycleTransitions
+VAR
+	leaf : MockLeafAutomationComponent("TestLeaf", parent := 0);
+END_VAR
+VAR_INST
+	testFinished : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN
+	RETURN;
+END_IF
+
+TEST(TestName := 'TestLifecycleTransitions');
+
+AssertEquals_DINT(
+	Expected := TO_DINT(TOF_Automation.OPERATIONAL_STATE.INITIALIZING),
+	Actual := TO_DINT(leaf.OperationalState),
+	Message := 'Initial state should be INITIALIZING'
+);
+
+leaf.Initialize();
+AssertEquals_DINT(
+	Expected := TO_DINT(TOF_Automation.OPERATIONAL_STATE.WORKING),
+	Actual := TO_DINT(leaf.OperationalState),
+	Message := 'State should be WORKING after Initialize'
+);
+
+leaf.Execute();
+AssertEquals_INT(Expected := 1, Actual := leaf.WorkingCount, Message := 'WorkingCount should be 1');
+
+leaf.Stop(reason := "Manual test stop");
+AssertEquals_DINT(
+	Expected := TO_DINT(TOF_Automation.OPERATIONAL_STATE.STOPPED),
+	Actual := TO_DINT(leaf.OperationalState),
+	Message := 'State should be STOPPED after Stop'
+);
+AssertEquals_WSTRING(
+	Expected := "Manual test stop",
+	Actual := leaf.OperationalStateReason,
+	Message := 'OperationalStateReason should match stop reason'
+);
+
+leaf.Reset();
+AssertEquals_DINT(
+	Expected := TO_DINT(TOF_Automation.OPERATIONAL_STATE.WORKING),
+	Actual := TO_DINT(leaf.OperationalState),
+	Message := 'State should return to WORKING after Reset'
+);
+
+testFinished := TRUE;
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="TestRunnerHappyPath" Id="{cb70e837-4514-4556-b56b-a83f4d6c6067}" FolderPath="Tests\">
+      <Declaration><![CDATA[METHOD PRIVATE TestRunnerHappyPath
+VAR
+	runner : TOF_Automation.AutomationRunner;
+	composite : MockCompositeAutomationComponent("RunnerComp", parent := 0);
+	components : ARRAY [0..0] OF TOF_Automation.IAutomationComponent := [composite];
+END_VAR
+VAR_INST
+	testFinished : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN
+	RETURN;
+END_IF
+
+TEST(TestName := 'TestRunnerHappyPath');
+
+AssertEquals_DINT(
+	Expected := TO_DINT(TOF_Automation.AUTOMATION_RUNNER_STATE.INITIALIZING),
+	Actual := TO_DINT(runner.State),
+	Message := 'Runner should start in INITIALIZING state'
+);
+
+runner.Execute(components := components);
+
+AssertEquals_DINT(
+	Expected := TO_DINT(TOF_Automation.AUTOMATION_RUNNER_STATE.RUNNING),
+	Actual := TO_DINT(runner.State),
+	Message := 'Runner should reach RUNNING state after successful initialization'
+);
+
+runner.Execute(components := components);
+AssertTrue(
+	Condition := composite.ChildA.WorkingCount > 0,
+	Message := 'Runner should advance cyclic execution of registered components'
+);
+
+testFinished := TRUE;
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="TestRunnerNullComponentGuard" Id="{d40c5d60-d89a-4cb1-aa31-e6bace6ef1c5}" FolderPath="Tests\">
+      <Declaration><![CDATA[METHOD PRIVATE TestRunnerNullComponentGuard
+VAR
+	runner : TOF_Automation.AutomationRunner;
+	nullComponents : ARRAY [0..0] OF TOF_Automation.IAutomationComponent := [0];
+END_VAR
+VAR_INST
+	testFinished : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN
+	RETURN;
+END_IF
+
+TEST(TestName := 'TestRunnerNullComponentGuard');
+
+runner.Execute(components := nullComponents);
+
+AssertEquals_DINT(
+	Expected := TO_DINT(TOF_Automation.AUTOMATION_RUNNER_STATE.INVALID),
+	Actual := TO_DINT(runner.State),
+	Message := 'Runner should transition to INVALID when component is null'
+);
+
+AssertFalse(
+	Condition := TOF_Core.WideStrings.IsNullOrWhiteSpace(stringToCheck := runner.InitializationErrorMessage),
+	Message := 'InitializationErrorMessage should be set when component is null'
+);
+
+testFinished := TRUE;
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+  </POU>
+</TcPlcObject>

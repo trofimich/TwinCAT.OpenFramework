@@ -8,11 +8,13 @@ License: https://opensource.org/license/mit
 *)
 
 (*!
-<summary>Checks Timer pulse timing, zero intervals and same-cycle restart.</summary>
+<summary>Checks timer duration, observations, restart refusal and lifecycle reuse.</summary>
 <description>
-Each scenario owns its timer and uses one explicit Execute per cyclic test call. Tests observe internal TON.Q
-through Elapsed and require Triggered in the same call. No hardware or manual exception cleanup is used.
-AutomationRunner retains responsibility for the terminal allocation boundary.
+Scenarios own persistent timers and run in one cyclic task. Positive runs use independent task timestamps;
+delayed scenarios intentionally withhold Execute, and synchronous cases exercise repeated calls in one cycle.
+A one-millisecond allowance accounts for TIME precision. Task timestamps must advance normally without clock
+changes or debugging pauses. Synthetic callback exceptions exercise refusal rather than escape to TcUnit.
+AutomationRunner supplies exception cleanup and the terminal allocation boundary. No physical I/O is used.
 </description>
 *)
 
@@ -22,35 +24,56 @@ VAR CONSTANT
 	_PositiveInterval : TIME := T#30MS;
 	//! <summary>Long initial interval keeps the active-restart scenario away from natural expiry.</summary>
 	_ActiveInterval : TIME := T#1H;
-	//! <summary>Time budget for three positive runs and their cyclic observations.</summary>
+	//! <summary>Time budget for cyclic timing scenarios, including three positive runs.</summary>
 	_Deadline : TIME := T#10S;
 	//! <summary>Repeated completions reveal stale pulse or restart state.</summary>
 	_RunCount : UINT := 3;
+
+	//! <summary>F_GetTaskTime uses 100ns ticks; 10000 ticks represent one millisecond of TIME.</summary>
+	_TaskTimeTicksPerMillisecond : ULINT := 10000;
+	//! <summary>Allows one millisecond of quantization when comparing TON with independent task time.</summary>
+	_TimingToleranceTicks : ULINT := 10000;
 END_VAR]]></Declaration>
     <Implementation>
       <ST><![CDATA[PositiveIntervalSameCallRestart();
 ZeroIntervalSameCallRestart();
-RestartWhileRunning();]]></ST>
+RestartWhileRunning();
+DefaultNameAndMetadata();
+CancelBeforeFirstExecuteAndReuse();
+ResetAfterCompletion();
+IntervalAssignmentPreservesObservation();
+RestartWaitsForStopping();
+RestartPreservesIntervalOnResetFailure();
+RestartRetainsIntervalOnStartFailure();
+CompletionCallbackCanReset();
+DelayedFirstExecuteUsesStartAnchor();
+CancelAfterUnobservedExpiry();
+PositiveRestartUsesStartAnchor();]]></ST>
     </Implementation>
     <Method Name="PositiveIntervalSameCallRestart" Id="{719ab949-d5b6-417d-b2f6-42192af5a334}">
       <Declaration><![CDATA[(*!
 <summary>Checks immediate completion pulses and same-cycle restart for positive intervals.</summary>
 <description>
-One explicit Execute per cyclic test call. Elapsed observes the internal TON.Q directly; a pulse must be
-visible in that same call. Three runs restart immediately, then a later idle Execute must clear the pulse. The
-deadline reports lack of progress; no fixed PLC period or exact wall-clock completion is assumed.
+One explicit Execute per cyclic test call. Independent task timestamps bound early and late expiry with a
+one-millisecond allowance and the actual observation gap. Three runs restart immediately; a later idle Execute
+clears the pulse. The deadline reports lack of progress. Time must advance normally without clock changes.
 </description>
 *)
 METHOD PositiveIntervalSameCallRestart
 VAR
 	exceptionEscaped : BOOL;
 	restartAccepted : BOOL;
+	currentTaskTime : ULINT;
+	elapsedTicks : ULINT;
+	observationGap : ULINT;
 END_VAR
 VAR_INST
 	testFinished : BOOL;
 	initialized : BOOL;
 	awaitingPulseClear : BOOL;
 	completedRuns : UINT;
+	startedAt : ULINT;
+	lastObservedAt : ULINT;
 	timer : TOF_Timers.Timer("timer");
 	deadline : Tc2_Standard.TON;
 END_VAR]]></Declaration>
@@ -61,6 +84,7 @@ END_IF
 
 TEST(TestName := __POUNAME());
 deadline(IN := TRUE, PT := _Deadline);
+
 IF deadline.Q THEN
 	AssertTrue(Condition := FALSE, Message := 'Timer scenario exceeded its deadline');
 	testFinished := TRUE;
@@ -71,12 +95,16 @@ END_IF
 IF NOT initialized THEN
 	initialized := TRUE;
 	timer.Interval := _PositiveInterval;
+	startedAt := Tc2_System.F_GetTaskTime();
+	lastObservedAt := startedAt;
+
 	IF NOT timer.Start() THEN
 		AssertTrue(Condition := FALSE, Message := 'Prepared timer must accept Start');
 		testFinished := TRUE;
 		TEST_FINISHED();
 		RETURN;
 	END_IF
+
 	AssertFalse(Condition := timer.Triggered, Message := 'Start must not expose a completion pulse');
 END_IF
 
@@ -102,11 +130,46 @@ IF awaitingPulseClear THEN
 	RETURN;
 END_IF
 
+currentTaskTime := Tc2_System.F_GetTaskTime();
+
+IF currentTaskTime < lastObservedAt THEN
+	AssertTrue(Condition := FALSE, Message := 'Independent task time moved backwards');
+	testFinished := TRUE;
+	TEST_FINISHED();
+	RETURN;
+END_IF
+
+elapsedTicks := currentTaskTime - startedAt;
+observationGap := currentTaskTime - lastObservedAt;
+lastObservedAt := currentTaskTime;
+
+IF timer.Triggered THEN
+	AssertTrue(
+		Condition := elapsedTicks + _TimingToleranceTicks >= TO_ULINT(_PositiveInterval) * _TaskTimeTicksPerMillisecond,
+		Message := 'Positive timer must not complete before its independent duration'
+	);
+END_IF
+
+AssertTrue(
+	Condition := timer.Triggered
+		OR_ELSE elapsedTicks <= TO_ULINT(_PositiveInterval) * _TaskTimeTicksPerMillisecond + _TimingToleranceTicks,
+	Message := 'Positive timer must complete by the first observation after its duration'
+);
+
+IF timer.Triggered THEN
+	AssertTrue(
+		Condition := elapsedTicks <= TO_ULINT(_PositiveInterval) * _TaskTimeTicksPerMillisecond
+			+ observationGap + _TimingToleranceTicks,
+		Message := 'Completion must not be delayed beyond the first eligible observation'
+	);
+END_IF
+
 AssertEquals_BOOL(
 		Expected := timer.Elapsed,
 		Actual := timer.Triggered,
 		Message := 'Triggered must match the newly observed TON.Q without an extra cycle'
 	);
+
 IF timer.Elapsed <> timer.Triggered THEN
 	testFinished := TRUE;
 	TEST_FINISHED();
@@ -123,12 +186,16 @@ IF timer.Triggered THEN
 		awaitingPulseClear := TRUE;
 	ELSE
 		__TRY
+			startedAt := Tc2_System.F_GetTaskTime();
+			lastObservedAt := startedAt;
 			restartAccepted := timer.Restart();
 		__CATCH
 			exceptionEscaped := TRUE;
 		__ENDTRY
+
 		AssertFalse(Condition := exceptionEscaped, Message := 'Restart on the completion cycle must not throw');
 		AssertTrue(Condition := restartAccepted, Message := 'Restart must succeed in the completion cycle');
+
 		IF exceptionEscaped OR_ELSE NOT restartAccepted THEN
 			testFinished := TRUE;
 			TEST_FINISHED();
@@ -171,6 +238,7 @@ END_IF
 
 TEST(TestName := __POUNAME());
 deadline(IN := TRUE, PT := _Deadline);
+
 IF deadline.Q THEN
 	AssertTrue(Condition := FALSE, Message := 'Timer scenario exceeded its deadline');
 	testFinished := TRUE;
@@ -181,12 +249,14 @@ END_IF
 IF NOT initialized THEN
 	initialized := TRUE;
 	timer.Interval := TOF_Core.Times.MIN_VALUE;
+
 	IF NOT timer.Start() THEN
 		AssertTrue(Condition := FALSE, Message := 'Prepared timer must accept Start');
 		testFinished := TRUE;
 		TEST_FINISHED();
 		RETURN;
 	END_IF
+
 	AssertFalse(Condition := timer.Triggered, Message := 'Start must not expose a completion pulse');
 END_IF
 
@@ -213,6 +283,7 @@ IF awaitingPulseClear THEN
 END_IF
 
 AssertTrue(Condition := timer.Elapsed, Message := 'Zero interval must set TON.Q on its first Execute');
+
 IF NOT timer.Elapsed THEN
 	testFinished := TRUE;
 	TEST_FINISHED();
@@ -224,6 +295,7 @@ AssertEquals_BOOL(
 		Actual := timer.Triggered,
 		Message := 'Triggered must match the newly observed TON.Q without an extra cycle'
 	);
+
 IF timer.Elapsed <> timer.Triggered THEN
 	testFinished := TRUE;
 	TEST_FINISHED();
@@ -244,8 +316,10 @@ IF timer.Triggered THEN
 		__CATCH
 			exceptionEscaped := TRUE;
 		__ENDTRY
+
 		AssertFalse(Condition := exceptionEscaped, Message := 'Restart on the completion cycle must not throw');
 		AssertTrue(Condition := restartAccepted, Message := 'Restart must succeed in the completion cycle');
+
 		IF exceptionEscaped OR_ELSE NOT restartAccepted THEN
 			testFinished := TRUE;
 			TEST_FINISHED();
@@ -288,6 +362,7 @@ TEST(TestName := __POUNAME());
 IF NOT initialized THEN
 	initialized := TRUE;
 	timer.Interval := _ActiveInterval;
+
 	IF NOT timer.Start() THEN
 		AssertTrue(Condition := FALSE, Message := 'Prepared timer must accept Start');
 		testFinished := TRUE;
@@ -305,6 +380,7 @@ IF NOT initialized THEN
 
 	AssertFalse(Condition := exceptionEscaped, Message := 'Active restart must not throw');
 	AssertTrue(Condition := restartAccepted, Message := 'Active restart must complete in the same cycle');
+
 	IF exceptionEscaped OR_ELSE NOT restartAccepted THEN
 		testFinished := TRUE;
 		TEST_FINISHED();
@@ -330,6 +406,688 @@ AssertTrue(Condition := timer.State.Stopped, Message := 'Restarted timer must co
 AssertTrue(Condition := timer.FinalStopReason.WorkDone, Message := 'Restarted timer must complete normally');
 testFinished := TRUE;
 TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="DefaultNameAndMetadata" Id="{a3534483-361f-4031-be66-bf6081fc9d8c}">
+      <Declaration><![CDATA[(*!
+<summary>Checks default and explicit names before Start and after reuse.</summary>
+<description>
+The empty-name instance exercises static ClassName readiness in base FB_init. Metadata is read-only;
+the borrowed name remains tied to the persistent timer. Zero completion permits synchronous reuse.
+</description>
+*)
+METHOD DefaultNameAndMetadata
+VAR
+	exceptionEscaped : BOOL;
+END_VAR
+VAR_INST
+	testFinished : BOOL;
+	timer : TOF_Timers.Timer(name := "");
+	namedTimer : TOF_Timers.Timer(name := "Explicit timer");
+	initialName : WSTRING;
+	borrowedName : REFERENCE TO WSTRING;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN
+	RETURN;
+END_IF
+
+TEST(TestName := __POUNAME());
+
+__TRY
+	borrowedName REF= timer.Name;
+	initialName := borrowedName;
+	AssertTrue(
+		Condition := Tc2_Standard.WLEFT(STR := initialName, SIZE := Tc2_Standard.WLEN(STR := "Timer")) = "Timer",
+		Message := 'Default name must contain the initialized Timer class before Start'
+	);
+	AssertTrue(Condition := namedTimer.Name = "Explicit timer", Message := 'Explicit name must be copied unchanged');
+	AssertTrue(Condition := timer.ClassName = 'Timer', Message := 'ClassName must identify the concrete Timer');
+	AssertTrue(Condition := timer.NamespaceName = 'TOF_Timers', Message := 'NamespaceName must identify the timer library');
+	AssertTrue(Condition := timer.SelfSize = XSIZEOF(timer), Message := 'SelfSize must match the concrete timer');
+	AssertTrue(Condition := timer.State.Ready, Message := 'Metadata reads must not start the timer');
+	timer.Interval := TOF_Core.Times.MIN_VALUE;
+	AssertTrue(Condition := timer.Start(), Message := 'Unnamed timer must accept Start');
+	timer.Execute();
+	AssertTrue(Condition := timer.Triggered, Message := 'Unnamed zero timer must complete');
+	AssertTrue(Condition := timer.Reset(), Message := 'Completed unnamed timer must accept Reset');
+	AssertTrue(Condition := timer.Name = initialName, Message := 'Reset must preserve the stored name');
+	AssertTrue(Condition := borrowedName = initialName, Message := 'Borrowed name storage must survive Reset');
+__CATCH
+	exceptionEscaped := TRUE;
+__ENDTRY
+
+AssertFalse(Condition := exceptionEscaped, Message := 'Timer scenario must not leak an exception to TcUnit');
+testFinished := TRUE;
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="CancelBeforeFirstExecuteAndReuse" Id="{b7712294-067e-4b39-9afe-0b9f7fc1057c}">
+      <Declaration><![CDATA[(*!
+<summary>Checks cancellation before the first Execute and reuse after reset.</summary>
+<description>
+No timer Execute precedes cancellation. The scenario checks RUNNING reset refusal, retained cancel result
+and a fresh zero interval after explicit Reset.
+</description>
+*)
+METHOD CancelBeforeFirstExecuteAndReuse
+VAR
+	exceptionEscaped : BOOL;
+END_VAR
+VAR_INST
+	testFinished : BOOL;
+	timer : TOF_Timers.Timer(name := "Cancel timer");
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN
+	RETURN;
+END_IF
+
+TEST(TestName := __POUNAME());
+
+__TRY
+	timer.Interval := _ActiveInterval;
+	AssertTrue(Condition := timer.Start(), Message := 'Long timer must accept Start');
+	AssertFalse(Condition := timer.Reset(), Message := 'Reset must refuse a running timer');
+	AssertTrue(Condition := timer.Cancel(), Message := 'Cancellation must be accepted before the first Execute');
+	AssertFalse(Condition := timer.Cancel(), Message := 'Repeated cancellation must be refused');
+	timer.Execute();
+	AssertTrue(Condition := timer.State.Stopped, Message := 'Ordinary cancellation must finish in one Execute');
+	AssertTrue(Condition := timer.FinalStopReason.ExternalCancel, Message := 'Cancellation must remain the final reason');
+	AssertFalse(Condition := timer.Triggered, Message := 'Cancellation must not become successful completion');
+	AssertFalse(Condition := timer.Elapsed, Message := 'Cancelled long timer must not report elapsed');
+	AssertTrue(Condition := timer.Reset(), Message := 'Cancelled timer must accept Reset');
+	AssertTrue(Condition := timer.ElapsedTime = TOF_Core.Times.MIN_VALUE, Message := 'Reset must clear elapsed time');
+	AssertTrue(Condition := timer.Interval = _ActiveInterval, Message := 'Reset must preserve the configured interval');
+	AssertTrue(
+		Condition := timer.SetIntervalAndRestart(interval := TOF_Core.Times.MIN_VALUE),
+		Message := 'Cancelled timer must support immediate reuse'
+	);
+	timer.Execute();
+	AssertTrue(Condition := timer.Triggered, Message := 'Reused timer must complete normally');
+__CATCH
+	exceptionEscaped := TRUE;
+__ENDTRY
+
+AssertFalse(Condition := exceptionEscaped, Message := 'Timer scenario must not leak an exception to TcUnit');
+testFinished := TRUE;
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="ResetAfterCompletion" Id="{a4e15992-6af0-46ad-9f1d-ec0cbdce615e}">
+      <Declaration><![CDATA[(*!
+<summary>Checks repeated Execute and explicit Reset after natural completion.</summary>
+<description>
+All calls occur in one suite invocation. Assertions distinguish retained elapsed from the call-based pulse.
+</description>
+*)
+METHOD ResetAfterCompletion
+VAR
+	exceptionEscaped : BOOL;
+END_VAR
+VAR_INST
+	testFinished : BOOL;
+	timer : TOF_Timers.Timer(name := "Completed timer");
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN
+	RETURN;
+END_IF
+
+TEST(TestName := __POUNAME());
+
+__TRY
+	timer.Interval := TOF_Core.Times.MIN_VALUE;
+	AssertTrue(Condition := timer.Start(), Message := 'Zero timer must accept Start');
+	timer.Execute();
+	AssertTrue(Condition := timer.Triggered, Message := 'First Execute must expose completion');
+	AssertFalse(Condition := timer.Start(), Message := 'Start must refuse STOPPED without Reset');
+	AssertFalse(Condition := timer.Cancel(), Message := 'Cancel must refuse an already completed timer');
+	timer.Execute();
+	AssertFalse(Condition := timer.Triggered, Message := 'A second Execute in the same cycle must clear the pulse');
+	AssertTrue(Condition := timer.Elapsed, Message := 'Idle Execute must preserve retained elapsed');
+	AssertTrue(Condition := timer.FinalStopReason.WorkDone, Message := 'Idle Execute must preserve the result');
+	AssertTrue(Condition := timer.Reset(), Message := 'Completed timer must accept Reset');
+	AssertTrue(Condition := timer.State.Ready, Message := 'Successful Reset must restore READY');
+	AssertFalse(Condition := timer.Elapsed, Message := 'Reset must clear retained elapsed');
+	AssertFalse(Condition := timer.Triggered, Message := 'Reset must clear the completion pulse');
+	AssertTrue(Condition := timer.ElapsedTime = TOF_Core.Times.MIN_VALUE, Message := 'Reset must clear ET');
+	AssertTrue(Condition := timer.Restart(), Message := 'Restart must also work from READY');
+	timer.Execute();
+	AssertTrue(Condition := timer.Triggered, Message := 'Restart after explicit Reset must yield a fresh completion');
+__CATCH
+	exceptionEscaped := TRUE;
+__ENDTRY
+
+AssertFalse(Condition := exceptionEscaped, Message := 'Timer scenario must not leak an exception to TcUnit');
+testFinished := TRUE;
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="IntervalAssignmentPreservesObservation" Id="{25a2f187-e177-4966-9360-29fabef6fdc9}">
+      <Declaration><![CDATA[(*!
+<summary>Checks PT assignment without implicit reset, start or observation update.</summary>
+<description>
+The setter is exercised in READY, RUNNING and STOPPED. Getters must remain observations until TON executes.
+</description>
+*)
+METHOD IntervalAssignmentPreservesObservation
+VAR
+	exceptionEscaped : BOOL;
+END_VAR
+VAR_INST
+	testFinished : BOOL;
+	timer : TOF_Timers.Timer(name := "Configured timer");
+	observedTime : TIME;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN
+	RETURN;
+END_IF
+
+TEST(TestName := __POUNAME());
+
+__TRY
+	timer.Interval := _ActiveInterval;
+	AssertTrue(Condition := timer.State.Ready, Message := 'Interval assignment must not start a READY timer');
+	AssertTrue(Condition := timer.Start(), Message := 'Configured timer must accept Start');
+	timer.Execute();
+	observedTime := timer.ElapsedTime;
+	timer.Interval := TOF_Core.Times.MIN_VALUE;
+	AssertTrue(Condition := timer.State.Running, Message := 'PT assignment must preserve RUNNING');
+	AssertTrue(Condition := timer.ElapsedTime = observedTime, Message := 'PT assignment must not update ET');
+	AssertFalse(Condition := timer.Elapsed, Message := 'PT assignment must not update Q');
+	AssertFalse(Condition := timer.Triggered, Message := 'PT assignment must not create a completion pulse');
+	timer.Execute();
+	AssertTrue(Condition := timer.Triggered, Message := 'Next Execute must evaluate the newly configured zero PT');
+	observedTime := timer.ElapsedTime;
+	timer.Interval := _ActiveInterval;
+	AssertTrue(Condition := timer.State.Stopped, Message := 'PT assignment must not restart a stopped timer');
+	AssertTrue(Condition := timer.Elapsed, Message := 'Stopped PT assignment must preserve the retained Q');
+	AssertTrue(Condition := timer.ElapsedTime = observedTime, Message := 'Stopped PT assignment must preserve ET');
+	timer.Execute();
+	AssertTrue(Condition := timer.Elapsed, Message := 'Stopped Execute must not reevaluate TON');
+	AssertTrue(Condition := timer.Reset(), Message := 'Explicit Reset must remain available');
+	AssertFalse(Condition := timer.Elapsed, Message := 'Reset must clear Q after PT assignment');
+__CATCH
+	exceptionEscaped := TRUE;
+__ENDTRY
+
+AssertFalse(Condition := exceptionEscaped, Message := 'Timer scenario must not leak an exception to TcUnit');
+testFinished := TRUE;
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="RestartWaitsForStopping" Id="{fd2a87cf-c953-423c-b759-cb5106fe0da8}">
+      <Declaration><![CDATA[(*!
+<summary>Checks one-step restart preparation while asynchronous stopping remains pending.</summary>
+<description>
+The persistent probe deliberately keeps OnStopping pending. The scenario then releases the gate and retries;
+no blocking wait or deferred restart is permitted.
+</description>
+*)
+METHOD RestartWaitsForStopping
+VAR
+	exceptionEscaped : BOOL;
+END_VAR
+VAR_INST
+	testFinished : BOOL;
+	timer : TimerRestartProbe(name := "Pending restart");
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN
+	RETURN;
+END_IF
+
+TEST(TestName := __POUNAME());
+
+__TRY
+	timer.Interval := _ActiveInterval;
+	timer.AllowStopping := FALSE;
+	AssertTrue(Condition := timer.Start(), Message := 'Probe must accept initial Start');
+	AssertFalse(
+		Condition := timer.SetIntervalAndRestart(interval := _PositiveInterval),
+		Message := 'Restart must refuse while stopping remains pending'
+	);
+	AssertTrue(Condition := timer.State.Running, Message := 'Refused preparation must retain active cleanup');
+	AssertTrue(Condition := timer.StoppingCalls = 1, Message := 'Preparation must advance stopping exactly once');
+	AssertTrue(Condition := timer.Interval = _ActiveInterval, Message := 'Pending stopping must preserve the old PT');
+	AssertFalse(Condition := timer.Restart(), Message := 'Another pending restart must also refuse');
+	AssertTrue(Condition := timer.StoppingCalls = 2, Message := 'Repeated preparation must add only one stopping call');
+	timer.AllowStopping := TRUE;
+	timer.Execute();
+	AssertTrue(Condition := timer.State.Stopped, Message := 'Open gate must allow cleanup to finish');
+	AssertTrue(Condition := timer.FinalStopReason.ExternalCancel, Message := 'Active restart preparation cancels the old run');
+	AssertTrue(Condition := timer.Interval = _ActiveInterval, Message := 'Finishing cleanup must not apply a deferred PT');
+	timer.Execute();
+	AssertTrue(Condition := timer.State.Stopped, Message := 'Refused restart must not schedule a later Start');
+	AssertTrue(
+		Condition := timer.SetIntervalAndRestart(interval := _PositiveInterval),
+		Message := 'An explicit retry must succeed after cleanup'
+	);
+	AssertTrue(Condition := timer.Interval = _PositiveInterval, Message := 'Successful retry must apply the new PT');
+	AssertTrue(Condition := timer.Cancel(), Message := 'Scenario must cancel its active replacement run');
+	timer.Execute();
+__CATCH
+	exceptionEscaped := TRUE;
+__ENDTRY
+
+AssertFalse(Condition := exceptionEscaped, Message := 'Timer scenario must not leak an exception to TcUnit');
+testFinished := TRUE;
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="RestartPreservesIntervalOnResetFailure" Id="{efc3dba2-ced9-445c-90cb-a020b1bdf6db}">
+      <Declaration><![CDATA[(*!
+<summary>Checks interval and observations when the reset hook refuses restart.</summary>
+<description>
+The deliberate operational exception occurs before the inherited reset. Task must contain it and preserve
+a reusable STOPPED state; AutomationRunner owns any cloned diagnostic exception until task cleanup.
+</description>
+*)
+METHOD RestartPreservesIntervalOnResetFailure
+VAR
+	exceptionEscaped : BOOL;
+END_VAR
+VAR_INST
+	testFinished : BOOL;
+	timer : TimerRestartProbe(name := "Reset refusal");
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN
+	RETURN;
+END_IF
+
+TEST(TestName := __POUNAME());
+
+__TRY
+	timer.Interval := TOF_Core.Times.MIN_VALUE;
+	AssertTrue(Condition := timer.Start(), Message := 'Probe must accept initial Start');
+	timer.Execute();
+	AssertTrue(Condition := timer.Triggered, Message := 'Old run must complete before reset injection');
+	timer.ThrowOnReset := TRUE;
+	AssertFalse(
+		Condition := timer.SetIntervalAndRestart(interval := _PositiveInterval),
+		Message := 'Reset exception must be converted to restart refusal'
+	);
+	AssertTrue(Condition := timer.State.Stopped, Message := 'Reset refusal must preserve STOPPED');
+	AssertTrue(Condition := timer.Interval = TOF_Core.Times.MIN_VALUE, Message := 'Failed preparation must preserve old PT');
+	AssertTrue(Condition := timer.Elapsed, Message := 'Failure before the base reset must retain old Q');
+	timer.ThrowOnReset := FALSE;
+	AssertTrue(
+		Condition := timer.SetIntervalAndRestart(interval := _ActiveInterval),
+		Message := 'Restart must recover after removing reset injection'
+	);
+	AssertFalse(Condition := timer.Elapsed, Message := 'Successful reset must clear old Q');
+	AssertFalse(Condition := timer.Triggered, Message := 'Successful restart must clear the old pulse');
+	AssertTrue(Condition := timer.Cancel(), Message := 'Scenario must cancel the recovered run');
+	timer.Execute();
+__CATCH
+	exceptionEscaped := TRUE;
+__ENDTRY
+
+AssertFalse(Condition := exceptionEscaped, Message := 'Timer scenario must not leak an exception to TcUnit');
+testFinished := TRUE;
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="RestartRetainsIntervalOnStartFailure" Id="{623f59d2-4237-4196-956e-9268b2a971dc}">
+      <Declaration><![CDATA[(*!
+<summary>Checks the configured new interval after late start-preparation refusal.</summary>
+<description>
+The new PT is assigned before Task.Start reaches its throwing hook. The failure result must not imply
+rollback of this configuration or an automatically scheduled retry.
+</description>
+*)
+METHOD RestartRetainsIntervalOnStartFailure
+VAR
+	exceptionEscaped : BOOL;
+END_VAR
+VAR_INST
+	testFinished : BOOL;
+	timer : TimerRestartProbe(name := "Start refusal");
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN
+	RETURN;
+END_IF
+
+TEST(TestName := __POUNAME());
+
+__TRY
+	timer.ThrowOnBeforeStart := TRUE;
+	AssertFalse(
+		Condition := timer.SetIntervalAndRestart(interval := _PositiveInterval),
+		Message := 'Start preparation exception must be converted to restart refusal'
+	);
+	AssertTrue(Condition := timer.State.Ready, Message := 'Refused Start must leave the prepared timer READY');
+	AssertTrue(Condition := timer.Interval = _PositiveInterval, Message := 'Late Start refusal must retain the new PT');
+	AssertFalse(Condition := timer.Elapsed, Message := 'Injected refusal before base Start must leave Q clear');
+	timer.Execute();
+	AssertTrue(Condition := timer.State.Ready, Message := 'Refused restart must not schedule automatic execution');
+	timer.ThrowOnBeforeStart := FALSE;
+	AssertTrue(Condition := timer.Start(), Message := 'Explicit Start must recover after removing injection');
+	AssertTrue(Condition := timer.Cancel(), Message := 'Scenario must cancel the recovered run');
+	timer.Execute();
+__CATCH
+	exceptionEscaped := TRUE;
+__ENDTRY
+
+AssertFalse(Condition := exceptionEscaped, Message := 'Timer scenario must not leak an exception to TcUnit');
+testFinished := TRUE;
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="CompletionCallbackCanReset" Id="{240f810d-22e3-4a85-94a7-defb1fa7ca9f}">
+      <Declaration><![CDATA[(*!
+<summary>Checks the documented completion observation when OnAfterStop resets the timer.</summary>
+<description>
+This descendant intentionally changes state after finalization. Ordinary Timer pulse expectations do not
+override the explicitly supported reset notification semantics.
+</description>
+*)
+METHOD CompletionCallbackCanReset
+VAR
+	exceptionEscaped : BOOL;
+END_VAR
+VAR_INST
+	testFinished : BOOL;
+	timer : TimerRestartProbe(name := "Callback reset");
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN
+	RETURN;
+END_IF
+
+TEST(TestName := __POUNAME());
+
+__TRY
+	timer.ResetOnAfterStop := TRUE;
+	timer.Interval := TOF_Core.Times.MIN_VALUE;
+	AssertTrue(Condition := timer.Start(), Message := 'Callback probe must accept Start');
+	timer.Execute();
+	AssertTrue(Condition := timer.State.Ready, Message := 'Supported callback Reset must restore READY');
+	AssertFalse(Condition := timer.Triggered, Message := 'Callback Reset may clear the pulse before Execute returns');
+	AssertFalse(Condition := timer.Elapsed, Message := 'Callback Reset must clear retained Q');
+	AssertTrue(Condition := timer.ElapsedTime = TOF_Core.Times.MIN_VALUE, Message := 'Callback Reset must clear ET');
+__CATCH
+	exceptionEscaped := TRUE;
+__ENDTRY
+
+AssertFalse(Condition := exceptionEscaped, Message := 'Timer scenario must not leak an exception to TcUnit');
+testFinished := TRUE;
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="DelayedFirstExecuteUsesStartAnchor" Id="{06464e85-097c-4af9-a2bd-253c7e58b96f}">
+      <Declaration><![CDATA[(*!
+<summary>Checks elapsed time when the first Execute is delayed beyond the positive preset.</summary>
+<description>
+Withholds Execute until independent task time exceeds PT plus one millisecond. Getters preserve the last TON
+observation while calls are skipped. The first Execute then completes, or cancellation takes precedence.
+Clock changes and debugging pauses are outside this timing scenario. A ten-second deadline bounds waiting.
+</description>
+*)
+METHOD DelayedFirstExecuteUsesStartAnchor
+VAR
+	currentTaskTime : ULINT;
+	elapsedTicks : ULINT;
+	exceptionEscaped : BOOL;
+END_VAR
+VAR_INST
+	phase : TIMER_TIMING_TEST_PHASE;
+	startedAt : ULINT;
+	timer : TOF_Timers.Timer(name := "DelayedFirstExecuteUsesStartAnchor");
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF phase = TIMER_TIMING_TEST_PHASE.FINISHED THEN
+	RETURN;
+END_IF
+
+TEST(TestName := __POUNAME());
+
+__TRY
+
+	CASE phase OF
+		TIMER_TIMING_TEST_PHASE.BEFORE_START:
+			timer.Interval := _PositiveInterval;
+			startedAt := Tc2_System.F_GetTaskTime();
+
+			IF timer.Start() THEN
+				phase := TIMER_TIMING_TEST_PHASE.WAITING_FOR_FIRST_EXECUTE;
+			ELSE
+				AssertTrue(Condition := FALSE, Message := 'Prepared positive timer must accept Start');
+				phase := TIMER_TIMING_TEST_PHASE.FINISHED;
+			END_IF
+
+		TIMER_TIMING_TEST_PHASE.WAITING_FOR_FIRST_EXECUTE:
+			currentTaskTime := Tc2_System.F_GetTaskTime();
+
+			IF currentTaskTime < startedAt THEN
+				AssertTrue(Condition := FALSE, Message := 'Independent task time moved backwards');
+				phase := TIMER_TIMING_TEST_PHASE.FINISHED;
+			ELSE
+				elapsedTicks := currentTaskTime - startedAt;
+				AssertFalse(Condition := timer.Elapsed, Message := 'Skipped Execute must not update observed Q');
+				AssertTrue(
+					Condition := timer.ElapsedTime = TOF_Core.Times.MIN_VALUE,
+					Message := 'Getter reads must not advance ET while Execute is skipped'
+				);
+
+				IF elapsedTicks > TO_ULINT(_Deadline) * _TaskTimeTicksPerMillisecond THEN
+					AssertTrue(Condition := FALSE, Message := 'Delayed timer scenario exceeded its deadline');
+					phase := TIMER_TIMING_TEST_PHASE.FINISHED;
+				ELSIF elapsedTicks >= TO_ULINT(_PositiveInterval) * _TaskTimeTicksPerMillisecond
+					+ _TimingToleranceTicks
+				THEN
+					timer.Execute();
+					AssertTrue(Condition := timer.Triggered, Message := 'First delayed Execute must observe expiry anchored at Start');
+					AssertTrue(Condition := timer.State.Stopped, Message := 'Delayed completion must be immediate');
+					AssertTrue(Condition := timer.FinalStopReason.WorkDone, Message := 'Delayed completion must remain successful');
+					AssertTrue(Condition := timer.ElapsedTime = _PositiveInterval, Message := 'Completed ET must reach the configured PT');
+					AssertTrue(
+						Condition := timer.SetIntervalAndRestart(interval := _PositiveInterval),
+						Message := 'A completed positive timer must accept positive restart'
+					);
+					AssertFalse(Condition := timer.Elapsed, Message := 'Positive restart must clear the previous Q');
+					AssertTrue(Condition := timer.Cancel(), Message := 'Scenario must cancel the replacement run');
+					timer.Execute();
+					phase := TIMER_TIMING_TEST_PHASE.FINISHED;
+				END_IF
+
+			END_IF
+
+	END_CASE
+
+__CATCH
+	exceptionEscaped := TRUE;
+	phase := TIMER_TIMING_TEST_PHASE.FINISHED;
+__ENDTRY
+
+AssertFalse(Condition := exceptionEscaped, Message := 'Delayed timer scenario must not leak exceptions');
+
+IF phase = TIMER_TIMING_TEST_PHASE.FINISHED THEN
+	TEST_FINISHED();
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="CancelAfterUnobservedExpiry" Id="{abfe5138-7b0d-44f9-afbe-2a17f0af1322}">
+      <Declaration><![CDATA[(*!
+<summary>Checks cancellation after elapsed task time but before the first TON observation.</summary>
+<description>
+Withholds Execute until independent task time exceeds PT plus one millisecond. Getters preserve the last TON
+observation while calls are skipped. The first Execute then completes, or cancellation takes precedence.
+Clock changes and debugging pauses are outside this timing scenario. A ten-second deadline bounds waiting.
+</description>
+*)
+METHOD CancelAfterUnobservedExpiry
+VAR
+	currentTaskTime : ULINT;
+	elapsedTicks : ULINT;
+	exceptionEscaped : BOOL;
+END_VAR
+VAR_INST
+	phase : TIMER_TIMING_TEST_PHASE;
+	startedAt : ULINT;
+	timer : TOF_Timers.Timer(name := "CancelAfterUnobservedExpiry");
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF phase = TIMER_TIMING_TEST_PHASE.FINISHED THEN
+	RETURN;
+END_IF
+
+TEST(TestName := __POUNAME());
+
+__TRY
+
+	CASE phase OF
+		TIMER_TIMING_TEST_PHASE.BEFORE_START:
+			timer.Interval := _PositiveInterval;
+			startedAt := Tc2_System.F_GetTaskTime();
+
+			IF timer.Start() THEN
+				phase := TIMER_TIMING_TEST_PHASE.WAITING_FOR_FIRST_EXECUTE;
+			ELSE
+				AssertTrue(Condition := FALSE, Message := 'Prepared positive timer must accept Start');
+				phase := TIMER_TIMING_TEST_PHASE.FINISHED;
+			END_IF
+
+		TIMER_TIMING_TEST_PHASE.WAITING_FOR_FIRST_EXECUTE:
+			currentTaskTime := Tc2_System.F_GetTaskTime();
+
+			IF currentTaskTime < startedAt THEN
+				AssertTrue(Condition := FALSE, Message := 'Independent task time moved backwards');
+				phase := TIMER_TIMING_TEST_PHASE.FINISHED;
+			ELSE
+				elapsedTicks := currentTaskTime - startedAt;
+				AssertFalse(Condition := timer.Elapsed, Message := 'Skipped Execute must not update observed Q');
+				AssertTrue(
+					Condition := timer.ElapsedTime = TOF_Core.Times.MIN_VALUE,
+					Message := 'Getter reads must not advance ET while Execute is skipped'
+				);
+
+				IF elapsedTicks > TO_ULINT(_Deadline) * _TaskTimeTicksPerMillisecond THEN
+					AssertTrue(Condition := FALSE, Message := 'Delayed timer scenario exceeded its deadline');
+					phase := TIMER_TIMING_TEST_PHASE.FINISHED;
+				ELSIF elapsedTicks >= TO_ULINT(_PositiveInterval) * _TaskTimeTicksPerMillisecond
+					+ _TimingToleranceTicks
+				THEN
+					AssertTrue(Condition := timer.Cancel(), Message := 'Cancel must take precedence over unobserved expiry');
+					timer.Execute();
+					AssertTrue(Condition := timer.State.Stopped, Message := 'Cancelled timer must finish its stopping step');
+					AssertTrue(Condition := timer.FinalStopReason.ExternalCancel, Message := 'Unobserved expiry must not replace cancellation');
+					AssertFalse(Condition := timer.Triggered, Message := 'Cancelled unobserved expiry must not trigger');
+					AssertFalse(Condition := timer.Elapsed, Message := 'Stopping must not evaluate the unobserved TON expiry');
+					phase := TIMER_TIMING_TEST_PHASE.FINISHED;
+				END_IF
+
+			END_IF
+
+	END_CASE
+
+__CATCH
+	exceptionEscaped := TRUE;
+	phase := TIMER_TIMING_TEST_PHASE.FINISHED;
+__ENDTRY
+
+AssertFalse(Condition := exceptionEscaped, Message := 'Delayed timer scenario must not leak exceptions');
+
+IF phase = TIMER_TIMING_TEST_PHASE.FINISHED THEN
+	TEST_FINISHED();
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="PositiveRestartUsesStartAnchor" Id="{3fb7f302-5ef2-42db-8160-af9946a5d24e}">
+      <Declaration><![CDATA[(*!
+<summary>Checks a positive interval after restarting an active long timer.</summary>
+<description>
+Restarts a one-hour timer with a positive preset, then withholds Execute beyond PT plus one millisecond.
+Getters must preserve the last TON observation while calls are skipped. The first Execute then completes, or cancellation takes precedence.
+Clock changes and debugging pauses are outside this timing scenario. A ten-second deadline bounds waiting.
+</description>
+*)
+METHOD PositiveRestartUsesStartAnchor
+VAR
+	currentTaskTime : ULINT;
+	elapsedTicks : ULINT;
+	exceptionEscaped : BOOL;
+END_VAR
+VAR_INST
+	phase : TIMER_TIMING_TEST_PHASE;
+	startedAt : ULINT;
+	timer : TOF_Timers.Timer(name := "PositiveRestartUsesStartAnchor");
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF phase = TIMER_TIMING_TEST_PHASE.FINISHED THEN
+	RETURN;
+END_IF
+
+TEST(TestName := __POUNAME());
+
+__TRY
+
+	CASE phase OF
+		TIMER_TIMING_TEST_PHASE.BEFORE_START:
+			timer.Interval := _ActiveInterval;
+			AssertTrue(Condition := timer.Start(), Message := 'Long timer must start before positive restart');
+			startedAt := Tc2_System.F_GetTaskTime();
+
+			IF timer.SetIntervalAndRestart(interval := _PositiveInterval) THEN
+				phase := TIMER_TIMING_TEST_PHASE.WAITING_FOR_FIRST_EXECUTE;
+			ELSE
+				AssertTrue(Condition := FALSE, Message := 'Prepared positive timer must accept Start');
+				phase := TIMER_TIMING_TEST_PHASE.FINISHED;
+			END_IF
+
+		TIMER_TIMING_TEST_PHASE.WAITING_FOR_FIRST_EXECUTE:
+			currentTaskTime := Tc2_System.F_GetTaskTime();
+
+			IF currentTaskTime < startedAt THEN
+				AssertTrue(Condition := FALSE, Message := 'Independent task time moved backwards');
+				phase := TIMER_TIMING_TEST_PHASE.FINISHED;
+			ELSE
+				elapsedTicks := currentTaskTime - startedAt;
+				AssertFalse(Condition := timer.Elapsed, Message := 'Skipped Execute must not update observed Q');
+				AssertTrue(
+					Condition := timer.ElapsedTime = TOF_Core.Times.MIN_VALUE,
+					Message := 'Getter reads must not advance ET while Execute is skipped'
+				);
+
+				IF elapsedTicks > TO_ULINT(_Deadline) * _TaskTimeTicksPerMillisecond THEN
+					AssertTrue(Condition := FALSE, Message := 'Delayed timer scenario exceeded its deadline');
+					phase := TIMER_TIMING_TEST_PHASE.FINISHED;
+				ELSIF elapsedTicks >= TO_ULINT(_PositiveInterval) * _TaskTimeTicksPerMillisecond
+					+ _TimingToleranceTicks
+				THEN
+					timer.Execute();
+					AssertTrue(Condition := timer.Triggered, Message := 'First delayed Execute must observe expiry anchored at Start');
+					AssertTrue(Condition := timer.State.Stopped, Message := 'Delayed completion must be immediate');
+					AssertTrue(Condition := timer.FinalStopReason.WorkDone, Message := 'Delayed completion must remain successful');
+					AssertTrue(Condition := timer.ElapsedTime = _PositiveInterval, Message := 'Completed ET must reach the configured PT');
+					AssertTrue(
+						Condition := timer.SetIntervalAndRestart(interval := _PositiveInterval),
+						Message := 'A completed positive timer must accept positive restart'
+					);
+					AssertFalse(Condition := timer.Elapsed, Message := 'Positive restart must clear the previous Q');
+					AssertTrue(Condition := timer.Cancel(), Message := 'Scenario must cancel the replacement run');
+					timer.Execute();
+					phase := TIMER_TIMING_TEST_PHASE.FINISHED;
+				END_IF
+
+			END_IF
+
+	END_CASE
+
+__CATCH
+	exceptionEscaped := TRUE;
+	phase := TIMER_TIMING_TEST_PHASE.FINISHED;
+__ENDTRY
+
+AssertFalse(Condition := exceptionEscaped, Message := 'Delayed timer scenario must not leak exceptions');
+
+IF phase = TIMER_TIMING_TEST_PHASE.FINISHED THEN
+	TEST_FINISHED();
+END_IF]]></ST>
       </Implementation>
     </Method>
   </POU>

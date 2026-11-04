@@ -1,0 +1,728 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="LoggerContractTest" Id="{5a9bd047-74cb-4350-9ca8-339c363352f1}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+SPDX-FileCopyrightText: © 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+SPDX-License-Identifier: MIT
+License: https://opensource.org/license/mit
+*)
+(*!
+<summary>Checks logger admission, copied delivery, failure containment, metadata and diagnostic routing.</summary>
+<description>
+Runs in the current TcUnit owner task with persistent fixtures. Does not inject terminal OOM or start the
+file logger except for the explicitly invalid zero-limit case, which must fail before filesystem I/O.
+The snapshot and manager-routing cases require the standard queue capacity of at least three records.
+Manager cases temporarily change the shared filter and numbering; no other task may log concurrently during
+these synchronous calls. A non-throwing FB_init probe records rejection outside cyclic context. The cyclic
+routing case intentionally emits one independent ADS diagnostic for a hostile Execute implementation.
+Instances must not be copied because their fixtures contain non-copyable state.
+</description>
+*)
+
+{attribute 'no_assign'}
+{attribute 'no_explicit_call' := 'do not call this function block directly'}
+FUNCTION_BLOCK LoggerContractTest EXTENDS TcUnit.FB_TestSuite
+VAR
+	//! <summary>Records that initialization exercised a non-cyclic execution context.</summary>
+	_InitializationContextObserved : BOOL;
+	//! <summary>Records rejection without exceptions, counter changes or a published non-cyclic destination.</summary>
+	_InitializationCallsRejected : BOOL;
+	_InitializationLogger : TOF_Core.AdsLogger;
+	_InitializationError : TOF_Core.ERROR;
+	_InitializationException : TOF_Core.StandardException;
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[QueuedSnapshotsAndFifo();
+QueuedCapacityAndWraparound();
+QueuedDeliveryFailures();
+FormatterFailureContainment();
+MetadataAndZeroRecordLimit();
+IndependentTaskDiagnostics();
+AggregateSnapshotsAndPartialAdmission();
+CurrentTaskLoggerRouting();
+RejectNonCyclicInitialization();]]></ST>
+    </Implementation>
+    <Method Name="QueuedSnapshotsAndFifo" Id="{a351d957-42b8-4a5a-815b-a56620041661}">
+      <Declaration><![CDATA[(*!
+<summary>Checks FIFO, optional numbers and producer-owned text/error snapshots against captured backend arguments.</summary>
+*)
+METHOD QueuedSnapshotsAndFifo
+VAR_INST
+	testFinished : BOOL;
+	queue : TOF_Loggers.QueuedLogger;
+	backend : LoggerCaptureBackend;
+	message : TOF_Core.ERROR_MESSAGE := "first snapshot";
+	number : ULINT := 17;
+	error : TOF_Core.ERROR;
+	expectedError : TOF_Core.ERROR_MESSAGE;
+	record : LOGGER_CAPTURED_MESSAGE;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN
+	RETURN;
+END_IF
+
+TEST(TestName := __POUNAME());
+
+__TRY
+	AssertTrue(Condition := queue.Configure(backend := backend), Message := 'Configure must accept a live backend');
+	AssertTrue(
+		Condition := queue.TryLogMessage(category := TOF_Core.LOG_CATEGORY.WARNING, message := message, messageNumber := number),
+		Message := 'Numbered message must be queued'
+	);
+	message := "second snapshot";
+	number := 29;
+	AssertTrue(
+		Condition := queue.TryLogMessage(category := TOF_Core.LOG_CATEGORY.DEBUG, message := message),
+		Message := 'Unnumbered message must be queued'
+	);
+	error.SetMessage(message := "copied critical error");
+	error.SetSeverity(severity := TOF_Core.ERROR_SEVERITY.CRITICAL);
+	expectedError := error.ToString(
+		sourceDisplayMode := TOF_Core.ERROR_SOURCE_DISPLAY_MODE.TOP_AND_ROOT,
+		timestampDisplayMode := TOF_Core.TIMESTAMP_DISPLAY_MODE.LOCAL
+	);
+	AssertTrue(Condition := queue.TryLogError(error := error, messageNumber := number), Message := 'Error must be queued');
+	message := "mutated caller storage";
+	number := 99;
+	error.Clear();
+	queue.Execute();
+	AssertTrue(Condition := backend.CapturedCount = 3, Message := 'All three records must reach the backend');
+	record := backend.RecordAt(index := 0);
+	AssertTrue(Condition := record.Message = "first snapshot", Message := 'First text must survive caller mutation');
+	AssertTrue(Condition := record.HasMessageNumber AND_THEN record.MessageNumber = 17, Message := 'Number must be copied');
+	AssertTrue(Condition := record.Category = TOF_Core.LOG_CATEGORY.WARNING, Message := 'First category must be preserved');
+	record := backend.RecordAt(index := 1);
+	AssertTrue(Condition := record.Message = "second snapshot", Message := 'FIFO order must preserve the second record');
+	AssertFalse(Condition := record.HasMessageNumber, Message := 'An absent number must not inherit the prior slot number');
+	record := backend.RecordAt(index := 2);
+	AssertTrue(Condition := record.Message = expectedError, Message := 'Error text must be copied before Clear');
+	AssertTrue(Condition := record.Category = TOF_Core.LOG_CATEGORY.CRITICAL_ERROR, Message := 'Critical severity must survive');
+	AssertTrue(Condition := record.HasMessageNumber AND_THEN record.MessageNumber = 29, Message := 'Error number must be copied');
+	AssertTrue(Condition := queue.PendingMessageCount = 0, Message := 'Queue must be empty after delivery');
+	AssertTrue(Condition := queue.FailedDeliveryCount = 0, Message := 'Successful delivery must not increase failures');
+__CATCH
+	AssertTrue(Condition := FALSE, Message := 'An exception escaped the logger contract scenario');
+__ENDTRY
+
+testFinished := TRUE;
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="QueuedCapacityAndWraparound" Id="{dd933d41-0f91-484e-818a-c222f0b3f874}">
+      <Declaration><![CDATA[(*!
+<summary>Checks capacity, overflow preservation and reused slot contents with the standard bounded capture fixture.</summary>
+*)
+METHOD QueuedCapacityAndWraparound
+VAR_INST
+	testFinished : BOOL;
+	queue : TOF_Loggers.QueuedLogger;
+	backend : LoggerCaptureBackend;
+	message : TOF_Core.ERROR_MESSAGE;
+	number : ULINT;
+	record : LOGGER_CAPTURED_MESSAGE;
+	i : DINT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN
+	RETURN;
+END_IF
+
+TEST(TestName := __POUNAME());
+
+__TRY
+	AssertTrue(Condition := queue.Configure(backend := backend), Message := 'Configure must succeed');
+
+	FOR i := 1 TO TOF_Loggers.Parameters.QUEUED_LOGGER_CAPACITY DO
+		number := TO_ULINT(i);
+		message := TOF_Core.WideStrings.Concat255("entry ", TO_WSTRING(i));
+		AssertTrue(
+			Condition := queue.TryLogMessage(category := TOF_Core.LOG_CATEGORY.INFORMATION, message := message, messageNumber := number),
+			Message := 'Every available queue slot must accept a record'
+		);
+	END_FOR
+
+	AssertFalse(
+		Condition := queue.TryLogMessage(category := TOF_Core.LOG_CATEGORY.ERROR, message := message),
+		Message := 'Full queue must refuse the next record'
+	);
+	queue.Execute();
+	AssertTrue(
+		Condition := backend.AttemptCount = TOF_Loggers.Parameters.QUEUED_LOGGER_CAPACITY,
+		Message := 'Delivery attempts must equal accepted capacity without retrying the overflow'
+	);
+
+	FOR i := 0 TO TO_DINT(TOF_Loggers.Parameters.QUEUED_LOGGER_CAPACITY) - 1 DO
+		record := backend.RecordAt(index := TO_UINT(i));
+		message := TOF_Core.WideStrings.Concat255("entry ", TO_WSTRING(i + 1));
+		AssertTrue(Condition := record.Message = message, Message := 'A full ring must preserve FIFO text');
+		AssertTrue(Condition := record.MessageNumber = TO_ULINT(i + 1), Message := 'A full ring must preserve numbers');
+	END_FOR
+
+	IF TOF_Loggers.Parameters.QUEUED_LOGGER_CAPACITY > 0 THEN
+		message := "after wraparound";
+		AssertTrue(
+			Condition := queue.TryLogMessage(category := TOF_Core.LOG_CATEGORY.WARNING, message := message),
+			Message := 'A drained ring must accept a reused slot'
+		);
+		queue.Execute();
+		record := backend.RecordAt(index := TOF_Loggers.Parameters.QUEUED_LOGGER_CAPACITY);
+		AssertTrue(Condition := record.Message = message, Message := 'Reused slot must deliver its new text');
+		AssertFalse(Condition := record.HasMessageNumber, Message := 'Reused slot must clear number presence');
+	END_IF
+
+	AssertTrue(Condition := queue.PendingMessageCount = 0, Message := 'Refilled queue must drain');
+__CATCH
+	AssertTrue(Condition := FALSE, Message := 'An exception escaped the logger contract scenario');
+__ENDTRY
+
+testFinished := TRUE;
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="QueuedDeliveryFailures" Id="{a2f96b73-674c-46dd-a23c-f9f47487969c}">
+      <Declaration><![CDATA[(*!
+<summary>Checks one attempt per record, FALSE/exception containment and cyclic backend service without recursive diagnostics.</summary>
+*)
+METHOD QueuedDeliveryFailures
+VAR_INST
+	testFinished : BOOL;
+	queue : TOF_Loggers.QueuedLogger;
+	backend : LoggerCaptureBackend;
+	message : TOF_Core.ERROR_MESSAGE := "delivery probe";
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN
+	RETURN;
+END_IF
+
+TEST(TestName := __POUNAME());
+
+__TRY
+	AssertTrue(Condition := queue.Configure(backend := backend), Message := 'Configure must succeed');
+	queue.Execute();
+	AssertTrue(Condition := backend.ExecuteCount = 1, Message := 'Empty queue must still service the backend');
+	backend.DeliveryBehavior := LOGGER_DELIVERY_BEHAVIOR.REFUSE;
+	queue.TryLogMessage(category := TOF_Core.LOG_CATEGORY.ERROR, message := message);
+	queue.TryLogMessage(category := TOF_Core.LOG_CATEGORY.ERROR, message := message);
+	queue.Execute();
+	AssertTrue(Condition := queue.FailedDeliveryCount = 2, Message := 'Refused attempts must be counted once each');
+	backend.DeliveryBehavior := LOGGER_DELIVERY_BEHAVIOR.THROW_EXCEPTION;
+	queue.TryLogMessage(category := TOF_Core.LOG_CATEGORY.ERROR, message := message);
+	queue.Execute();
+	AssertTrue(Condition := queue.FailedDeliveryCount = 3, Message := 'A hostile delivery exception must be contained and counted');
+	backend.DeliveryBehavior := LOGGER_DELIVERY_BEHAVIOR.ACCEPT;
+	backend.ThrowOnExecute := TRUE;
+	queue.TryLogMessage(category := TOF_Core.LOG_CATEGORY.INFORMATION, message := message);
+	queue.Execute();
+	backend.ThrowOnExecute := FALSE;
+	queue.Execute();
+	AssertTrue(Condition := backend.AttemptCount = 4, Message := 'Every dequeued record must have exactly one attempt');
+	AssertTrue(Condition := backend.CapturedCount = 1, Message := 'Normal delivery must resume after the nonfatal faults');
+	AssertTrue(Condition := backend.ExecuteCount = 5, Message := 'Execute faults must not prevent later service calls');
+	AssertTrue(Condition := queue.FailedDeliveryCount = 3, Message := 'Backend Execute failure must not count as delivery failure');
+	AssertTrue(Condition := queue.PendingMessageCount = 0, Message := 'Failed records must not be retried');
+__CATCH
+	AssertTrue(Condition := FALSE, Message := 'An exception escaped the logger contract scenario');
+__ENDTRY
+
+testFinished := TRUE;
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="FormatterFailureContainment" Id="{54216aa7-9066-42f5-bf64-433bb04f7ee3}">
+      <Declaration><![CDATA[(*!
+<summary>Checks direct TryLogException failure boundaries without sending a native event or starting file I/O.</summary>
+*)
+METHOD FormatterFailureContainment
+VAR_INST
+	testFinished : BOOL;
+	queue : TOF_Loggers.QueuedLogger;
+	backend : LoggerCaptureBackend;
+	eventLogger : TOF_Loggers.EventLogger(
+		debugEventType := TC_EVENTS.OpenFrameworkLoggerEventClass.DebugEvent,
+		informationEventType := TC_EVENTS.OpenFrameworkLoggerEventClass.InformationEvent,
+		warningEventType := TC_EVENTS.OpenFrameworkLoggerEventClass.WarningEvent,
+		errorEventType := TC_EVENTS.OpenFrameworkLoggerEventClass.ErrorEvent,
+		criticalErrorEventType := TC_EVENTS.OpenFrameworkLoggerEventClass.CriticalErrorEvent
+	);
+	fileLogger : TOF_Loggers.SimpleTextFileLogger(
+		directoryPath := '',
+		logFilePrefix := 'Log',
+		maxRecordsPerFile := 1,
+		directoryPathType := Tc2_System.E_OpenPath.PATH_GENERIC,
+		timeout := T#2S,
+		amsNetId := ''
+	);
+	formatter : ThrowingGetMessageException;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN
+	RETURN;
+END_IF
+
+TEST(TestName := __POUNAME());
+
+__TRY
+	queue.Configure(backend := backend);
+	AssertFalse(
+		Condition := queue.TryLogException(exception := formatter, severity := TOF_Core.ERROR_SEVERITY.ERROR),
+		Message := 'Queued logger must contain a throwing formatter'
+	);
+	AssertFalse(
+		Condition := fileLogger.TryLogException(exception := formatter, severity := TOF_Core.ERROR_SEVERITY.ERROR),
+		Message := 'File logger must contain a throwing formatter before admission'
+	);
+	AssertFalse(
+		Condition := eventLogger.TryLogException(exception := formatter, severity := TOF_Core.ERROR_SEVERITY.ERROR),
+		Message := 'Event logger must contain a throwing formatter before native send'
+	);
+	AssertTrue(Condition := queue.PendingMessageCount = 0, Message := 'Failed formatting must not enqueue a record');
+	AssertTrue(Condition := fileLogger.Busy, Message := 'INITIAL must still report pending initialization');
+	AssertTrue(
+		Condition := fileLogger.State = TOF_Loggers.SIMPLE_TEXT_FILE_LOGGER_STATE.INITIAL,
+		Message := 'A formatting refusal must leave the file logger in INITIAL'
+	);
+	fileLogger.Stop();
+	fileLogger.Execute();
+__CATCH
+	AssertTrue(Condition := FALSE, Message := 'An exception escaped the logger contract scenario');
+__ENDTRY
+
+testFinished := TRUE;
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="MetadataAndZeroRecordLimit" Id="{4090d48c-c3eb-4a09-b64b-144fe8ab0cff}">
+      <Declaration><![CDATA[(*!
+<summary>Checks static metadata and invalid record limits without allocating or opening any filesystem resource.</summary>
+*)
+METHOD MetadataAndZeroRecordLimit
+VAR_INST
+	testFinished : BOOL;
+	queue : TOF_Loggers.QueuedLogger;
+	eventLogger : TOF_Loggers.EventLogger(
+		debugEventType := TC_EVENTS.OpenFrameworkLoggerEventClass.DebugEvent,
+		informationEventType := TC_EVENTS.OpenFrameworkLoggerEventClass.InformationEvent,
+		warningEventType := TC_EVENTS.OpenFrameworkLoggerEventClass.WarningEvent,
+		errorEventType := TC_EVENTS.OpenFrameworkLoggerEventClass.ErrorEvent,
+		criticalErrorEventType := TC_EVENTS.OpenFrameworkLoggerEventClass.CriticalErrorEvent
+	);
+	fileLogger : TOF_Loggers.SimpleTextFileLogger(
+		directoryPath := '',
+		logFilePrefix := 'Log',
+		maxRecordsPerFile := 0,
+		directoryPathType := Tc2_System.E_OpenPath.PATH_GENERIC,
+		timeout := T#2S,
+		amsNetId := ''
+	);
+	error : TOF_Core.ERROR;
+	formatter : ThrowingGetMessageException;
+	message : TOF_Core.ERROR_MESSAGE := "must be refused";
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN
+	RETURN;
+END_IF
+
+TEST(TestName := __POUNAME());
+
+__TRY
+	AssertTrue(Condition := queue.ClassName = 'QueuedLogger', Message := 'Queue metadata must identify its concrete type');
+	AssertTrue(Condition := eventLogger.ClassName = 'EventLogger', Message := 'Event metadata must identify its concrete type');
+	AssertTrue(Condition := fileLogger.ClassName = 'SimpleTextFileLogger', Message := 'File metadata must identify its concrete type');
+	AssertTrue(Condition := fileLogger.NamespaceName = 'TOF_Loggers', Message := 'File namespace must remain unchanged');
+	AssertTrue(Condition := fileLogger.SelfSize = XSIZEOF(fileLogger), Message := 'Size must describe the concrete instance');
+	AssertTrue(Condition := fileLogger.Timeout = T#2S, Message := 'Configured native timeout must be retained');
+	AssertFalse(
+		Condition := fileLogger.TryLogMessage(category := TOF_Core.LOG_CATEGORY.INFORMATION, message := message),
+		Message := 'Zero record limit must refuse plain admission'
+	);
+	AssertFalse(Condition := fileLogger.TryLogError(error := error), Message := 'Zero record limit must refuse errors');
+	AssertFalse(
+		Condition := fileLogger.TryLogException(exception := formatter, severity := TOF_Core.ERROR_SEVERITY.ERROR),
+		Message := 'Zero record limit must refuse before formatting'
+	);
+	fileLogger.Execute();
+	AssertTrue(
+		Condition := fileLogger.State = TOF_Loggers.SIMPLE_TEXT_FILE_LOGGER_STATE.FAILED,
+		Message := 'Zero record limit must fail before attempting the deliberately empty directory'
+	);
+	AssertTrue(
+		Condition := fileLogger.ErrorMessage = "MaxRecordsPerFile must be greater than zero.",
+		Message := 'Configuration diagnostic must explain the invalid record limit'
+	);
+	AssertFalse(Condition := fileLogger.Busy, Message := 'No native cleanup may remain after the configuration failure');
+	AssertFalse(Condition := fileLogger.Start(), Message := 'FAILED must remain terminal');
+__CATCH
+	AssertTrue(Condition := FALSE, Message := 'An exception escaped the logger contract scenario');
+__ENDTRY
+
+testFinished := TRUE;
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="IndependentTaskDiagnostics" Id="{35877c02-96d1-4341-8634-f5a440eaf396}">
+      <Declaration><![CDATA[(*!
+<summary>Checks that explicit task diagnostics bypass the application reject-all filter without executing the destination.</summary>
+*)
+METHOD IndependentTaskDiagnostics
+VAR_INST
+	testFinished : BOOL;
+	task : LoggerTaskProbe(name := "diagnostic route probe");
+	backend : LoggerCaptureBackend;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN
+	RETURN;
+END_IF
+
+TEST(TestName := __POUNAME());
+
+__TRY
+	task.DiagnosticLogger := backend;
+	AssertTrue(Condition := task.Start(), Message := 'Prepared probe must start');
+	task.Execute();
+	AssertTrue(Condition := task.State.Stopped, Message := 'Probe must complete without native I/O');
+	AssertTrue(Condition := task.Reset(), Message := 'Stopped probe must reset');
+	AssertTrue(Condition := backend.CapturedCount = 3, Message := 'Independent route must capture RUNNING, STOPPED and READY');
+	AssertTrue(Condition := backend.ExecuteCount = 0, Message := 'Task must not take ownership of diagnostic execution');
+__CATCH
+	AssertTrue(Condition := FALSE, Message := 'An exception escaped the logger contract scenario');
+__ENDTRY
+
+testFinished := TRUE;
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="AggregateSnapshotsAndPartialAdmission" Id="{41d9d871-4da1-4080-8c14-abb3c2848bb7}">
+      <Declaration><![CDATA[(*!
+<summary>Checks aggregate text flattening, request numbers and partial admission without retaining exception references.</summary>
+*)
+METHOD AggregateSnapshotsAndPartialAdmission
+VAR
+	firstCause : TOF_Core.IException;
+	secondCause : TOF_Core.IException;
+	exceptionCode : __SYSTEM.ExceptionCode;
+END_VAR
+VAR_INST
+	testFinished : BOOL;
+	queue : TOF_Loggers.QueuedLogger;
+	backend : LoggerCaptureBackend;
+	aggregate : TOF_Core.AggregateException;
+	record : LOGGER_CAPTURED_MESSAGE;
+	expectedMessage : TOF_Core.ERROR_MESSAGE;
+	number : ULINT;
+	i : DINT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN
+	RETURN;
+END_IF
+
+TEST(TestName := __POUNAME());
+
+__TRY
+	AssertTrue(Condition := queue.Configure(backend := backend), Message := 'Configure must succeed');
+
+	__TRY
+		TOF_Core.Exceptions.ThrowStandard(
+			sourceNamespaceName := 'TOF_Tests',
+			sourceClassName := 'LoggerContractTest',
+			sourcePOUName := __POUNAME(),
+			sourcePosition := __POSITION(),
+			message := "first aggregate cause"
+		);
+	__CATCH(exceptionCode)
+		firstCause := TOF_Core.ExceptionManager.GetLastException(
+			exceptionCode := exceptionCode,
+			catchPointNamespaceName := 'TOF_Tests',
+			catchPointPOUName := __POUNAME(),
+			catchPointPosition := __POSITION()
+		);
+	__ENDTRY
+
+	__TRY
+		TOF_Core.Exceptions.ThrowStandard(
+			sourceNamespaceName := 'TOF_Tests',
+			sourceClassName := 'LoggerContractTest',
+			sourcePOUName := __POUNAME(),
+			sourcePosition := __POSITION(),
+			message := "second aggregate cause"
+		);
+	__CATCH(exceptionCode)
+		secondCause := TOF_Core.ExceptionManager.GetLastException(
+			exceptionCode := exceptionCode,
+			catchPointNamespaceName := 'TOF_Tests',
+			catchPointPOUName := __POUNAME(),
+			catchPointPosition := __POSITION()
+		);
+	__ENDTRY
+
+	aggregate.AddInnerException(innerException := firstCause);
+	aggregate.AddInnerException(innerException := secondCause);
+	number := 73;
+	AssertTrue(
+		Condition := queue.TryLogException(exception := aggregate, severity := TOF_Core.ERROR_SEVERITY.ERROR, messageNumber := number),
+		Message := 'Both aggregate causes must be accepted in order'
+	);
+	queue.Execute();
+	AssertTrue(Condition := backend.CapturedCount = 2, Message := 'Aggregate must become two text records');
+	record := backend.RecordAt(index := 0);
+	AssertTrue(
+		Condition := record.HasMessageNumber AND_THEN record.MessageNumber = number,
+		Message := 'First cause must share the request number'
+	);
+	expectedMessage := firstCause.GetMessage(showSource := TRUE, timestampDisplayMode := TOF_Core.TIMESTAMP_DISPLAY_MODE.LOCAL);
+	AssertTrue(Condition := record.Message = expectedMessage, Message := 'First cause must retain sender-side formatting');
+
+	FOR i := 1 TO TO_DINT(TOF_Loggers.Parameters.QUEUED_LOGGER_CAPACITY) - 1 DO
+		queue.TryLogMessage(category := TOF_Core.LOG_CATEGORY.DEBUG, message := "reserved queue slot");
+	END_FOR
+
+	AssertFalse(
+		Condition := queue.TryLogException(exception := aggregate, severity := TOF_Core.ERROR_SEVERITY.ERROR, messageNumber := number),
+		Message := 'An aggregate with only one free slot must report partial admission'
+	);
+	aggregate.Clear();
+	queue.Execute();
+	record := backend.RecordAt(index := TOF_Loggers.Parameters.QUEUED_LOGGER_CAPACITY + 1);
+	AssertTrue(Condition := record.Message = expectedMessage, Message := 'Accepted aggregate text must survive aggregate Clear');
+	AssertTrue(Condition := queue.PendingMessageCount = 0, Message := 'All partially admitted entries must drain');
+__CATCH
+	AssertTrue(Condition := FALSE, Message := 'An exception escaped the logger contract scenario');
+__ENDTRY
+
+aggregate.Clear();
+testFinished := TRUE;
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="FB_init" Id="{72f184dd-acb8-4642-a652-d7a78ccb4110}">
+      <Declaration><![CDATA[(*!
+<summary>Records manager behavior outside cyclic context without raising exceptions.</summary>
+<description>
+Uses persistent passive diagnostics and a dedicated ADS instance as an attempted assignment. The manager must
+reject every logging call before filtering or counter changes, ignore assignment and do no cyclic work.
+Results are asserted later by RejectNonCyclicInitialization. Does not inject failures or allocate exceptions.
+</description>
+*)
+METHOD FB_init : BOOL
+VAR_INPUT
+	bInitRetains: BOOL; // TRUE: the retain variables are initialized (reset warm / reset cold)
+	bInCopyCode: BOOL; // TRUE: the instance will be copied to the copy code afterward (online change)
+END_VAR
+VAR
+	taskIndex : DINT;
+	loggerBefore : TOF_Core.ILogger;
+	loggerAfter : TOF_Core.ILogger;
+	totalBefore : ULINT;
+	passedBefore : ULINT;
+	message : TOF_Core.ERROR_MESSAGE := "non-cyclic initialization probe";
+	messageAccepted : BOOL;
+	errorAccepted : BOOL;
+	exceptionAccepted : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[FB_init := TRUE;
+taskIndex := TOF_Core.System.GetCurrentTaskIndex();
+
+IF taskIndex >= 1 AND_THEN taskIndex <= TOF_Core.System.TASK_COUNT THEN
+	RETURN;
+END_IF
+
+_InitializationContextObserved := TRUE;
+loggerBefore := TOF_Core.LogManager.CurrentTaskLogger;
+TOF_Core.LogManager.CurrentTaskLogger := _InitializationLogger;
+loggerAfter := TOF_Core.LogManager.CurrentTaskLogger;
+totalBefore := TOF_Core.LogManager.TotalMessageCounter;
+passedBefore := TOF_Core.LogManager.PassedFilterMessageCounter;
+messageAccepted := TOF_Core.LogManager.TryLogMessage(
+	message := message,
+	category := TOF_Core.LOG_CATEGORY.INFORMATION
+);
+errorAccepted := TOF_Core.LogManager.TryLogError(error := _InitializationError);
+exceptionAccepted := TOF_Core.LogManager.TryLogException(
+	exception := _InitializationException,
+	severity := TOF_Core.ERROR_SEVERITY.ERROR
+);
+TOF_Core.LogManager.ExecuteCurrentTaskLogger();
+_InitializationCallsRejected := loggerBefore = 0 AND loggerAfter = 0
+	AND NOT messageAccepted AND NOT errorAccepted AND NOT exceptionAccepted
+	AND TOF_Core.LogManager.TotalMessageCounter = totalBefore
+	AND TOF_Core.LogManager.PassedFilterMessageCounter = passedBefore;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="CurrentTaskLoggerRouting" Id="{83686c45-e261-4309-9f2a-6d3c68d744ab}">
+      <Declaration><![CDATA[(*!
+<summary>Checks task destination assignment, default reset, queued diagnostics and service failure containment.</summary>
+<description>
+Saves and restores the current task destination, shared filter and numbering within one cyclic call. Backend
+and queue fixtures persist through caught failures; no local resource-owning function blocks are used.
+No other task may log while the shared settings are temporarily changed. The queue capacity must be at least
+three. A hostile backend Execute produces one independent ADS diagnostic; logging failures are not retried.
+</description>
+*)
+METHOD CurrentTaskLoggerRouting
+VAR
+	backendLogger : TOF_Core.ILogger;
+	savedLogger : TOF_Core.ILogger;
+	defaultLogger : TOF_Core.ILogger;
+	selectedLogger : TOF_Core.ILogger;
+	savedFilter : TOF_Core.ILogFilter;
+	savedFormat : TOF_Core.LOG_MESSAGE_NUMBER_FORMAT;
+END_VAR
+VAR_INST
+	testFinished : BOOL;
+	backend : LoggerCaptureBackend;
+	queue : TOF_Loggers.QueuedLogger;
+	error : TOF_Core.ERROR;
+	exception : TOF_Core.StandardException;
+	message : TOF_Core.ERROR_MESSAGE := "current task destination";
+	expectedError : TOF_Core.ERROR_MESSAGE;
+	expectedException : TOF_Core.ERROR_MESSAGE;
+	record : LOGGER_CAPTURED_MESSAGE;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN
+	RETURN;
+END_IF
+
+TEST(TestName := __POUNAME());
+savedLogger := TOF_Core.LogManager.CurrentTaskLogger;
+savedFilter := TOF_Core.LogManager.Filter;
+savedFormat := TOF_Core.LogManager.MessageNumberFormat;
+
+__TRY
+	TOF_Core.LogManager.Filter := 0;
+	TOF_Core.LogManager.MessageNumberFormat := TOF_Core.LOG_MESSAGE_NUMBER_FORMAT.NONE;
+	TOF_Core.LogManager.CurrentTaskLogger := 0;
+	defaultLogger := TOF_Core.LogManager.CurrentTaskLogger;
+	AssertTrue(Condition := defaultLogger <> 0, Message := 'Cyclic task must have a standard ADS destination');
+	TOF_Core.LogManager.CurrentTaskLogger := backend;
+	selectedLogger := TOF_Core.LogManager.CurrentTaskLogger;
+	backendLogger := backend;
+	AssertTrue(Condition := selectedLogger = backendLogger, Message := 'Getter must return the task assignment');
+	AssertTrue(
+		Condition := TOF_Core.LogManager.TryLogMessage(
+			message := message,
+			category := TOF_Core.LOG_CATEGORY.INFORMATION
+		),
+		Message := 'Manager must route text to the assigned backend'
+	);
+	TOF_Core.LogManager.ExecuteCurrentTaskLogger();
+	AssertTrue(Condition := backend.CapturedCount = 1, Message := 'Assigned backend must receive the message');
+	AssertTrue(Condition := backend.ExecuteCount = 1, Message := 'Service must use the same task destination');
+	record := backend.RecordAt(index := 0);
+	AssertTrue(Condition := record.Message = message, Message := 'Manager must preserve routed text');
+	AssertFalse(Condition := record.HasMessageNumber, Message := 'NONE must omit the request number');
+	AssertTrue(Condition := queue.Configure(backend := backend), Message := 'Queue must bind to the current task');
+	TOF_Core.LogManager.CurrentTaskLogger := queue;
+	error.SetMessage(message := "current task error");
+	expectedError := error.ToString(
+		sourceDisplayMode := TOF_Core.ERROR_SOURCE_DISPLAY_MODE.TOP_AND_ROOT,
+		timestampDisplayMode := TOF_Core.TIMESTAMP_DISPLAY_MODE.LOCAL
+	);
+	expectedException := exception.GetMessage(
+		showSource := TRUE,
+		timestampDisplayMode := TOF_Core.TIMESTAMP_DISPLAY_MODE.LOCAL
+	);
+	AssertTrue(
+		Condition := TOF_Core.LogManager.TryLogMessage(
+			message := message,
+			category := TOF_Core.LOG_CATEGORY.INFORMATION
+		),
+		Message := 'Replacement queue must accept the manager message'
+	);
+	AssertTrue(
+		Condition := TOF_Core.LogManager.TryLogError(error := error),
+		Message := 'Manager must route errors to the replacement queue'
+	);
+	AssertTrue(
+		Condition := TOF_Core.LogManager.TryLogException(
+			exception := exception,
+			severity := TOF_Core.ERROR_SEVERITY.ERROR
+		),
+		Message := 'Manager must route exceptions to the replacement queue'
+	);
+	AssertTrue(Condition := backend.CapturedCount = 1, Message := 'Admission must not bypass the queue');
+	AssertTrue(Condition := queue.PendingMessageCount = 3, Message := 'All three manager methods must use the queue');
+	TOF_Core.LogManager.ExecuteCurrentTaskLogger();
+	AssertTrue(Condition := backend.ExecuteCount = 2, Message := 'Manager service must advance the queue backend once');
+	AssertTrue(Condition := backend.CapturedCount = 4, Message := 'Service must deliver all queued manager records');
+	AssertTrue(Condition := queue.PendingMessageCount = 0, Message := 'Owner service must drain the queued records');
+	record := backend.RecordAt(index := 2);
+	AssertTrue(Condition := record.Message = expectedError, Message := 'Error delivery must preserve formatted text');
+	record := backend.RecordAt(index := 3);
+	AssertTrue(Condition := record.Message = expectedException, Message := 'Exception delivery must preserve formatted text');
+	TOF_Core.LogManager.CurrentTaskLogger := 0;
+	selectedLogger := TOF_Core.LogManager.CurrentTaskLogger;
+	AssertTrue(Condition := selectedLogger = defaultLogger, Message := 'Zero must restore the same task ADS instance');
+	TOF_Core.LogManager.ExecuteCurrentTaskLogger();
+	AssertTrue(Condition := backend.ExecuteCount = 2, Message := 'Reset must stop servicing the replaced backend');
+	TOF_Core.LogManager.CurrentTaskLogger := backend;
+	backend.ThrowOnExecute := TRUE;
+	TOF_Core.LogManager.ExecuteCurrentTaskLogger();
+	AssertTrue(Condition := backend.ExecuteCount = 3, Message := 'A hostile Execute must be attempted once');
+	AssertTrue(Condition := backend.CapturedCount = 4, Message := 'Execute failure diagnostics must bypass the task route');
+	backend.ThrowOnExecute := FALSE;
+	backend.DeliveryBehavior := LOGGER_DELIVERY_BEHAVIOR.THROW_EXCEPTION;
+	AssertFalse(
+		Condition := TOF_Core.LogManager.TryLogMessage(
+			message := message,
+			category := TOF_Core.LOG_CATEGORY.INFORMATION
+		),
+		Message := 'Manager must contain a hostile task logger TryLog exception'
+	);
+__CATCH
+	AssertTrue(Condition := FALSE, Message := 'An exception escaped the current-task manager regression');
+__ENDTRY
+
+backend.ThrowOnExecute := FALSE;
+backend.DeliveryBehavior := LOGGER_DELIVERY_BEHAVIOR.ACCEPT;
+TOF_Core.LogManager.CurrentTaskLogger := savedLogger;
+TOF_Core.LogManager.Filter := savedFilter;
+TOF_Core.LogManager.MessageNumberFormat := savedFormat;
+testFinished := TRUE;
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="RejectNonCyclicInitialization" Id="{861981ac-19b4-4f7d-9150-991a81fc440f}">
+      <Declaration><![CDATA[(*!
+<summary>Asserts the non-cyclic FB_init probe and absence of an initialization logger assignment.</summary>
+<description>
+The initialization probe performs no throwing diagnostics. This case runs once in the cyclic test task;
+Windows context and real multitask isolation remain owner verifications rather than simulated task calls.
+</description>
+*)
+METHOD RejectNonCyclicInitialization
+VAR
+	currentLogger : TOF_Core.ILogger;
+	initializationLogger : TOF_Core.ILogger;
+END_VAR
+VAR_INST
+	testFinished : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN
+	RETURN;
+END_IF
+
+TEST(TestName := __POUNAME());
+AssertTrue(Condition := _InitializationContextObserved, Message := 'FB_init must exercise a non-cyclic context');
+AssertTrue(
+	Condition := _InitializationCallsRejected,
+	Message := 'Non-cyclic calls must return defaults without logging or changing counters'
+);
+currentLogger := TOF_Core.LogManager.CurrentTaskLogger;
+initializationLogger := _InitializationLogger;
+AssertTrue(
+	Condition := currentLogger <> initializationLogger,
+	Message := 'An initialization setter must not assign a cyclic destination'
+);
+testFinished := TRUE;
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+  </POU>
+</TcPlcObject>

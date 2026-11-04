@@ -1,0 +1,349 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="TestServices" Id="{5e9b8a41-1d81-4eac-9f3c-1420e7e711fe}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+SPDX-FileCopyrightText: © 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+SPDX-License-Identifier: MIT
+License: https://opensource.org/license/mit
+*)
+
+(*!
+<summary>Provides internal exception diagnostics and stateless assertion services.</summary>
+<description>
+Assertion services retain no operands, receiver or diagnostic state between calls. Callers keep borrowed
+inputs alive for the call and use each test case only from its owning task without reentry. Failure
+reporting propagates receiver exceptions; floating helpers allocate no memory and invoke no callbacks.
+</description>
+*)
+
+{attribute 'no_explicit_call' := 'do not call this function block directly'}
+PROGRAM INTERNAL TestServices
+VAR
+	{attribute 'hide'} 
+	_ClassName : STRING := __POUNAME();
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[]]></ST>
+    </Implementation>
+    <Method Name="AreFloatingValuesWithinTolerance" Id="{3f039f5e-437f-4eab-907d-2256ec59016e}">
+      <Declaration><![CDATA[(*!
+<summary>Checks canonical floating equality or finite absolute distance without overflowing.</summary>
+<description>
+Requires canonical binary64 operands and a validated finite nonnegative tolerance. Canonical equality
+is accepted first. Zero tolerance does no arithmetic, preserving distinct subnormal representations.
+Unequal nonfinite values are never close. Opposite signs use a remaining tolerance budget.
+</description>
+<param name="actualBits">Canonical actual representation.</param>
+<param name="expectedBits">Canonical expected representation.</param>
+<param name="tolerance">Validated finite nonnegative absolute distance.</param>
+*)
+METHOD AreFloatingValuesWithinTolerance : BOOL
+VAR_INPUT
+	actualBits : ULINT;
+	expectedBits : ULINT;
+	tolerance : LREAL;
+END_VAR
+VAR
+	actualValue : TOF_Core.LREAL_UNION;
+	expectedValue : TOF_Core.LREAL_UNION;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF actualBits = expectedBits THEN
+	AreFloatingValuesWithinTolerance := TRUE;
+	RETURN;
+END_IF
+
+IF tolerance = TOF_Core.LongReals.ZERO THEN
+	RETURN;
+END_IF
+
+// The exponent mask isolates binary64 bits 62..52 and rejects remaining nonfinite operands.
+IF (actualBits AND TOF_Core.LongReals.EXPONENT_MASK) = TOF_Core.LongReals.EXPONENT_MASK
+	OR_ELSE (expectedBits AND TOF_Core.LongReals.EXPONENT_MASK) = TOF_Core.LongReals.EXPONENT_MASK
+THEN
+	RETURN;
+END_IF
+
+actualValue.Raw := actualBits;
+expectedValue.Raw := expectedBits;
+
+// Complementing MAGNITUDE_MASK isolates binary64 sign bit 63 to select the safe distance formula.
+IF (actualBits AND NOT TOF_Core.LongReals.MAGNITUDE_MASK)
+	<> (expectedBits AND NOT TOF_Core.LongReals.MAGNITUDE_MASK)
+THEN
+	AreFloatingValuesWithinTolerance := ABS(actualValue.Value) <= tolerance
+		AND_THEN ABS(expectedValue.Value) <= tolerance - ABS(actualValue.Value);
+ELSE
+	AreFloatingValuesWithinTolerance := ABS(actualValue.Value - expectedValue.Value) <= tolerance;
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="ClassName" Id="{f2670d22-703a-490d-8de0-75e9d34da6c8}">
+      <Declaration><![CDATA[//! <summary>Borrows the concrete class name for the lifetime of this instance; callers must not modify it.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{bedaf0d9-b0dd-4883-bc48-d6127ddbfd03}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ClassName REF= _ClassName;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="CompareFloatingValues" Id="{2eb68f7c-756d-48ef-a340-740ae721fe28}">
+      <Declaration><![CDATA[(*!
+<summary>Orders canonical floating operands using the Core NaN-first total order.</summary>
+<description>
+Requires canonical binary64 bits from GetCanonicalRealBits or GetCanonicalLongRealBits. Equal canonical
+bits compare equal; NaN precedes every non-NaN value. No comparison evaluates a NaN operand. Other pairs
+use native LREAL ordering, including the runtime treatment of subnormal operands.
+</description>
+<param name="actualBits">Canonical actual representation.</param>
+<param name="expectedBits">Canonical expected representation.</param>
+*)
+METHOD CompareFloatingValues : TOF_Core.COMPARISON_RESULT
+VAR_INPUT
+	actualBits : ULINT;
+	expectedBits : ULINT;
+END_VAR
+VAR
+	actualValue : TOF_Core.LREAL_UNION;
+	expectedValue : TOF_Core.LREAL_UNION;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF actualBits = expectedBits THEN
+	CompareFloatingValues := TOF_Core.COMPARISON_RESULT.FIRST_EQUAL_TO_SECOND;
+ELSIF actualBits = TOF_Core.LongReals.CANONICAL_NAN_BITS THEN
+	CompareFloatingValues := TOF_Core.COMPARISON_RESULT.FIRST_LESS_THAN_SECOND;
+ELSIF expectedBits = TOF_Core.LongReals.CANONICAL_NAN_BITS THEN
+	CompareFloatingValues := TOF_Core.COMPARISON_RESULT.FIRST_GREATER_THAN_SECOND;
+ELSE
+	actualValue.Raw := actualBits;
+	expectedValue.Raw := expectedBits;
+
+	IF actualValue.Value < expectedValue.Value THEN
+		CompareFloatingValues := TOF_Core.COMPARISON_RESULT.FIRST_LESS_THAN_SECOND;
+	ELSIF actualValue.Value > expectedValue.Value THEN
+		CompareFloatingValues := TOF_Core.COMPARISON_RESULT.FIRST_GREATER_THAN_SECOND;
+	ELSE
+		CompareFloatingValues := TOF_Core.COMPARISON_RESULT.FIRST_EQUAL_TO_SECOND;
+	END_IF
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="FormatCaughtException" Id="{d6c50883-b3eb-460f-9af2-64b93f18efe4}">
+      <Declaration><![CDATA[(*!
+<summary>Copies a caught exception diagnostic with its callback stage before task cleanup.</summary>
+<description>
+Borrows the current task's exception only during this call. Returns independent fixed-capacity text;
+no exception reference is retained. A failed custom formatter leaves a stage/code fallback.
+Terminal allocation failure propagates after the recoverable formatter handler and never becomes a fallback success.
+Call only from the owning cyclic task's catch handler; this method neither performs cleanup nor clears the fatal latch.
+</description>
+<param name="exceptionCode">Native transport code captured by the caller's catch handler.</param>
+<param name="stage">Interrupted callback or runner phase included in the copied result.</param>
+<param name="catchPointPOUName">POU containing the caller's catch handler.</param>
+<param name="catchPointPosition">Source position of the caller's catch handler.</param>
+*)
+METHOD FormatCaughtException : TOF_Core.ERROR_MESSAGE
+VAR_INPUT
+	exceptionCode : __SYSTEM.ExceptionCode;
+	stage : STRING;
+	catchPointPOUName : STRING;
+	catchPointPosition : STRING;
+END_VAR
+VAR
+	exception : TOF_Core.IException;
+	fallbackMessage : TOF_Core.ERROR_MESSAGE;
+	exceptionMessage : TOF_Core.ERROR_MESSAGE;
+	diagnostic : TOF_Core.ERROR_MESSAGE;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[fallbackMessage := TOF_Core.WideStrings.Concat255(
+	TO_WSTRING(stage), ": runtime exception code ", TO_WSTRING(exceptionCode), " (diagnostic unavailable)"
+);
+FormatCaughtException := fallbackMessage;
+
+// Contain failures from custom exception formatters while preserving the original fallback.
+__TRY
+	exception := TOF_Core.ExceptionManager.GetLastException(
+		exceptionCode := exceptionCode,
+		catchPointNamespaceName := CurrentNamespace.Name,
+		catchPointPOUName := catchPointPOUName,
+		catchPointPosition := catchPointPosition
+	);
+
+	IF exception <> 0 THEN
+		exceptionMessage := exception.GetMessage(
+			showSource := TRUE,
+			timestampDisplayMode := TOF_Core.TIMESTAMP_DISPLAY_MODE.HIDDEN
+		);
+		diagnostic := TO_WSTRING(stage);
+		TOF_Core.WideStrings.AppendFit(targetString := diagnostic, sourceString := ": ");
+		TOF_Core.WideStrings.AppendFit(targetString := diagnostic, sourceString := exceptionMessage);
+		FormatCaughtException := diagnostic;
+	END_IF
+
+__CATCH
+	FormatCaughtException := fallbackMessage;
+__ENDTRY
+
+TOF_Core.DynamicMemoryManager.RaiseIfAllocationFailed();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="GetCanonicalLongRealBits" Id="{bf0275c2-83f6-4740-8bbb-211368306968}">
+      <Declaration><![CDATA[(*!
+<summary>Maps a LREAL operand to the canonical binary64 assertion representation.</summary>
+<description>
+Classifies NaN from stored bits and maps all NaNs and signed zeros to Core canonical bits.
+Other bit representations are unchanged. No arithmetic, allocation or callback is performed.
+</description>
+<param name="value">Typed operand copied for this call.</param>
+*)
+METHOD GetCanonicalLongRealBits : ULINT
+VAR_INPUT
+	value : LREAL;
+END_VAR
+VAR
+	bits : TOF_Core.LREAL_UNION;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[bits.Value := value;
+
+// Binary64 masks isolate exponent bits 62..52 and fraction bits 51..0, clearing other bits.
+// An all-ones exponent with a nonzero fraction identifies NaN without arithmetic.
+IF (bits.Raw AND TOF_Core.LongReals.EXPONENT_MASK) = TOF_Core.LongReals.EXPONENT_MASK
+	AND_THEN (bits.Raw AND TOF_Core.LongReals.FRACTION_MASK) <> TOF_Core.LongReals.ZERO_BITS
+THEN
+	GetCanonicalLongRealBits := TOF_Core.LongReals.CANONICAL_NAN_BITS;
+	RETURN;
+END_IF
+
+// Clearing binary64 sign bit 63 maps both stored zeros to positive zero.
+IF (bits.Raw AND TOF_Core.LongReals.MAGNITUDE_MASK) = TOF_Core.LongReals.ZERO_BITS THEN
+	bits.Raw := TOF_Core.LongReals.ZERO_BITS;
+END_IF
+
+GetCanonicalLongRealBits := bits.Raw;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="GetCanonicalRealBits" Id="{4e55a69f-517a-43b8-b6a9-79e04313c982}">
+      <Declaration><![CDATA[(*!
+<summary>Maps a REAL operand to the canonical binary64 assertion representation.</summary>
+<description>
+Classifies NaN before arithmetic or widening, maps all NaNs and signed zeros to Core canonical bits.
+Other REAL values widen to LREAL using the runtime floating configuration. Owns no resources.
+</description>
+<param name="value">Typed operand copied for this call.</param>
+*)
+METHOD GetCanonicalRealBits : ULINT
+VAR_INPUT
+	value : REAL;
+END_VAR
+VAR
+	bits : TOF_Core.REAL_UNION;
+	longBits : TOF_Core.LREAL_UNION;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[bits.Value := value;
+
+// Binary32 masks isolate exponent bits 30..23 and fraction bits 22..0, clearing other bits.
+// An all-ones exponent with a nonzero fraction identifies NaN before widening.
+IF (bits.Raw AND TOF_Core.Reals.EXPONENT_MASK) = TOF_Core.Reals.EXPONENT_MASK
+	AND_THEN (bits.Raw AND TOF_Core.Reals.FRACTION_MASK) <> TOF_Core.Reals.ZERO_BITS
+THEN
+	GetCanonicalRealBits := TOF_Core.LongReals.CANONICAL_NAN_BITS;
+	RETURN;
+END_IF
+
+longBits.Value := TO_LREAL(bits.Value);
+
+// Clearing binary64 sign bit 63 maps both stored zeros to positive zero.
+IF (longBits.Raw AND TOF_Core.LongReals.MAGNITUDE_MASK) = TOF_Core.LongReals.ZERO_BITS THEN
+	longBits.Raw := TOF_Core.LongReals.ZERO_BITS;
+END_IF
+
+GetCanonicalRealBits := longBits.Raw;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="IsValidFloatingTolerance" Id="{0b82ef4a-6483-48f3-8c38-340dae73257a}">
+      <Declaration><![CDATA[(*!
+<summary>Checks whether an absolute tolerance is finite and nonnegative.</summary>
+<description>
+Rejects NaN and infinity from the stored exponent before arithmetic. Returns FALSE without reporting
+failure; the calling typed context reports the invalid argument with its current chain message.
+</description>
+<param name="tolerance">Absolute comparison distance; zero requests canonical equality.</param>
+*)
+METHOD IsValidFloatingTolerance : BOOL
+VAR_INPUT
+	tolerance : LREAL;
+END_VAR
+VAR
+	bits : TOF_Core.LREAL_UNION;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[bits.Value := tolerance;
+
+// Binary64 exponent bits 62..52 are all set for infinity and NaN.
+IsValidFloatingTolerance := (bits.Raw AND TOF_Core.LongReals.EXPONENT_MASK) <> TOF_Core.LongReals.EXPONENT_MASK
+	AND_THEN tolerance >= TOF_Core.LongReals.ZERO;]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="NamespaceName" Id="{5f858aa3-374e-4620-a94e-db532ed1e723}">
+      <Declaration><![CDATA[//! <summary>Borrows the compiler-initialized namespace; callers must not modify the returned reference.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{5dadf8a4-8f97-4afc-b0bc-732e035de00e}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[NamespaceName REF= CurrentNamespace.Name;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="ReportAssertionFailure" Id="{f04ab385-65e5-4d01-9abe-d4b5f0d205ec}">
+      <Declaration><![CDATA[(*!
+<summary>Reports a failed predicate with the copied chain prefix.</summary>
+<description>
+A missing receiver raises DataMemberNotSpecifiedException. A whitespace-only prefix is omitted.
+The receiver decides whether to retain the diagnostic; callback exceptions propagate. No input is retained.
+</description>
+<param name="testCase">Borrowed failure receiver.</param>
+<param name="message">Chain prefix copied by the calling context.</param>
+<param name="sourceClassName">Calling context class used for a missing-receiver diagnostic.</param>
+<param name="defaultMessage">Assertion diagnostic borrowed for this call.</param>
+*)
+METHOD ReportAssertionFailure
+VAR_INPUT
+	testCase : ITestCase;
+	message : WSTRING(255);
+	sourceClassName : STRING;
+END_VAR
+VAR_IN_OUT CONSTANT
+	defaultMessage : TOF_Core.ERROR_MESSAGE;
+END_VAR
+VAR
+	diagnostic : TOF_Core.ERROR_MESSAGE;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testCase = 0 THEN
+	TOF_Core.Exceptions.ThrowDataMemberNotSpecified(
+		sourceNamespaceName := NamespaceName,
+		sourceClassName := sourceClassName,
+		sourcePOUName := __POUNAME(),
+		sourcePosition := __POSITION(),
+		dataMemberName := '_TestCase'
+	);
+END_IF
+
+IF TOF_Core.WideStrings.IsNullOrWhiteSpace(stringToCheck := message) THEN
+	testCase.RecordFailure(message := defaultMessage);
+ELSE
+	diagnostic := message;
+	TOF_Core.WideStrings.AppendFit(targetString := diagnostic, sourceString := ": ");
+	TOF_Core.WideStrings.AppendFit(targetString := diagnostic, sourceString := defaultMessage);
+	testCase.RecordFailure(message := diagnostic);
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+  </POU>
+</TcPlcObject>

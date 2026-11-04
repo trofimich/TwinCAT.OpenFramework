@@ -25,13 +25,13 @@ VAR_STAT
 END_VAR
 VAR
 	{attribute 'OPC.UA.DA' := '0'}
-	_BranchConditions : TOF_Collections.List<0>(0);
+	_BranchConditions : TOF_Collections.List<0>(valueValidator := 0);
 
 	{attribute 'OPC.UA.DA' := '0'}
-	_BranchActivities : TOF_Collections.List<0>(0);
+	_BranchActivities : TOF_Collections.List<0>(valueValidator := 0);
 	
 	{attribute 'OPC.UA.DA' := '0'}	
-	_CurrentBranchIndex : DINT := -1;
+	_CurrentBranchIndex : DINT := Workflows.NO_SELECTED_ACTIVITY_INDEX;
 END_VAR]]></Declaration>
     <Implementation>
       <ST><![CDATA[]]></ST>
@@ -42,6 +42,10 @@ END_VAR]]></Declaration>
 <summary>Appends a condition-activity branch pair and returns its zero-based branch index.</summary>
 <description>
 Permitted only in PASSIVE_READY. Validates both condition and activity before appending the pair.
+The child must be unattached, including to this parent; duplicate slots are rejected before insertion.
+The parent chain and owning workflow must be PASSIVE_READY. Fixed workflow association is validated.
+Storage allocation precedes parent callbacks; callback exceptions may leave a partial configuration.
+Child references remain borrowed and must outlive the tree. No implicit detach or ownership transfer occurs.
 </description>
 <param name="condition">Required branch condition.</param>
 <param name="activity">Required branch activity.</param>
@@ -67,20 +71,30 @@ END_IF
 
 ValidateChildActivityAttachment(childActivity := activity, argumentName := 'activity');
 
-IF (condition.ParentActivity <> 0 AND_THEN condition.ParentActivity.SelfAddress <> SelfAddress)
-	OR_ELSE condition.ParentCondition <> 0
-THEN
+Workflows.ValidateElementAttachment(parent := THIS^, child := condition);
+
+IF condition.Parent <> 0 THEN
 	WorkflowExceptions.ThrowWorkflowAttachment(
 		sourceNamespaceName := NamespaceName,
 		sourceClassName := ClassName,
 		sourcePOUName := __POUNAME(),
 		sourcePosition := __POSITION(),
-		message := "Condition is already attached to another parent"
+		message := "Child element already occupies a parent slot"
+	);
+END_IF
+
+IF activity.Parent <> 0 THEN
+	WorkflowExceptions.ThrowWorkflowAttachment(
+		sourceNamespaceName := NamespaceName,
+		sourceClassName := ClassName,
+		sourcePOUName := __POUNAME(),
+		sourcePosition := __POSITION(),
+		message := "Child element already occupies a parent slot"
 	);
 END_IF
 
 _BranchConditions.AppendGeneric(
-	TOF_Core.GenericValueFactory.FromParts(
+	value := TOF_Core.GenericValueFactory.FromParts(
 		genericTypeClass := TOF_Core.GENERIC_TYPE_CLASS.OBJECT,
 		address := condition.SelfAddress,
 		size := condition.SelfSize,
@@ -90,7 +104,7 @@ _BranchConditions.AppendGeneric(
 
 __TRY
 	_BranchActivities.AppendGeneric(
-		TOF_Core.GenericValueFactory.FromParts(
+		value := TOF_Core.GenericValueFactory.FromParts(
 			genericTypeClass := TOF_Core.GENERIC_TYPE_CLASS.OBJECT,
 			address := activity.SelfAddress,
 			size := activity.SelfSize,
@@ -116,7 +130,14 @@ activity.ParentActivity := THIS^;]]></ST>
       </Implementation>
     </Method>
     <Property Name="ClassName" Id="{0fd055e5-b559-4b38-9ea0-4ca6dfde96f4}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Borrows the initialized class name used in diagnostics.</summary>
+<description>
+Returns initialized metadata storage without allocation. Callers must not modify the returned string.
+Derived function blocks must use distinct initialized static storage when overriding this metadata.
+</description>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
       <Get Name="Get" Id="{03123722-c59b-4f8b-8e1d-57ef078fc153}">
         <Declaration><![CDATA[]]></Declaration>
@@ -135,11 +156,11 @@ PROPERTY FINAL CurrentActivity : IActivity]]></Declaration>
         <Declaration><![CDATA[]]></Declaration>
         <Implementation>
           <ST><![CDATA[
-IF _BranchActivities.Length > 0
-	AND_THEN _CurrentBranchIndex >= 0
+IF _BranchActivities.Length > TOF_Core.SignedInt32.ZERO
+	AND_THEN _CurrentBranchIndex >= TOF_Core.SignedInt32.ZERO
 	AND_THEN _CurrentBranchIndex < _BranchActivities.Length
 THEN
-	__QUERYINTERFACE(_BranchActivities.Get(_CurrentBranchIndex).AsObject(), CurrentActivity);
+	__QUERYINTERFACE(_BranchActivities.Get(index := _CurrentBranchIndex).AsObject(), CurrentActivity);
 END_IF]]></ST>
         </Implementation>
       </Get>
@@ -158,7 +179,14 @@ PROPERTY FINAL CurrentBranchIndex : DINT]]></Declaration>
       </Get>
     </Property>
     <Property Name="NamespaceName" Id="{71b51e02-0e7f-400d-98b6-f6fe9b6e421d}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Borrows the compiler-initialized library namespace.</summary>
+<description>
+Borrows storage from the live internal namespace provider. Reacquire references after application
+reinitialization or relocation. Treat the reference as read-only; no ownership or synchronization is provided.
+</description>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
       <Get Name="Get" Id="{39b886bb-35c4-4342-9cee-6cf1f6e0a2e1}">
         <Declaration><![CDATA[]]></Declaration>
@@ -182,7 +210,7 @@ VAR
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[FOR i := 0 TO _BranchActivities.Length - 1 DO
-	__QUERYINTERFACE(_BranchActivities.Get(i).AsObject(), branchActivity);
+	__QUERYINTERFACE(_BranchActivities.Get(index := i).AsObject(), branchActivity);
 
 	IF branchActivity <> 0 AND_THEN branchActivity.State <> WORKFLOW_ELEMENT_STATE.PASSIVE_READY THEN
 		IF ResetChildActivity(childActivity := branchActivity) = ACTIVITY_RESETTING_STATE.WORK_IN_PROGRESS THEN
@@ -192,7 +220,7 @@ END_VAR]]></Declaration>
 	END_IF
 END_FOR
 
-_CurrentBranchIndex := -1;
+_CurrentBranchIndex := Workflows.NO_SELECTED_ACTIVITY_INDEX;
 OnResetting := ACTIVITY_RESETTING_STATE.WORK_RESET;]]></ST>
       </Implementation>
     </Method>
@@ -219,21 +247,21 @@ VAR
 	
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[IF _BranchConditions.Length < 1 THEN
+        <ST><![CDATA[IF _BranchConditions.Length = TOF_Core.SignedInt32.ZERO THEN
 	OnRunning := ACTIVITY_RUNNING_STATE.WORK_COMPLETED;
 	RETURN;
 END_IF
 
 IF startRunning THEN
-	_CurrentBranchIndex := -1;
+	_CurrentBranchIndex := Workflows.NO_SELECTED_ACTIVITY_INDEX;
 END_IF
 
-IF _CurrentBranchIndex < 0 THEN
+IF _CurrentBranchIndex < TOF_Core.SignedInt32.ZERO THEN
 	_CurrentBranchIndex := findReadyBranch();
-	branchJustPicked := _CurrentBranchIndex >= 0;
+	branchJustPicked := _CurrentBranchIndex >= TOF_Core.SignedInt32.ZERO;
 END_IF
 
-IF _CurrentBranchIndex < 0 THEN
+IF _CurrentBranchIndex < TOF_Core.SignedInt32.ZERO THEN
 	RETURN;
 END_IF
 
@@ -281,7 +309,7 @@ VAR
 	activity : IActivity;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[IF _BranchConditions.Length < 1 THEN
+        <ST><![CDATA[IF _BranchConditions.Length = TOF_Core.SignedInt32.ZERO THEN
 	OnStopping := ACTIVITY_STOPPING_STATE.WORK_COMPLETED;
 	RETURN;
 END_IF
@@ -292,7 +320,7 @@ IF activity = 0 THEN
 	IF startCancelling OR_ELSE startSuspending THEN
 		OnStopping := ACTIVITY_STOPPING_STATE.WORK_STOPPED;
 	ELSE
-		OnStopping := ACTIVITY_STOPPING_STATE.WORK_COMPLETED;		
+		OnStopping := ACTIVITY_STOPPING_STATE.WORK_COMPLETED;
 	END_IF
 
 	RETURN;
@@ -328,7 +356,14 @@ END_IF]]></ST>
       </Implementation>
     </Method>
     <Property Name="SelfSize" Id="{f48717c6-b99e-47cb-94a9-c8d92c921628}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Reports the size of this concrete function block instance in bytes.</summary>
+<description>
+Reports the instance layout rather than dynamic allocations owned by its fields. A derived function block
+with a different layout must override this property; the value does not grant disposal rights.
+</description>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY SelfSize : ULINT]]></Declaration>
       <Get Name="Get" Id="{2bce559c-e271-4c1b-b7e1-6e1feaa74956}">
         <Declaration><![CDATA[]]></Declaration>
@@ -352,11 +387,11 @@ VAR
 END_VAR
 ]]></Declaration>
       <Implementation>
-        <ST><![CDATA[findReadyBranch := -1;
+        <ST><![CDATA[findReadyBranch := Workflows.NO_SELECTED_ACTIVITY_INDEX;
 
 FOR i := 0 TO _BranchConditions.Length - 1 DO
-	__QUERYINTERFACE(_BranchConditions.Get(i).AsObject(), condition);
-	
+	__QUERYINTERFACE(_BranchConditions.Get(index := i).AsObject(), condition);
+
 	IF condition.Evaluate(activity := THIS^) THEN
 		findReadyBranch := i;
 		RETURN;

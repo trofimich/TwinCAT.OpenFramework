@@ -1,0 +1,275 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="TestGroup" Id="{fccec10a-eb09-4906-bd5e-d0543d12a9f4}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+SPDX-FileCopyrightText: © 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+SPDX-License-Identifier: MIT
+License: https://opensource.org/license/mit
+*)
+
+(*!
+<summary>Executes the fixed child array provided by a concrete group.</summary>
+<description>
+Descendants own persistent tests, nested groups and interface-array storage. Children returns the same valid
+array throughout the group lifetime; callers must not modify its contents through the reference. Each child
+is non-null, occurs once and has this group as its constructor-assigned Parent. Parent chains are acyclic.
+All objects outlive the tree; no allocation ownership is transferred. Zero children form an empty group.
+Reset validates the child reference, slots and parent chain once at the start of each run. Missing
+array storage raises DataMemberNotSpecifiedException; null slots do likewise with an indexed member name.
+Duplicates, a mismatched parent or a parent cycle raise StandardException before any direct child is called.
+A descendant's validation or callback can still fail after earlier siblings have reset; no rollback is promised.
+Execute drives one current child once and counts it once when finished. Groups add no synthetic test results
+and have no scenario setup or teardown hooks. Use the entire tree in one task without reentry.
+Do not mutate the child array or parent associations during the lifetime of the tree, or copy instances by value.
+</description>
+*)
+
+{attribute 'no_explicit_call' := 'do not call this function block directly'}
+FUNCTION_BLOCK ABSTRACT TestGroup
+VAR_GENERIC CONSTANT
+	//! <summary>Exact number of direct child slots; zero produces an empty array.</summary>
+	_ChildCount : TOF_Core.INT_LENGTH := 0;
+END_VAR
+EXTENDS TestElement IMPLEMENTS IParentTestElement
+VAR
+	_CurrentChildIndex : TOF_Core.INT_LENGTH;
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[]]></ST>
+    </Implementation>
+    <Property Name="ChildCount" Id="{f0effb84-646f-49e4-9e13-9408cd872452}">
+      <Declaration><![CDATA[(*!
+<summary>Reports the generic number of direct children.</summary>
+*)
+
+{attribute 'monitoring' := 'call'}
+PROPERTY FINAL ChildCount : TOF_Core.INT_LENGTH]]></Declaration>
+      <Get Name="Get" Id="{829400bc-aa3d-42c7-81fe-a509e449b13c}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ChildCount := _ChildCount;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="Children" Id="{3d0a9732-9a57-4a71-aee6-412b96c2cc99}">
+      <Declaration><![CDATA[(*!
+<summary>Borrows the concrete group's persistent fixed array of tests and nested groups.</summary>
+<description>
+Return the same valid storage and unchanged child list for the group lifetime, including an empty array
+when the generic count is zero. The getter must have no side effects. Callers may only read the reference.
+Children are borrowed; each has this group as its fixed Parent and remains alive while the tree is used.
+The base constructor never reads this property. Reset validates it before execution starts.
+</description>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY ABSTRACT Children : REFERENCE TO ARRAY [0.._ChildCount - 1] OF ITestElement]]></Declaration>
+      <Get Name="Get" Id="{0f3967a9-61e8-4805-83da-955655597e82}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="Execute" Id="{a8def063-35af-48f7-882c-bf17d297f8c7}">
+      <Declaration><![CDATA[(*!
+<summary>Advances one child of the validated fixed composition and counts it once on completion.</summary>
+<description>
+Requires a successful Reset before the first execution and every subsequent run, including after a failed Reset.
+Uses the concrete group's Children reference without repeating topology validation.
+External exceptions propagate to the runner and abort the run.
+Neither Reset nor Execute changes parent associations.
+</description>
+*)
+METHOD FINAL Execute
+VAR
+	childElements : REFERENCE TO ARRAY [0.._ChildCount - 1] OF ITestElement;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF IsFinished THEN
+	RETURN;
+END_IF
+
+childElements REF= THIS^.Children;
+
+_State := TEST_ELEMENT_STATE.RUNNING;
+_Duration := _Duration + TOF_Core.System.GetTaskCycleTime();
+
+IF _CurrentChildIndex < _ChildCount THEN
+	childElements[_CurrentChildIndex].Execute();
+
+	IF childElements[_CurrentChildIndex].IsFinished THEN
+		_PassedCount := _PassedCount + childElements[_CurrentChildIndex].PassedCount;
+		_FailedCount := _FailedCount + childElements[_CurrentChildIndex].FailedCount;
+		_SkippedCount := _SkippedCount + childElements[_CurrentChildIndex].SkippedCount;
+		_CurrentChildIndex := _CurrentChildIndex + 1;
+	END_IF
+
+END_IF
+
+IF _CurrentChildIndex >= _ChildCount THEN
+	_State := TEST_ELEMENT_STATE.COMPLETED;
+	_Reporter := 0;
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="GetChildByIndex" Id="{20542082-a6b5-49a9-9a82-7c12010e36c4}">
+      <Declaration><![CDATA[(*!
+<summary>Borrows one direct child in fixed execution order without changing the tree.</summary>
+<description>
+Checks storage before the index, including before the first Reset and after a failed Reset.
+Missing storage or a null selected slot raises DataMemberNotSpecifiedException; an index outside
+zero through ChildCount minus one raises ArgumentOutOfRangeException. No child callback is invoked.
+The returned interface is borrowed for the child's lifetime. Use from the owning task without reentry;
+this method does not repeat complete topology validation or authorize changes to the composition.
+</description>
+<param name="index">Zero-based position in the fixed direct-child array.</param>
+*)
+METHOD FINAL GetChildByIndex : ITestElement
+VAR_INPUT
+	index : TOF_Core.INT_LENGTH;
+END_VAR
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF NOT __ISVALIDREF(Children) THEN
+	TOF_Core.Exceptions.ThrowDataMemberNotSpecified(
+		sourceNamespaceName := NamespaceName,
+		sourceClassName := ClassName,
+		sourcePOUName := __POUNAME(),
+		sourcePosition := __POSITION(),
+		dataMemberName := 'Children'
+	);
+END_IF
+
+IF index < TOF_Core.SignedInt16.ZERO OR_ELSE index >= _ChildCount THEN
+	TOF_Core.Exceptions.ThrowArgumentOutOfRange(
+		sourceNamespaceName := NamespaceName,
+		sourceClassName := ClassName,
+		sourcePOUName := __POUNAME(),
+		sourcePosition := __POSITION(),
+		argumentName := 'index',
+		argumentValue := index
+	);
+END_IF
+
+IF Children[index] = 0 THEN
+	TOF_Core.Exceptions.ThrowDataMemberNotSpecified(
+		sourceNamespaceName := NamespaceName,
+		sourceClassName := ClassName,
+		sourcePOUName := __POUNAME(),
+		sourcePosition := __POSITION(),
+		dataMemberName := TOF_Core.Strings.Concat255('Children[', TO_STRING(index), ']')
+	);
+END_IF
+
+GetChildByIndex := Children[index];]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="Reset" Id="{684a83bb-641f-40fa-a5fd-372ce02c2dc6}">
+      <Declaration><![CDATA[(*!
+<summary>Clears observations and recursively resets descendant-specific state.</summary>
+<description>
+Does not run teardown or release user resources. Call only at the lifecycle boundaries in ITestElement.
+The reporter is borrowed until completion; no locks or cross-task transfer are provided.
+Validation or a child Reset exception propagates and can leave a partially reset tree; the runner aborts startup.
+</description>
+*)
+METHOD FINAL Reset
+VAR_INPUT
+	reporter : ITestReporter;
+END_VAR
+VAR
+	self : ITestElement;
+	slowAncestor : ITestElement;
+	fastAncestor : ITestElement;
+
+	i : INT;
+	j : INT;
+	
+	errorMessage : TOF_Core.ERROR_MESSAGE;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[SUPER^.Reset(reporter := reporter);
+
+IF NOT __ISVALIDREF(Children) THEN
+	TOF_Core.Exceptions.ThrowDataMemberNotSpecified(
+		sourceNamespaceName := NamespaceName,
+		sourceClassName := ClassName,
+		sourcePOUName := __POUNAME(),
+		sourcePosition := __POSITION(),
+		dataMemberName := 'Children'
+	);
+END_IF
+
+self := THIS^;
+slowAncestor := self;
+fastAncestor := self;
+
+// Traverse the fixed parent chain at two speeds to detect cycles without allocation or recursion.
+WHILE fastAncestor <> 0 DO
+	fastAncestor := fastAncestor.Parent;
+
+	IF fastAncestor = 0 THEN
+		EXIT;
+	END_IF
+
+	fastAncestor := fastAncestor.Parent;
+	slowAncestor := slowAncestor.Parent;
+
+	IF fastAncestor <> 0 AND_THEN fastAncestor = slowAncestor THEN
+		TOF_Core.Exceptions.ThrowStandard(
+			sourceNamespaceName := NamespaceName,
+			sourceClassName := ClassName,
+			sourcePOUName := __POUNAME(),
+			sourcePosition := __POSITION(),
+			message := "The assigned parent chain contains a cycle"
+		);
+	END_IF
+END_WHILE
+
+FOR i := 0 TO _ChildCount - 1 DO
+	IF Children[i] = 0 THEN
+		TOF_Core.Exceptions.ThrowDataMemberNotSpecified(
+			sourceNamespaceName := NamespaceName,
+			sourceClassName := ClassName,
+			sourcePOUName := __POUNAME(),
+			sourcePosition := __POSITION(),
+			dataMemberName := TOF_Core.Strings.Concat255('Children[', TO_STRING(i), ']')
+		);
+	END_IF
+
+	IF Children[i].Parent <> self THEN
+		errorMessage := TOF_Core.WideStrings.Concat255("A child '", Children[i].Name, "' has a different constructor-assigned parent"); 
+		
+		TOF_Core.Exceptions.ThrowStandard(
+			sourceNamespaceName := NamespaceName,
+			sourceClassName := ClassName,
+			sourcePOUName := __POUNAME(),
+			sourcePosition := __POSITION(),
+			message := errorMessage
+		);
+	END_IF
+
+	FOR j := 0 TO i - 1 DO
+		IF Children[i] = Children[j] THEN
+			errorMessage := TOF_Core.WideStrings.Concat255("A child '", Children[i].Name, "' occupies more than one slot"); 
+			
+			TOF_Core.Exceptions.ThrowStandard(
+				sourceNamespaceName := NamespaceName,
+				sourceClassName := ClassName,
+				sourcePOUName := __POUNAME(),
+				sourcePosition := __POSITION(),
+				message := errorMessage
+			);
+		END_IF
+	END_FOR
+END_FOR
+
+_CurrentChildIndex := 0;
+
+FOR i := 0 TO _ChildCount - 1 DO
+	Children[i].Reset(reporter := _Reporter);
+END_FOR]]></ST>
+      </Implementation>
+    </Method>
+  </POU>
+</TcPlcObject>

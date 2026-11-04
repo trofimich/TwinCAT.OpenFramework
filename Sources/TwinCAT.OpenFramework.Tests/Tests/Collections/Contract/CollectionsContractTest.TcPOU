@@ -1,0 +1,2343 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1" ProductVersion="3.1.4026.21">
+  <POU Name="CollectionsContractTest" Id="{2b23dfbc-87ac-4d91-9a04-e3a4d86d1d3e}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+SPDX-FileCopyrightText: © 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+SPDX-License-Identifier: MIT
+License: https://opensource.org/license/mit
+*)
+
+(*!
+<summary>Exercises collection contracts for ownership, callbacks, growth and borrowed enumeration.</summary>
+<description>
+Owns all collections, cursors, callback fixtures and unaccepted descriptors as persistent state.
+Each testcase prepares its own initial state and cleanup runs before every case and at destruction.
+No resource cleanup depends on exception stack unwinding. Fatal OOM is reserved for isolated owner tests.
+</description>
+*)
+
+FUNCTION_BLOCK CollectionsContractTest EXTENDS TcUnit.FB_TestSuite
+VAR_STAT
+	_ClassName : STRING := __POUNAME();
+END_VAR
+VAR
+	_Scalar : DINT := 1;
+	_OtherScalar : DINT := 2;
+	_MiddleScalar : DINT := 13;
+	_SignedKey : LINT := 1;
+	_UnsignedKey : UINT := 1;
+	_ByteValues : ARRAY [0..2] OF BYTE := [0, 1, 255];
+	_RealBits : TOF_Core.REAL_UNION;
+	_LongRealBits : TOF_Core.LREAL_UNION;
+
+	_SortSigned : LINT;
+	_SortUnsigned : UINT;
+	_SortReal : LREAL;
+	_SortText : STRING(16) := 'b';
+	_SortWideText : WSTRING(16) := "a";
+	_FirstComparable : CollectionComparableProbe;
+	_SecondComparable : CollectionComparableProbe;
+
+	_NullByteCursor : TOF_Collections.ByteListEnumerator(list := 0);
+	_NullListCursor : TOF_Collections.ListEnumerator(list := 0);
+	_NullQueueCursor : TOF_Collections.QueueEnumerator(queue := 0);
+	_NullStackCursor : TOF_Collections.StackEnumerator(stack := 0);
+	_NullDictionaryCursor : TOF_Collections.DictionaryEnumerator(dictionary := 0);
+	_NullSetCursor : TOF_Collections.UniqueDataSetEnumerator(uniqueSet := 0);
+	_NullCursors : ARRAY [0..5] OF TOF_Core.IEnumerator;
+
+
+	_CloneExitCount : UDINT;
+	_CloneSource : CollectionCloneProbe;
+	_FailingCloneSource : CollectionCloneProbe;
+	_Validator : CollectionValidatorProbe;
+	_Equality : CollectionEqualityProbe;
+	_Predicate : CollectionPredicateProbe;
+	_Comparer : CollectionComparerProbe;
+
+	_Bytes : TOF_Collections.ByteList<0>;
+	_StaticBytes : TOF_Collections.ByteList<8>;
+	_List : TOF_Collections.List<0>(valueValidator := 0);
+	_Queue : TOF_Collections.Queue<0>(valueValidator := _Validator);
+	_Stack : TOF_Collections.Stack<0>(valueValidator := 0);
+	_Dictionary : TOF_Collections.Dictionary<0>(keyValidator := 0, valueValidator := 0, keyEqualityComparer := 0);
+	_Set : TOF_Collections.UniqueDataSet<0>(valueValidator := 0, valueEqualityComparer := 0);
+	_CollisionDictionary : TOF_Collections.Dictionary<0>(
+		keyValidator := 0,
+		valueValidator := 0,
+		keyEqualityComparer := _Equality
+	);
+	_CollisionSet : TOF_Collections.UniqueDataSet<0>(valueValidator := 0, valueEqualityComparer := _Equality);
+
+	_RejectedList : TOF_Collections.List<1>(valueValidator := _Validator);
+	_RejectedQueue : TOF_Collections.Queue<1>(valueValidator := _Validator);
+	_RejectedStack : TOF_Collections.Stack<1>(valueValidator := _Validator);
+	_RejectedDictionary : TOF_Collections.Dictionary<1>(
+		keyValidator := 0,
+		valueValidator := _Validator,
+		keyEqualityComparer := 0
+	);
+	_RejectedSet : TOF_Collections.UniqueDataSet<1>(valueValidator := _Validator, valueEqualityComparer := 0);
+
+	_FullList : TOF_Collections.List<1>(valueValidator := 0);
+	_FullQueue : TOF_Collections.Queue<1>(valueValidator := 0);
+	_FullStack : TOF_Collections.Stack<1>(valueValidator := 0);
+	_FullDictionary : TOF_Collections.Dictionary<1>(keyValidator := 0, valueValidator := 0, keyEqualityComparer := 0);
+	_FullSet : TOF_Collections.UniqueDataSet<1>(valueValidator := 0, valueEqualityComparer := 0);
+
+	//! <summary>Retains unaccepted allocations and cursors across an aborted helper call.</summary>
+	_OwnedObject : TOF_Core.IObject;
+	_OwnedValue : TOF_Core.GENERIC_VALUE;
+	_Query : TOF_Core.GENERIC_VALUE;
+	_BorrowedSource : TOF_Core.GENERIC_VALUE;
+	_Enumerator : TOF_Core.IEnumerator;
+	_SecondEnumerator : TOF_Core.IEnumerator;
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[CopyFailurePreservesException();
+SecondCopyFailureCleanup();
+StaticFullCopyCleanup();
+ByteOverlapAndBounds();
+ByteSizeRejections();
+ListOwnershipReplacement();
+ListRemovalLimits();
+SortFailurePreservesEntries();
+QueueValidationAndGrowth();
+HashCollisionGrowth();
+HashEqualityRepresentations();
+HashOwnershipAliases();
+FullStaticDuplicateUpdates();
+QueryFailureCleanup();
+TryCallbackContainment();
+GenericQueryReleaseMatrix();
+AllCursorContracts();
+FixtureCleanupAfterException();
+DefaultSortNumericBranches();
+DefaultSortTextAndObjects();
+DefaultSortExplicitAndRejection();
+MissingCursorSources();]]></ST>
+    </Implementation>
+    <Method Name="AllCursorContracts" Id="{a05e6aff-081d-4362-8e1f-85396f674b96}">
+      <Declaration><![CDATA[(*!
+<summary>Checks independent cursors, generic byte values, Reset and repeated exhaustion for six containers.</summary>
+<description>
+Prepares an independent initial state. Persistent resources survive an aborted call and are released
+by the next testcase or suite destruction. Terminal OOM injection is excluded from this shared task.
+</description>
+*)
+METHOD AllCursorContracts
+VAR
+	i : DINT;
+END_VAR
+VAR_INST
+	testFinished : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN
+	RETURN;
+END_IF
+
+TEST(TestName := __POUNAME());
+cleanupFixtures();
+_CloneSource.ObserveExit(counter := _CloneExitCount);
+_CloneSource.ClearCloneTransportOnExit := TRUE;
+_CloneExitCount := TOF_Core.UnsignedInt32.ZERO;
+
+_Bytes.AppendData(data := ADR(_ByteValues), dataSize := 3);
+_List.AppendCopy(value := _Scalar);
+_Queue.EnqueueCopy(value := _Scalar);
+_Stack.PushCopy(value := _Scalar);
+_Dictionary.SetCopy(key := _Scalar, value := _OtherScalar);
+_Set.SetCopy(value := _Scalar);
+checkCursor(source := _Bytes);
+checkCursor(source := _List);
+checkCursor(source := _Queue);
+checkCursor(source := _Stack);
+checkCursor(source := _Dictionary);
+checkCursor(source := _Set);
+
+_Enumerator := _Bytes.CreateEnumerator();
+
+FOR i := 0 TO 2 DO
+	AssertTrue(Condition := _Enumerator.MoveNext(), Message := 'Byte cursor must visit every byte');
+	AssertEquals_BYTE(
+		Expected := _ByteValues[i],
+		Actual := _Enumerator.Current.AsByte(),
+		Message := 'Generic Current must address cached byte storage, including zero'
+	);
+END_FOR
+
+releaseCursors();
+_Bytes.Clear();
+_List.Clear();
+_Queue.Clear();
+_Stack.Clear();
+_Dictionary.Clear();
+_Set.Clear();
+checkCursor(source := _Bytes);
+checkCursor(source := _List);
+checkCursor(source := _Queue);
+checkCursor(source := _Stack);
+checkCursor(source := _Dictionary);
+checkCursor(source := _Set);
+
+cleanupFixtures();
+testFinished := TRUE;
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="assertOriginalFailure" Id="{376a0be9-5135-49dc-bded-d540defa07c1}">
+      <Declaration><![CDATA[(*!
+<summary>Checks a caught framework failure after resource cleanup.</summary>
+<description>
+Captures and consumes the exception within the current call; no exception interface survives task cleanup.
+</description>
+*)
+METHOD PRIVATE assertOriginalFailure
+VAR_INPUT
+	exceptionCode : __SYSTEM.ExceptionCode;
+	expectedMessage : WSTRING;
+END_VAR
+VAR
+	caughtException : TOF_Core.IException;
+	standardException : TOF_Core.IStandardException;
+	actualMessage : TOF_Core.ERROR_MESSAGE;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[caughtException := TOF_Core.ExceptionManager.GetLastException(
+	exceptionCode := exceptionCode,
+	catchPointNamespaceName := NamespaceName,
+	catchPointPOUName := __POUNAME(),
+	catchPointPosition := __POSITION()
+);
+AssertTrue(
+	Condition := __QUERYINTERFACE(caughtException, standardException),
+	Message := 'Original StandardException category must be preserved'
+);
+actualMessage := caughtException.GetMessage();
+AssertEquals_WSTRING(Expected := expectedMessage, Actual := actualMessage, Message := 'Original message must survive');]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="ByteOverlapAndBounds" Id="{340d99f1-c79b-44a8-8ea5-22e17cdc632d}">
+      <Declaration><![CDATA[(*!
+<summary>Supports byte self-growth, overlapping loads, empty removal and checked ranges.</summary>
+<description>
+Prepares an independent initial state. Persistent resources survive an aborted call and are released
+by the next testcase or suite destruction. Terminal OOM injection is excluded from this shared task.
+</description>
+*)
+METHOD ByteOverlapAndBounds
+VAR
+	i : DINT;
+END_VAR
+VAR_INST
+	testFinished : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN
+	RETURN;
+END_IF
+
+TEST(TestName := __POUNAME());
+cleanupFixtures();
+_CloneSource.ObserveExit(counter := _CloneExitCount);
+_CloneSource.ClearCloneTransportOnExit := TRUE;
+_CloneExitCount := TOF_Core.UnsignedInt32.ZERO;
+
+_Bytes.Remove(value := 7);
+_StaticBytes.Remove(value := 7);
+_Bytes.AppendData(data := ADR(_ByteValues), dataSize := 3);
+_Bytes.AppendData(data := _Bytes.DataAddress, dataSize := _Bytes.Length);
+AssertEquals_DINT(Expected := 6, Actual := _Bytes.Length, Message := 'Self-append must grow to six bytes');
+
+FOR i := 0 TO 5 DO
+	AssertEquals_BYTE(
+		Expected := _ByteValues[i MOD 3],
+		Actual := _Bytes.Get(index := i),
+		Message := 'Self-growth must retain the source bytes'
+	);
+END_FOR
+
+_Bytes.LoadFromData(data := _Bytes.DataAddress + 1, dataSize := 4, startIndex := 0);
+AssertEquals_DINT(Expected := 4, Actual := _Bytes.Length, Message := 'Overlapping load must truncate the tail');
+AssertEquals_BYTE(Expected := 1, Actual := _Bytes.Get(index := 0), Message := 'Overlap must copy the old second byte');
+AssertEquals_BYTE(Expected := 255, Actual := _Bytes.Get(index := 1), Message := 'Overlap must preserve byte 255');
+_Bytes.LoadFromData(data := 0, dataSize := 0, startIndex := 2);
+AssertEquals_DINT(Expected := 4, Actual := _Bytes.Length, Message := 'Null zero load must preserve Length');
+_Bytes.Clear(releaseDynamicMemory := TRUE);
+AssertEquals_DINT(Expected := 0, Actual := _Bytes.Capacity, Message := 'Explicit release must drop byte capacity');
+
+_StaticBytes.AppendData(data := ADR(_ByteValues), dataSize := 3);
+_StaticBytes.AppendData(data := _StaticBytes.DataAddress, dataSize := 3);
+_StaticBytes.LoadFromData(data := _StaticBytes.DataAddress + 1, dataSize := 4, startIndex := 0);
+AssertEquals_BYTE(Expected := 1, Actual := _StaticBytes.Get(index := 0), Message := 'Static overlap must be supported');
+_StaticBytes.RemoveAt(index := 1, count := 0);
+AssertEquals_DINT(Expected := 4, Actual := _StaticBytes.Length, Message := 'Validated zero removal must be a no-op');
+
+cleanupFixtures();
+testFinished := TRUE;
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="ByteSizeRejections" Id="{221eda35-e7a1-4033-aada-1b8f68fd77b1}">
+      <Declaration><![CDATA[(*!
+<summary>Rejects oversized generic byte ranges and overflowing end positions before reading input.</summary>
+<description>
+Prepares an independent initial state. Persistent resources survive an aborted call and are released
+by the next testcase or suite destruction. Terminal OOM injection is excluded from this shared task.
+</description>
+*)
+METHOD ByteSizeRejections
+VAR
+	i : DINT;
+	rejected : BOOL;
+	exceptionCode : __SYSTEM.ExceptionCode;
+	caughtException : TOF_Core.IException;
+	rangeException : TOF_Core.IArgumentOutOfRangeException;
+END_VAR
+VAR_INST
+	testFinished : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN
+	RETURN;
+END_IF
+
+TEST(TestName := __POUNAME());
+cleanupFixtures();
+_CloneSource.ObserveExit(counter := _CloneExitCount);
+_CloneSource.ClearCloneTransportOnExit := TRUE;
+_CloneExitCount := TOF_Core.UnsignedInt32.ZERO;
+
+_Bytes.AppendData(data := ADR(_ByteValues), dataSize := 3);
+_Query := TOF_Core.GenericValueFactory.FromParts(
+	genericTypeClass := TOF_Core.GENERIC_TYPE_CLASS.UINT_8,
+	address := ADR(_ByteValues),
+	size := TO_ULINT(TOF_Core.SignedInt32.MAX_VALUE) + 1,
+	memoryManagementBehavior := TOF_Core.GENERIC_MEMORY_MANAGEMENT_BEHAVIOR.STORE_ORIGINAL_REFERENCE_AND_NOT_OWNS_MEMORY
+);
+
+FOR i := 0 TO 3 DO
+	rejected := FALSE;
+
+	__TRY
+		CASE i OF
+			0:
+				_Bytes.AppendGeneric(data := _Query);
+			1:
+				_Bytes.LoadFromGeneric(data := _Query);
+			2:
+				_Bytes.AppendData(data := ADR(_ByteValues), dataSize := TOF_Core.SignedInt32.MAX_VALUE);
+			3:
+				_Bytes.RemoveAt(index := 1, count := TOF_Core.SignedInt32.MAX_VALUE);
+		END_CASE
+	__CATCH(exceptionCode)
+		rejected := TRUE;
+		caughtException := TOF_Core.ExceptionManager.GetLastException(
+			exceptionCode := exceptionCode,
+			catchPointNamespaceName := NamespaceName,
+			catchPointPOUName := __POUNAME(),
+			catchPointPosition := __POSITION()
+		);
+		AssertTrue(
+			Condition := __QUERYINTERFACE(caughtException, rangeException),
+			Message := 'Oversized byte range must report ArgumentOutOfRangeException'
+		);
+	__ENDTRY
+
+	AssertTrue(Condition := rejected, Message := 'Oversized byte request must be rejected');
+	AssertEquals_DINT(Expected := 3, Actual := _Bytes.Length, Message := 'Rejected range must preserve Length');
+	AssertEquals_BYTE(Expected := 255, Actual := _Bytes.Get(index := 2), Message := 'Rejected range must preserve bytes');
+END_FOR
+
+_Query.Reset();
+
+cleanupFixtures();
+testFinished := TRUE;
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="checkCursor" Id="{b6358e9a-d4d6-4b99-9629-a6ef4313925d}">
+      <Declaration><![CDATA[(*!
+<summary>Checks traversal and invalid-current states without changing the borrowed source.</summary>
+<description>
+The source stays alive and structurally unchanged. Cursor ownership is stored in suite fields on failure.
+</description>
+*)
+METHOD PRIVATE checkCursor
+VAR_INPUT
+	source : TOF_Collections.ICollection;
+END_VAR
+VAR
+	i : DINT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_Enumerator := source.CreateEnumerator();
+_SecondEnumerator := source.CreateEnumerator();
+AssertTrue(Condition := _Enumerator.Current.IsNull, Message := 'Current before MoveNext must be empty');
+
+FOR i := 0 TO source.Length - 1 DO
+	AssertTrue(Condition := _Enumerator.MoveNext(), Message := 'Cursor must visit every source entry');
+	AssertFalse(Condition := _Enumerator.Current.IsNull, Message := 'Current must expose the visited entry');
+END_FOR
+
+AssertFalse(Condition := _Enumerator.MoveNext(), Message := 'Cursor must stop at source end');
+AssertFalse(Condition := _Enumerator.MoveNext(), Message := 'Exhausted cursor must stay exhausted');
+AssertTrue(Condition := _Enumerator.Current.IsNull, Message := 'Current after exhaustion must be empty');
+AssertEquals_BOOL(
+	Expected := source.Length > TOF_Core.SignedInt32.ZERO,
+	Actual := _SecondEnumerator.MoveNext(),
+	Message := 'Second cursor must retain an independent position'
+);
+_Enumerator.Reset();
+AssertTrue(Condition := _Enumerator.Current.IsNull, Message := 'Current after Reset must be empty');
+AssertEquals_BOOL(
+	Expected := source.Length > TOF_Core.SignedInt32.ZERO,
+	Actual := _Enumerator.MoveNext(),
+	Message := 'Reset must restore the initial cursor position'
+);
+releaseCursors();]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="ClassName" Id="{1f91d31f-890a-4534-962c-aa88934a4d48}">
+      <Declaration><![CDATA[(*!
+<summary>Provides the suite class name.</summary>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{0983ef2a-0567-4efb-8ccc-1c0c11c10494}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ClassName REF= _ClassName;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="cleanupFixtures" Id="{9469dbf0-a844-422f-a123-838d09b9d94a}">
+      <Declaration><![CDATA[(*!
+<summary>Releases every suite-owned resource before resetting the next testcase.</summary>
+<description>
+Uses non-allocating, non-throwing release paths. All probe counters and borrowed source values are persistent.
+</description>
+*)
+METHOD PRIVATE cleanupFixtures]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[releaseCursors();
+_CloneSource.ThrowOnEquality := FALSE;
+_FailingCloneSource.ThrowOnClone := FALSE;
+_Validator.Reject := FALSE;
+_Equality.ThrowOnHash := FALSE;
+_Equality.ThrowOnEquality := FALSE;
+_Predicate.ThrowOnCall := 0;
+_Comparer.ThrowOnCall := 0;
+
+_Bytes.Clear(releaseDynamicMemory := TRUE);
+_StaticBytes.Clear(releaseDynamicMemory := TRUE);
+_List.Clear();
+_Queue.Clear();
+_Stack.Clear();
+_Dictionary.Clear();
+_Set.Clear();
+_CollisionDictionary.Clear();
+_CollisionSet.Clear();
+_Equality.MatchEveryValue := FALSE;
+_RejectedList.Clear();
+_RejectedQueue.Clear();
+_RejectedStack.Clear();
+_RejectedDictionary.Clear();
+_RejectedSet.Clear();
+_FullList.Clear();
+_FullQueue.Clear();
+_FullStack.Clear();
+_FullDictionary.Clear();
+_FullSet.Clear();
+
+_OwnedValue.Release();
+_Query.Release();
+_BorrowedSource.Reset();
+
+IF _OwnedObject <> 0 THEN
+	TOF_Core.Memory.TryReleaseDynamicObject(instance := _OwnedObject);
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="CopyFailurePreservesException" Id="{5a351d62-e143-49f3-90c5-bec2217b1660}">
+      <Declaration><![CDATA[(*!
+<summary>Preserves the original validator failure across cleanup in all seven Copy methods.</summary>
+<description>
+Prepares an independent initial state. Persistent resources survive an aborted call and are released
+by the next testcase or suite destruction. Terminal OOM injection is excluded from this shared task.
+</description>
+*)
+METHOD CopyFailurePreservesException
+VAR
+	rejected : BOOL;
+	exceptionCode : __SYSTEM.ExceptionCode;
+END_VAR
+VAR_INST
+	testFinished : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN
+	RETURN;
+END_IF
+
+TEST(TestName := __POUNAME());
+cleanupFixtures();
+_CloneSource.ObserveExit(counter := _CloneExitCount);
+_CloneSource.ClearCloneTransportOnExit := TRUE;
+_CloneExitCount := TOF_Core.UnsignedInt32.ZERO;
+
+_RejectedList.AppendCopy(value := _Scalar);
+_Validator.Reject := TRUE;
+
+rejected := FALSE;
+_CloneExitCount := TOF_Core.UnsignedInt32.ZERO;
+
+__TRY
+	_RejectedList.AppendCopy(value := _CloneSource, isObject := TRUE);
+__CATCH(exceptionCode)
+	rejected := TRUE;
+	assertOriginalFailure(exceptionCode := exceptionCode, expectedMessage := "Collection validation rejected");
+__ENDTRY
+
+AssertTrue(Condition := rejected, Message := 'Failure must propagate');
+AssertEquals_UDINT(
+	Expected := 1,
+	Actual := _CloneExitCount,
+	Message := 'Owned temporary must be released exactly once'
+);
+
+rejected := FALSE;
+_CloneExitCount := TOF_Core.UnsignedInt32.ZERO;
+
+__TRY
+	_RejectedList.InsertCopy(index := 0, value := _CloneSource, isObject := TRUE);
+__CATCH(exceptionCode)
+	rejected := TRUE;
+	assertOriginalFailure(exceptionCode := exceptionCode, expectedMessage := "Collection validation rejected");
+__ENDTRY
+
+AssertTrue(Condition := rejected, Message := 'Failure must propagate');
+AssertEquals_UDINT(
+	Expected := 1,
+	Actual := _CloneExitCount,
+	Message := 'Owned temporary must be released exactly once'
+);
+
+rejected := FALSE;
+_CloneExitCount := TOF_Core.UnsignedInt32.ZERO;
+
+__TRY
+	_RejectedList.SetCopy(index := 0, value := _CloneSource, isObject := TRUE);
+__CATCH(exceptionCode)
+	rejected := TRUE;
+	assertOriginalFailure(exceptionCode := exceptionCode, expectedMessage := "Collection validation rejected");
+__ENDTRY
+
+AssertTrue(Condition := rejected, Message := 'Failure must propagate');
+AssertEquals_UDINT(
+	Expected := 1,
+	Actual := _CloneExitCount,
+	Message := 'Owned temporary must be released exactly once'
+);
+
+rejected := FALSE;
+_CloneExitCount := TOF_Core.UnsignedInt32.ZERO;
+
+__TRY
+	_RejectedQueue.EnqueueCopy(value := _CloneSource, isObject := TRUE);
+__CATCH(exceptionCode)
+	rejected := TRUE;
+	assertOriginalFailure(exceptionCode := exceptionCode, expectedMessage := "Collection validation rejected");
+__ENDTRY
+
+AssertTrue(Condition := rejected, Message := 'Failure must propagate');
+AssertEquals_UDINT(
+	Expected := 1,
+	Actual := _CloneExitCount,
+	Message := 'Owned temporary must be released exactly once'
+);
+
+rejected := FALSE;
+_CloneExitCount := TOF_Core.UnsignedInt32.ZERO;
+
+__TRY
+	_RejectedStack.PushCopy(value := _CloneSource, isObject := TRUE);
+__CATCH(exceptionCode)
+	rejected := TRUE;
+	assertOriginalFailure(exceptionCode := exceptionCode, expectedMessage := "Collection validation rejected");
+__ENDTRY
+
+AssertTrue(Condition := rejected, Message := 'Failure must propagate');
+AssertEquals_UDINT(
+	Expected := 1,
+	Actual := _CloneExitCount,
+	Message := 'Owned temporary must be released exactly once'
+);
+
+rejected := FALSE;
+_CloneExitCount := TOF_Core.UnsignedInt32.ZERO;
+
+__TRY
+	_RejectedDictionary.SetCopy(key := _Scalar, value := _CloneSource, valueIsObject := TRUE);
+__CATCH(exceptionCode)
+	rejected := TRUE;
+	assertOriginalFailure(exceptionCode := exceptionCode, expectedMessage := "Collection validation rejected");
+__ENDTRY
+
+AssertTrue(Condition := rejected, Message := 'Failure must propagate');
+AssertEquals_UDINT(
+	Expected := 1,
+	Actual := _CloneExitCount,
+	Message := 'Owned temporary must be released exactly once'
+);
+
+rejected := FALSE;
+_CloneExitCount := TOF_Core.UnsignedInt32.ZERO;
+
+__TRY
+	_RejectedSet.SetCopy(value := _CloneSource, isObject := TRUE);
+__CATCH(exceptionCode)
+	rejected := TRUE;
+	assertOriginalFailure(exceptionCode := exceptionCode, expectedMessage := "Collection validation rejected");
+__ENDTRY
+
+AssertTrue(Condition := rejected, Message := 'Failure must propagate');
+AssertEquals_UDINT(
+	Expected := 1,
+	Actual := _CloneExitCount,
+	Message := 'Owned temporary must be released exactly once'
+);
+
+AssertEquals_DINT(Expected := 1, Actual := _RejectedList.Length, Message := 'Rejected replacement must retain entry');
+AssertEquals_DINT(Expected := _Scalar, Actual := _RejectedList.Get(index := 0).AsDInt(), Message := 'Entry must survive');
+AssertTrue(Condition := _RejectedQueue.Empty, Message := 'Rejected queue must remain empty');
+AssertTrue(Condition := _RejectedStack.Empty, Message := 'Rejected stack must remain empty');
+AssertTrue(Condition := _RejectedDictionary.Empty, Message := 'Rejected dictionary must remain empty');
+AssertTrue(Condition := _RejectedSet.Empty, Message := 'Rejected set must remain empty');
+
+cleanupFixtures();
+testFinished := TRUE;
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="DefaultSortExplicitAndRejection" Id="{60f4a118-8148-405a-a79d-7835894f411b}">
+      <Declaration><![CDATA[(*!
+<summary>Preserves explicit comparer priority and reports unsupported default pairs without losing entries.</summary>
+<description>
+Uses persistent collection and source fixtures. Each case prepares an independent initial state;
+comparison failures retain descriptors without promising rollback of completed swaps.
+</description>
+*)
+METHOD DefaultSortExplicitAndRejection
+VAR
+	rejected : BOOL;
+	exceptionCode : __SYSTEM.ExceptionCode;
+	caughtException : TOF_Core.IException;
+	conversionException : TOF_Core.IGenericConversionNotSupportedException;
+	objectValue : TOF_Core.GENERIC_VALUE;
+END_VAR
+VAR_INST
+	testFinished : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN
+	RETURN;
+END_IF
+
+TEST(TestName := __POUNAME());
+cleanupFixtures();
+
+_Comparer.ResetCount();
+_Comparer.ThrowOnCall := 1;
+_List.Sort();
+_List.Sort(comparer := _Comparer);
+_List.AppendCopy(value := _Scalar);
+_List.Sort();
+_List.Sort(comparer := _Comparer);
+AssertEquals_UDINT(Expected := 0, Actual := _Comparer.CallCount, Message := 'Empty and singleton sort must not compare');
+_List.AppendCopy(value := _SortText);
+
+__TRY
+	_List.Sort(comparer := _Comparer);
+__CATCH(exceptionCode)
+	rejected := TRUE;
+	assertOriginalFailure(exceptionCode := exceptionCode, expectedMessage := "Collection comparer rejected");
+__ENDTRY
+
+AssertTrue(Condition := rejected, Message := 'Explicit comparer must run before default compatibility checks');
+AssertEquals_UDINT(Expected := 1, Actual := _Comparer.CallCount, Message := 'Explicit comparer must receive the pair');
+rejected := FALSE;
+
+__TRY
+	_List.Sort();
+__CATCH(exceptionCode)
+	rejected := TRUE;
+	caughtException := TOF_Core.ExceptionManager.GetLastException(
+		exceptionCode := exceptionCode,
+		catchPointNamespaceName := NamespaceName,
+		catchPointPOUName := __POUNAME(),
+		catchPointPosition := __POSITION()
+	);
+	AssertTrue(
+		Condition := __QUERYINTERFACE(caughtException, conversionException),
+		Message := 'Unsupported default order must report GenericConversionNotSupportedException'
+	);
+__ENDTRY
+
+AssertTrue(Condition := rejected, Message := 'Incompatible numeric and text values must reject default sorting');
+AssertEquals_DINT(Expected := 2, Actual := _List.Length, Message := 'Default rejection must retain all entries');
+AssertTrue(Condition := _List.Get(index := 0).IsMemoryOwner, Message := 'Default rejection must retain first owner');
+AssertTrue(Condition := _List.Get(index := 1).IsMemoryOwner, Message := 'Default rejection must retain second owner');
+_List.Clear();
+objectValue := TOF_Core.GenericValueFactory.FromAnyType(
+	value := _CloneSource,
+	isObject := TRUE,
+	memoryManagementBehavior := TOF_Core.GENERIC_MEMORY_MANAGEMENT_BEHAVIOR.STORE_ORIGINAL_REFERENCE_AND_NOT_OWNS_MEMORY
+);
+_List.AppendGeneric(value := objectValue);
+_List.Sort();
+_List.AppendGeneric(value := objectValue);
+rejected := FALSE;
+
+__TRY
+	_List.Sort();
+__CATCH(exceptionCode)
+	rejected := TRUE;
+	caughtException := TOF_Core.ExceptionManager.GetLastException(
+		exceptionCode := exceptionCode,
+		catchPointNamespaceName := NamespaceName,
+		catchPointPOUName := __POUNAME(),
+		catchPointPosition := __POSITION()
+	);
+	AssertTrue(
+		Condition := __QUERYINTERFACE(caughtException, conversionException),
+		Message := 'Unsupported default order must report GenericConversionNotSupportedException'
+	);
+__ENDTRY
+
+AssertTrue(Condition := rejected, Message := 'OBJECT default order requires IComparable');
+AssertEquals_DINT(Expected := 2, Actual := _List.Length, Message := 'Unsupported OBJECT sorting must retain descriptors');
+
+cleanupFixtures();
+testFinished := TRUE;
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="DefaultSortNumericBranches" Id="{fe5a0cf7-853a-4f66-93e2-bb1852332601}">
+      <Declaration><![CDATA[(*!
+<summary>Sorts mixed numeric representations with omitted or null comparer in both algorithm branches.</summary>
+<description>
+Uses persistent collection and source fixtures. Each case prepares an independent initial state;
+comparison failures retain descriptors without promising rollback of completed swaps.
+</description>
+*)
+METHOD DefaultSortNumericBranches
+VAR
+	i : DINT;
+	count : DINT;
+	expectedValue : DINT;
+	expectedDescriptor : TOF_Core.GENERIC_VALUE;
+	sortView : TOF_Collections.IList;
+END_VAR
+VAR_INST
+	testFinished : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN
+	RETURN;
+END_IF
+
+TEST(TestName := __POUNAME());
+cleanupFixtures();
+
+sortView := _List;
+
+FOR count := 16 TO 17 DO
+	_List.Clear();
+
+	FOR i := count TO 1 BY -1 DO
+		CASE i MOD 3 OF
+			0:
+				_SortReal := TO_LREAL(i);
+				_List.AppendCopy(value := _SortReal);
+			1:
+				_SortSigned := TO_LINT(i);
+				_List.AppendCopy(value := _SortSigned);
+			2:
+				_SortUnsigned := TO_UINT(i);
+				_List.AppendCopy(value := _SortUnsigned);
+		END_CASE
+	END_FOR
+
+	sortView.Sort();
+
+	FOR i := 0 TO count - 1 DO
+		expectedValue := i + 1;
+		expectedDescriptor := TOF_Core.GenericValueFactory.FromDIntReference(value := expectedValue);
+		AssertTrue(
+			Condition := _List.Get(index := i).CompareTo(otherValue := expectedDescriptor)
+				= TOF_Core.COMPARISON_RESULT.FIRST_EQUAL_TO_SECOND,
+			Message := 'Default ascending order must compare mixed numeric values by value'
+		);
+	END_FOR
+
+	_List.Sort(comparer := 0, direction := TOF_Core.SORT_DIRECTION.DESCENDING);
+
+	FOR i := 0 TO count - 1 DO
+		expectedValue := count - i;
+		expectedDescriptor := TOF_Core.GenericValueFactory.FromDIntReference(value := expectedValue);
+		AssertTrue(
+			Condition := _List.Get(index := i).CompareTo(otherValue := expectedDescriptor)
+				= TOF_Core.COMPARISON_RESULT.FIRST_EQUAL_TO_SECOND,
+			Message := 'Null comparer must select the same default order in descending sorting'
+		);
+		AssertTrue(Condition := _List.Get(index := i).IsMemoryOwner, Message := 'Default sorting must retain owners');
+	END_FOR
+END_FOR
+
+cleanupFixtures();
+testFinished := TRUE;
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="DefaultSortTextAndObjects" Id="{6c17bdda-8c28-4a7a-a7d6-c61ce84d0667}">
+      <Declaration><![CDATA[(*!
+<summary>Uses natural mixed-text and IComparable OBJECT ordering without catalogue selection.</summary>
+<description>
+Uses persistent collection and source fixtures. Each case prepares an independent initial state;
+comparison failures retain descriptors without promising rollback of completed swaps.
+</description>
+*)
+METHOD DefaultSortTextAndObjects
+VAR
+	objectValue : TOF_Core.GENERIC_VALUE;
+END_VAR
+VAR_INST
+	testFinished : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN
+	RETURN;
+END_IF
+
+TEST(TestName := __POUNAME());
+cleanupFixtures();
+
+_List.AppendCopy(value := _SortText);
+_List.AppendCopy(value := _SortWideText);
+_List.Sort();
+AssertEquals_WSTRING(
+	Expected := "a",
+	Actual := _List.Get(index := 0).AsWString255(),
+	Message := 'Default sort must compare mixed STRING and WSTRING text'
+);
+AssertEquals_WSTRING(
+	Expected := "b",
+	Actual := _List.Get(index := 1).AsWString255(),
+	Message := 'Default mixed-text order must retain the second value'
+);
+_List.Clear();
+_FirstComparable.SortValue := 2;
+_SecondComparable.SortValue := 1;
+objectValue := TOF_Core.GenericValueFactory.FromAnyType(
+	value := _FirstComparable,
+	isObject := TRUE,
+	memoryManagementBehavior := TOF_Core.GENERIC_MEMORY_MANAGEMENT_BEHAVIOR.STORE_ORIGINAL_REFERENCE_AND_NOT_OWNS_MEMORY
+);
+_List.AppendGeneric(value := objectValue);
+objectValue := TOF_Core.GenericValueFactory.FromAnyType(
+	value := _SecondComparable,
+	isObject := TRUE,
+	memoryManagementBehavior := TOF_Core.GENERIC_MEMORY_MANAGEMENT_BEHAVIOR.STORE_ORIGINAL_REFERENCE_AND_NOT_OWNS_MEMORY
+);
+_List.AppendGeneric(value := objectValue);
+_List.Sort();
+AssertTrue(
+	Condition := TO_LWORD(_List.Get(index := 0).Address) = TO_LWORD(_SecondComparable.SelfAddress),
+	Message := 'Default OBJECT ordering must invoke IComparable'
+);
+AssertFalse(Condition := _List.Get(index := 0).IsMemoryOwner, Message := 'Borrowed OBJECT must remain borrowed');
+
+cleanupFixtures();
+testFinished := TRUE;
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="FB_exit" Id="{378db911-9827-4701-a4ad-20c722db7f6c}">
+      <Declaration><![CDATA[(*!
+<summary>Releases persistent fixtures during suite destruction without allocating or raising.</summary>
+*)
+METHOD FB_exit : BOOL
+VAR_INPUT
+	bInCopyCode : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[cleanupFixtures();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="FixtureCleanupAfterException" Id="{fc198e34-cd00-48ec-b2ab-88e11164b885}">
+      <Declaration><![CDATA[(*!
+<summary>Retains resources through an intermediate throwing call and cleans them explicitly afterwards.</summary>
+<description>
+Prepares an independent initial state. Persistent resources survive an aborted call and are released
+by the next testcase or suite destruction. Terminal OOM injection is excluded from this shared task.
+</description>
+*)
+METHOD FixtureCleanupAfterException
+VAR
+	rejected : BOOL;
+	exceptionCode : __SYSTEM.ExceptionCode;
+END_VAR
+VAR_INST
+	testFinished : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN
+	RETURN;
+END_IF
+
+TEST(TestName := __POUNAME());
+cleanupFixtures();
+_CloneSource.ObserveExit(counter := _CloneExitCount);
+_CloneSource.ClearCloneTransportOnExit := TRUE;
+_CloneExitCount := TOF_Core.UnsignedInt32.ZERO;
+
+_List.AppendCopy(value := _Scalar);
+
+__TRY
+	prepareResourcesThenReject();
+__CATCH(exceptionCode)
+	rejected := TRUE;
+	assertOriginalFailure(exceptionCode := exceptionCode, expectedMessage := "Collection fixture rejected");
+__ENDTRY
+
+AssertTrue(Condition := rejected, Message := 'Fixture injection must reach the local handler');
+AssertTrue(Condition := _Enumerator <> 0, Message := 'Cursor ownership must survive the aborted helper');
+AssertTrue(Condition := _OwnedValue.IsMemoryOwner, Message := 'Payload ownership must survive the aborted helper');
+releaseCursors();
+AssertTrue(Condition := _Enumerator = 0, Message := 'Cursor alias must be reset after cleanup');
+_OwnedValue.Release();
+AssertEquals_UDINT(Expected := 1, Actual := _CloneExitCount, Message := 'Retained probe must be destroyed once');
+AssertEquals_DINT(Expected := 1, Actual := _List.Length, Message := 'Cursor disposal must not dispose its source');
+
+cleanupFixtures();
+testFinished := TRUE;
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="FullStaticDuplicateUpdates" Id="{25c40577-beac-42e5-9ad6-5cffc1210902}">
+      <Declaration><![CDATA[(*!
+<summary>Updates equal entries in full static hash containers without adding a slot.</summary>
+<description>
+Prepares an independent initial state. Persistent resources survive an aborted call and are released
+by the next testcase or suite destruction. Terminal OOM injection is excluded from this shared task.
+</description>
+*)
+METHOD FullStaticDuplicateUpdates
+VAR
+	keyAddress : PVOID;
+END_VAR
+VAR_INST
+	testFinished : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN
+	RETURN;
+END_IF
+
+TEST(TestName := __POUNAME());
+cleanupFixtures();
+_CloneSource.ObserveExit(counter := _CloneExitCount);
+_CloneSource.ClearCloneTransportOnExit := TRUE;
+_CloneExitCount := TOF_Core.UnsignedInt32.ZERO;
+
+_FullDictionary.SetCopy(key := _Scalar, value := _Scalar);
+_FullSet.SetCopy(value := _Scalar);
+keyAddress := _FullDictionary.GetKeyValuePairByIndex(index := 0).Key.Address;
+_FullDictionary.SetCopy(key := _Scalar, value := _OtherScalar);
+_FullSet.SetCopy(value := _Scalar);
+AssertEquals_DINT(Expected := 1, Actual := _FullDictionary.Length, Message := 'Duplicate update must not need a slot');
+AssertEquals_DINT(Expected := 1, Actual := _FullSet.Length, Message := 'Duplicate set replacement must not need a slot');
+AssertTrue(
+	Condition := keyAddress = _FullDictionary.GetKeyValuePairByIndex(index := 0).Key.Address,
+	Message := 'Dictionary must retain its existing equal key allocation'
+);
+AssertEquals_DINT(
+	Expected := _OtherScalar,
+	Actual := _FullDictionary.GetKeyValuePairByIndex(index := 0).Value.AsDInt(),
+	Message := 'Full dictionary must accept the replacement value'
+);
+
+cleanupFixtures();
+testFinished := TRUE;
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="GenericQueryReleaseMatrix" Id="{e671de32-fa11-41af-957d-1d86171a8658}">
+      <Declaration><![CDATA[(*!
+<summary>Checks found/missing queries with owned/borrowed payload and explicit release on/off.</summary>
+<description>
+Exercises seven generic dictionary/set queries over 56 combinations. Universal fixture equality permits
+an owned query to match without aliasing any retained allocation. The source counter is persistent and
+cleanup never dereferences a caller alias after requested release.
+</description>
+*)
+METHOD GenericQueryReleaseMatrix
+VAR
+	foundCase : DINT;
+	ownedCase : DINT;
+	releaseCase : DINT;
+	operation : DINT;
+	position : DINT;
+	found : BOOL;
+	releaseQuery : BOOL;
+	foundValue : TOF_Core.GENERIC_VALUE;
+	queryAsInterface : TOF_Core.IObject;
+END_VAR
+VAR_INST
+	testFinished : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN
+	RETURN;
+END_IF
+
+TEST(TestName := __POUNAME());
+cleanupFixtures();
+_CloneSource.ObserveExit(counter := _CloneExitCount);
+_CloneSource.ClearCloneTransportOnExit := TRUE;
+_Equality.MatchEveryValue := TRUE;
+
+FOR foundCase := 0 TO 1 DO
+	FOR ownedCase := 0 TO 1 DO
+		FOR releaseCase := 0 TO 1 DO
+			FOR operation := 0 TO 6 DO
+				_CollisionDictionary.Clear();
+				_CollisionSet.Clear();
+
+				IF foundCase = 1 THEN
+					_CollisionDictionary.SetCopy(key := _Scalar, value := _OtherScalar);
+					_CollisionSet.SetCopy(value := _Scalar);
+				END_IF
+
+				_CloneExitCount := TOF_Core.UnsignedInt32.ZERO;
+
+				IF ownedCase = 1 THEN
+					prepareOwnedValue();
+					_Query := _OwnedValue;
+					_OwnedValue.Reset();
+				ELSE
+					_Query := TOF_Core.GenericValueFactory.FromParts(
+						genericTypeClass := TOF_Core.GENERIC_TYPE_CLASS.OBJECT,
+						address := _CloneSource.SelfAddress,
+						size := _CloneSource.SelfSize,
+						memoryManagementBehavior :=
+							TOF_Core.GENERIC_MEMORY_MANAGEMENT_BEHAVIOR.STORE_ORIGINAL_REFERENCE_AND_NOT_OWNS_MEMORY
+					);
+				END_IF
+
+				releaseQuery := releaseCase = 1;
+
+				CASE operation OF
+					0:
+						found := _CollisionDictionary.ContainsGenericKey(key := _Query, releaseKey := releaseQuery);
+					1:
+						position := _CollisionDictionary.GetGenericKeyPosition(key := _Query, releaseKey := releaseQuery);
+						found := position >= TOF_Core.SignedInt32.ZERO;
+					2:
+						found := _CollisionDictionary.TryGetValueByGenericKey(
+							key := _Query,
+							releaseKey := releaseQuery,
+							value => foundValue
+						);
+					3:
+						_CollisionDictionary.TryRemoveByGenericKey(
+							key := _Query,
+							releaseKey := releaseQuery,
+							removed => found
+						);
+					4:
+						found := _CollisionSet.ContainsGeneric(value := _Query, releaseValue := releaseQuery);
+					5:
+						position := _CollisionSet.GetGenericValuePosition(value := _Query, releaseValue := releaseQuery);
+						found := position >= TOF_Core.SignedInt32.ZERO;
+					6:
+						_CollisionSet.TryRemoveGeneric(value := _Query, releaseValue := releaseQuery, removed => found);
+				END_CASE
+
+				IF releaseQuery THEN
+					_Query.Reset();
+				END_IF
+
+				AssertEquals_BOOL(
+					Expected := foundCase = 1,
+					Actual := found,
+					Message := 'Owned and borrowed queries must preserve found and missing outcomes'
+				);
+				AssertEquals_UDINT(
+					Expected := TO_UDINT(ownedCase * releaseCase),
+					Actual := _CloneExitCount,
+					Message := 'Only an explicitly released owned query may be destroyed by lookup'
+				);
+
+				IF NOT releaseQuery THEN
+					AssertFalse(Condition := _Query.IsNull, Message := 'Retained query descriptor must remain valid');
+					queryAsInterface := _Query.AsIObject();
+					AssertTrue(Condition := queryAsInterface <> 0, Message := 'Retained query object must remain alive');
+					_Query.Release();
+				END_IF
+
+				AssertEquals_UDINT(
+					Expected := TO_UDINT(ownedCase),
+					Actual := _CloneExitCount,
+					Message := 'Each owned query must have exactly one disposal owner'
+				);
+			END_FOR
+		END_FOR
+	END_FOR
+END_FOR
+
+cleanupFixtures();
+testFinished := TRUE;
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="HashCollisionGrowth" Id="{a1d9b9fd-1278-49f3-9ae8-c4b9ac58c876}">
+      <Declaration><![CDATA[(*!
+<summary>Preserves collision chains through growth, middle removal, reinsertion and reuse.</summary>
+<description>
+Prepares an independent initial state. Persistent resources survive an aborted call and are released
+by the next testcase or suite destruction. Terminal OOM injection is excluded from this shared task.
+</description>
+*)
+METHOD HashCollisionGrowth
+VAR
+	i : DINT;
+	removed : BOOL;
+	foundValue : TOF_Core.GENERIC_VALUE;
+END_VAR
+VAR_INST
+	testFinished : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN
+	RETURN;
+END_IF
+
+TEST(TestName := __POUNAME());
+cleanupFixtures();
+_CloneSource.ObserveExit(counter := _CloneExitCount);
+_CloneSource.ClearCloneTransportOnExit := TRUE;
+_CloneExitCount := TOF_Core.UnsignedInt32.ZERO;
+
+_CollisionDictionary.DefaultDynamicAllocationElementCount := 2;
+_CollisionSet.DefaultDynamicAllocationElementCount := 2;
+
+FOR i := 1 TO 25 DO
+	_CollisionDictionary.SetCopy(key := i, value := i);
+	_CollisionSet.SetCopy(value := i);
+END_FOR
+
+AssertEquals_DINT(Expected := 25, Actual := _CollisionDictionary.Length, Message := 'All dictionary collisions must fit');
+AssertEquals_DINT(Expected := 25, Actual := _CollisionSet.Length, Message := 'All set collisions must fit');
+
+FOR i := 1 TO 25 DO
+	AssertTrue(
+		Condition := _CollisionDictionary.TryGetValueByKey(key := i, value => foundValue),
+		Message := 'Growth must retain each dictionary collision'
+	);
+	AssertEquals_DINT(Expected := i, Actual := foundValue.AsDInt(), Message := 'Dictionary collision value must match');
+	AssertTrue(Condition := _CollisionSet.Contains(value := i), Message := 'Growth must retain each set collision');
+END_FOR
+
+_CollisionDictionary.TryRemoveByKey(key := _MiddleScalar, removed => removed);
+AssertTrue(Condition := removed, Message := 'Middle collision must be removed');
+_CollisionSet.TryRemove(value := _MiddleScalar, removed => removed);
+AssertTrue(Condition := removed, Message := 'Middle set collision must be removed');
+AssertFalse(Condition := _CollisionDictionary.ContainsKey(key := _MiddleScalar), Message := 'Removed key must be absent');
+AssertFalse(Condition := _CollisionSet.Contains(value := _MiddleScalar), Message := 'Removed value must be absent');
+_CollisionDictionary.SetCopy(key := _MiddleScalar, value := _OtherScalar);
+_CollisionSet.SetCopy(value := _MiddleScalar);
+
+FOR i := 1 TO 25 DO
+	AssertTrue(Condition := _CollisionDictionary.ContainsKey(key := i), Message := 'Rebuild must preserve dictionary links');
+	AssertTrue(Condition := _CollisionSet.Contains(value := i), Message := 'Rebuild must preserve set links');
+END_FOR
+
+_CollisionDictionary.Clear();
+_CollisionSet.Clear();
+_CollisionDictionary.SetCopy(key := _Scalar, value := _OtherScalar);
+_CollisionSet.SetCopy(value := _Scalar);
+AssertTrue(Condition := _CollisionDictionary.ContainsKey(key := _Scalar), Message := 'Dictionary comparer must survive Clear');
+AssertTrue(Condition := _CollisionSet.Contains(value := _Scalar), Message := 'Set comparer must survive Clear');
+
+cleanupFixtures();
+testFinished := TRUE;
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="HashEqualityRepresentations" Id="{3a5bd688-cc46-4dd8-80d5-00892d3bcc0c}">
+      <Declaration><![CDATA[(*!
+<summary>Uses matching hashes for cross-width integers, signed zero, NaN and empty descriptors.</summary>
+<description>
+Prepares an independent initial state. Persistent resources survive an aborted call and are released
+by the next testcase or suite destruction. Terminal OOM injection is excluded from this shared task.
+</description>
+*)
+METHOD HashEqualityRepresentations
+VAR_INST
+	testFinished : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN
+	RETURN;
+END_IF
+
+TEST(TestName := __POUNAME());
+cleanupFixtures();
+_CloneSource.ObserveExit(counter := _CloneExitCount);
+_CloneSource.ClearCloneTransportOnExit := TRUE;
+_CloneExitCount := TOF_Core.UnsignedInt32.ZERO;
+
+_Dictionary.SetCopy(key := _SignedKey, value := _Scalar);
+_Dictionary.SetCopy(key := _UnsignedKey, value := _OtherScalar);
+_Set.SetCopy(value := _SignedKey);
+_Set.SetCopy(value := _UnsignedKey);
+AssertEquals_DINT(Expected := 1, Actual := _Dictionary.Length, Message := 'Equal integer widths must share a key');
+AssertEquals_DINT(Expected := 1, Actual := _Set.Length, Message := 'Equal integer widths must share an entry');
+
+_RealBits.Raw := TOF_Core.Reals.ZERO_BITS;
+_Dictionary.SetCopy(key := _RealBits.Value, value := _Scalar);
+_Set.SetCopy(value := _RealBits.Value);
+_LongRealBits.Raw := NOT TOF_Core.LongReals.MAGNITUDE_MASK;
+_Dictionary.SetCopy(key := _LongRealBits.Value, value := _OtherScalar);
+_Set.SetCopy(value := _LongRealBits.Value);
+AssertEquals_DINT(Expected := 2, Actual := _Dictionary.Length, Message := 'Signed floating zeros must share a key');
+AssertEquals_DINT(Expected := 2, Actual := _Set.Length, Message := 'Signed floating zeros must share an entry');
+
+_RealBits.Raw := TOF_Core.Reals.CANONICAL_NAN_BITS;
+_LongRealBits.Raw := TOF_Core.LongReals.CANONICAL_NAN_BITS;
+_Dictionary.SetCopy(key := _RealBits.Value, value := _Scalar);
+_Dictionary.SetCopy(key := _LongRealBits.Value, value := _OtherScalar);
+_Set.SetCopy(value := _RealBits.Value);
+_Set.SetCopy(value := _LongRealBits.Value);
+AssertEquals_DINT(Expected := 3, Actual := _Dictionary.Length, Message := 'Cross-width NaNs must share a key');
+AssertEquals_DINT(Expected := 3, Actual := _Set.Length, Message := 'Cross-width NaNs must share an entry');
+
+_Query.Reset();
+_Dictionary.SetGeneric(key := _Query, value := _Query);
+_Set.SetGeneric(value := _Query);
+AssertTrue(Condition := _Dictionary.ContainsGenericKey(key := _Query), Message := 'Empty key must be searchable');
+AssertTrue(Condition := _Set.ContainsGeneric(value := _Query), Message := 'Empty entry must be searchable');
+AssertEquals_DINT(Expected := 4, Actual := _Dictionary.Length, Message := 'Empty must remain distinct from nonempty values');
+AssertEquals_DINT(Expected := 4, Actual := _Set.Length, Message := 'Empty must remain distinct from nonempty values');
+
+cleanupFixtures();
+testFinished := TRUE;
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="HashOwnershipAliases" Id="{a39d84ff-af24-4c57-983c-012cf48c506d}">
+      <Declaration><![CDATA[(*!
+<summary>Disposes shared key/value allocations once and retains same-allocation set ownership.</summary>
+<description>
+Prepares an independent initial state. Persistent resources survive an aborted call and are released
+by the next testcase or suite destruction. Terminal OOM injection is excluded from this shared task.
+</description>
+*)
+METHOD HashOwnershipAliases
+VAR
+	borrowedValue : TOF_Core.GENERIC_VALUE;
+	pair : TOF_Core.GENERIC_KEY_VALUE_PAIR;
+END_VAR
+VAR_INST
+	testFinished : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN
+	RETURN;
+END_IF
+
+TEST(TestName := __POUNAME());
+cleanupFixtures();
+_CloneSource.ObserveExit(counter := _CloneExitCount);
+_CloneSource.ClearCloneTransportOnExit := TRUE;
+_CloneExitCount := TOF_Core.UnsignedInt32.ZERO;
+
+prepareOwnedValue();
+borrowedValue := TOF_Core.GenericValueFactory.FromParts(
+	genericTypeClass := _OwnedValue.TypeClass,
+	address := _OwnedValue.Address,
+	size := _OwnedValue.Size,
+	memoryManagementBehavior := TOF_Core.GENERIC_MEMORY_MANAGEMENT_BEHAVIOR.STORE_ORIGINAL_REFERENCE_AND_NOT_OWNS_MEMORY
+);
+_Dictionary.SetGeneric(key := _OwnedValue, value := _OwnedValue);
+_OwnedValue.Reset();
+pair := _Dictionary.GetKeyValuePairByIndex(index := 0);
+AssertTrue(Condition := pair.Key.IsMemoryOwner, Message := 'Shared pair ownership must belong to key');
+AssertFalse(Condition := pair.Value.IsMemoryOwner, Message := 'Shared pair value must remain borrowed');
+_Dictionary.SetGeneric(key := borrowedValue, value := borrowedValue);
+AssertEquals_UDINT(Expected := 0, Actual := _CloneExitCount, Message := 'Retained pair storage must stay alive');
+_Dictionary.Clear();
+AssertEquals_UDINT(Expected := 1, Actual := _CloneExitCount, Message := 'Shared pair must be destroyed once');
+
+prepareOwnedValue();
+borrowedValue := TOF_Core.GenericValueFactory.FromParts(
+	genericTypeClass := _OwnedValue.TypeClass,
+	address := _OwnedValue.Address,
+	size := _OwnedValue.Size,
+	memoryManagementBehavior := TOF_Core.GENERIC_MEMORY_MANAGEMENT_BEHAVIOR.STORE_ORIGINAL_REFERENCE_AND_NOT_OWNS_MEMORY
+);
+_Set.SetGeneric(value := _OwnedValue);
+_OwnedValue.Reset();
+_Set.SetGeneric(value := borrowedValue);
+AssertTrue(Condition := _Set.GetByIndex(index := 0).IsMemoryOwner, Message := 'Set replacement must preserve owner');
+_Set.Clear();
+AssertEquals_UDINT(Expected := 2, Actual := _CloneExitCount, Message := 'Retained set storage must be destroyed once');
+
+cleanupFixtures();
+testFinished := TRUE;
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="ListOwnershipReplacement" Id="{ff86aacd-93d8-4341-a71c-7be53baf07ab}">
+      <Declaration><![CDATA[(*!
+<summary>Preserves ownership when replacing a stored value with its borrowed same-allocation alias.</summary>
+<description>
+Prepares an independent initial state. Persistent resources survive an aborted call and are released
+by the next testcase or suite destruction. Terminal OOM injection is excluded from this shared task.
+</description>
+*)
+METHOD ListOwnershipReplacement
+VAR
+	borrowedValue : TOF_Core.GENERIC_VALUE;
+END_VAR
+VAR_INST
+	testFinished : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN
+	RETURN;
+END_IF
+
+TEST(TestName := __POUNAME());
+cleanupFixtures();
+_CloneSource.ObserveExit(counter := _CloneExitCount);
+_CloneSource.ClearCloneTransportOnExit := TRUE;
+_CloneExitCount := TOF_Core.UnsignedInt32.ZERO;
+
+prepareOwnedValue();
+_List.AppendGeneric(value := _OwnedValue);
+_OwnedValue.Reset();
+borrowedValue := TOF_Core.GenericValueFactory.FromParts(
+	genericTypeClass := _List.Get(index := 0).TypeClass,
+	address := _List.Get(index := 0).Address,
+	size := _List.Get(index := 0).Size,
+	memoryManagementBehavior := TOF_Core.GENERIC_MEMORY_MANAGEMENT_BEHAVIOR.STORE_ORIGINAL_REFERENCE_AND_NOT_OWNS_MEMORY
+);
+_List.SetGeneric(index := 0, value := borrowedValue);
+AssertTrue(Condition := _List.Get(index := 0).IsMemoryOwner, Message := 'Borrowed replacement must preserve owner');
+AssertEquals_UDINT(Expected := 0, Actual := _CloneExitCount, Message := 'Same allocation must remain alive');
+_List.Clear();
+AssertEquals_UDINT(Expected := 1, Actual := _CloneExitCount, Message := 'Retained allocation must be destroyed once');
+
+cleanupFixtures();
+testFinished := TRUE;
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="ListRemovalLimits" Id="{a5b4d6e3-1e6c-43ba-b4ff-87ff535e30f3}">
+      <Declaration><![CDATA[(*!
+<summary>Applies skip and maxRemoved and preserves completed removals after a predicate failure.</summary>
+<description>
+Prepares an independent initial state. Persistent resources survive an aborted call and are released
+by the next testcase or suite destruction. Terminal OOM injection is excluded from this shared task.
+</description>
+*)
+METHOD ListRemovalLimits
+VAR
+	i : DINT;
+	removedCount : DINT;
+	rejected : BOOL;
+	exceptionCode : __SYSTEM.ExceptionCode;
+END_VAR
+VAR_INST
+	testFinished : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN
+	RETURN;
+END_IF
+
+TEST(TestName := __POUNAME());
+cleanupFixtures();
+_CloneSource.ObserveExit(counter := _CloneExitCount);
+_CloneSource.ClearCloneTransportOnExit := TRUE;
+_CloneExitCount := TOF_Core.UnsignedInt32.ZERO;
+
+FOR i := 1 TO 5 DO
+	_List.AppendCopy(value := i);
+END_FOR
+
+_Predicate.ResetCount();
+_List.RemoveMatched(predicate := _Predicate, skip := 1, maxRemoved := 2, removedCount => removedCount);
+AssertEquals_DINT(Expected := 2, Actual := removedCount, Message := 'Removal must obey the positive limit');
+AssertEquals_UDINT(Expected := 3, Actual := _Predicate.CallCount, Message := 'Limit must stop further callbacks');
+AssertEquals_DINT(Expected := 3, Actual := _List.Length, Message := 'Two matches must be removed');
+AssertEquals_DINT(Expected := 5, Actual := _List.Get(index := 2).AsDInt(), Message := 'Skipped last match must remain');
+_Predicate.ResetCount();
+_List.RemoveMatched(predicate := _Predicate, maxRemoved := 0, removedCount => removedCount);
+AssertEquals_UDINT(Expected := 0, Actual := _Predicate.CallCount, Message := 'Zero limit must not invoke predicate');
+AssertEquals_DINT(Expected := 0, Actual := removedCount, Message := 'Zero limit must report no removals');
+
+_List.Clear();
+
+FOR i := 1 TO 5 DO
+	_List.AppendCopy(value := i);
+END_FOR
+
+_Predicate.ResetCount();
+_Predicate.ThrowOnCall := 2;
+
+__TRY
+	_List.RemoveMatched(predicate := _Predicate, removedCount => removedCount);
+__CATCH(exceptionCode)
+	rejected := TRUE;
+	assertOriginalFailure(exceptionCode := exceptionCode, expectedMessage := "Collection predicate rejected");
+__ENDTRY
+
+AssertTrue(Condition := rejected, Message := 'Predicate failure must propagate');
+AssertEquals_DINT(Expected := 4, Actual := _List.Length, Message := 'Completed removal must not roll back');
+AssertEquals_DINT(Expected := 4, Actual := _List.Get(index := 3).AsDInt(), Message := 'Remaining order must be valid');
+
+cleanupFixtures();
+testFinished := TRUE;
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="MissingCursorSources" Id="{b4965fba-3274-45b4-845e-bf68a5a9d697}">
+      <Declaration><![CDATA[(*!
+<summary>Diagnoses null constructor sources outside FB_init for all six cursors and concrete current views.</summary>
+<description>
+All six cursors are constructed with null sources without throwing during FB_init. MoveNext, generic
+Current and concrete current views must report configuration failure in the current cyclic task. Reset
+remains a local cursor operation that does not access the missing source.
+</description>
+*)
+METHOD MissingCursorSources
+VAR
+	i : DINT;
+	rejected : BOOL;
+	exceptionCode : __SYSTEM.ExceptionCode;
+	caughtException : TOF_Core.IException;
+	missingException : TOF_Core.IDataMemberNotSpecifiedException;
+	currentValue : TOF_Core.GENERIC_VALUE;
+	currentByte : BYTE;
+	currentPair : TOF_Core.GENERIC_KEY_VALUE_PAIR;
+END_VAR
+VAR_INST
+	testFinished : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN
+	RETURN;
+END_IF
+
+TEST(TestName := __POUNAME());
+cleanupFixtures();
+
+_NullCursors[0] := _NullByteCursor;
+_NullCursors[1] := _NullListCursor;
+_NullCursors[2] := _NullQueueCursor;
+_NullCursors[3] := _NullStackCursor;
+_NullCursors[4] := _NullDictionaryCursor;
+_NullCursors[5] := _NullSetCursor;
+
+FOR i := 0 TO 5 DO
+	rejected := FALSE;
+
+	__TRY
+		_NullCursors[i].MoveNext();
+	__CATCH(exceptionCode)
+		rejected := TRUE;
+		caughtException := TOF_Core.ExceptionManager.GetLastException(
+			exceptionCode := exceptionCode,
+			catchPointNamespaceName := NamespaceName,
+			catchPointPOUName := __POUNAME(),
+			catchPointPosition := __POSITION()
+		);
+		AssertTrue(
+			Condition := __QUERYINTERFACE(caughtException, missingException),
+			Message := 'Missing cursor source must report DataMemberNotSpecifiedException'
+		);
+	__ENDTRY
+
+	AssertTrue(Condition := rejected, Message := 'MoveNext must reject a missing source');
+	rejected := FALSE;
+
+	__TRY
+		currentValue := _NullCursors[i].Current;
+	__CATCH(exceptionCode)
+		rejected := TRUE;
+		caughtException := TOF_Core.ExceptionManager.GetLastException(
+			exceptionCode := exceptionCode,
+			catchPointNamespaceName := NamespaceName,
+			catchPointPOUName := __POUNAME(),
+			catchPointPosition := __POSITION()
+		);
+		AssertTrue(
+			Condition := __QUERYINTERFACE(caughtException, missingException),
+			Message := 'Missing cursor source must report DataMemberNotSpecifiedException'
+		);
+	__ENDTRY
+
+	AssertTrue(Condition := rejected, Message := 'Current must reject a missing source');
+	_NullCursors[i].Reset();
+END_FOR
+
+rejected := FALSE;
+
+__TRY
+	currentByte := _NullByteCursor.CurrentByte;
+__CATCH(exceptionCode)
+	rejected := TRUE;
+	caughtException := TOF_Core.ExceptionManager.GetLastException(
+		exceptionCode := exceptionCode,
+		catchPointNamespaceName := NamespaceName,
+		catchPointPOUName := __POUNAME(),
+		catchPointPosition := __POSITION()
+	);
+	AssertTrue(
+		Condition := __QUERYINTERFACE(caughtException, missingException),
+		Message := 'Missing cursor source must report DataMemberNotSpecifiedException'
+	);
+__ENDTRY
+
+AssertTrue(Condition := rejected, Message := 'Concrete CurrentByte must reject a missing source');
+rejected := FALSE;
+
+__TRY
+	currentPair := _NullDictionaryCursor.CurrentKeyValuePair;
+__CATCH(exceptionCode)
+	rejected := TRUE;
+	caughtException := TOF_Core.ExceptionManager.GetLastException(
+		exceptionCode := exceptionCode,
+		catchPointNamespaceName := NamespaceName,
+		catchPointPOUName := __POUNAME(),
+		catchPointPosition := __POSITION()
+	);
+	AssertTrue(
+		Condition := __QUERYINTERFACE(caughtException, missingException),
+		Message := 'Missing cursor source must report DataMemberNotSpecifiedException'
+	);
+__ENDTRY
+
+AssertTrue(Condition := rejected, Message := 'Concrete CurrentKeyValuePair must reject a missing source');
+
+cleanupFixtures();
+testFinished := TRUE;
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="NamespaceName" Id="{5a049f0d-fcfd-417c-88cd-fcda530dd984}">
+      <Declaration><![CDATA[(*!
+<summary>Borrows the test namespace for diagnostic context.</summary>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{da008935-6d3c-4647-9ed7-05c940ee822e}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[NamespaceName REF= CurrentNamespace.Name;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="prepareOwnedValue" Id="{94a5cfa1-a4f4-47f4-a702-9c68d1d7d09b}">
+      <Declaration><![CDATA[(*!
+<summary>Retains one clone as a suite-owned descriptor until acceptance or cleanup.</summary>
+*)
+METHOD PRIVATE prepareOwnedValue]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_OwnedObject := _CloneSource.Clone();
+_OwnedValue := TOF_Core.GenericValueFactory.FromParts(
+	genericTypeClass := TOF_Core.GENERIC_TYPE_CLASS.OBJECT,
+	address := _OwnedObject.SelfAddress,
+	size := _OwnedObject.SelfSize,
+	memoryManagementBehavior := TOF_Core.GENERIC_MEMORY_MANAGEMENT_BEHAVIOR.STORE_ORIGINAL_REFERENCE_AND_OWNS_MEMORY
+);
+_OwnedObject := 0;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="prepareResourcesThenReject" Id="{ebc32318-fb19-453a-88a7-258899f9ed57}">
+      <Declaration><![CDATA[(*!
+<summary>Prepares persistent resources and raises before the caller can release them.</summary>
+*)
+METHOD PRIVATE prepareResourcesThenReject]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_Enumerator := _List.CreateEnumerator();
+prepareOwnedValue();
+TOF_Core.Exceptions.ThrowStandard(
+	sourceNamespaceName := NamespaceName,
+	sourceClassName := ClassName,
+	sourcePOUName := __POUNAME(),
+	sourcePosition := __POSITION(),
+	message := "Collection fixture rejected"
+);]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="QueryFailureCleanup" Id="{25a0a1a5-f49b-4503-8602-f962fcf0346f}">
+      <Declaration><![CDATA[(*!
+<summary>Releases owned queries and retains callback diagnostics across cleanup context changes.</summary>
+<description>
+Prepares an independent initial state. Persistent resources survive an aborted call and are released
+by the next testcase or suite destruction. Terminal OOM injection is excluded from this shared task.
+</description>
+*)
+METHOD QueryFailureCleanup
+VAR
+	rejected : BOOL;
+	exceptionCode : __SYSTEM.ExceptionCode;
+END_VAR
+VAR_INST
+	testFinished : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN
+	RETURN;
+END_IF
+
+TEST(TestName := __POUNAME());
+cleanupFixtures();
+_CloneSource.ObserveExit(counter := _CloneExitCount);
+_CloneSource.ClearCloneTransportOnExit := TRUE;
+_CloneExitCount := TOF_Core.UnsignedInt32.ZERO;
+
+_BorrowedSource := TOF_Core.GenericValueFactory.FromParts(
+	genericTypeClass := TOF_Core.GENERIC_TYPE_CLASS.OBJECT,
+	address := _CloneSource.SelfAddress,
+	size := _CloneSource.SelfSize,
+	memoryManagementBehavior := TOF_Core.GENERIC_MEMORY_MANAGEMENT_BEHAVIOR.STORE_ORIGINAL_REFERENCE_AND_NOT_OWNS_MEMORY
+);
+_List.AppendGeneric(value := _BorrowedSource);
+_Queue.EnqueueGeneric(value := _BorrowedSource);
+_Stack.PushGeneric(value := _BorrowedSource);
+_CollisionDictionary.SetCopy(key := _Scalar, value := _Scalar);
+_CollisionSet.SetCopy(value := _Scalar);
+_CloneSource.ThrowOnEquality := TRUE;
+_Equality.ThrowOnEquality := TRUE;
+
+prepareOwnedValue();
+_Query := _OwnedValue;
+_OwnedValue.Reset();
+
+rejected := FALSE;
+_CloneExitCount := TOF_Core.UnsignedInt32.ZERO;
+
+__TRY
+	_List.ContainsGeneric(value := _Query, releaseValue := TRUE);
+	_Query.Reset();
+__CATCH(exceptionCode)
+	_Query.Reset();
+	rejected := TRUE;
+	assertOriginalFailure(exceptionCode := exceptionCode, expectedMessage := "Collection object equality rejected");
+__ENDTRY
+
+AssertTrue(Condition := rejected, Message := 'Failure must propagate');
+AssertEquals_UDINT(
+	Expected := 1,
+	Actual := _CloneExitCount,
+	Message := 'Owned temporary must be released exactly once'
+);
+
+prepareOwnedValue();
+_Query := _OwnedValue;
+_OwnedValue.Reset();
+
+rejected := FALSE;
+_CloneExitCount := TOF_Core.UnsignedInt32.ZERO;
+
+__TRY
+	_Queue.ContainsGeneric(value := _Query, releaseValue := TRUE);
+	_Query.Reset();
+__CATCH(exceptionCode)
+	_Query.Reset();
+	rejected := TRUE;
+	assertOriginalFailure(exceptionCode := exceptionCode, expectedMessage := "Collection object equality rejected");
+__ENDTRY
+
+AssertTrue(Condition := rejected, Message := 'Failure must propagate');
+AssertEquals_UDINT(
+	Expected := 1,
+	Actual := _CloneExitCount,
+	Message := 'Owned temporary must be released exactly once'
+);
+
+prepareOwnedValue();
+_Query := _OwnedValue;
+_OwnedValue.Reset();
+
+rejected := FALSE;
+_CloneExitCount := TOF_Core.UnsignedInt32.ZERO;
+
+__TRY
+	_Stack.ContainsGeneric(value := _Query, releaseValue := TRUE);
+	_Query.Reset();
+__CATCH(exceptionCode)
+	_Query.Reset();
+	rejected := TRUE;
+	assertOriginalFailure(exceptionCode := exceptionCode, expectedMessage := "Collection object equality rejected");
+__ENDTRY
+
+AssertTrue(Condition := rejected, Message := 'Failure must propagate');
+AssertEquals_UDINT(
+	Expected := 1,
+	Actual := _CloneExitCount,
+	Message := 'Owned temporary must be released exactly once'
+);
+
+prepareOwnedValue();
+_Query := _OwnedValue;
+_OwnedValue.Reset();
+
+rejected := FALSE;
+_CloneExitCount := TOF_Core.UnsignedInt32.ZERO;
+
+__TRY
+	_CollisionDictionary.ContainsGenericKey(key := _Query, releaseKey := TRUE);
+	_Query.Reset();
+__CATCH(exceptionCode)
+	_Query.Reset();
+	rejected := TRUE;
+	assertOriginalFailure(exceptionCode := exceptionCode, expectedMessage := "Collection equality rejected");
+__ENDTRY
+
+AssertTrue(Condition := rejected, Message := 'Failure must propagate');
+AssertEquals_UDINT(
+	Expected := 1,
+	Actual := _CloneExitCount,
+	Message := 'Owned temporary must be released exactly once'
+);
+
+prepareOwnedValue();
+_Query := _OwnedValue;
+_OwnedValue.Reset();
+
+rejected := FALSE;
+_CloneExitCount := TOF_Core.UnsignedInt32.ZERO;
+
+__TRY
+	_CollisionDictionary.GetGenericKeyPosition(key := _Query, releaseKey := TRUE);
+	_Query.Reset();
+__CATCH(exceptionCode)
+	_Query.Reset();
+	rejected := TRUE;
+	assertOriginalFailure(exceptionCode := exceptionCode, expectedMessage := "Collection equality rejected");
+__ENDTRY
+
+AssertTrue(Condition := rejected, Message := 'Failure must propagate');
+AssertEquals_UDINT(
+	Expected := 1,
+	Actual := _CloneExitCount,
+	Message := 'Owned temporary must be released exactly once'
+);
+
+prepareOwnedValue();
+_Query := _OwnedValue;
+_OwnedValue.Reset();
+
+rejected := FALSE;
+_CloneExitCount := TOF_Core.UnsignedInt32.ZERO;
+
+__TRY
+	_CollisionSet.ContainsGeneric(value := _Query, releaseValue := TRUE);
+	_Query.Reset();
+__CATCH(exceptionCode)
+	_Query.Reset();
+	rejected := TRUE;
+	assertOriginalFailure(exceptionCode := exceptionCode, expectedMessage := "Collection equality rejected");
+__ENDTRY
+
+AssertTrue(Condition := rejected, Message := 'Failure must propagate');
+AssertEquals_UDINT(
+	Expected := 1,
+	Actual := _CloneExitCount,
+	Message := 'Owned temporary must be released exactly once'
+);
+
+prepareOwnedValue();
+_Query := _OwnedValue;
+_OwnedValue.Reset();
+
+rejected := FALSE;
+_CloneExitCount := TOF_Core.UnsignedInt32.ZERO;
+
+__TRY
+	_CollisionSet.GetGenericValuePosition(value := _Query, releaseValue := TRUE);
+	_Query.Reset();
+__CATCH(exceptionCode)
+	_Query.Reset();
+	rejected := TRUE;
+	assertOriginalFailure(exceptionCode := exceptionCode, expectedMessage := "Collection equality rejected");
+__ENDTRY
+
+AssertTrue(Condition := rejected, Message := 'Failure must propagate');
+AssertEquals_UDINT(
+	Expected := 1,
+	Actual := _CloneExitCount,
+	Message := 'Owned temporary must be released exactly once'
+);
+
+AssertEquals_DINT(Expected := 1, Actual := _List.Length, Message := 'Failed query must not remove list entries');
+AssertEquals_DINT(Expected := 1, Actual := _CollisionDictionary.Length, Message := 'Failed query must not mutate keys');
+AssertEquals_DINT(Expected := 1, Actual := _CollisionSet.Length, Message := 'Failed query must not mutate values');
+
+cleanupFixtures();
+testFinished := TRUE;
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="QueueValidationAndGrowth" Id="{ceb33495-1420-4593-8e0b-92638412a698}">
+      <Declaration><![CDATA[(*!
+<summary>Invokes the validator once per enqueue and rejects before growth or adoption.</summary>
+<description>
+Prepares an independent initial state. Persistent resources survive an aborted call and are released
+by the next testcase or suite destruction. Terminal OOM injection is excluded from this shared task.
+</description>
+*)
+METHOD QueueValidationAndGrowth
+VAR
+	i : DINT;
+	rejected : BOOL;
+	exceptionCode : __SYSTEM.ExceptionCode;
+END_VAR
+VAR_INST
+	testFinished : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN
+	RETURN;
+END_IF
+
+TEST(TestName := __POUNAME());
+cleanupFixtures();
+_CloneSource.ObserveExit(counter := _CloneExitCount);
+_CloneSource.ClearCloneTransportOnExit := TRUE;
+_CloneExitCount := TOF_Core.UnsignedInt32.ZERO;
+
+_Queue.DefaultDynamicAllocationElementCount := 2;
+_Validator.ResetCount();
+
+FOR i := 1 TO 6 DO
+	_Queue.EnqueueCopy(value := i);
+END_FOR
+
+AssertEquals_UDINT(Expected := 6, Actual := _Validator.CallCount, Message := 'Enqueue must validate exactly once');
+AssertEquals_DINT(Expected := 6, Actual := _Queue.Capacity, Message := 'Queue must grow several times');
+_Validator.Reject := TRUE;
+prepareOwnedValue();
+
+__TRY
+	_Queue.EnqueueGeneric(value := _OwnedValue);
+__CATCH(exceptionCode)
+	rejected := TRUE;
+	assertOriginalFailure(exceptionCode := exceptionCode, expectedMessage := "Collection validation rejected");
+__ENDTRY
+
+AssertTrue(Condition := rejected, Message := 'Configured validator must reject');
+AssertEquals_DINT(Expected := 6, Actual := _Queue.Capacity, Message := 'Rejected enqueue must not grow');
+AssertEquals_DINT(Expected := 6, Actual := _Queue.Length, Message := 'Rejected enqueue must not insert');
+AssertEquals_UDINT(Expected := 0, Actual := _CloneExitCount, Message := 'Rejected owner must remain caller-owned');
+_OwnedValue.Release();
+AssertEquals_UDINT(Expected := 1, Actual := _CloneExitCount, Message := 'Caller must retain disposal rights');
+_Validator.Reject := FALSE;
+
+FOR i := 1 TO 6 DO
+	AssertEquals_DINT(Expected := i, Actual := _Queue.Peek().AsDInt(), Message := 'Growth must preserve FIFO order');
+	_Queue.RemoveFirst();
+END_FOR
+
+cleanupFixtures();
+testFinished := TRUE;
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="releaseCursors" Id="{54f118b4-be9f-4615-948c-91212742aec9}">
+      <Declaration><![CDATA[(*!
+<summary>Releases persistent cursor ownership without deleting source collections.</summary>
+<description>
+Clears interface aliases before best-effort disposal; no throwing callbacks or allocation are introduced.
+</description>
+*)
+METHOD PRIVATE releaseCursors
+VAR
+	ownedCursor : TOF_Core.IObject;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF _Enumerator <> 0 THEN
+	ownedCursor := _Enumerator;
+	_Enumerator := 0;
+	TOF_Core.Memory.TryReleaseDynamicObject(instance := ownedCursor);
+END_IF
+
+IF _SecondEnumerator <> 0 THEN
+	ownedCursor := _SecondEnumerator;
+	_SecondEnumerator := 0;
+	TOF_Core.Memory.TryReleaseDynamicObject(instance := ownedCursor);
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="SecondCopyFailureCleanup" Id="{bb4ab097-b7c4-488b-903f-543dadbc7972}">
+      <Declaration><![CDATA[(*!
+<summary>Releases the prepared dictionary key if the second object clone rejects.</summary>
+<description>
+Prepares an independent initial state. Persistent resources survive an aborted call and are released
+by the next testcase or suite destruction. Terminal OOM injection is excluded from this shared task.
+</description>
+*)
+METHOD SecondCopyFailureCleanup
+VAR
+	rejected : BOOL;
+	exceptionCode : __SYSTEM.ExceptionCode;
+END_VAR
+VAR_INST
+	testFinished : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN
+	RETURN;
+END_IF
+
+TEST(TestName := __POUNAME());
+cleanupFixtures();
+_CloneSource.ObserveExit(counter := _CloneExitCount);
+_CloneSource.ClearCloneTransportOnExit := TRUE;
+_CloneExitCount := TOF_Core.UnsignedInt32.ZERO;
+
+_FailingCloneSource.ThrowOnClone := TRUE;
+
+rejected := FALSE;
+_CloneExitCount := TOF_Core.UnsignedInt32.ZERO;
+
+__TRY
+	_Dictionary.SetCopy(
+		key := _CloneSource,
+		value := _FailingCloneSource,
+		keyIsObject := TRUE,
+		valueIsObject := TRUE
+	);
+__CATCH(exceptionCode)
+	rejected := TRUE;
+	assertOriginalFailure(exceptionCode := exceptionCode, expectedMessage := "Collection clone rejected");
+__ENDTRY
+
+AssertTrue(Condition := rejected, Message := 'Failure must propagate');
+AssertEquals_UDINT(
+	Expected := 1,
+	Actual := _CloneExitCount,
+	Message := 'Owned temporary must be released exactly once'
+);
+
+AssertTrue(Condition := _Dictionary.Empty, Message := 'Second clone failure must not insert a pair');
+
+cleanupFixtures();
+testFinished := TRUE;
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="SelfSize" Id="{edd36196-9ccd-4854-9ae1-3d5506ea79c6}">
+      <Declaration><![CDATA[(*!
+<summary>Reports the complete fixture instance size, excluding separately allocated storage.</summary>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY SelfSize : ULINT]]></Declaration>
+      <Get Name="Get" Id="{43d2ba1c-f77a-4a72-b1ae-359401fe6901}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[SelfSize := XSIZEOF(THIS^);]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="SortFailurePreservesEntries" Id="{f7efe6ff-3e18-4561-b8c8-4b44a929ace0}">
+      <Declaration><![CDATA[(*!
+<summary>Retains every owned descriptor after comparer failures in both sorting branches.</summary>
+<description>
+Prepares an independent initial state. Persistent resources survive an aborted call and are released
+by the next testcase or suite destruction. Terminal OOM injection is excluded from this shared task.
+</description>
+*)
+METHOD SortFailurePreservesEntries
+VAR
+	i : DINT;
+	count : DINT;
+	rejected : BOOL;
+	exceptionCode : __SYSTEM.ExceptionCode;
+END_VAR
+VAR_INST
+	testFinished : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN
+	RETURN;
+END_IF
+
+TEST(TestName := __POUNAME());
+cleanupFixtures();
+_CloneSource.ObserveExit(counter := _CloneExitCount);
+_CloneSource.ClearCloneTransportOnExit := TRUE;
+_CloneExitCount := TOF_Core.UnsignedInt32.ZERO;
+
+FOR count := 16 TO 17 DO
+	_List.Clear();
+
+	FOR i := count TO 1 BY -1 DO
+		_List.AppendCopy(value := i);
+	END_FOR
+
+	_Comparer.ResetCount();
+	_Comparer.ThrowOnCall := 3;
+	rejected := FALSE;
+
+	__TRY
+		_List.Sort(comparer := _Comparer);
+	__CATCH(exceptionCode)
+		rejected := TRUE;
+		assertOriginalFailure(exceptionCode := exceptionCode, expectedMessage := "Collection comparer rejected");
+	__ENDTRY
+
+	AssertTrue(Condition := rejected, Message := 'Comparer failure must propagate');
+	AssertEquals_DINT(Expected := count, Actual := _List.Length, Message := 'Failed sort must preserve Length');
+	_Comparer.ThrowOnCall := 0;
+	_List.Sort(comparer := _Comparer);
+
+	FOR i := 0 TO count - 1 DO
+		AssertEquals_DINT(
+			Expected := i + 1,
+			Actual := _List.Get(index := i).AsDInt(),
+			Message := 'Failed sorting must neither lose nor duplicate entries'
+		);
+		AssertTrue(Condition := _List.Get(index := i).IsMemoryOwner, Message := 'Sorting must preserve ownership');
+	END_FOR
+END_FOR
+
+cleanupFixtures();
+testFinished := TRUE;
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="StaticFullCopyCleanup" Id="{20ce59d7-26ae-4c1c-a21f-cb8cbf0dad94}">
+      <Declaration><![CDATA[(*!
+<summary>Retains static-full diagnostics and disposes prepared copies before adoption.</summary>
+<description>
+Prepares an independent initial state. Persistent resources survive an aborted call and are released
+by the next testcase or suite destruction. Terminal OOM injection is excluded from this shared task.
+</description>
+*)
+METHOD StaticFullCopyCleanup
+VAR
+	rejected : BOOL;
+	exceptionCode : __SYSTEM.ExceptionCode;
+	caughtException : TOF_Core.IException;
+	fullException : TOF_Core.IStaticCollectionFullException;
+END_VAR
+VAR_INST
+	testFinished : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN
+	RETURN;
+END_IF
+
+TEST(TestName := __POUNAME());
+cleanupFixtures();
+_CloneSource.ObserveExit(counter := _CloneExitCount);
+_CloneSource.ClearCloneTransportOnExit := TRUE;
+_CloneExitCount := TOF_Core.UnsignedInt32.ZERO;
+
+_FullList.AppendCopy(value := _Scalar);
+_FullQueue.EnqueueCopy(value := _Scalar);
+_FullStack.PushCopy(value := _Scalar);
+_FullDictionary.SetCopy(key := _Scalar, value := _Scalar);
+_FullSet.SetCopy(value := _Scalar);
+
+rejected := FALSE;
+_CloneExitCount := TOF_Core.UnsignedInt32.ZERO;
+
+__TRY
+	_FullList.AppendCopy(value := _CloneSource, isObject := TRUE);
+__CATCH(exceptionCode)
+	rejected := TRUE;
+	caughtException := TOF_Core.ExceptionManager.GetLastException(
+		exceptionCode := exceptionCode,
+		catchPointNamespaceName := NamespaceName,
+		catchPointPOUName := __POUNAME(),
+		catchPointPosition := __POSITION()
+	);
+	AssertTrue(
+		Condition := __QUERYINTERFACE(caughtException, fullException),
+		Message := 'Static-full diagnostic must survive clone disposal'
+	);
+__ENDTRY
+
+AssertTrue(Condition := rejected, Message := 'Static full must reject Copy');
+AssertEquals_UDINT(Expected := 1, Actual := _CloneExitCount, Message := 'Rejected copy must be released once');
+
+rejected := FALSE;
+_CloneExitCount := TOF_Core.UnsignedInt32.ZERO;
+
+__TRY
+	_FullList.InsertCopy(index := 0, value := _CloneSource, isObject := TRUE);
+__CATCH(exceptionCode)
+	rejected := TRUE;
+	caughtException := TOF_Core.ExceptionManager.GetLastException(
+		exceptionCode := exceptionCode,
+		catchPointNamespaceName := NamespaceName,
+		catchPointPOUName := __POUNAME(),
+		catchPointPosition := __POSITION()
+	);
+	AssertTrue(
+		Condition := __QUERYINTERFACE(caughtException, fullException),
+		Message := 'Static-full diagnostic must survive clone disposal'
+	);
+__ENDTRY
+
+AssertTrue(Condition := rejected, Message := 'Static full must reject Copy');
+AssertEquals_UDINT(Expected := 1, Actual := _CloneExitCount, Message := 'Rejected copy must be released once');
+
+rejected := FALSE;
+_CloneExitCount := TOF_Core.UnsignedInt32.ZERO;
+
+__TRY
+	_FullQueue.EnqueueCopy(value := _CloneSource, isObject := TRUE);
+__CATCH(exceptionCode)
+	rejected := TRUE;
+	caughtException := TOF_Core.ExceptionManager.GetLastException(
+		exceptionCode := exceptionCode,
+		catchPointNamespaceName := NamespaceName,
+		catchPointPOUName := __POUNAME(),
+		catchPointPosition := __POSITION()
+	);
+	AssertTrue(
+		Condition := __QUERYINTERFACE(caughtException, fullException),
+		Message := 'Static-full diagnostic must survive clone disposal'
+	);
+__ENDTRY
+
+AssertTrue(Condition := rejected, Message := 'Static full must reject Copy');
+AssertEquals_UDINT(Expected := 1, Actual := _CloneExitCount, Message := 'Rejected copy must be released once');
+
+rejected := FALSE;
+_CloneExitCount := TOF_Core.UnsignedInt32.ZERO;
+
+__TRY
+	_FullStack.PushCopy(value := _CloneSource, isObject := TRUE);
+__CATCH(exceptionCode)
+	rejected := TRUE;
+	caughtException := TOF_Core.ExceptionManager.GetLastException(
+		exceptionCode := exceptionCode,
+		catchPointNamespaceName := NamespaceName,
+		catchPointPOUName := __POUNAME(),
+		catchPointPosition := __POSITION()
+	);
+	AssertTrue(
+		Condition := __QUERYINTERFACE(caughtException, fullException),
+		Message := 'Static-full diagnostic must survive clone disposal'
+	);
+__ENDTRY
+
+AssertTrue(Condition := rejected, Message := 'Static full must reject Copy');
+AssertEquals_UDINT(Expected := 1, Actual := _CloneExitCount, Message := 'Rejected copy must be released once');
+
+rejected := FALSE;
+_CloneExitCount := TOF_Core.UnsignedInt32.ZERO;
+
+__TRY
+	_FullDictionary.SetCopy(key := _OtherScalar, value := _CloneSource, valueIsObject := TRUE);
+__CATCH(exceptionCode)
+	rejected := TRUE;
+	caughtException := TOF_Core.ExceptionManager.GetLastException(
+		exceptionCode := exceptionCode,
+		catchPointNamespaceName := NamespaceName,
+		catchPointPOUName := __POUNAME(),
+		catchPointPosition := __POSITION()
+	);
+	AssertTrue(
+		Condition := __QUERYINTERFACE(caughtException, fullException),
+		Message := 'Static-full diagnostic must survive clone disposal'
+	);
+__ENDTRY
+
+AssertTrue(Condition := rejected, Message := 'Static full must reject Copy');
+AssertEquals_UDINT(Expected := 1, Actual := _CloneExitCount, Message := 'Rejected copy must be released once');
+
+rejected := FALSE;
+_CloneExitCount := TOF_Core.UnsignedInt32.ZERO;
+
+__TRY
+	_FullSet.SetCopy(value := _CloneSource, isObject := TRUE);
+__CATCH(exceptionCode)
+	rejected := TRUE;
+	caughtException := TOF_Core.ExceptionManager.GetLastException(
+		exceptionCode := exceptionCode,
+		catchPointNamespaceName := NamespaceName,
+		catchPointPOUName := __POUNAME(),
+		catchPointPosition := __POSITION()
+	);
+	AssertTrue(
+		Condition := __QUERYINTERFACE(caughtException, fullException),
+		Message := 'Static-full diagnostic must survive clone disposal'
+	);
+__ENDTRY
+
+AssertTrue(Condition := rejected, Message := 'Static full must reject Copy');
+AssertEquals_UDINT(Expected := 1, Actual := _CloneExitCount, Message := 'Rejected copy must be released once');
+
+AssertEquals_DINT(Expected := 1, Actual := _FullList.Length, Message := 'Full list must retain its entry');
+AssertEquals_DINT(Expected := 1, Actual := _FullQueue.Length, Message := 'Full queue must retain its entry');
+AssertEquals_DINT(Expected := 1, Actual := _FullStack.Length, Message := 'Full stack must retain its entry');
+AssertEquals_DINT(Expected := 1, Actual := _FullDictionary.Length, Message := 'Full dictionary must retain its entry');
+AssertEquals_DINT(Expected := 1, Actual := _FullSet.Length, Message := 'Full set must retain its entry');
+
+cleanupFixtures();
+testFinished := TRUE;
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="TryCallbackContainment" Id="{fda33962-0fbd-48b7-9aae-aa3a5c793b5d}">
+      <Declaration><![CDATA[(*!
+<summary>Contains hash and equality failures in all six Try methods and still releases owned queries.</summary>
+<description>
+Prepares an independent initial state. Persistent resources survive an aborted call and are released
+by the next testcase or suite destruction. Terminal OOM injection is excluded from this shared task.
+</description>
+*)
+METHOD TryCallbackContainment
+VAR
+	failureKind : DINT;
+	found : BOOL;
+	escaped : BOOL;
+	foundValue : TOF_Core.GENERIC_VALUE;
+END_VAR
+VAR_INST
+	testFinished : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN
+	RETURN;
+END_IF
+
+TEST(TestName := __POUNAME());
+cleanupFixtures();
+_CloneSource.ObserveExit(counter := _CloneExitCount);
+_CloneSource.ClearCloneTransportOnExit := TRUE;
+_CloneExitCount := TOF_Core.UnsignedInt32.ZERO;
+
+_CollisionDictionary.SetCopy(key := _Scalar, value := _Scalar);
+_CollisionSet.SetCopy(value := _Scalar);
+
+FOR failureKind := 0 TO 1 DO
+	_Equality.ThrowOnHash := failureKind = 0;
+	_Equality.ThrowOnEquality := failureKind = 1;
+
+	found := TRUE;
+	escaped := FALSE;
+
+	__TRY
+		found := _CollisionDictionary.TryGetValueByKey(key := _OtherScalar, value => foundValue);
+	__CATCH
+		escaped := TRUE;
+	__ENDTRY
+
+	AssertFalse(Condition := escaped, Message := 'Try callback failure must not escape');
+	AssertFalse(Condition := found, Message := 'Try callback failure must report failure');
+
+	prepareOwnedValue();
+	_Query := _OwnedValue;
+	_OwnedValue.Reset();
+	_CloneExitCount := TOF_Core.UnsignedInt32.ZERO;
+	found := TRUE;
+	escaped := FALSE;
+
+	__TRY
+		found := _CollisionDictionary.TryGetValueByGenericKey(key := _Query, releaseKey := TRUE, value => foundValue);
+	__CATCH
+		escaped := TRUE;
+	__ENDTRY
+
+	AssertFalse(Condition := escaped, Message := 'Try callback failure must not escape');
+	AssertFalse(Condition := found, Message := 'Try callback failure must report failure');
+	_Query.Reset();
+	AssertEquals_UDINT(Expected := 1, Actual := _CloneExitCount, Message := 'Failed Try must dispose its owned query');
+
+	found := TRUE;
+	escaped := FALSE;
+
+	__TRY
+		_CollisionDictionary.TryRemoveByKey(key := _OtherScalar, removed => found);
+	__CATCH
+		escaped := TRUE;
+	__ENDTRY
+
+	AssertFalse(Condition := escaped, Message := 'Try callback failure must not escape');
+	AssertFalse(Condition := found, Message := 'Try callback failure must report failure');
+
+	prepareOwnedValue();
+	_Query := _OwnedValue;
+	_OwnedValue.Reset();
+	_CloneExitCount := TOF_Core.UnsignedInt32.ZERO;
+	found := TRUE;
+	escaped := FALSE;
+
+	__TRY
+		_CollisionDictionary.TryRemoveByGenericKey(key := _Query, releaseKey := TRUE, removed => found);
+	__CATCH
+		escaped := TRUE;
+	__ENDTRY
+
+	AssertFalse(Condition := escaped, Message := 'Try callback failure must not escape');
+	AssertFalse(Condition := found, Message := 'Try callback failure must report failure');
+	_Query.Reset();
+	AssertEquals_UDINT(Expected := 1, Actual := _CloneExitCount, Message := 'Failed Try must dispose its owned query');
+
+	found := TRUE;
+	escaped := FALSE;
+
+	__TRY
+		_CollisionSet.TryRemove(value := _OtherScalar, removed => found);
+	__CATCH
+		escaped := TRUE;
+	__ENDTRY
+
+	AssertFalse(Condition := escaped, Message := 'Try callback failure must not escape');
+	AssertFalse(Condition := found, Message := 'Try callback failure must report failure');
+
+	prepareOwnedValue();
+	_Query := _OwnedValue;
+	_OwnedValue.Reset();
+	_CloneExitCount := TOF_Core.UnsignedInt32.ZERO;
+	found := TRUE;
+	escaped := FALSE;
+
+	__TRY
+		_CollisionSet.TryRemoveGeneric(value := _Query, releaseValue := TRUE, removed => found);
+	__CATCH
+		escaped := TRUE;
+	__ENDTRY
+
+	AssertFalse(Condition := escaped, Message := 'Try callback failure must not escape');
+	AssertFalse(Condition := found, Message := 'Try callback failure must report failure');
+	_Query.Reset();
+	AssertEquals_UDINT(Expected := 1, Actual := _CloneExitCount, Message := 'Failed Try must dispose its owned query');
+END_FOR
+
+AssertEquals_DINT(Expected := 1, Actual := _CollisionDictionary.Length, Message := 'Failed Try must preserve dictionary');
+AssertEquals_DINT(Expected := 1, Actual := _CollisionSet.Length, Message := 'Failed Try must preserve set');
+AssertFalse(Condition := TOF_Core.DynamicMemoryManager.HasAllocationFailed, Message := 'Ordinary rejection is not OOM');
+
+cleanupFixtures();
+testFinished := TRUE;
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+  </POU>
+</TcPlcObject>
