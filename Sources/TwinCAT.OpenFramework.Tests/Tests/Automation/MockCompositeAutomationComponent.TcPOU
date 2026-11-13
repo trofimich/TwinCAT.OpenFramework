@@ -8,20 +8,37 @@ License: https://opensource.org/license/mit
 *)
 
 (*!
-<summary>Mock composite component hosting two mock leaves for hierarchy and routing tests.</summary>
+<summary>Mock composite with two leaves, callback observations and explicit storage faults.</summary>
+<description>Self-bound child relationships require a live instance that is not copied.</description>
 *)
 
 FUNCTION_BLOCK MockCompositeAutomationComponent EXTENDS TOF_Automation.CompositeAutomationComponent<2>
+VAR_OUTPUT
+	//! <summary>Number of completed output passes observed by the after-output hook.</summary>
+	AfterOutputCount : INT;
+	//! <summary>Counts completed input passes.</summary>
+	AfterInputCount : INT;
+END_VAR
+VAR_INPUT
+	//! <summary>Stops and immediately resets this branch in the opening output hook.</summary>
+	StopAndResetBeforeOutput : BOOL;
+END_VAR
 VAR_STAT
 	{attribute 'hide'}
 	_ClassName : STRING := __POUNAME();
 END_VAR
 VAR
-	_ChildA : MockLeafAutomationComponent("ChildA", THIS^);
-	_ChildB : MockLeafAutomationComponent("ChildB", THIS^);
+	_ChildA : MockLeafAutomationComponent(name := "ChildA", parent := THIS^);
+	_ChildB : MockLeafAutomationComponent(name := "ChildB", parent := THIS^);
 	
 	_Children : ARRAY [0.._ChildCount - 1] OF TOF_Automation.IChildAutomationComponent;
 	
+	_ThrowOnGetChildren : BOOL;
+	_MissingChildrenReference : BOOL;
+	_ResetOnBeforeChildrenStopped : BOOL;
+	_BeforeInitializeCount : INT;
+	_AfterWorkingCount : INT;
+
 	_EventReceivedCount : INT;
 	_LastReceivedEventId : INT;
 END_VAR]]></Declaration>
@@ -49,12 +66,33 @@ PROPERTY ChildB : REFERENCE TO MockLeafAutomationComponent]]></Declaration>
       </Get>
     </Property>
     <Property Name="Children" Id="{a69de2da-8ae4-4029-8194-69664ded7b50}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Returns test child storage or the configured missing/throwing fault.</summary>
+<description>
+The borrowed array and its self-bound children must not be copied. Faults exercise lookup containment
+and validation before initialization hooks.
+</description>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY FINAL Children : REFERENCE TO ARRAY [0.._ChildCount - 1] OF TOF_Automation.IChildAutomationComponent]]></Declaration>
       <Get Name="Get" Id="{2f00b5a8-2b5b-4f30-b422-77d147e70d15}">
         <Declaration><![CDATA[]]></Declaration>
         <Implementation>
-          <ST><![CDATA[Children REF= _Children;]]></ST>
+          <ST><![CDATA[IF _ThrowOnGetChildren THEN
+	TOF_Core.Exceptions.ThrowStandard(
+		sourceNamespaceName := NamespaceName,
+		sourceClassName := ClassName,
+		sourcePOUName := __POUNAME(),
+		sourcePosition := __POSITION(),
+		message := "Injected Children getter failure."
+	);
+END_IF
+
+IF _MissingChildrenReference THEN
+	Children REF= 0;
+ELSE
+	Children REF= _Children;
+END_IF]]></ST>
         </Implementation>
       </Get>
     </Property>
@@ -142,5 +180,147 @@ PROPERTY SelfSize : ULINT]]></Declaration>
         </Implementation>
       </Get>
     </Property>
+    <Property Name="ThrowOnGetChildren" Id="{b9a2026b-b04a-4e8a-b58a-31fcd1f68ca2}">
+      <Declaration><![CDATA[(*!
+<summary>Controls an exception from the Children getter.</summary>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY ThrowOnGetChildren : BOOL]]></Declaration>
+      <Get Name="Get" Id="{c095e8b9-e5bd-4bd3-84d3-488118641d16}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ThrowOnGetChildren := _ThrowOnGetChildren;]]></ST>
+        </Implementation>
+      </Get>
+      <Set Name="Set" Id="{b683e324-504f-44f6-a6a8-5b793198c448}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[_ThrowOnGetChildren := ThrowOnGetChildren;]]></ST>
+        </Implementation>
+      </Set>
+    </Property>
+    <Property Name="MissingChildrenReference" Id="{ef792f84-ca7b-4e06-9524-b7b0e25e1aad}">
+      <Declaration><![CDATA[(*!
+<summary>Controls a missing Children storage reference.</summary>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY MissingChildrenReference : BOOL]]></Declaration>
+      <Get Name="Get" Id="{1e531314-79e7-461e-b65b-1bfc43ff1f9d}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[MissingChildrenReference := _MissingChildrenReference;]]></ST>
+        </Implementation>
+      </Get>
+      <Set Name="Set" Id="{be387924-aee3-4a7b-92eb-f5bf86e1c99b}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[_MissingChildrenReference := MissingChildrenReference;]]></ST>
+        </Implementation>
+      </Set>
+    </Property>
+    <Property Name="ResetOnBeforeChildrenStopped" Id="{b18bfd76-bbf1-4a61-9bee-f5f32cf0d0cd}">
+      <Declaration><![CDATA[(*!
+<summary>Requests one Reset from the next before-stopped hook.</summary>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY ResetOnBeforeChildrenStopped : BOOL]]></Declaration>
+      <Get Name="Get" Id="{77651eec-cb18-4b7c-ad03-076cea20e111}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ResetOnBeforeChildrenStopped := _ResetOnBeforeChildrenStopped;]]></ST>
+        </Implementation>
+      </Get>
+      <Set Name="Set" Id="{689bd6bb-7e3f-4cfb-bfd6-3904ab6a44c0}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[_ResetOnBeforeChildrenStopped := ResetOnBeforeChildrenStopped;]]></ST>
+        </Implementation>
+      </Set>
+    </Property>
+    <Property Name="BeforeInitializeCount" Id="{9ad1bf26-aad5-4405-8f40-8e44edecc381}">
+      <Declaration><![CDATA[(*!
+<summary>Gets the number of completed BeforeInitialize hook calls.</summary>
+*)
+PROPERTY BeforeInitializeCount : INT]]></Declaration>
+      <Get Name="Get" Id="{433e513e-594a-4294-83c3-0a529d4a6fdf}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[BeforeInitializeCount := _BeforeInitializeCount;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="AfterWorkingCount" Id="{5b6cbafd-6210-44ec-ae37-66c22bf51624}">
+      <Declaration><![CDATA[(*!
+<summary>Gets the number of completed AfterWorking hook calls.</summary>
+*)
+PROPERTY AfterWorkingCount : INT]]></Declaration>
+      <Get Name="Get" Id="{fc62d877-05bc-491b-ac4f-a529d51bab79}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[AfterWorkingCount := _AfterWorkingCount;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="OnBeforeChildrenInitializing" Id="{60672aff-0eb9-45c1-aa92-ca8588ccba94}">
+      <Declaration><![CDATA[(*!
+<summary>Records entry into the branch initialization hook.</summary>
+*)
+METHOD PROTECTED OnBeforeChildrenInitializing]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_BeforeInitializeCount := _BeforeInitializeCount + 1;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="OnAfterChildrenWorking" Id="{7a687f84-3167-400a-b7c7-17f520e2dd58}">
+      <Declaration><![CDATA[(*!
+<summary>Records completion of working-child traversal.</summary>
+*)
+METHOD PROTECTED OnAfterChildrenWorking]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_AfterWorkingCount := _AfterWorkingCount + 1;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="OnBeforeChildrenStopped" Id="{1adc44e1-f15c-4b26-b54c-032fd4398c9f}">
+      <Declaration><![CDATA[(*!
+<summary>Optionally resumes the tree from within its stopped-cycle callback.</summary>
+<description>
+Consumes the request before Reset so it cannot trigger a repeated request from this hook.
+</description>
+*)
+METHOD PROTECTED OnBeforeChildrenStopped]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF _ResetOnBeforeChildrenStopped THEN
+	_ResetOnBeforeChildrenStopped := FALSE;
+	Reset();
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="OnAfterChildrenProcessOutput" Id="{14dd1a0b-7c6b-4453-8ef1-1aa6b93f8c9a}">
+      <Declaration><![CDATA[(*!
+<summary>Counts completed output passes.</summary>
+*)
+METHOD PROTECTED OnAfterChildrenProcessOutput]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[AfterOutputCount := AfterOutputCount + 1;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="OnBeforeChildrenProcessOutput" Id="{b6c975f5-f847-47cb-b551-988041b82a79}">
+      <Declaration><![CDATA[(*!
+<summary>Optionally changes state twice before the first output.</summary>
+*)
+METHOD PROTECTED OnBeforeChildrenProcessOutput]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF StopAndResetBeforeOutput THEN
+	Stop(reason := "Injected stop before output");
+	Reset();
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="OnAfterChildrenProcessInput" Id="{12f371bc-f191-480d-8937-e3bc77f7121e}">
+      <Declaration><![CDATA[(*! <summary>Records completion of this branch's input traversal.</summary> *)
+METHOD PROTECTED OnAfterChildrenProcessInput]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[AfterInputCount := AfterInputCount + 1;]]></ST>
+      </Implementation>
+    </Method>
   </POU>
 </TcPlcObject>

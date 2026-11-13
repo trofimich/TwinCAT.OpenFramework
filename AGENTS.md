@@ -178,6 +178,9 @@ be reflected in Beckhoff documentation; do not override it based on documentatio
 - `__DELETE(ptr)` automatically invokes `FB_exit` only when the pointer is typed as a concrete function block
   (`POINTER TO FB_Type`). When deleting through `PVOID` or an interface, the runtime only frees memory, and `FB_exit`
   is NOT invoked (risk of resource and handle leaks).
+- Dynamic allocation with `__NEW(DerivedFB)` yields `POINTER TO DerivedFB` and cannot be assigned directly to
+  a pointer of a base type (`POINTER TO BaseFB`). Always store the allocation result in a pointer of the exact
+  instantiated type first before checking for null/OOM and dereferencing into an interface or reference.
 - If `FB_exit` violates its contract during `TryRelease`, the helper returns `FALSE` and clears the passed
   pointer/interface. This does not guarantee deallocation and does not nullify aliases; do not use or re-delete
   a partially destroyed object via other references.
@@ -228,6 +231,10 @@ be reflected in Beckhoff documentation; do not override it based on documentatio
   - No duplicate field declarations with the same name (notably `_ClassName`) if already declared in a base FB.
   - IEC identifiers are case-insensitive. Parameters and locals shadow same-named instance members. Qualify the
     intended member with `THIS^.` (e.g. `THIS^.Name`), because implicit conversions can let the wrong expression compile.
+  - Pointers lack inheritance polymorphism: `POINTER TO Derived` cannot be implicitly converted or assigned to
+    `POINTER TO Base` (compiler error `C0032`). The result of `__NEW(Derived)` must first be assigned to a variable of
+    type `POINTER TO Derived`. To expose it polymorphically, dereference the typed pointer into an interface reference
+    (`itf := derivedPtr^`) or base reference.
 - Bind `REFERENCE TO` via `REF=`. In a reference property getter, `:=` dereferences the uninitialized result,
   causing an Access Violation / Page Fault and an emergency PLC crash.
 - A `REFERENCE TO` property cannot be made truly read-only: direct assignment `fb.Prop := val` dereferences the
@@ -268,6 +275,8 @@ be reflected in Beckhoff documentation; do not override it based on documentatio
   `PlaceholderReference`, or `PlaceholderResolution` without explicit instruction.
 - Actual library resolution is not identical to source files. Do not activate target/hardware for reading or auditing.
   XML parsing does not imply ST compilation.
+- For I/O models, determine data types, field widths, and mailbox support from the exact device revision and selected
+  PDOs. ADC resolution and an EL/EP product prefix alone do not establish the process image or CoE capability.
 
 ## Tests and Samples
 

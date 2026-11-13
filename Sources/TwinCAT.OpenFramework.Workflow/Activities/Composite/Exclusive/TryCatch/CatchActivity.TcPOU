@@ -8,21 +8,33 @@ License: https://opensource.org/license/mit
 *)
 
 (*!
-<summary>Base recovery activity that stores a durable ERROR snapshot captured from a failed try branch.</summary>
+<summary>Recovery activity that stores a durable ERROR snapshot and executes an optional recovery activity.</summary>
 <description>
 CaptureException copies exception diagnostics into Error without retaining the task-scoped exception
-reference. Resetting clears the captured Error snapshot when returning to PASSIVE_READY.
+reference. If configured with a recovery activity, executes it during OnRunning; otherwise completes immediately
+with WORK_COMPLETED. Resetting clears the captured Error snapshot and resets the recovery child.
 </description>
 *)
 
 {attribute 'no_explicit_call' := 'do not call this function block directly'}
-FUNCTION_BLOCK ABSTRACT CatchActivity EXTENDS Activity IMPLEMENTS ICatchActivity
+{attribute 'enable_dynamic_creation'}
+FUNCTION_BLOCK CatchActivity EXTENDS ExclusiveCompositeActivity
+	IMPLEMENTS ICatchActivity, TOF_Core.IConfigurationSerializable
+VAR_STAT
+	{attribute 'hide'}
+	_ClassName : STRING := __POUNAME();
+END_VAR
 VAR
+	{attribute 'OPC.UA.DA' := '0'}
 	_Error : TOF_Core.ERROR;
+
+	{attribute 'OPC.UA.DA' := '0'}
+	_RecoveryActivity : IActivity;
 END_VAR]]></Declaration>
     <Implementation>
       <ST><![CDATA[]]></ST>
     </Implementation>
+    <Folder Name="Overriden methods" Id="{4b1940a8-7f28-46eb-a947-f3d28941a520}" />
     <Method Name="CaptureException" Id="{d9d61120-f3d9-4934-9559-e527454c65b5}">
       <Declaration><![CDATA[(*!
 <summary>Copies exception diagnostics into the activity-owned Error snapshot.</summary>
@@ -65,6 +77,69 @@ __CATCH(exceptionCode)
 __ENDTRY]]></ST>
       </Implementation>
     </Method>
+    <Property Name="ClassName" Id="{7d99a6b1-527e-4e7f-a303-2fecd24dc34a}">
+      <Declaration><![CDATA[(*!
+<summary>Borrows the initialized class name used in diagnostics.</summary>
+<description>
+Returns initialized metadata storage without allocation. Callers must not modify the returned string.
+Derived function blocks must use distinct initialized static storage when overriding this metadata.
+</description>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{44a783ff-bfb1-40a3-8f6a-2f15b8a183f6}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ClassName REF= _ClassName;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="Configure" Id="{6f0558d6-9626-448f-a6fd-149b15c1717c}">
+      <Declaration><![CDATA[(*!
+<summary>Configures the optional recovery activity executed after an exception is caught.</summary>
+<description>
+Permitted only in PASSIVE_READY. Validates readiness and fixed workflow association.
+When recoveryActivity is 0, the catch block captures exception diagnostics and completes immediately.
+Assigns THIS^ as ParentActivity of recoveryActivity.
+</description>
+<param name="recoveryActivity">Optional recovery activity to execute, or 0.</param>
+*)
+METHOD Configure
+VAR_INPUT
+	recoveryActivity : IActivity;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF State <> WORKFLOW_ELEMENT_STATE.PASSIVE_READY THEN
+	WorkflowExceptions.ThrowWorkflowConfiguration(
+		sourceNamespaceName := NamespaceName,
+		sourceClassName := ClassName,
+		sourcePOUName := __POUNAME(),
+		sourcePosition := __POSITION(),
+		message := "Cannot configure CatchActivity outside PASSIVE_READY"
+	);
+END_IF
+
+IF recoveryActivity <> 0 THEN
+	ValidateChildActivityAttachment(childActivity := recoveryActivity, argumentName := 'recoveryActivity');
+	recoveryActivity.ParentActivity := THIS^;
+END_IF
+
+_RecoveryActivity := recoveryActivity;]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="CurrentActivity" Id="{0624bbf6-83cd-4ba0-8916-e0f046e329c8}">
+      <Declaration><![CDATA[(*!
+<summary>Returns the currently executing recovery activity, or 0 when idle.</summary>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY FINAL CurrentActivity : IActivity]]></Declaration>
+      <Get Name="Get" Id="{6b8b77e7-c3b4-4563-bb61-47cec245ff60}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[CurrentActivity := _RecoveryActivity;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
     <Property Name="Error" Id="{31a255c6-6895-449c-a94f-081db36d9305}">
       <Declaration><![CDATA[(*!
 <summary>Exposes a borrowed read-only view of the captured recovery diagnostics.</summary>
@@ -82,9 +157,26 @@ PROPERTY FINAL Error : REFERENCE TO TOF_Core.ERROR]]></Declaration>
         </Implementation>
       </Get>
     </Property>
-    <Method Name="OnResetting" Id="{81f39b41-77b3-40f6-8f12-71c5a8a77149}">
+    <Property Name="NamespaceName" Id="{1bfaee33-cc9a-4ed1-94b7-8d304f37c1bc}">
       <Declaration><![CDATA[(*!
-<summary>Clears the captured recovery Error snapshot and completes resetting.</summary>
+<summary>Borrows the compiler-initialized library namespace.</summary>
+<description>
+Borrows storage from the live internal namespace provider. Reacquire references after application
+reinitialization or relocation. Treat the reference as read-only; no ownership or synchronization is provided.
+</description>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{799cc5c0-d327-4bd3-8438-f391bbc3a97f}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[NamespaceName REF= CurrentNamespace.Name;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="OnResetting" Id="{81f39b41-77b3-40f6-8f12-71c5a8a77149}" FolderPath="Overriden methods\">
+      <Declaration><![CDATA[(*!
+<summary>Clears the captured recovery Error snapshot and resets the recovery activity.</summary>
 <param name="startResetting">TRUE on the initial call from RequestReset.</param>
 *)
 METHOD PROTECTED OnResetting : ACTIVITY_RESETTING_STATE
@@ -92,9 +184,176 @@ VAR_INPUT
 	startResetting : BOOL;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[_Error.Clear();
+        <ST><![CDATA[IF _RecoveryActivity <> 0 AND_THEN _RecoveryActivity.State <> WORKFLOW_ELEMENT_STATE.PASSIVE_READY THEN
+	IF ResetChildActivity(childActivity := _RecoveryActivity) = ACTIVITY_RESETTING_STATE.WORK_IN_PROGRESS THEN
+		OnResetting := ACTIVITY_RESETTING_STATE.WORK_IN_PROGRESS;
+		RETURN;
+	END_IF
+END_IF
+
+_Error.Clear();
 
 OnResetting := ACTIVITY_RESETTING_STATE.WORK_RESET;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="OnRunning" Id="{75c59596-0be9-43c0-af4d-85a9f62e9537}" FolderPath="Overriden methods\">
+      <Declaration><![CDATA[(*!
+<summary>Executes the configured recovery activity or completes immediately if no activity is set.</summary>
+<param name="startRunning">TRUE on the initial call of a fresh start.</param>
+<param name="startResuming">TRUE on the initial call when resuming from suspension.</param>
+<param name="haltReason">Receives the recovery child's HaltReason when halted.</param>
+*)
+METHOD PROTECTED OnRunning : ACTIVITY_RUNNING_STATE
+VAR_INPUT
+	startRunning : BOOL;
+	startResuming : BOOL;
+END_VAR
+VAR_OUTPUT
+	haltReason : WSTRING(255);
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF _RecoveryActivity <> 0 THEN
+	IF startRunning OR_ELSE startResuming THEN
+		_RecoveryActivity.RequestStart();
+	ELSE
+		_RecoveryActivity.Execute();
+	END_IF
+
+	OnRunning := MapChildRunningState(childState := _RecoveryActivity.State);
+
+	IF OnRunning = ACTIVITY_RUNNING_STATE.WORK_HALTED THEN
+		haltReason := _RecoveryActivity.HaltReason;
+	END_IF
+ELSE
+	OnRunning := ACTIVITY_RUNNING_STATE.WORK_COMPLETED;
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="OnStopping" Id="{d80a2dc1-1fc9-4f61-aa08-6e60fb630d2b}" FolderPath="Overriden methods\">
+      <Declaration><![CDATA[(*!
+<summary>Stops the recovery activity on cancel or suspend.</summary>
+<param name="startCancelling">TRUE on the initial call from RequestCancel.</param>
+<param name="startSuspending">TRUE on the initial call from RequestSuspend.</param>
+<param name="haltReason">Receives the recovery child's HaltReason if it halts while stopping.</param>
+*)
+METHOD PROTECTED OnStopping : ACTIVITY_STOPPING_STATE
+VAR_INPUT
+	startCancelling : BOOL;
+	startSuspending : BOOL;
+END_VAR
+VAR_OUTPUT
+	haltReason : WSTRING(255);
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF _RecoveryActivity = 0 THEN
+	OnStopping := ACTIVITY_STOPPING_STATE.WORK_STOPPED;
+	RETURN;
+END_IF
+
+IF NOT _RecoveryActivity.Busy THEN
+	IF startCancelling AND_THEN _RecoveryActivity.State = WORKFLOW_ELEMENT_STATE.PASSIVE_SUSPENDED THEN
+		_RecoveryActivity.RequestCancel(reason := _CancelReason);
+	END_IF
+
+	OnStopping := MapChildStoppingState(childState := _RecoveryActivity.State);
+
+	IF OnStopping = ACTIVITY_STOPPING_STATE.WORK_HALTED THEN
+		haltReason := _RecoveryActivity.HaltReason;
+	END_IF
+
+	RETURN;
+END_IF
+
+IF startCancelling THEN
+	_RecoveryActivity.RequestCancel(reason := _CancelReason);
+ELSIF startSuspending THEN
+	_RecoveryActivity.RequestSuspend();
+END_IF
+
+_RecoveryActivity.Execute();
+
+OnStopping := MapChildStoppingState(childState := _RecoveryActivity.State);
+
+IF OnStopping = ACTIVITY_STOPPING_STATE.WORK_HALTED THEN
+	haltReason := _RecoveryActivity.HaltReason;
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="RecoveryActivity" Id="{e959e690-e79e-416e-a443-4d4b39456ae2}">
+      <Declaration><![CDATA[(*!
+<summary>Returns the optional recovery activity executed upon exception, or 0.</summary>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY FINAL RecoveryActivity : IActivity]]></Declaration>
+      <Get Name="Get" Id="{7efed585-d8d9-4dea-8c9c-45ec224de645}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[RecoveryActivity := _RecoveryActivity;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="SelfSize" Id="{a41b15fa-f1c4-4356-951a-5e9939fbbdd3}">
+      <Declaration><![CDATA[(*!
+<summary>Reports the size of this concrete function block instance in bytes.</summary>
+<description>
+Reports the instance layout rather than dynamic allocations owned by its fields. A derived function block
+with a different layout must override this property; the value does not grant disposal rights.
+</description>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY SelfSize : ULINT]]></Declaration>
+      <Get Name="Get" Id="{f818bcba-0f9a-4972-867d-4dd7ffe421e3}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[SelfSize := XSIZEOF(THIS^);]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="Serialize" Id="{f15dd82c-ed29-465f-a680-8c47d904e2f7}">
+      <Declaration><![CDATA[(*!
+<summary>Writes the configuration fields for this object.</summary>
+<description>Borrows the writer for this call. A failure invalidates the current output document.</description>
+<param name="writer">Target configuration writer receiving serialized state.</param>
+*)
+METHOD Serialize
+VAR_INPUT
+	writer : TOF_Core.IConfigurationWriter;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[Workflows.WriteConfigurationHeader(writer := writer, source := THIS^, displayName := Name, scope := THIS^);
+
+IF _RecoveryActivity <> 0 THEN
+	Workflows.WriteConfigurationObject(writer := writer, name := 'recoveryActivity', source := _RecoveryActivity);
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="Deserialize" Id="{3f169dd1-5b64-4453-91c3-ba8cf051d405}">
+      <Declaration><![CDATA[(*!
+<summary>Restores this fresh instance from its configuration object.</summary>
+<description>
+The reader, document node and deserialization context are borrowed for this call.
+On failure discard the partial instance.
+</description>
+<param name="reader">Active configuration reader.</param>
+<param name="node">Configuration node for this activity.</param>
+<param name="context">Active configuration deserialization context providing workflow reconstruction services.</param>
+*)
+METHOD Deserialize
+VAR_INPUT
+	reader : TOF_Core.IConfigurationReader;
+	node : TOF_Core.CONFIGURATION_NODE;
+	context : TOF_Core.IConfigurationDeserializationContext;
+END_VAR
+VAR
+	loader : IWorkflowLoader;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[loader := WorkflowConfigurationSerializer.ResolveWorkflowLoader(context := context);
+Workflows.ReadConfigurationHeader(reader := reader, node := node, target := THIS^, scope := THIS^);
+
+Configure(
+	recoveryActivity := Workflows.ReadActivity(loader := loader, node := reader.FindField(node := node, name := 'recoveryActivity'))
+);]]></ST>
       </Implementation>
     </Method>
   </POU>

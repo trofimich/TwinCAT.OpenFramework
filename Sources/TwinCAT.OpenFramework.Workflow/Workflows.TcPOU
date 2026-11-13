@@ -8,8 +8,11 @@ License: https://opensource.org/license/mit
 *)
 
 (*!
-<summary>Provides state transition validation and allowed-transition formatting for workflow elements.</summary>
+<summary>Provides workflow node creation, transition validation, topology checks and configuration helpers.</summary>
 <description>
+Public facade delegating element creation and type description to WorkflowElementFactory, state-transition and
+attachment validation to WorkflowElementHelper, and configuration serialization helpers to
+WorkflowConfigurationSerializer.
 Defines the canonical transition table for WORKFLOW_ELEMENT_STATE. Fresh starts require PASSIVE_READY,
 resuming requires PASSIVE_SUSPENDED, and completed, halted, cancelled or failed elements must pass through
 ACTIVE_RESETTING before returning to PASSIVE_READY.
@@ -32,6 +35,7 @@ END_VAR]]></Declaration>
     <Implementation>
       <ST><![CDATA[]]></ST>
     </Implementation>
+    <Folder Name="Service methods" Id="{84931a7b-3d4a-4632-9cb1-e5d7a8f192b4}" />
     <Property Name="ClassName" Id="{481cf308-45d8-4e8a-9beb-4d74c6f3cadc}">
       <Declaration><![CDATA[(*!
 <summary>Returns the program name for diagnostic reporting.</summary>
@@ -45,82 +49,108 @@ PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
         </Implementation>
       </Get>
     </Property>
+    <Method Name="ConfigurationTypeName" Id="{e19b9cf7-a009-4705-aacb-39f7d6d97cc6}">
+      <Declaration><![CDATA[(*!
+<summary>Returns the elementary IEC spelling used in configuration documents.</summary>
+<description>String capacities exclude the terminator. Unsupported types raise before writing the value.</description>
+*)
+METHOD ConfigurationTypeName : STRING
+VAR_INPUT
+	typeClass : __SYSTEM.TYPE_CLASS;
+	size : UDINT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[ConfigurationTypeName := WorkflowElementFactory.ConfigurationTypeName(
+	typeClass := typeClass,
+	size := size
+);]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="ConfigurationValueType" Id="{b888840e-ea36-4c5a-b4fa-e0d8dd9a7b2a}">
+      <Declaration><![CDATA[(*!
+<summary>Maps an elementary IEC type class to its CONFIGURATION_VALUE_TYPE enum.</summary>
+<description>Unsupported type classes raise a configuration exception.</description>
+<param name="typeClass">Type class from __SYSTEM.TYPE_CLASS.</param>
+*)
+METHOD ConfigurationValueType : TOF_Core.CONFIGURATION_VALUE_TYPE
+VAR_INPUT
+	typeClass : __SYSTEM.TYPE_CLASS;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[ConfigurationValueType := WorkflowElementFactory.ConfigurationValueType(
+	typeClass := typeClass
+);]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="CreateElement" Id="{693894bc-56da-47d7-b359-9e37c1dedefe}">
+      <Declaration><![CDATA[(*!
+<summary>Creates a dynamic workflow element and returns it after ownership registration.</summary>
+<description>Requires a live ready workflow in its owning task. Built-in qualified names are handled first, then the
+optional application factory. Unknown names raise a configuration exception. A successful element is borrowed
+until workflow disposal; configuration and attachment are separate operations. Registration failures propagate
+under the RegisterChild cleanup contract. Call outside lifecycle methods and without reentry.</description>
+<param name="typeName">Case-sensitive qualified PLC type.</param>
+<param name="workflow">Owner of the resulting element.</param>
+<param name="factory">Optional application type factory.</param>
+*)
+METHOD CreateElement : IWorkflowElement
+VAR_INPUT
+	typeName : STRING(255);
+	workflow : IWorkflow;
+	factory : IWorkflowElementFactory := 0;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[CreateElement := WorkflowElementFactory.CreateElement(
+	typeName := typeName,
+	workflow := workflow,
+	factory := factory
+);]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="GetValueDescriptor" Id="{4fae6f9f-c8bd-454e-aa6a-dfa4443d6513}">
+      <Declaration><![CDATA[(*!
+<summary>Borrows an IEC variable as a typed initial element descriptor.</summary>
+<description>Keep the source alive and unchanged through DeclareArray. The descriptor carries the exact IEC category
+and full storage width. No allocation or ownership transfer occurs.</description>
+<param name="value">Live typed PLC variable.</param>
+*)
+METHOD GetValueDescriptor : __SYSTEM.AnyType
+VAR_INPUT
+	value : ANY;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[GetValueDescriptor := value;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="ParseTypeDescriptor" Id="{bed09c9b-1f24-4dbb-9ac1-8c3c77270d19}">
+      <Declaration><![CDATA[(*!
+<summary>Resolves an exact elementary type and storage capacity.</summary>
+<description>Use within one synchronous load. Handles borrow the active document and expire when it is replaced.</description>
+*)
+METHOD ParseTypeDescriptor : __SYSTEM.AnyType
+VAR_INPUT
+	typeName : STRING;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[ParseTypeDescriptor := WorkflowElementFactory.ParseTypeDescriptor(typeName := typeName);]]></ST>
+      </Implementation>
+    </Method>
     <Method Name="GetAllowedTransitionNames" Id="{41bf9062-9c5f-4633-8ce3-cbe75b618334}">
       <Declaration><![CDATA[(*!
 <summary>Returns a comma-separated list of target states permitted from the given state.</summary>
 <description>
-Matches the transitions accepted by ValidateTransition. The newState parameter is retained for signature
-compatibility and does not filter the result.
+Lists targets accepted by ValidateTransition in diagnostic display order.
 </description>
 <param name="currentState">Current state of the workflow element.</param>
-<param name="newState">Unused target state parameter retained for compatibility.</param>
 *)
 METHOD GetAllowedTransitionNames : STRING(255)
 VAR_INPUT
 	currentState : WORKFLOW_ELEMENT_STATE;
-	newState : WORKFLOW_ELEMENT_STATE;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[CASE currentState OF
-	WORKFLOW_ELEMENT_STATE.PASSIVE_READY: // can be changed to ACTIVE_RUNNING (with RequestStart)
-		GetAllowedTransitionNames := TO_STRING(WORKFLOW_ELEMENT_STATE.ACTIVE_RUNNING);
-
-	WORKFLOW_ELEMENT_STATE.PASSIVE_COMPLETED, // can be changed to ACTIVE_RESETTING (with RequestReset)
-	WORKFLOW_ELEMENT_STATE.PASSIVE_HALTED, // can be changed to ACTIVE_RESETTING (with RequestReset)
-	WORKFLOW_ELEMENT_STATE.PASSIVE_CANCELLED, // can be changed to ACTIVE_RESETTING (with RequestReset)
-	WORKFLOW_ELEMENT_STATE.PASSIVE_FAILED: // can be changed to ACTIVE_RESETTING (with RequestReset)
-		GetAllowedTransitionNames := TO_STRING(WORKFLOW_ELEMENT_STATE.ACTIVE_RESETTING);
-
-	WORKFLOW_ELEMENT_STATE.PASSIVE_SUSPENDED: // can be changed to ACTIVE_RUNNING (with RequestStart) or ACTIVE_CANCELLING (with RequestCancel)
-		GetAllowedTransitionNames := TOF_Core.Strings.Concat255(
-			TO_STRING(WORKFLOW_ELEMENT_STATE.ACTIVE_RUNNING),
-			',',
-			TO_STRING(WORKFLOW_ELEMENT_STATE.ACTIVE_CANCELLING));
-
-	// Can be changed to PASSIVE_COMPLETED (internally) or ACTIVE_SUSPENDING (RequestSuspend)
-	// or ACTIVE_CANCELLING (RequestCancel) or PASSIVE_HALTED (internally) or PASSIVE_FAILED (internally)
-	WORKFLOW_ELEMENT_STATE.ACTIVE_RUNNING:
-		GetAllowedTransitionNames := TOF_Core.Strings.Concat255(
-			TO_STRING(WORKFLOW_ELEMENT_STATE.PASSIVE_COMPLETED),
-			',',
-			TO_STRING(WORKFLOW_ELEMENT_STATE.ACTIVE_SUSPENDING),
-			',',
-			TO_STRING(WORKFLOW_ELEMENT_STATE.ACTIVE_CANCELLING),
-			',',
-			TO_STRING(WORKFLOW_ELEMENT_STATE.PASSIVE_HALTED),
-			',',
-			TO_STRING(WORKFLOW_ELEMENT_STATE.PASSIVE_FAILED));
-
-	// Can be changed to PASSIVE_CANCELLED (internally) or PASSIVE_COMPLETED (internally)
-	// or PASSIVE_HALTED (internally) or PASSIVE_FAILED (internally)
-	WORKFLOW_ELEMENT_STATE.ACTIVE_CANCELLING:
-		GetAllowedTransitionNames := TOF_Core.Strings.Concat255(
-			TO_STRING(WORKFLOW_ELEMENT_STATE.PASSIVE_CANCELLED),
-			',',
-			TO_STRING(WORKFLOW_ELEMENT_STATE.PASSIVE_COMPLETED),
-			',',
-			TO_STRING(WORKFLOW_ELEMENT_STATE.PASSIVE_HALTED),
-			',',
-			TO_STRING(WORKFLOW_ELEMENT_STATE.PASSIVE_FAILED));
-
-	// Can be changed to PASSIVE_SUSPENDED (internally) or PASSIVE_COMPLETED (internally)
-	// or PASSIVE_HALTED (internally) or PASSIVE_FAILED (internally)
-	WORKFLOW_ELEMENT_STATE.ACTIVE_SUSPENDING:
-		GetAllowedTransitionNames := TOF_Core.Strings.Concat255(
-			TO_STRING(WORKFLOW_ELEMENT_STATE.PASSIVE_SUSPENDED),
-			',',
-			TO_STRING(WORKFLOW_ELEMENT_STATE.PASSIVE_COMPLETED),
-			',',
-			TO_STRING(WORKFLOW_ELEMENT_STATE.PASSIVE_HALTED),
-			',',
-			TO_STRING(WORKFLOW_ELEMENT_STATE.PASSIVE_FAILED));
-
-	WORKFLOW_ELEMENT_STATE.ACTIVE_RESETTING: // can be changed to PASSIVE_READY (internally) or PASSIVE_FAILED (internally)
-		GetAllowedTransitionNames := TOF_Core.Strings.Concat255(
-			TO_STRING(WORKFLOW_ELEMENT_STATE.PASSIVE_READY),
-			',',
-			TO_STRING(WORKFLOW_ELEMENT_STATE.PASSIVE_FAILED));
-END_CASE]]></ST>
+        <ST><![CDATA[GetAllowedTransitionNames := WorkflowElementHelper.GetAllowedTransitionNames(
+	currentState := currentState
+);]]></ST>
       </Implementation>
     </Method>
     <Property Name="NamespaceName" Id="{f189a98d-babc-4b35-b814-9f960e872687}">
@@ -136,68 +166,188 @@ PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
         </Implementation>
       </Get>
     </Property>
-    <Method Name="ValidateTransition" Id="{bc368e59-28e8-40f0-ada3-0cec58c2ed3a}">
+    <Method Name="ReadActivity" Id="{98f68397-5f00-4cef-a8c2-0506c6c4e202}">
       <Declaration><![CDATA[(*!
-<summary>Reports whether transitioning from currentState to newState is permitted.</summary>
-<description>
-Does not mutate state or raise exceptions. Callers use this predicate before changing state or validating
-external requests.
-</description>
-<param name="currentState">Current state of the workflow element.</param>
-<param name="newState">Requested target state.</param>
+<summary>Restores a child and checks the interface required by its parent role.</summary>
+<description>Use within one synchronous load. Handles borrow the active document and expire when it is replaced.</description>
+<param name="loader">Workflow loader providing element construction services.</param>
+<param name="node">Configuration node of the activity.</param>
 *)
-METHOD ValidateTransition : BOOL
+METHOD ReadActivity : IActivity
 VAR_INPUT
-	currentState : WORKFLOW_ELEMENT_STATE;
-	newState : WORKFLOW_ELEMENT_STATE;
+	loader : IWorkflowLoader;
+	node : TOF_Core.CONFIGURATION_NODE;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[CASE currentState OF
-	WORKFLOW_ELEMENT_STATE.PASSIVE_READY: // can be changed to ACTIVE_RUNNING (with RequestStart)
-		ValidateTransition := newState = WORKFLOW_ELEMENT_STATE.ACTIVE_RUNNING;
-
-	WORKFLOW_ELEMENT_STATE.PASSIVE_COMPLETED, // can be changed to ACTIVE_RESETTING (with RequestReset)
-	WORKFLOW_ELEMENT_STATE.PASSIVE_HALTED, // can be changed to ACTIVE_RESETTING (with RequestReset)
-	WORKFLOW_ELEMENT_STATE.PASSIVE_CANCELLED, // can be changed to ACTIVE_RESETTING (with RequestReset)
-	WORKFLOW_ELEMENT_STATE.PASSIVE_FAILED: // can be changed to ACTIVE_RESETTING (with RequestReset)
-		ValidateTransition := newState = WORKFLOW_ELEMENT_STATE.ACTIVE_RESETTING;
-
-	WORKFLOW_ELEMENT_STATE.PASSIVE_SUSPENDED: // can be changed to ACTIVE_RUNNING (with RequestStart) or ACTIVE_CANCELLING (with RequestCancel)
-		ValidateTransition := newState = WORKFLOW_ELEMENT_STATE.ACTIVE_RUNNING
-			OR_ELSE newState = WORKFLOW_ELEMENT_STATE.ACTIVE_CANCELLING;
-
-	// Can be changed to PASSIVE_COMPLETED (internally) or ACTIVE_SUSPENDING (RequestSuspend)
-	// or ACTIVE_CANCELLING (RequestCancel) or PASSIVE_HALTED (internally) or PASSIVE_FAILED (internally)
-	WORKFLOW_ELEMENT_STATE.ACTIVE_RUNNING:
-		ValidateTransition := newState = WORKFLOW_ELEMENT_STATE.PASSIVE_COMPLETED
-			OR_ELSE newState = WORKFLOW_ELEMENT_STATE.ACTIVE_SUSPENDING
-			OR_ELSE newState = WORKFLOW_ELEMENT_STATE.ACTIVE_CANCELLING
-			OR_ELSE newState = WORKFLOW_ELEMENT_STATE.PASSIVE_HALTED
-			OR_ELSE newState = WORKFLOW_ELEMENT_STATE.PASSIVE_FAILED;
-
-	// Can be changed to PASSIVE_CANCELLED (internally) or PASSIVE_COMPLETED (internally)
-	// or PASSIVE_HALTED (internally) or PASSIVE_FAILED (internally)
-	WORKFLOW_ELEMENT_STATE.ACTIVE_CANCELLING:
-		ValidateTransition := newState = WORKFLOW_ELEMENT_STATE.PASSIVE_CANCELLED
-			OR_ELSE newState = WORKFLOW_ELEMENT_STATE.PASSIVE_COMPLETED
-			OR_ELSE newState = WORKFLOW_ELEMENT_STATE.PASSIVE_HALTED
-			OR_ELSE newState = WORKFLOW_ELEMENT_STATE.PASSIVE_FAILED;
-
-	// Can be changed to PASSIVE_SUSPENDED (internally) or PASSIVE_COMPLETED (internally)
-	// or PASSIVE_HALTED (internally) or PASSIVE_FAILED (internally)
-	WORKFLOW_ELEMENT_STATE.ACTIVE_SUSPENDING:
-		ValidateTransition := newState = WORKFLOW_ELEMENT_STATE.PASSIVE_SUSPENDED
-			OR_ELSE newState = WORKFLOW_ELEMENT_STATE.PASSIVE_COMPLETED
-			OR_ELSE newState = WORKFLOW_ELEMENT_STATE.PASSIVE_HALTED
-			OR_ELSE newState = WORKFLOW_ELEMENT_STATE.PASSIVE_FAILED;
-
-	WORKFLOW_ELEMENT_STATE.ACTIVE_RESETTING: // can be changed to PASSIVE_READY (internally) or PASSIVE_FAILED (internally)
-		ValidateTransition := newState = WORKFLOW_ELEMENT_STATE.PASSIVE_READY
-			OR_ELSE newState = WORKFLOW_ELEMENT_STATE.PASSIVE_FAILED;
-END_CASE]]></ST>
+        <ST><![CDATA[ReadActivity := WorkflowConfigurationSerializer.ReadActivity(
+	loader := loader,
+	node := node
+);]]></ST>
       </Implementation>
     </Method>
-    <Method Name="ValidateElementAttachment" Id="{39a48f34-ab25-4bc8-a7ce-16ed935b5b85}">
+    <Method Name="ReadCatchActivity" Id="{8c543632-4522-4db9-9268-45235c983784}">
+      <Declaration><![CDATA[(*!
+<summary>Restores a child and checks the interface required by its parent role.</summary>
+<description>Use within one synchronous load. Handles borrow the active document and expire when it is replaced.</description>
+<param name="loader">Workflow loader providing element construction services.</param>
+<param name="node">Configuration node of the catch activity.</param>
+*)
+METHOD ReadCatchActivity : ICatchActivity
+VAR_INPUT
+	loader : IWorkflowLoader;
+	node : TOF_Core.CONFIGURATION_NODE;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[ReadCatchActivity := WorkflowConfigurationSerializer.ReadCatchActivity(
+	loader := loader,
+	node := node
+);]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="ReadCondition" Id="{775db239-85c0-4318-a235-4deda689de89}">
+      <Declaration><![CDATA[(*!
+<summary>Restores a child and checks the interface required by its parent role.</summary>
+<description>Use within one synchronous load. Handles borrow the active document and expire when it is replaced.</description>
+<param name="loader">Workflow loader providing element construction services.</param>
+<param name="node">Configuration node of the condition.</param>
+*)
+METHOD ReadCondition : ICondition
+VAR_INPUT
+	loader : IWorkflowLoader;
+	node : TOF_Core.CONFIGURATION_NODE;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[ReadCondition := WorkflowConfigurationSerializer.ReadCondition(
+	loader := loader,
+	node := node
+);]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="ReadConfigurationHeader" Id="{c18d4e92-3a7b-4f60-85c1-92d4e6b8a0f3}">
+      <Declaration><![CDATA[(*!
+<summary>Reads local variable declarations and the display name for a named workflow object.</summary>
+<description>Restores local declarations into scope and reads the 'name' field into target.Name.
+Use within one synchronous load.</description>
+<param name="reader">Active configuration reader.</param>
+<param name="node">Configuration object node.</param>
+<param name="target">Named workflow object receiving the restored display name.</param>
+<param name="scope">Declaration container receiving local variable declarations.</param>
+*)
+METHOD ReadConfigurationHeader
+VAR_INPUT
+	reader : TOF_Core.IConfigurationReader;
+	node : TOF_Core.CONFIGURATION_NODE;
+	target : TOF_Core.INamed;
+	scope : IDeclaredVariableContainer;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[WorkflowConfigurationSerializer.ReadConfigurationHeader(
+	reader := reader,
+	node := node,
+	target := target,
+	scope := scope
+);]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="ReadDeclarations" Id="{869b056d-ad87-4e0a-9f82-e70f970b435e}">
+      <Declaration><![CDATA[(*!
+<summary>Copies all initial declarations into a fresh local scope.</summary>
+<description>Use within one synchronous load. Handles borrow the active document and expire when it is replaced.</description>
+<param name="reader">Active configuration reader.</param>
+<param name="node">Configuration object node.</param>
+<param name="scope">Declaration container receiving local variable declarations.</param>
+*)
+METHOD ReadDeclarations
+VAR_INPUT
+	reader : TOF_Core.IConfigurationReader;
+	node : TOF_Core.CONFIGURATION_NODE;
+	scope : IDeclaredVariableContainer;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[WorkflowConfigurationSerializer.ReadDeclarations(
+	reader := reader,
+	node := node,
+	scope := scope
+);]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="ReadLiteral" Id="{30a44b32-53cb-4c18-ad77-87a97061ecc3}">
+      <Declaration><![CDATA[(*!
+<summary>Allocates and decodes a literal into caller-owned byte storage.</summary>
+<description>Use within one synchronous load. Handles borrow the active document and expire when it is replaced.</description>
+<param name="reader">Active configuration reader.</param>
+<param name="node">Configuration node containing literal object.</param>
+*)
+METHOD ReadLiteral : __SYSTEM.AnyType
+VAR_INPUT
+	reader : TOF_Core.IConfigurationReader;
+	node : TOF_Core.CONFIGURATION_NODE;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[ReadLiteral := WorkflowConfigurationSerializer.ReadLiteral(
+	reader := reader,
+	node := node
+);]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="ReadName" Id="{88e9b459-6768-4c73-8437-11b767b5356c}">
+      <Declaration><![CDATA[(*!
+<summary>Reads an IEC name without truncation.</summary>
+<description>The reader rejects an oversized field.</description>
+<param name="reader">Active configuration reader.</param>
+<param name="node">Configuration node containing string name.</param>
+*)
+METHOD ReadName : STRING
+VAR_INPUT
+	reader : TOF_Core.IConfigurationReader;
+	node : TOF_Core.CONFIGURATION_NODE;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[ReadName := WorkflowConfigurationSerializer.ReadName(
+	reader := reader,
+	node := node
+);]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="ReadTypeName" Id="{35ac909b-9386-4cf0-8aee-a7908186761d}">
+      <Declaration><![CDATA[(*!
+<summary>Reads a qualified configuration type name.</summary>
+<description>Use within one synchronous load. Handles borrow the active document and expire when it is replaced.</description>
+<param name="reader">Active configuration reader.</param>
+<param name="node">Configuration node containing type name.</param>
+*)
+METHOD ReadTypeName : STRING(255)
+VAR_INPUT
+	reader : TOF_Core.IConfigurationReader;
+	node : TOF_Core.CONFIGURATION_NODE;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[ReadTypeName := WorkflowConfigurationSerializer.ReadTypeName(
+	reader := reader,
+	node := node
+);]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="ReadVariableHasValueCondition" Id="{ab79eafb-a2eb-4395-8ac6-d5069fde64a9}">
+      <Declaration><![CDATA[(*!
+<summary>Restores a child and checks the interface required by its parent role.</summary>
+<description>Use within one synchronous load. Handles borrow the active document and expire when it is replaced.</description>
+<param name="loader">Workflow loader providing element construction services.</param>
+<param name="node">Configuration node of the condition.</param>
+*)
+METHOD ReadVariableHasValueCondition : IVariableHasValueCondition
+VAR_INPUT
+	loader : IWorkflowLoader;
+	node : TOF_Core.CONFIGURATION_NODE;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[ReadVariableHasValueCondition := WorkflowConfigurationSerializer.ReadVariableHasValueCondition(
+	loader := loader,
+	node := node
+);]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="ValidateElementAttachment" Id="{39a48f34-ab25-4bc8-a7ce-16ed935b5b85}" FolderPath="Service methods\">
       <Declaration><![CDATA[(*!
 <summary>Validates a borrowed parent-child link before any graph mutation.</summary>
 <description>
@@ -215,124 +365,186 @@ METHOD INTERNAL ValidateElementAttachment
 VAR_INPUT
 	parent : IWorkflowElement;
 	child : IWorkflowElement;
-END_VAR
-VAR
-	ancestor : IWorkflowElement;
-	ancestorActivity : IActivity;
-	childActivity : IActivity;
-	parentWorkflow : IWorkflow;
-	childWorkflow : IWorkflow;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[IF parent = 0 THEN
-	TOF_Core.Exceptions.ThrowArgumentNotSpecified(
-		sourceNamespaceName := NamespaceName,
-		sourceClassName := ClassName,
-		sourcePOUName := __POUNAME(),
-		sourcePosition := __POSITION(),
-		argumentName := 'parent'
-	);
-END_IF
-
-IF child = 0 THEN
-	TOF_Core.Exceptions.ThrowArgumentNotSpecified(
-		sourceNamespaceName := NamespaceName,
-		sourceClassName := ClassName,
-		sourcePOUName := __POUNAME(),
-		sourcePosition := __POSITION(),
-		argumentName := 'child'
-	);
-END_IF
-
-ancestor := parent;
-
-WHILE ancestor <> 0 DO
-
-	IF ancestor.SelfAddress = child.SelfAddress THEN
-		WorkflowExceptions.ThrowWorkflowAttachment(
-			sourceNamespaceName := NamespaceName,
-			sourceClassName := ClassName,
-			sourcePOUName := __POUNAME(),
-			sourcePosition := __POSITION(),
-			message := "Cannot attach an element to itself or its descendant"
-		);
-	END_IF
-
-	IF __QUERYINTERFACE(ancestor, ancestorActivity)
-		AND_THEN ancestorActivity.State <> WORKFLOW_ELEMENT_STATE.PASSIVE_READY
-	THEN
-		WorkflowExceptions.ThrowWorkflowConfiguration(
-			sourceNamespaceName := NamespaceName,
-			sourceClassName := ClassName,
-			sourcePOUName := __POUNAME(),
-			sourcePosition := __POSITION(),
-			message := "Cannot change a workflow tree outside PASSIVE_READY"
-		);
-	END_IF
-
-	ancestor := ancestor.Parent;
-END_WHILE
-
-IF child.Parent <> 0 AND_THEN child.Parent.SelfAddress <> parent.SelfAddress THEN
-	WorkflowExceptions.ThrowWorkflowAttachment(
-		sourceNamespaceName := NamespaceName,
-		sourceClassName := ClassName,
-		sourcePOUName := __POUNAME(),
-		sourcePosition := __POSITION(),
-		message := "Child element is already attached to another parent"
-	);
-END_IF
-
-IF __QUERYINTERFACE(child, childActivity)
-	AND_THEN childActivity.State <> WORKFLOW_ELEMENT_STATE.PASSIVE_READY
-THEN
-	WorkflowExceptions.ThrowWorkflowConfiguration(
-		sourceNamespaceName := NamespaceName,
-		sourceClassName := ClassName,
-		sourcePOUName := __POUNAME(),
-		sourcePosition := __POSITION(),
-		message := "Only a PASSIVE_READY child can be attached"
-	);
-END_IF
-
-parentWorkflow := parent.Workflow;
-childWorkflow := child.Workflow;
-
-IF parentWorkflow <> 0 AND_THEN parentWorkflow.State <> WORKFLOW_ELEMENT_STATE.PASSIVE_READY THEN
-	WorkflowExceptions.ThrowWorkflowConfiguration(
-		sourceNamespaceName := NamespaceName,
-		sourceClassName := ClassName,
-		sourcePOUName := __POUNAME(),
-		sourcePosition := __POSITION(),
-		message := "Cannot configure elements while their workflow is not PASSIVE_READY"
-	);
-END_IF
-
-IF childWorkflow <> 0 THEN
-
-	IF parentWorkflow = 0 OR_ELSE childWorkflow.SelfAddress <> parentWorkflow.SelfAddress THEN
-		WorkflowExceptions.ThrowWorkflowAttachment(
-			sourceNamespaceName := NamespaceName,
-			sourceClassName := ClassName,
-			sourcePOUName := __POUNAME(),
-			sourcePosition := __POSITION(),
-			message := "An associated child requires a parent from the same workflow"
-		);
-	END_IF
-
-	IF childWorkflow.RootActivity <> 0
-		AND_THEN childWorkflow.RootActivity.SelfAddress = child.SelfAddress
-	THEN
-		WorkflowExceptions.ThrowWorkflowAttachment(
-			sourceNamespaceName := NamespaceName,
-			sourceClassName := ClassName,
-			sourcePOUName := __POUNAME(),
-			sourcePosition := __POSITION(),
-			message := "A workflow root cannot be attached as a child"
-		);
-	END_IF
-
-END_IF]]></ST>
+        <ST><![CDATA[WorkflowElementHelper.ValidateElementAttachment(
+	parent := parent,
+	child := child
+);]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="ValidateTransition" Id="{bc368e59-28e8-40f0-ada3-0cec58c2ed3a}">
+      <Declaration><![CDATA[(*!
+<summary>Reports whether transitioning from currentState to newState is permitted.</summary>
+<description>
+Does not mutate state or raise exceptions. Callers use this predicate before changing state or validating
+external requests.
+</description>
+<param name="currentState">Current state of the workflow element.</param>
+<param name="newState">Requested target state.</param>
+*)
+METHOD ValidateTransition : BOOL
+VAR_INPUT
+	currentState : WORKFLOW_ELEMENT_STATE;
+	newState : WORKFLOW_ELEMENT_STATE;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[ValidateTransition := WorkflowElementHelper.ValidateTransition(
+	currentState := currentState,
+	newState := newState
+);]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="WriteConfigurationHeader" Id="{636274aa-4460-45bb-b93e-ab61e0c5c633}">
+      <Declaration><![CDATA[(*!
+<summary>Writes qualified type, display name and local declarations for one node.</summary>
+<description>Call once per node before writing its configuration fields. Only owned declarations are enumerated.</description>
+*)
+METHOD WriteConfigurationHeader
+VAR_INPUT
+	writer : TOF_Core.IConfigurationWriter;
+	source : TOF_Core.IObject;
+	displayName : WSTRING;
+	scope : IDeclaredVariableContainer;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[WorkflowConfigurationSerializer.WriteConfigurationHeader(
+	writer := writer,
+	source := source,
+	displayName := displayName,
+	scope := scope
+);]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="WriteConfigurationLiteral" Id="{6e4854ec-3314-41e0-a392-502ce654358b}">
+      <Declaration><![CDATA[(*!
+<summary>Writes the type and value of a configured literal operand.</summary>
+<description>The source descriptor is borrowed for this call. Unsupported types raise.</description>
+*)
+METHOD WriteConfigurationLiteral
+VAR_INPUT
+	writer : TOF_Core.IConfigurationWriter;
+	name : STRING;
+	value : __SYSTEM.AnyType;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[WorkflowConfigurationSerializer.WriteConfigurationLiteral(
+	writer := writer,
+	name := name,
+	value := value
+);]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="WriteConfigurationObject" Id="{b5a855d9-a98e-4518-b7a1-32b28d730a95}">
+      <Declaration><![CDATA[(*!
+<summary>Writes a nested configuration under the supplied role.</summary>
+<description>
+The object must implement the serialization interface. Null mandatory objects and unsupported objects raise.
+</description>
+*)
+METHOD WriteConfigurationObject
+VAR_INPUT
+	writer : TOF_Core.IConfigurationWriter;
+	name : STRING;
+	source : TOF_Core.IObject;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[WorkflowConfigurationSerializer.WriteConfigurationObject(
+	writer := writer,
+	name := name,
+	source := source
+);]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="WriteDependency" Id="{ba1e2d68-647b-4258-ba55-41eaae9d44b5}">
+      <Declaration><![CDATA[(*!
+<summary>Writes one embedded configuration or one stable external key.</summary>
+<description>
+An unspecified binding raises with the node name. Borrowed objects need no serialization interface.
+</description>
+*)
+METHOD WriteDependency
+VAR_INPUT
+	writer : TOF_Core.IConfigurationWriter;
+	role : STRING;
+	kind : DEPENDENCY_BINDING_KIND;
+	key : STRING;
+	dependency : TOF_Core.IObject;
+	nodeName : WSTRING;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[WorkflowConfigurationSerializer.WriteDependency(
+	writer := writer,
+	role := role,
+	kind := kind,
+	key := key,
+	dependency := dependency,
+	nodeName := nodeName
+);]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="FormatComparisonOperator" Id="{fbf344a9-0aff-4f5e-a0fa-5a4effb181ba}">
+      <Declaration><![CDATA[(*!
+<summary>Formats a comparison operator enumeration value into its standard string representation.</summary>
+<description>Delegates to WorkflowConfigurationSerializer.</description>
+<param name="comparisonOperator">Comparison operator to format.</param>
+*)
+METHOD FormatComparisonOperator : STRING
+VAR_INPUT
+	comparisonOperator : COMPARISON_OPERATOR;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[FormatComparisonOperator := WorkflowConfigurationSerializer.FormatComparisonOperator(
+	comparisonOperator := comparisonOperator
+);]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="FormatLogicalOperator" Id="{d82116e3-9bff-4d4b-89a0-3db4c0f573ea}">
+      <Declaration><![CDATA[(*!
+<summary>Formats a logical operator enumeration value into its standard uppercase string representation.</summary>
+<description>Delegates to WorkflowConfigurationSerializer.</description>
+<param name="logicalOperator">Logical operator to format.</param>
+*)
+METHOD FormatLogicalOperator : STRING
+VAR_INPUT
+	logicalOperator : LOGICAL_OPERATOR;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[FormatLogicalOperator := WorkflowConfigurationSerializer.FormatLogicalOperator(
+	logicalOperator := logicalOperator
+);]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="ParseComparisonOperator" Id="{5c24df7e-997b-4182-9ed0-a17b299b3d91}">
+      <Declaration><![CDATA[(*!
+<summary>Parses a comparison operator from its string representation.</summary>
+<description>Delegates to WorkflowConfigurationSerializer.</description>
+<param name="rawOperator">Operator string to parse.</param>
+*)
+METHOD ParseComparisonOperator : COMPARISON_OPERATOR
+VAR_INPUT
+	rawOperator : STRING;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[ParseComparisonOperator := WorkflowConfigurationSerializer.ParseComparisonOperator(
+	rawOperator := rawOperator
+);]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="ParseLogicalOperator" Id="{b0bb9f0f-3d04-4a21-8523-6bb1ca1bbbbe}">
+      <Declaration><![CDATA[(*!
+<summary>Parses a logical operator from its string representation.</summary>
+<description>Delegates to WorkflowConfigurationSerializer.</description>
+<param name="rawOperator">Operator string to parse.</param>
+*)
+METHOD ParseLogicalOperator : LOGICAL_OPERATOR
+VAR_INPUT
+	rawOperator : STRING;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[ParseLogicalOperator := WorkflowConfigurationSerializer.ParseLogicalOperator(
+	rawOperator := rawOperator
+);]]></ST>
       </Implementation>
     </Method>
   </POU>

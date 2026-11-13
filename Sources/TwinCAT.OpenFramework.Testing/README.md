@@ -5,7 +5,7 @@ Choose a base class for one scenario:
 | Type | Override | Completion |
 | --- | --- | --- |
 | `SingleCycleTest` | `ExecuteTest` | Returning from the body completes the test. |
-| `MultiCycleTest` | `ExecuteTest` | Return to wait for another cycle; call `Complete()` when done. |
+| `MultiCycleTest` | `ExecuteTest : TEST_CYCLE_RESULT` | Return `BUSY` to wait for another cycle, or `DONE` when finished. |
 | `TestGroup<N>` (abstract) | `Children` reference property | Executes its `N` children sequentially, including nested groups. |
 | `TestRunner<N>` (abstract) | `Children` reference property | Drives `N` root elements and reports the run result. |
 
@@ -38,8 +38,10 @@ Executable sources:
 ## Wait across cycles
 
 Extend `TOF_Testing.MultiCycleTest`. Keep the scenario's persistent objects and state in FB fields. Prepare them
-once in `BeforeTest`, advance one bounded step in `ExecuteTest`, and call `Complete()` when the checks are done.
-Use a typed enumeration if the scenario needs multiple phases. There is no numeric step API or separate context FB.
+once in `BeforeTest`, advance one bounded step in `ExecuteTest`, and return `TOF_Testing.TEST_CYCLE_RESULT.BUSY`
+to continue on the next cycle or `TOF_Testing.TEST_CYCLE_RESULT.DONE` when checks are done (any failure also
+terminates the case immediately after the callback returns). Use a typed enumeration if the scenario needs multiple
+phases. There is no numeric step API or separate context FB.
 
 The `Timeout` property defaults to `T#1S`; configure it before starting. `T#0S` disables the deadline. `Elapsed`
 starts at zero on the first execution and accumulates nominal calling-task periods in `LTIME` internally.
@@ -242,9 +244,10 @@ by application reinitialization.
 
 This model replaces `TestSuite`, `ITestSuite`, `AsyncTestContext` and `CurrentTestSession`.
 Move each guarded scenario into its own FB. Remove `RunTests` enumeration and `Test`/`AsyncTest` guards.
-Move per-scenario setup and cleanup into `BeforeTest`/`AfterTest`; use `Complete()` for multi-cycle completion.
-Keep fluent `Assert.That…` expressions inside the leaf test. Declare fixed group and runner children instead of
-passing `ITestSuite` arrays on every Execute call. Runner root count is now a generic constant.
+Move per-scenario setup and cleanup into `BeforeTest`/`AfterTest`; return `TEST_CYCLE_RESULT.DONE` from
+`MultiCycleTest.ExecuteTest` when finished (`BUSY` to continue). Keep fluent `Assert.That…` expressions inside the
+leaf test. Declare fixed group and runner children instead of passing `ITestSuite` arrays on every Execute call.
+Runner root count is now a generic constant.
 
 Custom reporters implement `ReportRunStart(totalElements)`, `ReportTestCaseResult(groupPath, testName, outcome,
 duration, message)` and `ReportRunEnd(totalTests, passedTests, failedTests, skippedTests, duration)`.
@@ -266,7 +269,7 @@ execution, ADS/JUnit consumption, online change and terminal-OOM verification re
 
 - `TestElements`: shared element lifecycle, interfaces and state.
 - `TestElements/Groups`: sequential group and its fixed child composition.
-- `TestElements/Tests`: individual case lifecycle, interface/outcome and single/multi-cycle strategies.
+- `TestElements/Tests`: individual case lifecycle, interface/outcome/cycle result and single/multi-cycle strategies.
 - `Runner`: root scheduling and its phase enum.
 - `Assertions`: fluent provider and generic comparison/diagnostic context.
 - `Assertions/TypedContexts`: copied operands and concrete literal-friendly assertion signatures.

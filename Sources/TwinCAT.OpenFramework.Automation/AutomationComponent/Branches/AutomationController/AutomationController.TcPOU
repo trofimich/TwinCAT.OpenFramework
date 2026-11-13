@@ -13,7 +13,11 @@ License: https://opensource.org/license/mit
 Use the inherited BroadcastEvent to deliver events to this controller and its descendants. The inherited
 BubbleEvent receives events at the root without forwarding them further. Both operations use synchronous
 borrowed delivery and do not transfer event ownership. Indexed Try lookups return borrowed interfaces or null
-and do not propagate exceptions.
+and do not propagate exceptions. Fatal allocation observations return null without clearing the latch.
+A state transition during output processing skips remaining outputs and the after-output hook.
+Completed writes remain effective. A pass started in STOPPED proceeds while the branch stays in that state.
+Plugin callbacks run in WORKING and STOPPED even while disabled, independently of enabled I/O and working
+or stopped hooks. INITIALIZING and INVALID receive no cycle callbacks.
 </description>
 *)
 
@@ -68,8 +72,19 @@ PROPERTY ABSTRACT Children : REFERENCE TO ARRAY [0.._ChildCount - 1] OF IChildAu
       </Get>
     </Property>
     <Method Name="OnAfterExecute" Id="{c3b115f5-1f5b-4065-8927-f57c8b59a3f3}" FolderPath="Overriden methods\Execute\">
-      <Declaration><![CDATA[METHOD PROTECTED FINAL OnAfterExecute
+      <Declaration><![CDATA[(*!
+<summary>Processes child outputs after the working or stopped phase.</summary>
+<description>
+Execute checks Enabled before entering this phase. An enabled controller processes outputs in both WORKING
+and STOPPED.
+A state transition during output processing skips remaining outputs and the after-output hook.
+Completed writes remain effective. A pass started in STOPPED proceeds while the branch stays in that state.
+OnCycleEnd can still dispatch plugin callbacks when this phase is skipped.
+</description>
+*)
+METHOD PROTECTED FINAL OnAfterExecute
 VAR
+	entryRevision : UDINT;
 	exceptionCode : __SYSTEM.ExceptionCode;
 	exception : TOF_Core.IException;	
 	exceptionReaction : TOF_Core.EXCEPTION_REACTION;
@@ -80,12 +95,12 @@ VAR
 	
 	child : IChildAutomationComponent;
 	
-	outputDevice : IOutputLeafAutomationComponent;	
-
-	plugin : IAutomationControllerPlugin;
+	outputDevice : IOutputLeafAutomationComponent;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[__TRY
+        <ST><![CDATA[entryRevision := _OperationalStateRevision;
+
+__TRY
 	OnBeforeChildrenProcessOutput();
 __CATCH(exceptionCode)		
 	exception := TOF_Core.ExceptionManager.GetLastException(
@@ -105,10 +120,18 @@ __CATCH(exceptionCode)
 __ENDTRY
 
 FOR i := 0 TO ChildCount - 1 DO
+	IF _OperationalStateRevision <> entryRevision THEN
+		RETURN;
+	END_IF
+
 	child := TryGetChildByIndex(index := i);
 	
 	IF child = 0 OR_ELSE NOT child.Enabled OR_ELSE NOT __QUERYINTERFACE(child, outputDevice) THEN
 		CONTINUE;
+	END_IF
+
+	IF _OperationalStateRevision <> entryRevision THEN
+		RETURN;
 	END_IF
 
 	outputDevice.ProcessOutput(); 
@@ -130,6 +153,10 @@ FOR i := 0 TO ChildCount - 1 DO
 	END_IF
 END_FOR
 
+IF _OperationalStateRevision <> entryRevision THEN
+	RETURN;
+END_IF
+
 __TRY
 	OnAfterChildrenProcessOutput();
 __CATCH(exceptionCode)		
@@ -147,39 +174,20 @@ __CATCH(exceptionCode)
 		exceptionReaction := exceptionReaction,
 		exceptionSourceHint := "OnAfterChildrenProcessOutput error"
 	);
-__ENDTRY
-
-FOR i := 0 TO PluginCount - 1 DO
-	plugin := TryGetPluginByIndex(index := i);
-	
-	IF plugin <> 0 THEN
-		__TRY
-			plugin.OnAfterControllerExecute(controller := THIS^);
-		__CATCH(exceptionCode)		
-			exception := TOF_Core.ExceptionManager.GetLastException(
-				exceptionCode := exceptionCode,
-				catchPointNamespaceName := NamespaceName,
-				catchPointPOUName := __POUNAME(),
-				catchPointPosition := __POSITION()
-			);
-							
-			exceptionReaction := OnHandleException(
-				exception := exception,
-				failedMethodName := TOF_Core.Strings.Concat255('plugin[', TO_STRING(i), '].OnAfterControllerExecute')
-			);
-		
-			ProcessException(
-				exception := exception,
-				exceptionReaction := exceptionReaction,
-				exceptionSourceHint := TOF_Core.WideStrings.Concat255("plugin[", TO_WSTRING(i), "].OnAfterControllerExecute error")
-			);
-		__ENDTRY		
-	END_IF
-END_FOR]]></ST>
+__ENDTRY]]></ST>
       </Implementation>
     </Method>
     <Method Name="OnBeforeExecute" Id="{3242870c-aa52-4580-929a-ba469938843b}" FolderPath="Overriden methods\Execute\">
-      <Declaration><![CDATA[METHOD PROTECTED FINAL OnBeforeExecute
+      <Declaration><![CDATA[(*!
+<summary>Processes child inputs before the working or stopped phase.</summary>
+<description>
+Execute checks Enabled after OnCycleStart before entering this phase. An enabled controller processes
+inputs in both WORKING and STOPPED.
+While the branch remains enabled, a transition to STOPPED continues the input pass through the remaining
+enabled input children and the after-input hook. Input callbacks must support execution in STOPPED.
+</description>
+*)
+METHOD PROTECTED FINAL OnBeforeExecute
 VAR
 	exceptionCode : __SYSTEM.ExceptionCode;
 	exception : TOF_Core.IException;	
@@ -192,39 +200,9 @@ VAR
 	child : IChildAutomationComponent;
 	
 	inputDevice : IInputLeafAutomationComponent;
-
-	plugin : IAutomationControllerPlugin;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[FOR i := 0 TO PluginCount - 1 DO
-	plugin := TryGetPluginByIndex(index := i);
-	
-	IF plugin <> 0 THEN
-		__TRY
-			plugin.OnBeforeControllerExecute(controller := THIS^);
-		__CATCH(exceptionCode)		
-			exception := TOF_Core.ExceptionManager.GetLastException(
-				exceptionCode := exceptionCode,
-				catchPointNamespaceName := NamespaceName,
-				catchPointPOUName := __POUNAME(),
-				catchPointPosition := __POSITION()
-			);
-							
-			exceptionReaction := OnHandleException(
-				exception := exception,
-				failedMethodName := TOF_Core.Strings.Concat255('plugin[', TO_STRING(i), '].OnBeforeControllerExecute')
-			);
-		
-			ProcessException(
-				exception := exception,
-				exceptionReaction := exceptionReaction,
-				exceptionSourceHint := TOF_Core.WideStrings.Concat255("plugin[", TO_WSTRING(i), "].OnBeforeControllerExecute error")
-			);
-		__ENDTRY		
-	END_IF
-END_FOR
-
-__TRY
+        <ST><![CDATA[__TRY
 	OnBeforeChildrenProcessInput();
 __CATCH(exceptionCode)		
 	exception := TOF_Core.ExceptionManager.GetLastException(
@@ -304,21 +282,35 @@ PROPERTY FINAL PluginCount : TOF_Core.INT_LENGTH]]></Declaration>
 <summary>Returns a borrowed child by its zero-based index.</summary>
 <description>
 Returns null when the entry is unavailable, the index is out of range or a nested call raises an exception.
-Does not transfer ownership or extend lifetime. Implementations must not propagate exceptions.
+Fatal allocation observations before or after the storage getter return null and preserve the latch for
+the outer task boundary. Does not transfer ownership or extend lifetime. Getter exceptions are contained.
 </description>
 *)
 METHOD FINAL TryGetChildByIndex : IChildAutomationComponent
 VAR_INPUT
 	index : TOF_Core.INT_INDEX;
+END_VAR
+VAR
+	childStorage : REFERENCE TO ARRAY [0.._ChildCount - 1] OF IChildAutomationComponent;
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[__TRY
-	IF __ISVALIDREF(Children) AND_THEN index >= 0 AND_THEN index < _ChildCount THEN
-		TryGetChildByIndex := Children[index];
+	IF TOF_Core.DynamicMemoryManager.HasAllocationFailed OR_ELSE index < 0 OR_ELSE index >= _ChildCount THEN
+		RETURN;
+	END_IF
+
+	childStorage REF= Children;
+
+	IF NOT TOF_Core.DynamicMemoryManager.HasAllocationFailed AND_THEN __ISVALIDREF(childStorage) THEN
+		TryGetChildByIndex := childStorage[index];
 	END_IF
 __CATCH
 	TryGetChildByIndex := 0;
-__ENDTRY]]></ST>
+__ENDTRY
+
+IF TOF_Core.DynamicMemoryManager.HasAllocationFailed THEN
+	TryGetChildByIndex := 0;
+END_IF]]></ST>
       </Implementation>
     </Method>
     <Method Name="TryGetPluginByIndex" Id="{ec5a9acc-4e3a-430c-bc3c-dbbed33a62ee}">
@@ -326,7 +318,8 @@ __ENDTRY]]></ST>
 <summary>Returns a borrowed plugin by its zero-based index.</summary>
 <description>
 Returns null when the entry is unavailable, the index is out of range or a nested call raises an exception.
-Does not transfer ownership or extend lifetime. Implementations must not propagate exceptions.
+Fatal allocation observations return null and preserve the latch for the task boundary.
+Does not transfer ownership or extend lifetime; no exception may escape.
 </description>
 *)
 METHOD FINAL TryGetPluginByIndex : IAutomationControllerPlugin
@@ -335,12 +328,20 @@ VAR_INPUT
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[__TRY
+	IF TOF_Core.DynamicMemoryManager.HasAllocationFailed THEN
+		RETURN;
+	END_IF
+
 	IF _Plugins <> 0 AND_THEN index >= 0 AND_THEN index < _PluginCount THEN
 		TryGetPluginByIndex := _Plugins[index];
 	END_IF
 __CATCH
 	TryGetPluginByIndex := 0;
-__ENDTRY]]></ST>
+__ENDTRY
+
+IF TOF_Core.DynamicMemoryManager.HasAllocationFailed THEN
+	TryGetPluginByIndex := 0;
+END_IF]]></ST>
       </Implementation>
     </Method>
     <Method Name="Validate" Id="{fd0d162a-dd4e-4a58-a453-d5799968f0d2}" FolderPath="Overriden methods\">
@@ -357,6 +358,102 @@ END_VAR]]></Declaration>
 		dataMemberName := 'Children'
 	);
 END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="OnCycleStart" Id="{0d765623-7ab6-4c29-a807-e8fd960b4578}">
+      <Declaration><![CDATA[(*!
+<summary>Dispatches OnBeforeControllerExecute to controller plugins before child input processing.</summary>
+<description>
+Plugins receive this callback in WORKING and STOPPED, including while disabled. Changes to Enabled affect
+input processing in this call. Plugins must check Enabled before performing technological actions.
+Plugin failures follow the controller exception policy. Completed callback effects are retained.
+</description>
+*)
+METHOD PROTECTED FINAL OnCycleStart
+VAR
+	i : TOF_Core.INT_INDEX;
+	plugin : IAutomationControllerPlugin;
+
+	exceptionCode : __SYSTEM.ExceptionCode;
+	exception : TOF_Core.IException;
+	exceptionReaction : TOF_Core.EXCEPTION_REACTION;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[FOR i := 0 TO PluginCount - 1 DO
+	plugin := TryGetPluginByIndex(index := i);
+	
+	IF plugin <> 0 THEN
+		__TRY
+			plugin.OnBeforeControllerExecute(controller := THIS^);
+		__CATCH(exceptionCode)		
+			exception := TOF_Core.ExceptionManager.GetLastException(
+				exceptionCode := exceptionCode,
+				catchPointNamespaceName := NamespaceName,
+				catchPointPOUName := __POUNAME(),
+				catchPointPosition := __POSITION()
+			);
+							
+			exceptionReaction := OnHandleException(
+				exception := exception,
+				failedMethodName := TOF_Core.Strings.Concat255('plugin[', TO_STRING(i), '].OnBeforeControllerExecute')
+			);
+		
+			ProcessException(
+				exception := exception,
+				exceptionReaction := exceptionReaction,
+				exceptionSourceHint := TOF_Core.WideStrings.Concat255("plugin[", TO_WSTRING(i), "].OnBeforeControllerExecute error")
+			);
+		__ENDTRY		
+	END_IF
+END_FOR]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="OnCycleEnd" Id="{64ee0609-7786-43bc-95d8-90525d7889f1}">
+      <Declaration><![CDATA[(*!
+<summary>Dispatches OnAfterControllerExecute so plugins can observe the resulting controller state.</summary>
+<description>
+Plugins receive this callback even when the enabled phases were skipped. An escaping failure can end Execute
+before dispatch. Plugins must check Enabled before performing technological actions. Plugin failures follow
+the controller exception policy. Completed callback effects are retained.
+</description>
+*)
+METHOD PROTECTED FINAL OnCycleEnd
+VAR
+	i : TOF_Core.INT_INDEX;
+	plugin : IAutomationControllerPlugin;
+
+	exceptionCode : __SYSTEM.ExceptionCode;
+	exception : TOF_Core.IException;
+	exceptionReaction : TOF_Core.EXCEPTION_REACTION;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[FOR i := 0 TO PluginCount - 1 DO
+	plugin := TryGetPluginByIndex(index := i);
+	
+	IF plugin <> 0 THEN
+		__TRY
+			plugin.OnAfterControllerExecute(controller := THIS^);
+		__CATCH(exceptionCode)		
+			exception := TOF_Core.ExceptionManager.GetLastException(
+				exceptionCode := exceptionCode,
+				catchPointNamespaceName := NamespaceName,
+				catchPointPOUName := __POUNAME(),
+				catchPointPosition := __POSITION()
+			);
+							
+			exceptionReaction := OnHandleException(
+				exception := exception,
+				failedMethodName := TOF_Core.Strings.Concat255('plugin[', TO_STRING(i), '].OnAfterControllerExecute')
+			);
+		
+			ProcessException(
+				exception := exception,
+				exceptionReaction := exceptionReaction,
+				exceptionSourceHint := TOF_Core.WideStrings.Concat255("plugin[", TO_WSTRING(i), "].OnAfterControllerExecute error")
+			);
+		__ENDTRY		
+	END_IF
+END_FOR]]></ST>
       </Implementation>
     </Method>
   </POU>

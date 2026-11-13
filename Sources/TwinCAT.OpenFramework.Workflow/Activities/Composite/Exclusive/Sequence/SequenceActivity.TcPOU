@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <TcPlcObject Version="1.1.0.1">
   <POU Name="SequenceActivity" Id="{1bca36af-b7de-4b08-b287-296cf8c67b1e}" SpecialFunc="None">
     <Declaration><![CDATA[(*
@@ -19,7 +19,8 @@ pending child. Resetting resets all non-ready child activities back to PASSIVE_R
 
 {attribute 'no_explicit_call' := 'do not call this function block directly'}
 {attribute 'enable_dynamic_creation'}
-FUNCTION_BLOCK SequenceActivity EXTENDS ExclusiveCompositeActivity IMPLEMENTS ISequenceActivity
+FUNCTION_BLOCK SequenceActivity EXTENDS ExclusiveCompositeActivity
+	IMPLEMENTS ISequenceActivity, TOF_Core.IConfigurationSerializable
 VAR_STAT
 	{attribute 'hide'}
 	_ClassName : STRING := __POUNAME();
@@ -37,7 +38,8 @@ END_VAR]]></Declaration>
     <Implementation>
       <ST><![CDATA[]]></ST>
     </Implementation>
-    <Folder Name="Service members" Id="{3f51cbe1-be68-4e5e-a663-f6baed6e006e}" />
+    <Folder Name="Overriden methods" Id="{c5874289-fa30-4e42-9a18-d42194d8091a}" />
+    <Folder Name="Service methods" Id="{3f51cbe1-be68-4e5e-a663-f6baed6e006e}" />
     <Method Name="AddChildActivity" Id="{a30975d8-8e95-48ec-a5ab-8e9aa1d75be7}">
       <Declaration><![CDATA[(*!
 <summary>Appends a child activity to the sequence and assigns this sequence as its ParentActivity.</summary>
@@ -53,11 +55,16 @@ Child references remain borrowed and must outlive the tree. No implicit detach o
 METHOD AddChildActivity
 VAR_INPUT
 	activity : IActivity;
+END_VAR
+VAR
+	childParent : IWorkflowElement;
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[ValidateChildActivityAttachment(childActivity := activity, argumentName := 'activity');
 
-IF activity.Parent <> 0 THEN
+childParent := activity.Parent;
+
+IF childParent <> 0 THEN
 	WorkflowExceptions.ThrowWorkflowAttachment(
 		sourceNamespaceName := NamespaceName,
 		sourceClassName := ClassName,
@@ -144,7 +151,7 @@ PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
         </Implementation>
       </Get>
     </Property>
-    <Method Name="OnResetting" Id="{7b20c640-7f05-4729-b6d4-37b7999c102f}">
+    <Method Name="OnResetting" Id="{7b20c640-7f05-4729-b6d4-37b7999c102f}" FolderPath="Overriden methods\">
       <Declaration><![CDATA[(*!
 <summary>Resets all non-ready child activities to PASSIVE_READY and clears the step selection.</summary>
 <param name="startResetting">TRUE on the initial call from RequestReset.</param>
@@ -174,7 +181,7 @@ _CurrentActivityStartPending := FALSE;
 OnResetting := ACTIVITY_RESETTING_STATE.WORK_RESET;]]></ST>
       </Implementation>
     </Method>
-    <Method Name="OnRunning" Id="{53e0829c-4dbd-4b85-a474-dd611d0f45cd}">
+    <Method Name="OnRunning" Id="{53e0829c-4dbd-4b85-a474-dd611d0f45cd}" FolderPath="Overriden methods\">
       <Declaration><![CDATA[(*!
 <summary>Advances the current child activity by one step and selects the next child upon completion.</summary>
 <param name="startRunning">TRUE on the initial call of a fresh start.</param>
@@ -225,12 +232,12 @@ ELSE
 	activity.Execute();
 END_IF
 
-OnRunning := GetActivityRunningStateByNestedActivityState(nestedActivityState := activity.State);
+OnRunning := MapChildRunningState(childState := activity.State);
 
 IF OnRunning = ACTIVITY_RUNNING_STATE.WORK_HALTED THEN
 	haltReason := activity.HaltReason;
 ELSIF OnRunning = ACTIVITY_RUNNING_STATE.WORK_COMPLETED THEN
-	selectNextTask();
+	selectNextActivity();
 
 	IF _CurrentActivityIndex >= TOF_Core.SignedInt32.ZERO THEN
 		OnRunning := ACTIVITY_RUNNING_STATE.WORK_IN_PROGRESS;
@@ -238,7 +245,7 @@ ELSIF OnRunning = ACTIVITY_RUNNING_STATE.WORK_COMPLETED THEN
 END_IF]]></ST>
       </Implementation>
     </Method>
-    <Method Name="OnStopping" Id="{58c42973-4e56-4492-9a0d-c7eb58c052dc}">
+    <Method Name="OnStopping" Id="{58c42973-4e56-4492-9a0d-c7eb58c052dc}" FolderPath="Overriden methods\">
       <Declaration><![CDATA[(*!
 <summary>Stops the active child activity or stops immediately at a pending step boundary.</summary>
 <param name="startCancelling">TRUE on the initial call from RequestCancel.</param>
@@ -284,7 +291,7 @@ IF NOT activity.Busy THEN
 		activity.RequestCancel(reason := _CancelReason);
 	END_IF
 
-	OnStopping := GetActivityStoppingStateByNestedActivityState(nestedActivityState := activity.State);
+	OnStopping := MapChildStoppingState(childState := activity.State);
 
 	IF OnStopping = ACTIVITY_STOPPING_STATE.WORK_HALTED THEN
 		haltReason := activity.HaltReason;
@@ -301,18 +308,18 @@ ELSE
 	activity.Execute();
 END_IF
 
-OnStopping := GetActivityStoppingStateByNestedActivityState(nestedActivityState := activity.State);
+OnStopping := MapChildStoppingState(childState := activity.State);
 
 IF OnStopping = ACTIVITY_STOPPING_STATE.WORK_HALTED THEN
 	haltReason := activity.HaltReason;
 END_IF]]></ST>
       </Implementation>
     </Method>
-    <Method Name="selectNextTask" Id="{7ad99828-ec1f-4f8b-bfdb-f4b31de1f87c}" FolderPath="Service members\">
+    <Method Name="selectNextActivity" Id="{7ad99828-ec1f-4f8b-bfdb-f4b31de1f87c}" FolderPath="Service methods\">
       <Declaration><![CDATA[(*!
 <summary>Selects the next child activity in sequence as pending, or clears the selection after the last child.</summary>
 *)
-METHOD PRIVATE selectNextTask]]></Declaration>
+METHOD PRIVATE selectNextActivity]]></Declaration>
       <Implementation>
         <ST><![CDATA[IF _CurrentActivityIndex < _Children.Length - 1 THEN
 	_CurrentActivityIndex := _CurrentActivityIndex + 1;
@@ -340,5 +347,65 @@ PROPERTY SelfSize : ULINT]]></Declaration>
         </Implementation>
       </Get>
     </Property>
+    <Method Name="Serialize" Id="{57353df2-319f-4bca-938b-1f6be3fec8a9}">
+      <Declaration><![CDATA[(*!
+<summary>Writes the configuration fields for this object.</summary>
+<description>Borrows the writer for this call. A failure invalidates the current output document.</description>
+*)
+METHOD Serialize
+VAR_INPUT
+	writer : TOF_Core.IConfigurationWriter;
+END_VAR
+VAR
+	i : DINT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[Workflows.WriteConfigurationHeader(writer := writer, source := THIS^, displayName := Name, scope := THIS^);
+writer.BeginArray(name := 'children');
+
+FOR i := 0 TO _Children.Length - 1 DO
+	Workflows.WriteConfigurationObject(writer := writer, name := '', source := _Children.Get(index := i).AsObject());
+END_FOR
+
+writer.EndArray();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="Deserialize" Id="{5fb419d4-4e58-45d9-ae31-84af188e24f4}">
+      <Declaration><![CDATA[(*!
+<summary>Restores this fresh instance from its configuration object.</summary>
+<description>
+The reader, document node and deserialization context are borrowed for this call.
+On failure discard the partial instance.
+</description>
+<param name="reader">Active configuration reader.</param>
+<param name="node">Configuration node for this activity.</param>
+<param name="context">Active configuration deserialization context providing workflow reconstruction services.</param>
+*)
+METHOD Deserialize
+VAR_INPUT
+	reader : TOF_Core.IConfigurationReader;
+	node : TOF_Core.CONFIGURATION_NODE;
+	context : TOF_Core.IConfigurationDeserializationContext;
+END_VAR
+VAR
+	loader : IWorkflowLoader;
+	items : TOF_Core.CONFIGURATION_NODE;
+	count : DINT;
+	i : DINT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[loader := WorkflowConfigurationSerializer.ResolveWorkflowLoader(context := context);
+Workflows.ReadConfigurationHeader(reader := reader, node := node, target := THIS^, scope := THIS^);
+
+items := reader.GetField(node := node, name := 'children');
+count := TO_DINT(reader.GetArraySize(node := items));
+
+FOR i := 0 TO count - 1 DO
+	AddChildActivity(
+		activity := Workflows.ReadActivity(loader := loader, node := reader.GetItem(node := items, index := TO_UDINT(i)))
+	);
+END_FOR]]></ST>
+      </Implementation>
+    </Method>
   </POU>
 </TcPlcObject>

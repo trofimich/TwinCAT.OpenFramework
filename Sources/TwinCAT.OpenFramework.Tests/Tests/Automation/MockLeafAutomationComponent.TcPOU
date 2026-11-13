@@ -8,10 +8,16 @@ License: https://opensource.org/license/mit
 *)
 
 (*!
-<summary>Mock leaf component for testing lifecycle hooks, I/O phases, errors and event routing.</summary>
+<summary>Mock leaf for lifecycle hooks, I/O phases, initialization/reset faults and event routing.</summary>
 *)
 
 FUNCTION_BLOCK MockLeafAutomationComponent EXTENDS TOF_Automation.InputOutputLeafAutomationComponent
+VAR_INPUT
+	//! <summary>Raises one output fault after the output call has been counted.</summary>
+	ThrowOnNextOutput : BOOL;
+	//! <summary>Raises one fault during input acquisition.</summary>
+	ThrowOnNextInput : BOOL;
+END_VAR
 VAR_STAT
 	{attribute 'hide'}
 	_ClassName : STRING := __POUNAME();
@@ -43,6 +49,8 @@ VAR
 	_InitReturnValue : BOOL := TRUE;
 	{attribute 'hide'}
 	_FailOnWorking : BOOL;
+	_ThrowOnInitializing : BOOL;
+	_ThrowOnReset : BOOL;
 END_VAR]]></Declaration>
     <Implementation>
       <ST><![CDATA[]]></ST>
@@ -197,28 +205,85 @@ stopPropagation := _StopPropagationOnEvent;]]></ST>
       </Implementation>
     </Method>
     <Method Name="OnInitializing" Id="{6fb51265-efad-48f5-a686-62ad9bd26b0a}" FolderPath="Methods to override\">
-      <Declaration><![CDATA[METHOD PROTECTED OnInitializing : BOOL]]></Declaration>
+      <Declaration><![CDATA[(*!
+<summary>Records the OnInitializing call and optionally injects an exception.</summary>
+<description>
+The exception exercises production conversion into a copied component error; the hook does not own it.
+</description>
+*)
+METHOD PROTECTED OnInitializing : BOOL]]></Declaration>
       <Implementation>
         <ST><![CDATA[_InitializeCount := _InitializeCount + 1;
+
+IF _ThrowOnInitializing THEN
+	TOF_Core.Exceptions.ThrowStandard(
+		sourceNamespaceName := NamespaceName,
+		sourceClassName := ClassName,
+		sourcePOUName := __POUNAME(),
+		sourcePosition := __POSITION(),
+		message := "Injected OnInitializing failure."
+	);
+END_IF
+
 OnInitializing := _InitReturnValue;]]></ST>
       </Implementation>
     </Method>
     <Method Name="OnProcessInput" Id="{16a990da-11aa-4e60-bc1c-debaa2275464}" FolderPath="Methods to override\">
-      <Declaration><![CDATA[METHOD PROTECTED OnProcessInput]]></Declaration>
+      <Declaration><![CDATA[(*! <summary>Counts input calls and raises an armed input fault once.</summary> *)
+METHOD PROTECTED OnProcessInput]]></Declaration>
       <Implementation>
-        <ST><![CDATA[_ProcessInputCount := _ProcessInputCount + 1;]]></ST>
+        <ST><![CDATA[_ProcessInputCount := _ProcessInputCount + 1;
+
+IF ThrowOnNextInput THEN
+	ThrowOnNextInput := FALSE;
+	TOF_Core.Exceptions.ThrowStandard(
+		sourceNamespaceName := NamespaceName,
+		sourceClassName := ClassName,
+		sourcePOUName := __POUNAME(),
+		sourcePosition := __POSITION(),
+		message := "Injected input failure"
+	);
+END_IF]]></ST>
       </Implementation>
     </Method>
     <Method Name="OnProcessOutput" Id="{13d5c65e-afd4-4d9c-a902-9000ddab6569}" FolderPath="Methods to override\">
-      <Declaration><![CDATA[METHOD PROTECTED OnProcessOutput]]></Declaration>
+      <Declaration><![CDATA[(*! <summary>Counts output calls and optionally injects a one-shot fault after the observed effect.</summary> *)
+METHOD PROTECTED OnProcessOutput]]></Declaration>
       <Implementation>
-        <ST><![CDATA[_ProcessOutputCount := _ProcessOutputCount + 1;]]></ST>
+        <ST><![CDATA[_ProcessOutputCount := _ProcessOutputCount + 1;
+
+IF ThrowOnNextOutput THEN
+	ThrowOnNextOutput := FALSE;
+	TOF_Core.Exceptions.ThrowStandard(
+		sourceNamespaceName := NamespaceName,
+		sourceClassName := ClassName,
+		sourcePOUName := __POUNAME(),
+		sourcePosition := __POSITION(),
+		message := "Injected output failure"
+	);
+END_IF]]></ST>
       </Implementation>
     </Method>
     <Method Name="OnReset" Id="{1a42e8fd-4f72-4198-b9e9-5592070c737e}" FolderPath="Methods to override\">
-      <Declaration><![CDATA[METHOD PROTECTED OnReset]]></Declaration>
+      <Declaration><![CDATA[(*!
+<summary>Records the OnReset call and optionally injects an exception.</summary>
+<description>
+The exception exercises production conversion into a copied component error; the hook does not own it.
+</description>
+*)
+METHOD PROTECTED OnReset]]></Declaration>
       <Implementation>
-        <ST><![CDATA[_ResetCount := _ResetCount + 1;]]></ST>
+        <ST><![CDATA[_ResetCount := _ResetCount + 1;
+
+IF _ThrowOnReset THEN
+	TOF_Core.Exceptions.ThrowStandard(
+		sourceNamespaceName := NamespaceName,
+		sourceClassName := ClassName,
+		sourcePOUName := __POUNAME(),
+		sourcePosition := __POSITION(),
+		message := "Injected OnReset failure."
+	);
+END_IF]]></ST>
       </Implementation>
     </Method>
     <Method Name="OnStopped" Id="{b3148cc2-962a-490b-ba15-a96998f300aa}" FolderPath="Methods to override\">
@@ -319,5 +384,58 @@ PROPERTY WorkingCount : INT]]></Declaration>
         </Implementation>
       </Get>
     </Property>
+    <Property Name="ThrowOnInitializing" Id="{112053f4-0cbc-41b5-a06a-87a87a46364f}">
+      <Declaration><![CDATA[(*!
+<summary>Controls the initialization-hook failure injected by regression tests.</summary>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY ThrowOnInitializing : BOOL]]></Declaration>
+      <Get Name="Get" Id="{ffe3d562-5540-4e3e-ad76-d837a6dde8a4}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ThrowOnInitializing := _ThrowOnInitializing;]]></ST>
+        </Implementation>
+      </Get>
+      <Set Name="Set" Id="{c1a76dd8-0de4-44b5-89f1-eea061a87c48}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[_ThrowOnInitializing := ThrowOnInitializing;]]></ST>
+        </Implementation>
+      </Set>
+    </Property>
+    <Property Name="ThrowOnReset" Id="{9ea1bff4-c2c6-46f6-b244-a52eb26b2f46}">
+      <Declaration><![CDATA[(*!
+<summary>Controls the reset-hook failure injected by regression tests.</summary>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY ThrowOnReset : BOOL]]></Declaration>
+      <Get Name="Get" Id="{91d419db-0fd3-4005-a532-2471f9189792}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ThrowOnReset := _ThrowOnReset;]]></ST>
+        </Implementation>
+      </Get>
+      <Set Name="Set" Id="{841ec3fb-3c6d-42ce-bc1d-07c4611e638f}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[_ThrowOnReset := ThrowOnReset;]]></ST>
+        </Implementation>
+      </Set>
+    </Property>
+    <Method Name="ApplyExceptionReaction" Id="{5c891c44-9149-4457-adb2-6048d59c3797}">
+      <Declaration><![CDATA[(*!
+<summary>Exercises the inherited exception handler with a borrowed diagnostic in the fixture's current state.</summary>
+<param name="exception">Task-local exception that remains live for the call.</param>
+<param name="reaction">Runtime reaction to apply.</param>
+*)
+METHOD ApplyExceptionReaction
+VAR_INPUT
+	exception : TOF_Core.IException;
+	reaction : TOF_Core.EXCEPTION_REACTION;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[ProcessException(exception := exception, exceptionReaction := reaction, exceptionSourceHint := "Injected primary failure");]]></ST>
+      </Implementation>
+    </Method>
   </POU>
 </TcPlcObject>

@@ -94,11 +94,11 @@ This class contain model of physical equipment:
 
 ## 6. MAIN Program Setup
 
-In the `MAIN` program:
-- Create instance of `IntersectionController` 
-- Create instance of `AutomationRunner`
-- Create array of `IAutomationComponent` and assign 'IntersectionController' instance to it
-- Call `Runner.Execute(_AutomationControllers);` where `Runner` is instance of `IntersectionController` and `_AutomationControllers` is array of `IAutomationComponent`.
+In the `MAIN` program, declare the controllers before their root array.
+
+- Populate `_AutomationControllers` with the root interfaces in execution order.
+- Declare `Runner : TOF_Automation.AutomationRunner(components := _AutomationControllers);` after the array.
+- Keep the array and its entries valid and in the same order for the runner's lifetime. Call `Runner.Execute();` each cycle.
 
 ---
 

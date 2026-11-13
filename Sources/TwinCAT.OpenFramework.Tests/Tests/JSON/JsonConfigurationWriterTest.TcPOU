@@ -1,0 +1,355 @@
+<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="JsonConfigurationWriterTest" Id="{0c817d2b-f993-472f-97f1-486c1de2ee2d}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+SPDX-FileCopyrightText: © 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+SPDX-License-Identifier: MIT
+License: https://opensource.org/license/mit
+*)
+
+(*!
+<summary>Exercises JsonConfigurationWriter serialization contracts, structural calls and failure handling.</summary>
+<description>
+Tests serialize invocation, exception recovery and reuse, null source rejection, argument validation,
+manual document streaming, and destination buffer overflow detection.
+</description>
+*)
+
+{attribute 'no_assign'}
+{attribute 'no_explicit_call' := 'do not call this function block directly'}
+FUNCTION_BLOCK JsonConfigurationWriterTest EXTENDS TOF_Testing.SingleCycleTest
+VAR_STAT
+	{attribute 'hide'}
+	_ClassName : STRING := __POUNAME();
+END_VAR
+VAR
+	{attribute 'hide'}
+	{attribute 'init_namespace'}
+	_NamespaceName : STRING;
+END_VAR
+VAR
+	_Writer : TOF_JSON.JsonConfigurationWriter;
+	_Reader : TOF_JSON.JsonConfigurationReader;
+	_Mock : MockConfigurationWritable;
+	_Doc : TOF_Core.JSON_DOCUMENT;
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[]]></ST>
+    </Implementation>
+    <Property Name="ClassName" Id="{37b6c46b-4a64-46ae-9509-a0a164265f89}">
+      <Declaration><![CDATA[(*!
+<summary>Borrows the concrete class name for the lifetime of this instance.</summary>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{bebdf22a-f089-447d-bad6-75bbe5c2e989}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ClassName REF= _ClassName;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="ExecuteTest" Id="{e8e9f135-9b72-4b59-879b-3317b0a3a9fe}">
+      <Declaration><![CDATA[(*!
+<summary>Executes all writer test scenarios in a single PLC cycle.</summary>
+*)
+METHOD PROTECTED ExecuteTest]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[testSerializeWritable();
+testDeserializeContextFreeObject();
+testSerializeFailureClearsDocumentAndAllowsReuse();
+testSerializeNullSource();
+testWriteValueNullDataOrZeroSize();
+testWriteValueInvalidSize();
+testDocumentBufferOverflow();
+testManualDocumentConstruction();]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="NamespaceName" Id="{764057de-66e1-40ba-96ca-32f03d8080c4}">
+      <Declaration><![CDATA[(*!
+<summary>Borrows the compiler-initialized namespace for the lifetime of this instance.</summary>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{9ac25ca3-7359-4bbd-942f-80f00ee9d497}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[NamespaceName REF= CurrentNamespace.Name;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="SelfSize" Id="{3be2d6f1-99c7-4cb9-9197-a5d52cf22994}">
+      <Declaration><![CDATA[(*!
+<summary>Reports the complete concrete instance size in bytes.</summary>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY SelfSize : ULINT]]></Declaration>
+      <Get Name="Get" Id="{f75c3bee-2b91-4c12-989d-151fa4e109b9}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[SelfSize := XSIZEOF(THIS^);]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="testDocumentBufferOverflow" Id="{ecf77c8f-5c04-4620-af64-c106070133d6}">
+      <Declaration><![CDATA[(*!
+<summary>Verifies that EndDocument raises when serialized content exceeds destination buffer capacity.</summary>
+*)
+METHOD PRIVATE testDocumentBufferOverflow
+VAR
+	i : DINT;
+	value : STRING(50) := '01234567890123456789012345678901234567890123456789';
+	caught : BOOL;
+	exceptionCode : __SYSTEM.ExceptionCode;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_Writer.BeginDocument();
+_Writer.BeginArray(name := 'overflowList');
+
+// SA0175: Raw string buffer passed to test document overflow; no character indexing.
+{analysis -175}
+FOR i := 0 TO 250 DO
+	_Writer.WriteValue(
+		name := '',
+		valueType := TOF_Core.CONFIGURATION_VALUE_TYPE.TYPE_STRING,
+		data := ADR(value),
+		size := SIZEOF(value)
+	);
+END_FOR
+{analysis +175}
+
+_Writer.EndArray();
+
+caught := FALSE;
+__TRY
+	_Writer.EndDocument(document := _Doc);
+__CATCH (exceptionCode)
+	caught := TRUE;
+__ENDTRY
+
+Assert.ThatBool(actual := caught).IsTrue();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="testManualDocumentConstruction" Id="{c9770a11-4b87-436c-a1a5-43e92e3fedaf}">
+      <Declaration><![CDATA[(*!
+<summary>Verifies manual BeginDocument/BeginObject/BeginArray/End* streaming.</summary>
+*)
+METHOD PRIVATE testManualDocumentConstruction
+VAR
+	val : DINT := 10;
+	item : DINT := 1;
+	hasCfg : BOOL;
+	hasItems : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_Writer.BeginDocument();
+
+_Writer.BeginObject(name := 'cfg');
+_Writer.WriteValue(
+	name := 'num',
+	valueType := TOF_Core.CONFIGURATION_VALUE_TYPE.TYPE_DINT,
+	data := ADR(val),
+	size := SIZEOF(val)
+);
+_Writer.EndObject();
+
+_Writer.BeginArray(name := 'items');
+_Writer.WriteValue(
+	name := '',
+	valueType := TOF_Core.CONFIGURATION_VALUE_TYPE.TYPE_DINT,
+	data := ADR(item),
+	size := SIZEOF(item)
+);
+_Writer.EndArray();
+
+_Writer.EndDocument(document := _Doc);
+
+// SA0175: ASCII substring search in serialized JSON document.
+{analysis -175}
+hasCfg := Tc2_Standard.FIND(STR1 := _Doc, STR2 := 'cfg') > 0;
+hasItems := Tc2_Standard.FIND(STR1 := _Doc, STR2 := 'items') > 0;
+{analysis +175}
+
+Assert.ThatBool(actual := hasCfg).IsTrue();
+Assert.ThatBool(actual := hasItems).IsTrue();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="testSerializeFailureClearsDocumentAndAllowsReuse" Id="{da9d4c54-a69d-4943-bb20-3eb35f2a4dbe}">
+      <Declaration><![CDATA[(*!
+<summary>Verifies document clearing on failure and writer reuse without manual reset.</summary>
+*)
+METHOD PRIVATE testSerializeFailureClearsDocumentAndAllowsReuse
+VAR
+	caught : BOOL;
+	exceptionCode : __SYSTEM.ExceptionCode;
+	hasContent : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_Mock.Reset();
+_Mock.ThrowOnSerialize := TRUE;
+_Doc := 'pre-existing content that must be cleared';
+
+caught := FALSE;
+__TRY
+	_Writer.Serialize(source := _Mock, document := _Doc);
+__CATCH (exceptionCode)
+	caught := TRUE;
+__ENDTRY
+
+Assert.ThatBool(actual := caught).IsTrue();
+Assert.ThatString(actual := _Doc).ToBe(expected := '');
+
+_Mock.ThrowOnSerialize := FALSE;
+_Writer.Serialize(source := _Mock, document := _Doc);
+
+hasContent := Tc2_Standard.LEN(STR := _Doc) > 0;
+Assert.ThatBool(actual := hasContent).IsTrue();
+Assert.ThatUDInt(actual := _Mock.SerializeCount).ToBe(expected := 1);]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="testSerializeNullSource" Id="{860a5c75-a29d-4d6e-93b8-da14ae1e11e8}">
+      <Declaration><![CDATA[(*!
+<summary>Verifies that Serialize rejects null source with an exception.</summary>
+*)
+METHOD PRIVATE testSerializeNullSource
+VAR
+	nullSource : TOF_Core.IConfigurationSerializable := 0;
+	caught : BOOL;
+	exceptionCode : __SYSTEM.ExceptionCode;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[caught := FALSE;
+__TRY
+	_Writer.Serialize(source := nullSource, document := _Doc);
+__CATCH (exceptionCode)
+	caught := TRUE;
+__ENDTRY
+
+Assert.ThatBool(actual := caught).IsTrue();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="testSerializeWritable" Id="{be17a119-22a3-40af-909b-f880885c7d0c}">
+      <Declaration><![CDATA[(*!
+<summary>Verifies successful serialization of an IConfigurationSerializable object.</summary>
+*)
+METHOD PRIVATE testSerializeWritable
+VAR
+	hasIntField : BOOL;
+	hasStringField : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_Mock.Reset();
+_Writer.Serialize(source := _Mock, document := _Doc);
+
+Assert.ThatUDInt(actual := _Mock.SerializeCount).ToBe(expected := 1);
+
+// SA0175: ASCII substring search in serialized JSON document.
+{analysis -175}
+hasIntField := Tc2_Standard.FIND(STR1 := _Doc, STR2 := 'intField') > 0;
+hasStringField := Tc2_Standard.FIND(STR1 := _Doc, STR2 := 'stringField') > 0;
+{analysis +175}
+
+Assert.ThatBool(actual := hasIntField).IsTrue();
+Assert.ThatBool(actual := hasStringField).IsTrue();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="testDeserializeContextFreeObject" Id="{16157275-0ae9-47a7-8250-4fd46dbd539e}">
+      <Declaration><![CDATA[(*!
+<summary>Verifies that a context-free object deserializes successfully with null deserialization context.</summary>
+*)
+METHOD PRIVATE testDeserializeContextFreeObject
+VAR
+	root : TOF_Core.CONFIGURATION_NODE;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_Mock.Reset();
+_Mock.IntField := 123;
+_Mock.StringField := 'test context-free';
+_Writer.Serialize(source := _Mock, document := _Doc);
+
+root := _Reader.Parse(document := _Doc);
+_Mock.Reset();
+_Mock.Deserialize(reader := _Reader, node := root, context := 0);
+
+Assert.ThatUDInt(actual := _Mock.DeserializeCount).ToBe(expected := 1);
+Assert.ThatDInt(actual := _Mock.IntField).ToBe(expected := 123);
+Assert.ThatString(actual := _Mock.StringField).ToBe(expected := 'test context-free');]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="testWriteValueInvalidSize" Id="{822bc991-b7f6-40fc-8de6-bd1dae44dace}">
+      <Declaration><![CDATA[(*!
+<summary>Verifies rejection of invalid data size for a fixed configuration value type.</summary>
+*)
+METHOD PRIVATE testWriteValueInvalidSize
+VAR
+	dummy : DINT := 123;
+	caught : BOOL;
+	exceptionCode : __SYSTEM.ExceptionCode;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_Writer.BeginDocument();
+
+caught := FALSE;
+__TRY
+	_Writer.WriteValue(
+		name := 'invalidSize',
+		valueType := TOF_Core.CONFIGURATION_VALUE_TYPE.TYPE_DINT,
+		data := ADR(dummy),
+		size := 3
+	);
+__CATCH (exceptionCode)
+	caught := TRUE;
+__ENDTRY
+
+Assert.ThatBool(actual := caught).IsTrue();
+
+_Writer.EndDocument(document := _Doc);]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="testWriteValueNullDataOrZeroSize" Id="{2da88161-f470-4a8b-9689-3d707e49a46a}">
+      <Declaration><![CDATA[(*!
+<summary>Verifies that WriteValue rejects null pointer or zero size.</summary>
+*)
+METHOD PRIVATE testWriteValueNullDataOrZeroSize
+VAR
+	dummy : DINT := 123;
+	caught : BOOL;
+	exceptionCode : __SYSTEM.ExceptionCode;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_Writer.BeginDocument();
+
+caught := FALSE;
+__TRY
+	_Writer.WriteValue(
+		name := 'nullData',
+		valueType := TOF_Core.CONFIGURATION_VALUE_TYPE.TYPE_DINT,
+		data := 0,
+		size := 4
+	);
+__CATCH (exceptionCode)
+	caught := TRUE;
+__ENDTRY
+
+Assert.ThatBool(actual := caught).IsTrue();
+
+caught := FALSE;
+__TRY
+	_Writer.WriteValue(
+		name := 'zeroSize',
+		valueType := TOF_Core.CONFIGURATION_VALUE_TYPE.TYPE_DINT,
+		data := ADR(dummy),
+		size := 0
+	);
+__CATCH (exceptionCode)
+	caught := TRUE;
+__ENDTRY
+
+Assert.ThatBool(actual := caught).IsTrue();
+
+_Writer.EndDocument(document := _Doc);]]></ST>
+      </Implementation>
+    </Method>
+  </POU>
+</TcPlcObject>
+

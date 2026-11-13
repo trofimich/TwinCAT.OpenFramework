@@ -23,7 +23,8 @@ provides the ordinary path for driving pending cancellation/reset work before a 
 
 {attribute 'no_explicit_call' := 'do not call this function block directly'}
 {attribute 'enable_dynamic_creation'}
-FUNCTION_BLOCK TryCatchActivity EXTENDS ExclusiveCompositeActivity IMPLEMENTS ITryCatchActivity
+FUNCTION_BLOCK TryCatchActivity EXTENDS ExclusiveCompositeActivity
+	IMPLEMENTS ITryCatchActivity, TOF_Core.IConfigurationSerializable
 VAR_STAT
 	{attribute 'hide'}
 	_ClassName : STRING := __POUNAME();
@@ -41,6 +42,7 @@ END_VAR]]></Declaration>
     <Implementation>
       <ST><![CDATA[]]></ST>
     </Implementation>
+    <Folder Name="Overriden methods" Id="{5198ec74-8b1a-4d40-bf51-2490efda6192}" />
     <Property Name="CatchActivity" Id="{d45db91b-6e3c-4d25-88ad-eccd861a1235}">
       <Declaration><![CDATA[(*!
 <summary>Returns the optional recovery activity executed when TryActivity raises an exception.</summary>
@@ -144,7 +146,7 @@ PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
         </Implementation>
       </Get>
     </Property>
-    <Method Name="OnResetting" Id="{5b92043f-7a56-4812-8b93-2f93c74a1504}">
+    <Method Name="OnResetting" Id="{5b92043f-7a56-4812-8b93-2f93c74a1504}" FolderPath="Overriden methods\">
       <Declaration><![CDATA[(*!
 <summary>Resets TryActivity and CatchActivity back to PASSIVE_READY and clears CurrentActivity.</summary>
 <param name="startResetting">TRUE on the initial call from RequestReset.</param>
@@ -172,7 +174,7 @@ _CurrentActivity := 0;
 OnResetting := ACTIVITY_RESETTING_STATE.WORK_RESET;]]></ST>
       </Implementation>
     </Method>
-    <Method Name="OnRunning" Id="{ca2f10c4-f86d-4e87-bfe8-d64bbb3b6bc6}">
+    <Method Name="OnRunning" Id="{ca2f10c4-f86d-4e87-bfe8-d64bbb3b6bc6}" FolderPath="Overriden methods\">
       <Declaration><![CDATA[(*!
 <summary>Runs TryActivity and transitions to CatchActivity if TryActivity raises a non-terminal exception.</summary>
 <param name="startRunning">TRUE on the initial call of a fresh start.</param>
@@ -215,7 +217,7 @@ IF _CurrentActivity = _TryActivity THEN
 			_CurrentActivity.Execute();
 		END_IF
 
-		OnRunning := GetActivityRunningStateByNestedActivityState(nestedActivityState := _CurrentActivity.State);
+		OnRunning := MapChildRunningState(childState := _CurrentActivity.State);
 
 		IF OnRunning = ACTIVITY_RUNNING_STATE.WORK_HALTED THEN
 			haltReason := _CurrentActivity.HaltReason;
@@ -257,7 +259,7 @@ IF _CurrentActivity = _TryActivity THEN
 		_CurrentActivity := _CatchActivity;
 		_CurrentActivity.RequestStart();
 
-		OnRunning := GetActivityRunningStateByNestedActivityState(nestedActivityState := _CurrentActivity.State);
+		OnRunning := MapChildRunningState(childState := _CurrentActivity.State);
 
 		IF OnRunning = ACTIVITY_RUNNING_STATE.WORK_HALTED THEN
 			haltReason := _CurrentActivity.HaltReason;
@@ -270,7 +272,7 @@ ELSIF _CurrentActivity <> 0 AND_THEN _CatchActivity <> 0 AND_THEN _CurrentActivi
 		_CurrentActivity.Execute();
 	END_IF
 
-	OnRunning := GetActivityRunningStateByNestedActivityState(nestedActivityState := _CurrentActivity.State);
+	OnRunning := MapChildRunningState(childState := _CurrentActivity.State);
 
 	IF OnRunning = ACTIVITY_RUNNING_STATE.WORK_HALTED THEN
 		haltReason := _CurrentActivity.HaltReason;
@@ -278,7 +280,7 @@ ELSIF _CurrentActivity <> 0 AND_THEN _CatchActivity <> 0 AND_THEN _CurrentActivi
 END_IF]]></ST>
       </Implementation>
     </Method>
-    <Method Name="OnStopping" Id="{3ff4c539-5cf6-4ae8-9712-0a7f4b6fdb99}">
+    <Method Name="OnStopping" Id="{3ff4c539-5cf6-4ae8-9712-0a7f4b6fdb99}" FolderPath="Overriden methods\">
       <Declaration><![CDATA[(*!
 <summary>Stops the currently active try or catch branch on cancel or suspend.</summary>
 <param name="startCancelling">TRUE on the initial call from RequestCancel.</param>
@@ -304,7 +306,7 @@ IF NOT _CurrentActivity.Busy THEN
 		_CurrentActivity.RequestCancel(reason := _CancelReason);
 	END_IF
 
-	OnStopping := GetActivityStoppingStateByNestedActivityState(nestedActivityState := _CurrentActivity.State);
+	OnStopping := MapChildStoppingState(childState := _CurrentActivity.State);
 
 	IF OnStopping = ACTIVITY_STOPPING_STATE.WORK_HALTED THEN
 		haltReason := _CurrentActivity.HaltReason;
@@ -321,7 +323,7 @@ ELSE
 	_CurrentActivity.Execute();
 END_IF
 
-OnStopping := GetActivityStoppingStateByNestedActivityState(nestedActivityState := _CurrentActivity.State);
+OnStopping := MapChildStoppingState(childState := _CurrentActivity.State);
 
 IF OnStopping = ACTIVITY_STOPPING_STATE.WORK_HALTED THEN
 	haltReason := _CurrentActivity.HaltReason;
@@ -358,5 +360,53 @@ PROPERTY FINAL TryActivity : IActivity]]></Declaration>
         </Implementation>
       </Get>
     </Property>
+    <Method Name="Serialize" Id="{9c60f75b-d656-44ab-a4a1-542acc44035f}">
+      <Declaration><![CDATA[(*!
+<summary>Writes the configuration fields for this object.</summary>
+<description>Borrows the writer for this call. A failure invalidates the current output document.</description>
+*)
+METHOD Serialize
+VAR_INPUT
+	writer : TOF_Core.IConfigurationWriter;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[Workflows.WriteConfigurationHeader(writer := writer, source := THIS^, displayName := Name, scope := THIS^);
+Workflows.WriteConfigurationObject(writer := writer, name := 'tryActivity', source := _TryActivity);
+
+IF _CatchActivity <> 0 THEN
+	Workflows.WriteConfigurationObject(writer := writer, name := 'catchActivity', source := _CatchActivity);
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="Deserialize" Id="{804f42e5-7bca-4936-a972-344bb4532c66}">
+      <Declaration><![CDATA[(*!
+<summary>Restores this fresh instance from its configuration object.</summary>
+<description>
+The reader, document node and deserialization context are borrowed for this call.
+On failure discard the partial instance.
+</description>
+<param name="reader">Active configuration reader.</param>
+<param name="node">Configuration node for this activity.</param>
+<param name="context">Active configuration deserialization context providing workflow reconstruction services.</param>
+*)
+METHOD Deserialize
+VAR_INPUT
+	reader : TOF_Core.IConfigurationReader;
+	node : TOF_Core.CONFIGURATION_NODE;
+	context : TOF_Core.IConfigurationDeserializationContext;
+END_VAR
+VAR
+	loader : IWorkflowLoader;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[loader := WorkflowConfigurationSerializer.ResolveWorkflowLoader(context := context);
+Workflows.ReadConfigurationHeader(reader := reader, node := node, target := THIS^, scope := THIS^);
+
+Configure(
+	tryActivity := Workflows.ReadActivity(loader := loader, node := reader.GetField(node := node, name := 'tryActivity')),
+	catchActivity := Workflows.ReadCatchActivity(loader := loader, node := reader.FindField(node := node, name := 'catchActivity'))
+);]]></ST>
+      </Implementation>
+    </Method>
   </POU>
 </TcPlcObject>

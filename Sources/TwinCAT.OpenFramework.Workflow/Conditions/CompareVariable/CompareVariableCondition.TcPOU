@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <TcPlcObject Version="1.1.0.1">
   <POU Name="CompareVariableCondition" Id="{e6af0489-4250-42f8-a1a5-877dabb5feb1}" SpecialFunc="None">
     <Declaration><![CDATA[(*
@@ -12,7 +12,7 @@ License: https://opensource.org/license/mit
 <description>
 Standard elements resolve condition-local and ancestor bindings first, then evaluating activity/ancestor
 bindings, then workflow fallback. The condition-associated workflow precedes a distinct context workflow.
-Custom elements expose direct bindings through ILocalVariableContainer; legacy opaque lookups run after
+Custom elements expose direct bindings through ILocalVariableLookup; legacy opaque lookups run after
 discoverable local scopes and before workflow fallback.
 Supports evaluating a workflow variable against a copied reference value, or comparing two workflow variables.
 Without a custom comparer, numeric pairs use GENERIC_VALUE.CompareTo across widths and signedness, including
@@ -21,6 +21,7 @@ across capacities and encodings. Other pairs require equal generic type categori
 TOF_Comparison.StandardComparers; unequal categories raise GenericConversionNotSupportedException before
 payload comparison. Equal categories retain their concrete comparer rules, including byte ordering for
 USER_DEFINED, storage-address ordering for POINTER_TO and natural OBJECT ordering through IComparable.
+Explicit comparer bindings persist a workflow-owned configuration or an external key.
 A custom comparer receives both descriptors unchanged and defines its own supported representations.
 Descriptors must describe live readable storage matching their categories; strings must be terminated within
 their storage. Operands remain borrowed during evaluation. Comparer and conversion exceptions propagate
@@ -31,7 +32,8 @@ Raises an exception when evaluated before configuration or when a referenced var
 
 {attribute 'no_explicit_call' := 'do not call this function block directly'}
 {attribute 'enable_dynamic_creation'}
-FUNCTION_BLOCK CompareVariableCondition EXTENDS Condition IMPLEMENTS ICompareVariableCondition
+FUNCTION_BLOCK CompareVariableCondition EXTENDS Condition
+	IMPLEMENTS ICompareVariableCondition, TOF_Core.IConfigurationSerializable
 VAR_STAT
 	{attribute 'hide'}
 	_ClassName : STRING := __POUNAME();
@@ -51,6 +53,8 @@ VAR
 
 	{attribute 'OPC.UA.DA' := '0'}
 	_Comparer : TOF_Core.IComparer;
+	_BindingKind : DEPENDENCY_BINDING_KIND;
+	_ExternalKey : STRING;
 
 	{attribute 'OPC.UA.DA' := '0'}
 	_Configured : BOOL;
@@ -58,7 +62,8 @@ END_VAR]]></Declaration>
     <Implementation>
       <ST><![CDATA[]]></ST>
     </Implementation>
-    <Folder Name="Internal members" Id="{58dd9158-ea44-441f-ae30-1e47152182db}" />
+    <Folder Name="Overriden methods" Id="{3914a872-5b91-4e78-bc41-7298efda5192}" />
+    <Folder Name="Service methods" Id="{58dd9158-ea44-441f-ae30-1e47152182db}" />
     <Property Name="ClassName" Id="{fab625c7-99bf-4544-8456-04904e433ff5}">
       <Declaration><![CDATA[(*!
 <summary>Borrows the initialized class name used in diagnostics.</summary>
@@ -76,6 +81,52 @@ PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
         </Implementation>
       </Get>
     </Property>
+    <Method Name="compareOperands" Id="{4a82c915-7b38-4d91-8e24-3f60d18c7b52}" FolderPath="Service methods\">
+      <Declaration><![CDATA[(*!
+<summary>Dispatches operand comparison through the configured comparer or built-in type rules.</summary>
+*)
+METHOD PRIVATE compareOperands : TOF_Core.COMPARISON_RESULT
+VAR_INPUT
+	first : TOF_Core.GENERIC_VALUE;
+	second : TOF_Core.GENERIC_VALUE;
+END_VAR
+VAR
+	activeComparer : TOF_Core.IComparer;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF _Comparer <> 0 THEN
+	compareOperands := _Comparer.Compare(first := first, second := second);
+ELSIF (
+		first.TypeClass >= TOF_Core.GENERIC_TYPE_CLASS.BOOLEAN
+		AND_THEN first.TypeClass <= TOF_Core.GENERIC_TYPE_CLASS.REAL_64
+		AND_THEN second.TypeClass >= TOF_Core.GENERIC_TYPE_CLASS.BOOLEAN
+		AND_THEN second.TypeClass <= TOF_Core.GENERIC_TYPE_CLASS.REAL_64
+	)
+	OR_ELSE (
+		(first.TypeClass = TOF_Core.GENERIC_TYPE_CLASS.STRING_ASCII
+			OR_ELSE first.TypeClass = TOF_Core.GENERIC_TYPE_CLASS.STRING_UTF16)
+		AND_THEN (second.TypeClass = TOF_Core.GENERIC_TYPE_CLASS.STRING_ASCII
+			OR_ELSE second.TypeClass = TOF_Core.GENERIC_TYPE_CLASS.STRING_UTF16)
+	)
+THEN
+	compareOperands := first.CompareTo(otherValue := second);
+ELSE
+	IF first.TypeClass <> second.TypeClass THEN
+		TOF_Core.Exceptions.ThrowGenericConversionNotSupported(
+			sourceNamespaceName := NamespaceName,
+			sourceClassName := ClassName,
+			sourcePOUName := __POUNAME(),
+			sourcePosition := __POSITION(),
+			sourceDataType := first.TypeClass,
+			targetDataType := second.TypeClass
+		);
+	END_IF
+
+	activeComparer := TOF_Comparison.StandardComparers.GetForTypeClass(typeClass := first.TypeClass);
+	compareOperands := activeComparer.Compare(first := first, second := second);
+END_IF]]></ST>
+      </Implementation>
+    </Method>
     <Property Name="Comparer" Id="{c5cee58f-97b1-4e3b-b4c0-30a32d650a18}">
       <Declaration><![CDATA[(*!
 <summary>Gets or sets the borrowed custom ordering strategy, or zero to select automatic pair dispatch.</summary>
@@ -83,6 +134,7 @@ PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
 A non-null comparer must remain alive while used and accept the resolved operand representations. It receives
 both descriptors unchanged, bypassing automatic numeric/text ordering and equal-category validation. Its
 exceptions propagate without fallback; replacing the comparer does not alter the configured operands.
+Direct assignment clears any persistent binding role. Zero selects built-in comparison.
 </description>
 *)
 {attribute 'monitoring' := 'call'}
@@ -97,7 +149,11 @@ PROPERTY Comparer : TOF_Core.IComparer]]></Declaration>
         <Declaration><![CDATA[VAR
 END_VAR]]></Declaration>
         <Implementation>
-          <ST><![CDATA[_Comparer := Comparer;]]></ST>
+          <ST><![CDATA[validateNotBusy(sourcePOUName := __POUNAME());
+
+_Comparer := Comparer;
+_BindingKind := DEPENDENCY_BINDING_KIND.UNSPECIFIED;
+_ExternalKey := '';]]></ST>
         </Implementation>
       </Set>
     </Property>
@@ -122,25 +178,111 @@ Operand compatibility is checked during evaluation, when both descriptors are re
 and text pairs use GENERIC_VALUE.CompareTo; other automatic pairs require equal generic categories. A custom
 comparer defines its own supported pairs. Evaluation does not update the configured operands or operator.
 </description>
-<param name="variableName">Non-empty name of the workflow variable to evaluate.</param>
+<param name="firstVariableName">Non-empty name of the workflow variable to evaluate.</param>
 <param name="comparisonOperator">Relational or equality operator to apply.</param>
 <param name="referenceValue">Literal reference value to compare against.</param>
 *)
 METHOD Configure
 VAR_INPUT
-	variableName : STRING;
+	firstVariableName : STRING;
 	comparisonOperator : COMPARISON_OPERATOR;
 	referenceValue : ANY;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[IF variableName = '' THEN
+        <ST><![CDATA[configureLiteral(
+	firstVariableName := firstVariableName,
+	comparisonOperator := comparisonOperator,
+	referenceValue := referenceValue
+);]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="ConfigureEmbeddedComparer" Id="{373fefe4-0983-4fb9-ae88-2fdb9b5452b3}">
+      <Declaration><![CDATA[(*!
+<summary>Adopts a fresh workflow-owned comparer.</summary>
+<description>Requires a ready node in a workflow and a dynamic serializable instance available for exclusive transfer.
+The workflow owns it on success. A duplicate in the same workflow raises before changing this node.</description>
+*)
+METHOD ConfigureEmbeddedComparer
+VAR_INPUT
+	comparer : TOF_Core.IComparer;
+END_VAR
+VAR
+	owner : IEmbeddedDependencyOwner;
+	ownerWorkflow : IWorkflow;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[validateNotBusy(sourcePOUName := __POUNAME());
+
+ownerWorkflow := Workflow;
+
+IF ownerWorkflow = 0 OR_ELSE NOT __QUERYINTERFACE(ownerWorkflow, owner) THEN
+	WorkflowExceptions.ThrowWorkflowConfiguration(
+		sourceNamespaceName := NamespaceName,
+		sourceClassName := ClassName,
+		sourcePOUName := __POUNAME(),
+		sourcePosition := __POSITION(),
+		message := "Workflow does not accept embedded dependencies"
+	);
+END_IF
+
+owner.AttachEmbeddedDependency(dependency := comparer, node := THIS^);
+
+_Comparer := comparer;
+_BindingKind := DEPENDENCY_BINDING_KIND.EMBEDDED;
+_ExternalKey := '';]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="ConfigureExternalComparer" Id="{f918a814-f5e0-4db2-b780-ed73abc88c05}">
+      <Declaration><![CDATA[(*!
+<summary>Binds an externally owned comparer.</summary>
+<description>Requires a live dependency and a nonempty stable key. Several nodes may borrow the same external instance.
+The provider keeps it alive. Rejection preserves the previous binding.</description>
+*)
+METHOD ConfigureExternalComparer
+VAR_INPUT
+	comparer : TOF_Core.IComparer;
+	key : STRING;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[validateNotBusy(sourcePOUName := __POUNAME());
+
+IF comparer = 0 OR_ELSE key = '' THEN
+	WorkflowExceptions.ThrowWorkflowConfiguration(
+		sourceNamespaceName := NamespaceName,
+		sourceClassName := ClassName,
+		sourcePOUName := __POUNAME(),
+		sourcePosition := __POSITION(),
+		message := "External binding requires a live dependency and a key"
+	);
+END_IF
+
+_Comparer := comparer;
+_BindingKind := DEPENDENCY_BINDING_KIND.EXTERNAL_KEY;
+_ExternalKey := key;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="configureLiteral" Id="{af599852-b872-4e81-a5b5-d50914aea5ab}" FolderPath="Service methods\">
+      <Declaration><![CDATA[(*!
+<summary>Validates the names and copies the typed literal operand.</summary>
+<description>The descriptor and its payload are borrowed only for this call.</description>
+*)
+METHOD PRIVATE configureLiteral
+VAR_INPUT
+	firstVariableName : STRING;
+	comparisonOperator : COMPARISON_OPERATOR;
+	referenceValue : __SYSTEM.AnyType;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[validateNotBusy(sourcePOUName := __POUNAME());
+
+IF firstVariableName = '' THEN
 	TOF_Core.Exceptions.ThrowArgumentOutOfRange(
 		sourceNamespaceName := NamespaceName,
 		sourceClassName := ClassName,
 		sourcePOUName := __POUNAME(),
 		sourcePosition := __POSITION(),
-		argumentName := 'variableName',
-		argumentValue := variableName
+		argumentName := 'firstVariableName',
+		argumentValue := firstVariableName
 	);
 END_IF
 
@@ -154,6 +296,8 @@ IF referenceValue.pValue = TOF_Core.Memory.NULL_ADDRESS OR_ELSE referenceValue.d
 	);
 END_IF
 
+validateOperator(comparisonOperator := comparisonOperator, sourcePOUName := __POUNAME());
+
 _Configured := FALSE;
 
 _ReferenceValue.Release();
@@ -163,7 +307,7 @@ _ReferenceValue := TOF_Core.GenericValueFactory.FromAnyType(
 		memoryManagementBehavior := TOF_Core.GENERIC_MEMORY_MANAGEMENT_BEHAVIOR.CLONE_ORIGINAL_VALUE_AND_OWNS_MEMORY
 	);
 
-_FirstVariableName := variableName;
+_FirstVariableName := firstVariableName;
 _SecondVariableName := '';
 _Operator := comparisonOperator;
 
@@ -189,7 +333,9 @@ VAR_INPUT
 	secondVariableName : STRING;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[IF firstVariableName = '' THEN
+        <ST><![CDATA[validateNotBusy(sourcePOUName := __POUNAME());
+
+IF firstVariableName = '' THEN
 	TOF_Core.Exceptions.ThrowArgumentOutOfRange(
 		sourceNamespaceName := NamespaceName,
 		sourceClassName := ClassName,
@@ -211,6 +357,8 @@ IF secondVariableName = '' THEN
 	);
 END_IF
 
+validateOperator(comparisonOperator := comparisonOperator, sourcePOUName := __POUNAME());
+
 _Configured := FALSE;
 
 _ReferenceValue.Release();
@@ -222,7 +370,121 @@ _Operator := comparisonOperator;
 _Configured := TRUE;]]></ST>
       </Implementation>
     </Method>
-    <Method Name="FB_exit" Id="{a6ce3e19-6f11-4f34-a7c3-4b9eff5768e5}" FolderPath="Internal members\">
+    <Method Name="Deserialize" Id="{cb634a06-9bdd-4f0f-bd8f-d151b5700f3b}">
+      <Declaration><![CDATA[(*!
+<summary>Restores this fresh instance from its configuration object.</summary>
+<description>
+The reader, document node and deserialization context are borrowed for this call.
+On failure discard the partial instance.
+</description>
+<param name="reader">Active configuration reader.</param>
+<param name="node">Object node to read fields from.</param>
+<param name="context">Active configuration deserialization context providing workflow reconstruction services.</param>
+*)
+METHOD Deserialize
+VAR_INPUT
+	reader : TOF_Core.IConfigurationReader;
+	node : TOF_Core.CONFIGURATION_NODE;
+	context : TOF_Core.IConfigurationDeserializationContext;
+END_VAR
+VAR
+	loader : IWorkflowLoader;
+	firstVariableName : STRING;
+	secondVariableName : STRING;
+	sourceNode : TOF_Core.CONFIGURATION_NODE;
+	valueNode : TOF_Core.CONFIGURATION_NODE;
+	comparerNode : TOF_Core.CONFIGURATION_NODE;
+	comparison : COMPARISON_OPERATOR;
+	operatorText : STRING;
+	literal : __SYSTEM.AnyType;
+	storage : POINTER TO BYTE;
+	exceptionCode : __SYSTEM.ExceptionCode;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[loader := WorkflowConfigurationSerializer.ResolveWorkflowLoader(context := context);
+Workflows.ReadConfigurationHeader(reader := reader, node := node, target := THIS^, scope := THIS^);
+
+firstVariableName := Workflows.ReadName(reader := reader, node := reader.GetField(node := node, name := 'first'));
+loader.AddRequiredVariable(scope := THIS^, name := firstVariableName);
+operatorText := Workflows.ReadName(reader := reader, node := reader.GetField(node := node, name := 'operator'));
+comparison := Workflows.ParseComparisonOperator(rawOperator := operatorText);
+
+sourceNode := reader.FindField(node := node, name := 'second');
+valueNode := reader.FindField(node := node, name := 'value');
+
+IF (sourceNode.Handle = 0) = (valueNode.Handle = 0) THEN
+	WorkflowExceptions.ThrowWorkflowConfiguration(
+		sourceNamespaceName := NamespaceName,
+		sourceClassName := ClassName,
+		sourcePOUName := __POUNAME(),
+		sourcePosition := __POSITION(),
+		message := "Expected exactly one comparison operand"
+	);
+END_IF
+
+IF sourceNode.Handle <> 0 THEN
+	secondVariableName := Workflows.ReadName(reader := reader, node := sourceNode);
+	loader.AddRequiredVariable(scope := THIS^, name := secondVariableName);
+	ConfigureVariable(firstVariableName := firstVariableName, comparisonOperator := comparison, secondVariableName := secondVariableName);
+ELSE
+	literal := Workflows.ReadLiteral(reader := reader, node := valueNode);
+	storage := literal.pValue;
+
+	__TRY
+		configureLiteral(firstVariableName := firstVariableName, comparisonOperator := comparison, referenceValue := literal);
+	__CATCH(exceptionCode)
+		__DELETE(storage);
+		TOF_Core.ExceptionManager.ReThrowLastException(
+			exceptionCode := exceptionCode,
+			catchPointNamespaceName := NamespaceName,
+			catchPointPOUName := __POUNAME(),
+			catchPointPosition := __POSITION()
+		);
+	__ENDTRY
+
+	__DELETE(storage);
+END_IF
+
+comparerNode := reader.FindField(node := node, name := 'comparer');
+
+IF comparerNode.Handle <> 0 THEN
+	loader.BindDependency(node := comparerNode, target := THIS^, isTask := FALSE);
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="evaluateComparisonResult" Id="{6b19d428-3c57-4e92-a814-2f70e38c9d61}" FolderPath="Service methods\">
+      <Declaration><![CDATA[(*!
+<summary>Evaluates the configured relational or equality operator against a comparison result.</summary>
+*)
+METHOD PRIVATE evaluateComparisonResult : BOOL
+VAR_INPUT
+	comparisonResult : TOF_Core.COMPARISON_RESULT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[CASE _Operator OF
+	COMPARISON_OPERATOR.EQUAL:
+		evaluateComparisonResult := comparisonResult = TOF_Core.COMPARISON_RESULT.FIRST_EQUAL_TO_SECOND;
+
+	COMPARISON_OPERATOR.NOT_EQUAL:
+		evaluateComparisonResult := comparisonResult <> TOF_Core.COMPARISON_RESULT.FIRST_EQUAL_TO_SECOND;
+
+	COMPARISON_OPERATOR.LESS_THAN:
+		evaluateComparisonResult := comparisonResult = TOF_Core.COMPARISON_RESULT.FIRST_LESS_THAN_SECOND;
+
+	COMPARISON_OPERATOR.LESS_THAN_OR_EQUAL:
+		evaluateComparisonResult := comparisonResult = TOF_Core.COMPARISON_RESULT.FIRST_LESS_THAN_SECOND
+			OR_ELSE comparisonResult = TOF_Core.COMPARISON_RESULT.FIRST_EQUAL_TO_SECOND;
+
+	COMPARISON_OPERATOR.GREATER_THAN:
+		evaluateComparisonResult := comparisonResult = TOF_Core.COMPARISON_RESULT.FIRST_GREATER_THAN_SECOND;
+
+	COMPARISON_OPERATOR.GREATER_THAN_OR_EQUAL:
+		evaluateComparisonResult := comparisonResult = TOF_Core.COMPARISON_RESULT.FIRST_GREATER_THAN_SECOND
+			OR_ELSE comparisonResult = TOF_Core.COMPARISON_RESULT.FIRST_EQUAL_TO_SECOND;
+END_CASE]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="FB_exit" Id="{a6ce3e19-6f11-4f34-a7c3-4b9eff5768e5}">
       <Declaration><![CDATA[(*!
 <summary>Releases the owned comparison reference snapshot during destruction.</summary>
 <description>
@@ -269,7 +531,7 @@ PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
         </Implementation>
       </Get>
     </Property>
-    <Method Name="OnEvaluate" Id="{d1e7db02-9592-4e74-af2f-447ec2bae63f}" FolderPath="Internal members\">
+    <Method Name="OnEvaluate" Id="{d1e7db02-9592-4e74-af2f-447ec2bae63f}" FolderPath="Overriden methods\">
       <Declaration><![CDATA[(*!
 <summary>Resolves operands, selects a compatible ordering strategy and evaluates the comparison operator.</summary>
 <description>
@@ -287,10 +549,9 @@ END_VAR
 VAR
 	formattedExceptionMessage : TOF_Core.ERROR_MESSAGE;
 	variableFound : BOOL;
-	firstVal : TOF_Core.GENERIC_VALUE;
-	secondVal : TOF_Core.GENERIC_VALUE;
-	activeComparer : TOF_Core.IComparer;
-	cmpResult : TOF_Core.COMPARISON_RESULT;
+	firstValue : TOF_Core.GENERIC_VALUE;
+	secondValue : TOF_Core.GENERIC_VALUE;
+	comparisonResult : TOF_Core.COMPARISON_RESULT;
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[IF NOT Configured THEN
@@ -305,7 +566,7 @@ END_VAR]]></Declaration>
 	);
 END_IF
 
-variableFound := TryResolveVariable(name := _FirstVariableName, activity := activity, variable => firstVal);
+variableFound := TryResolveVariable(name := _FirstVariableName, activity := activity, variable => firstValue);
 
 IF NOT variableFound THEN
 	formattedExceptionMessage := TOF_Core.WideStrings.Concat255(
@@ -326,16 +587,16 @@ IF NOT variableFound THEN
 END_IF
 
 IF _SecondVariableName <> '' THEN
-	variableFound := TryResolveVariable(name := _SecondVariableName, activity := activity, variable => secondVal);
+	variableFound := TryResolveVariable(name := _SecondVariableName, activity := activity, variable => secondValue);
 
 	IF NOT variableFound THEN
 		formattedExceptionMessage := TOF_Core.WideStrings.Concat255(
-		"Condition '",
-		Name,
-		"' requires variable '",
-		TO_WSTRING(_SecondVariableName),
-		"' which is not found"
-	);
+			"Condition '",
+			Name,
+			"' requires variable '",
+			TO_WSTRING(_SecondVariableName),
+			"' which is not found"
+		);
 
 		WorkflowExceptions.ThrowWorkflowVariableNotFound(
 			sourceNamespaceName := NamespaceName,
@@ -346,63 +607,11 @@ IF _SecondVariableName <> '' THEN
 		);
 	END_IF
 ELSE
-	secondVal := _ReferenceValue;
+	secondValue := _ReferenceValue;
 END_IF
 
-IF _Comparer <> 0 THEN
-	cmpResult := _Comparer.Compare(first := firstVal, second := secondVal);
-ELSIF (
-		firstVal.TypeClass >= TOF_Core.GENERIC_TYPE_CLASS.BOOLEAN
-		AND_THEN firstVal.TypeClass <= TOF_Core.GENERIC_TYPE_CLASS.REAL_64
-		AND_THEN secondVal.TypeClass >= TOF_Core.GENERIC_TYPE_CLASS.BOOLEAN
-		AND_THEN secondVal.TypeClass <= TOF_Core.GENERIC_TYPE_CLASS.REAL_64
-	)
-	OR_ELSE (
-		(firstVal.TypeClass = TOF_Core.GENERIC_TYPE_CLASS.STRING_ASCII
-			OR_ELSE firstVal.TypeClass = TOF_Core.GENERIC_TYPE_CLASS.STRING_UTF16)
-		AND_THEN (secondVal.TypeClass = TOF_Core.GENERIC_TYPE_CLASS.STRING_ASCII
-			OR_ELSE secondVal.TypeClass = TOF_Core.GENERIC_TYPE_CLASS.STRING_UTF16)
-	)
-THEN
-	cmpResult := firstVal.CompareTo(otherValue := secondVal);
-ELSE
-
-	IF firstVal.TypeClass <> secondVal.TypeClass THEN
-		TOF_Core.Exceptions.ThrowGenericConversionNotSupported(
-			sourceNamespaceName := NamespaceName,
-			sourceClassName := ClassName,
-			sourcePOUName := __POUNAME(),
-			sourcePosition := __POSITION(),
-			sourceDataType := firstVal.TypeClass,
-			targetDataType := secondVal.TypeClass
-		);
-	END_IF
-
-	activeComparer := TOF_Comparison.StandardComparers.GetForTypeClass(typeClass := firstVal.TypeClass);
-	cmpResult := activeComparer.Compare(first := firstVal, second := secondVal);
-END_IF
-
-CASE _Operator OF
-	COMPARISON_OPERATOR.EQUAL:
-		OnEvaluate := cmpResult = TOF_Core.COMPARISON_RESULT.FIRST_EQUAL_TO_SECOND;
-
-	COMPARISON_OPERATOR.NOT_EQUAL:
-		OnEvaluate := cmpResult <> TOF_Core.COMPARISON_RESULT.FIRST_EQUAL_TO_SECOND;
-
-	COMPARISON_OPERATOR.LESS_THAN:
-		OnEvaluate := cmpResult = TOF_Core.COMPARISON_RESULT.FIRST_LESS_THAN_SECOND;
-
-	COMPARISON_OPERATOR.LESS_THAN_OR_EQUAL:
-		OnEvaluate := cmpResult = TOF_Core.COMPARISON_RESULT.FIRST_LESS_THAN_SECOND
-			OR_ELSE cmpResult = TOF_Core.COMPARISON_RESULT.FIRST_EQUAL_TO_SECOND;
-
-	COMPARISON_OPERATOR.GREATER_THAN:
-		OnEvaluate := cmpResult = TOF_Core.COMPARISON_RESULT.FIRST_GREATER_THAN_SECOND;
-
-	COMPARISON_OPERATOR.GREATER_THAN_OR_EQUAL:
-		OnEvaluate := cmpResult = TOF_Core.COMPARISON_RESULT.FIRST_GREATER_THAN_SECOND
-			OR_ELSE cmpResult = TOF_Core.COMPARISON_RESULT.FIRST_EQUAL_TO_SECOND;
-END_CASE]]></ST>
+comparisonResult := compareOperands(first := firstValue, second := secondValue);
+OnEvaluate := evaluateComparisonResult(comparisonResult := comparisonResult);]]></ST>
       </Implementation>
     </Method>
     <Property Name="Operator" Id="{5b497c96-2374-4bde-82a8-17a76eb8cb98}">
@@ -421,7 +630,10 @@ PROPERTY Operator : COMPARISON_OPERATOR]]></Declaration>
         <Declaration><![CDATA[VAR
 END_VAR]]></Declaration>
         <Implementation>
-          <ST><![CDATA[_Operator := Operator;]]></ST>
+          <ST><![CDATA[validateNotBusy(sourcePOUName := __POUNAME());
+validateOperator(comparisonOperator := Operator, sourcePOUName := __POUNAME());
+
+_Operator := Operator;]]></ST>
         </Implementation>
       </Set>
     </Property>
@@ -455,5 +667,104 @@ PROPERTY SelfSize : ULINT]]></Declaration>
         </Implementation>
       </Get>
     </Property>
+    <Method Name="Serialize" Id="{7e206955-54b1-4f30-b0b5-82a1dffcd9c0}">
+      <Declaration><![CDATA[(*!
+<summary>Writes the configuration fields for this object.</summary>
+<description>Borrows the writer for this call. A failure invalidates the current output document.</description>
+*)
+METHOD Serialize
+VAR_INPUT
+	writer : TOF_Core.IConfigurationWriter;
+END_VAR
+VAR
+	operatorText : STRING;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[Workflows.WriteConfigurationHeader(writer := writer, source := THIS^, displayName := Name, scope := THIS^);
+IF _Comparer <> 0 THEN
+	Workflows.WriteDependency(
+		writer := writer,
+		role := 'comparer',
+		kind := _BindingKind,
+		key := _ExternalKey,
+		dependency := _Comparer,
+		nodeName := Name
+	);
+END_IF
+
+writer.WriteValue(
+	name := 'first',
+	valueType := TOF_Core.CONFIGURATION_VALUE_TYPE.TYPE_STRING,
+	data := ADR(_FirstVariableName),
+	size := SIZEOF(_FirstVariableName)
+);
+operatorText := Workflows.FormatComparisonOperator(comparisonOperator := _Operator);
+writer.WriteValue(
+	name := 'operator',
+	valueType := TOF_Core.CONFIGURATION_VALUE_TYPE.TYPE_STRING,
+	data := ADR(operatorText),
+	size := SIZEOF(operatorText)
+);
+
+IF _SecondVariableName <> '' THEN
+	writer.WriteValue(
+		name := 'second',
+		valueType := TOF_Core.CONFIGURATION_VALUE_TYPE.TYPE_STRING,
+		data := ADR(_SecondVariableName),
+		size := SIZEOF(_SecondVariableName)
+	);
+ELSE
+	Workflows.WriteConfigurationLiteral(writer := writer, name := 'value', value := _ReferenceValue.AsAnyType());
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="validateNotBusy" Id="{2e58c419-7a36-4d82-b915-3c40d28e7f61}" FolderPath="Service methods\">
+      <Declaration><![CDATA[(*!
+<summary>Rejects configuration mutation while the associated workflow is active.</summary>
+*)
+METHOD PRIVATE validateNotBusy
+VAR_INPUT
+	sourcePOUName : STRING;
+END_VAR
+VAR
+	ownerWorkflow : IWorkflow;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[ownerWorkflow := Workflow;
+
+IF ownerWorkflow <> 0 AND_THEN ownerWorkflow.Busy THEN
+	WorkflowExceptions.ThrowWorkflowConfiguration(
+		sourceNamespaceName := NamespaceName,
+		sourceClassName := ClassName,
+		sourcePOUName := sourcePOUName,
+		sourcePosition := __POSITION(),
+		message := "Cannot change the binding during execution"
+	);
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="validateOperator" Id="{8c41b529-3d48-4e91-a726-5f30c18e9d42}" FolderPath="Service methods\">
+      <Declaration><![CDATA[(*!
+<summary>Validates that comparisonOperator is a defined COMPARISON_OPERATOR enumeration value.</summary>
+*)
+METHOD PRIVATE validateOperator
+VAR_INPUT
+	comparisonOperator : COMPARISON_OPERATOR;
+	sourcePOUName : STRING;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF comparisonOperator < COMPARISON_OPERATOR.EQUAL
+	OR_ELSE comparisonOperator > COMPARISON_OPERATOR.GREATER_THAN_OR_EQUAL
+THEN
+	WorkflowExceptions.ThrowWorkflowConfiguration(
+		sourceNamespaceName := NamespaceName,
+		sourceClassName := ClassName,
+		sourcePOUName := sourcePOUName,
+		sourcePosition := __POSITION(),
+		message := "Unknown operator value"
+	);
+END_IF]]></ST>
+      </Implementation>
+    </Method>
   </POU>
 </TcPlcObject>

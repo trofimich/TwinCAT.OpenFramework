@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <TcPlcObject Version="1.1.0.1" ProductVersion="3.1.4026.21">
   <POU Name="WorkflowComprehensiveTest" Id="{d7e08298-7ac4-41d4-b416-1c0c7d8a4ce5}" SpecialFunc="None">
     <Declaration><![CDATA[(*
@@ -110,6 +110,7 @@ VAR
 
 	whileCondition : POINTER TO TOF_Workflow.VariableHasValueCondition;
 	whileActivity : POINTER TO TOF_Workflow.WhileActivity;
+	whileBody : POINTER TO TOF_Workflow.SequenceActivity;
 
 	feedTaskActivity : POINTER TO TOF_Workflow.InvokeTaskActivity;
 
@@ -215,7 +216,16 @@ IF whileActivity = 0 THEN
 END_IF
 
 _Workflow.RegisterChild(child := whileActivity^);
-whileActivity^.Configure(condition := whileCondition^);
+
+whileBody := __NEW(TOF_Workflow.SequenceActivity(workflow := _Workflow));
+
+IF whileBody = 0 THEN
+	TOF_Core.DynamicMemoryManager.RaiseAllocationFailure();
+END_IF
+
+_Workflow.RegisterChild(child := whileBody^);
+
+whileActivity^.Configure(condition := whileCondition^, body := whileBody^);
 rootSequence^.AddChildActivity(activity := whileActivity^);
 
 // 3.1. InvokeTaskActivity inside while body
@@ -229,7 +239,7 @@ _Workflow.RegisterChild(child := feedTaskActivity^);
 _CounterTask.Reset(refuseReason => refuseReason);
 _CounterTask.TargetValue := 1;
 feedTaskActivity^.Configure(task := _CounterTask);
-whileActivity^.AddChildActivity(activity := feedTaskActivity^);
+whileBody^.AddChildActivity(activity := feedTaskActivity^);
 
 // 3.2. WaitConditionActivity with CompositeCondition (AND)
 condPart := __NEW(TOF_Workflow.VariableHasValueCondition(workflow := _Workflow));
@@ -269,7 +279,7 @@ END_IF
 
 _Workflow.RegisterChild(child := waitCondAct^);
 waitCondAct^.Configure(condition := compCond^);
-whileActivity^.AddChildActivity(activity := waitCondAct^);
+whileBody^.AddChildActivity(activity := waitCondAct^);
 
 // 3.3. DelayActivity
 delayAct := __NEW(TOF_Workflow.DelayActivity(workflow := _Workflow));
@@ -280,7 +290,7 @@ END_IF
 
 _Workflow.RegisterChild(child := delayAct^);
 delayAct^.Interval := T#0S;
-whileActivity^.AddChildActivity(activity := delayAct^);
+whileBody^.AddChildActivity(activity := delayAct^);
 
 // 3.4. WaitAndPickActivity (Inspection decision)
 pickAct := __NEW(TOF_Workflow.WaitAndPickActivity(workflow := _Workflow));
@@ -308,7 +318,7 @@ END_IF
 
 _Workflow.RegisterChild(child := actOk^);
 actOk^.Configure(targetVariableName := 'ProducedCount', value := producedIncrement);
-pickAct^.AddBarnch(condition := condOk^, activity := actOk^);
+pickAct^.AddBranch(condition := condOk^, activity := actOk^);
 
 condRej := __NEW(TOF_Workflow.VariableHasValueCondition(workflow := _Workflow));
 
@@ -327,9 +337,9 @@ END_IF
 
 _Workflow.RegisterChild(child := actRej^);
 actRej^.Configure(targetVariableName := 'RejectCount', value := rejectIncrement);
-pickAct^.AddBarnch(condition := condRej^, activity := actRej^);
+pickAct^.AddBranch(condition := condRej^, activity := actRej^);
 
-whileActivity^.AddChildActivity(activity := pickAct^);
+whileBody^.AddChildActivity(activity := pickAct^);
 
 // 3.5. IfElseActivity
 ifCond := __NEW(TOF_Workflow.VariableHasValueCondition(workflow := _Workflow));
@@ -358,7 +368,7 @@ END_IF
 
 _Workflow.RegisterChild(child := ifElseAct^);
 ifElseAct^.Configure(condition := ifCond^, trueActivity := trueAct^, falseActivity := 0);
-whileActivity^.AddChildActivity(activity := ifElseAct^);
+whileBody^.AddChildActivity(activity := ifElseAct^);
 
 // 3.6. TryCatchActivity: verifies exception interception and recovery
 tryCatchAct := __NEW(TOF_Workflow.TryCatchActivity(workflow := _Workflow));
@@ -379,7 +389,7 @@ END_IF
 _Workflow.RegisterChild(child := catchAct^);
 
 tryCatchAct^.Configure(tryActivity := _ThrowingActivity, catchActivity := catchAct^);
-whileActivity^.AddChildActivity(activity := tryCatchAct^);
+whileBody^.AddChildActivity(activity := tryCatchAct^);
 
 // Set root activity on workflow
 _Workflow.SetRootActivity(rootActivity := rootSequence^);
@@ -433,7 +443,7 @@ _Workflow.ProducedCount := 5;
 
 // Literal comparisons
 _ComparisonCondition.Configure(
-	variableName := 'ProducedCount',
+	firstVariableName := 'ProducedCount',
 	comparisonOperator := TOF_Workflow.COMPARISON_OPERATOR.LESS_THAN,
 	referenceValue := threshold10
 );
@@ -443,7 +453,7 @@ AssertTrue(
 );
 
 _ComparisonCondition.Configure(
-	variableName := 'ProducedCount',
+	firstVariableName := 'ProducedCount',
 	comparisonOperator := TOF_Workflow.COMPARISON_OPERATOR.GREATER_THAN,
 	referenceValue := threshold10
 );
@@ -453,7 +463,7 @@ AssertFalse(
 );
 
 _ComparisonCondition.Configure(
-	variableName := 'ProducedCount',
+	firstVariableName := 'ProducedCount',
 	comparisonOperator := TOF_Workflow.COMPARISON_OPERATOR.EQUAL,
 	referenceValue := threshold5
 );
@@ -463,7 +473,7 @@ AssertTrue(
 );
 
 _ComparisonCondition.Configure(
-	variableName := 'ProducedCount',
+	firstVariableName := 'ProducedCount',
 	comparisonOperator := TOF_Workflow.COMPARISON_OPERATOR.NOT_EQUAL,
 	referenceValue := threshold5
 );
@@ -473,7 +483,7 @@ AssertFalse(
 );
 
 _ComparisonCondition.Configure(
-	variableName := 'ProducedCount',
+	firstVariableName := 'ProducedCount',
 	comparisonOperator := TOF_Workflow.COMPARISON_OPERATOR.GREATER_THAN_OR_EQUAL,
 	referenceValue := threshold5
 );
@@ -483,7 +493,7 @@ AssertTrue(
 );
 
 _ComparisonCondition.Configure(
-	variableName := 'ProducedCount',
+	firstVariableName := 'ProducedCount',
 	comparisonOperator := TOF_Workflow.COMPARISON_OPERATOR.LESS_THAN_OR_EQUAL,
 	referenceValue := threshold10
 );
@@ -542,11 +552,11 @@ END_IF
 TEST(TestName := __POUNAME());
 
 _PairComparisonCondition.Comparer := 0;
-_PairComparisonCondition.RegisterVariable(name := 'NumericNarrow', plcVariable := _ComparisonNarrowInteger);
-_PairComparisonCondition.RegisterVariable(name := 'NumericWide', plcVariable := _ComparisonWideInteger);
-_PairComparisonCondition.RegisterVariable(name := 'NumericSigned', plcVariable := _ComparisonSignedInteger);
-_PairComparisonCondition.RegisterVariable(name := 'NumericUnsigned', plcVariable := _ComparisonUnsignedInteger);
-_PairComparisonCondition.RegisterVariable(name := 'NumericFloat', plcVariable := _ComparisonFloatingValue);
+_PairComparisonCondition.BindPlcVariable(name := 'NumericNarrow', plcVariable := _ComparisonNarrowInteger);
+_PairComparisonCondition.BindPlcVariable(name := 'NumericWide', plcVariable := _ComparisonWideInteger);
+_PairComparisonCondition.BindPlcVariable(name := 'NumericSigned', plcVariable := _ComparisonSignedInteger);
+_PairComparisonCondition.BindPlcVariable(name := 'NumericUnsigned', plcVariable := _ComparisonUnsignedInteger);
+_PairComparisonCondition.BindPlcVariable(name := 'NumericFloat', plcVariable := _ComparisonFloatingValue);
 
 _PairComparisonCondition.ConfigureVariable(
 	firstVariableName := 'NumericWide',
@@ -569,7 +579,7 @@ AssertTrue(
 );
 
 _PairComparisonCondition.Configure(
-	variableName := 'NumericWide',
+	firstVariableName := 'NumericWide',
 	comparisonOperator := TOF_Workflow.COMPARISON_OPERATOR.GREATER_THAN,
 	referenceValue := _ComparisonNarrowInteger
 );
@@ -579,7 +589,7 @@ AssertTrue(
 );
 
 _PairComparisonCondition.Configure(
-	variableName := 'NumericNarrow',
+	firstVariableName := 'NumericNarrow',
 	comparisonOperator := TOF_Workflow.COMPARISON_OPERATOR.LESS_THAN,
 	referenceValue := _ComparisonWideInteger
 );
@@ -609,7 +619,7 @@ AssertTrue(
 );
 
 _PairComparisonCondition.Configure(
-	variableName := 'NumericSigned',
+	firstVariableName := 'NumericSigned',
 	comparisonOperator := TOF_Workflow.COMPARISON_OPERATOR.LESS_THAN,
 	referenceValue := _ComparisonUnsignedInteger
 );
@@ -619,7 +629,7 @@ AssertTrue(
 );
 
 _PairComparisonCondition.Configure(
-	variableName := 'NumericUnsigned',
+	firstVariableName := 'NumericUnsigned',
 	comparisonOperator := TOF_Workflow.COMPARISON_OPERATOR.GREATER_THAN,
 	referenceValue := _ComparisonSignedInteger
 );
@@ -653,7 +663,7 @@ AssertTrue(
 );
 
 _PairComparisonCondition.Configure(
-	variableName := 'NumericWide',
+	firstVariableName := 'NumericWide',
 	comparisonOperator := TOF_Workflow.COMPARISON_OPERATOR.GREATER_THAN,
 	referenceValue := _ComparisonFloatingValue
 );
@@ -722,8 +732,8 @@ _ComparisonText[261] := TO_BYTE(TOF_Core.UnsignedInt8.MIN_VALUE);
 _ComparisonWideText[261] := TO_WORD(TOF_Core.UnsignedInt16.MIN_VALUE);
 {analysis +175}
 
-_PairComparisonCondition.RegisterVariable(name := 'TextNarrow', plcVariable := _ComparisonText);
-_PairComparisonCondition.RegisterVariable(name := 'TextWide', plcVariable := _ComparisonWideText);
+_PairComparisonCondition.BindPlcVariable(name := 'TextNarrow', plcVariable := _ComparisonText);
+_PairComparisonCondition.BindPlcVariable(name := 'TextWide', plcVariable := _ComparisonWideText);
 
 _PairComparisonCondition.ConfigureVariable(
 	firstVariableName := 'TextNarrow',
@@ -746,7 +756,7 @@ AssertTrue(
 );
 
 _PairComparisonCondition.Configure(
-	variableName := 'TextNarrow',
+	firstVariableName := 'TextNarrow',
 	comparisonOperator := TOF_Workflow.COMPARISON_OPERATOR.LESS_THAN,
 	referenceValue := _ComparisonWideText
 );
@@ -756,7 +766,7 @@ AssertTrue(
 );
 
 _PairComparisonCondition.Configure(
-	variableName := 'TextWide',
+	firstVariableName := 'TextWide',
 	comparisonOperator := TOF_Workflow.COMPARISON_OPERATOR.GREATER_THAN,
 	referenceValue := _ComparisonText
 );
@@ -792,10 +802,10 @@ _PairComparisonCondition.Comparer := 0;
 _FirstComparisonBytes.Raw := UDINT#16#01010101;
 _SecondComparisonBytes.Raw := UDINT#16#02020202;
 
-_PairComparisonCondition.RegisterVariable(name := 'FallbackEarlierTime', plcVariable := _FirstComparisonTimeOfDay);
-_PairComparisonCondition.RegisterVariable(name := 'FallbackLaterTime', plcVariable := _SecondComparisonTimeOfDay);
-_PairComparisonCondition.RegisterVariable(name := 'FallbackFirstBytes', plcVariable := _FirstComparisonBytes);
-_PairComparisonCondition.RegisterVariable(name := 'FallbackSecondBytes', plcVariable := _SecondComparisonBytes);
+_PairComparisonCondition.BindPlcVariable(name := 'FallbackEarlierTime', plcVariable := _FirstComparisonTimeOfDay);
+_PairComparisonCondition.BindPlcVariable(name := 'FallbackLaterTime', plcVariable := _SecondComparisonTimeOfDay);
+_PairComparisonCondition.BindPlcVariable(name := 'FallbackFirstBytes', plcVariable := _FirstComparisonBytes);
+_PairComparisonCondition.BindPlcVariable(name := 'FallbackSecondBytes', plcVariable := _SecondComparisonBytes);
 
 _PairComparisonCondition.ConfigureVariable(
 	firstVariableName := 'FallbackEarlierTime',
@@ -808,7 +818,7 @@ AssertTrue(
 );
 
 _PairComparisonCondition.Configure(
-	variableName := 'FallbackLaterTime',
+	firstVariableName := 'FallbackLaterTime',
 	comparisonOperator := TOF_Workflow.COMPARISON_OPERATOR.GREATER_THAN,
 	referenceValue := _FirstComparisonTimeOfDay
 );
@@ -828,7 +838,7 @@ AssertTrue(
 );
 
 _PairComparisonCondition.Configure(
-	variableName := 'FallbackSecondBytes',
+	firstVariableName := 'FallbackSecondBytes',
 	comparisonOperator := TOF_Workflow.COMPARISON_OPERATOR.GREATER_THAN,
 	referenceValue := _FirstComparisonBytes
 );
@@ -862,11 +872,11 @@ END_IF
 TEST(TestName := __POUNAME());
 
 _PairComparisonCondition.Comparer := 0;
-_PairComparisonCondition.RegisterVariable(name := 'RejectedNumber', plcVariable := _ComparisonUnrelatedInteger);
-_PairComparisonCondition.RegisterVariable(name := 'RejectedTime', plcVariable := _FirstComparisonTimeOfDay);
-_PairComparisonCondition.RegisterVariable(name := 'RejectedText', plcVariable := _ComparisonText);
-_PairComparisonCondition.RegisterVariable(name := 'RejectedBytes', plcVariable := _FirstComparisonBytes);
-_PairComparisonCondition.RegisterVariable(
+_PairComparisonCondition.BindPlcVariable(name := 'RejectedNumber', plcVariable := _ComparisonUnrelatedInteger);
+_PairComparisonCondition.BindPlcVariable(name := 'RejectedTime', plcVariable := _FirstComparisonTimeOfDay);
+_PairComparisonCondition.BindPlcVariable(name := 'RejectedText', plcVariable := _ComparisonText);
+_PairComparisonCondition.BindPlcVariable(name := 'RejectedBytes', plcVariable := _FirstComparisonBytes);
+_PairComparisonCondition.BindPlcVariable(
 	name := 'RejectedObject',
 	plcVariable := _ComparisonObject,
 	plcVariableIsObject := TRUE
@@ -887,14 +897,14 @@ _PairComparisonCondition.ConfigureVariable(
 assertComparisonRejected(scenario := 'TOD/DINT variables');
 
 _PairComparisonCondition.Configure(
-	variableName := 'RejectedNumber',
+	firstVariableName := 'RejectedNumber',
 	comparisonOperator := TOF_Workflow.COMPARISON_OPERATOR.EQUAL,
 	referenceValue := _FirstComparisonTimeOfDay
 );
 assertComparisonRejected(scenario := 'DINT/TOD reference');
 
 _PairComparisonCondition.Configure(
-	variableName := 'RejectedTime',
+	firstVariableName := 'RejectedTime',
 	comparisonOperator := TOF_Workflow.COMPARISON_OPERATOR.EQUAL,
 	referenceValue := _ComparisonUnrelatedInteger
 );
@@ -929,7 +939,7 @@ _PairComparisonCondition.ConfigureVariable(
 assertComparisonRejected(scenario := 'USER_DEFINED/OBJECT variables');
 
 _PairComparisonCondition.Configure(
-	variableName := 'RejectedNumber',
+	firstVariableName := 'RejectedNumber',
 	comparisonOperator := TOF_Workflow.COMPARISON_OPERATOR.EQUAL,
 	referenceValue := _ComparisonUnrelatedInteger
 );
@@ -1391,8 +1401,8 @@ END_IF
 AssertTrue(Condition := _DirectWorkflow <> 0, Message := 'Workflow dynamic creation (__NEW) must succeed');
 
 IF _DirectWorkflow <> 0 THEN
-	registered := _DirectWorkflow^.RegisterVariable(name := 'DynamicVar', plcVariable := _DynamicTestVar);
-	AssertTrue(Condition := registered, Message := 'RegisterVariable on dynamic Workflow must return TRUE');
+	registered := _DirectWorkflow^.BindPlcVariable(name := 'DynamicVar', plcVariable := _DynamicTestVar);
+	AssertTrue(Condition := registered, Message := 'BindPlcVariable on dynamic Workflow must return TRUE');
 
 	found := _DirectWorkflow^.TryGetVariable(name := 'DynamicVar', variable => resolvedVar);
 	AssertTrue(Condition := found, Message := 'TryGetVariable on dynamic Workflow must find registered variable');
@@ -1449,7 +1459,7 @@ _Workflow.RegisterChild(child := childAssign^);
 rootSequence^.AddChildActivity(activity := childAssign^);
 
 // Register variable in parent activity scope
-rootSequence^.RegisterVariable(name := 'ParentVar', plcVariable := _ParentScopeVar);
+rootSequence^.BindPlcVariable(name := 'ParentVar', plcVariable := _ParentScopeVar);
 
 // Child should find parent variable through hierarchical resolution
 found := childAssign^.TryGetVariable(name := 'ParentVar', variable => resolvedVar);
@@ -1457,8 +1467,8 @@ AssertTrue(Condition := found, Message := 'Child activity must resolve variable 
 AssertTrue(Condition := resolvedVar.Address = ADR(_ParentScopeVar), Message := 'Parent variable address must match');
 
 // Register variable in workflow, and shadow it in child activity
-_ScopeWorkflow.RegisterVariable(name := 'ShadowVar', plcVariable := _WorkflowScopeVar);
-childAssign^.RegisterVariable(name := 'ShadowVar', plcVariable := _ChildLocalVar);
+_ScopeWorkflow.BindPlcVariable(name := 'ShadowVar', plcVariable := _WorkflowScopeVar);
+childAssign^.BindPlcVariable(name := 'ShadowVar', plcVariable := _ChildLocalVar);
 
 // Child activity must resolve its own shadowed local variable
 found := childAssign^.TryGetVariable(name := 'ShadowVar', variable => resolvedVar);
@@ -1505,10 +1515,10 @@ END_IF
 
 TEST(TestName := __POUNAME());
 
-_ValidationWorkflow.RegisterVariable(name := 'Registered', plcVariable := _ValidationValue);
+_ValidationWorkflow.BindPlcVariable(name := 'Registered', plcVariable := _ValidationValue);
 
 __TRY
-	_ValidationWorkflow.RegisterVariable(name := 'StackValue', plcVariable := stackValue);
+	_ValidationWorkflow.BindPlcVariable(name := 'StackValue', plcVariable := stackValue);
 __CATCH(exceptionCode)
 	exception := TOF_Core.ExceptionManager.GetLastException(
 		exceptionCode := exceptionCode,
@@ -1523,7 +1533,7 @@ AssertTrue(Condition := caughtExpected, Message := 'Stack binding must raise Wor
 caughtExpected := FALSE;
 
 __TRY
-	_ValidationWorkflow.RegisterVariable(name := '', plcVariable := _ValidationValue);
+	_ValidationWorkflow.BindPlcVariable(name := '', plcVariable := _ValidationValue);
 __CATCH(exceptionCode)
 	exception := TOF_Core.ExceptionManager.GetLastException(
 		exceptionCode := exceptionCode,
@@ -1538,7 +1548,7 @@ AssertTrue(Condition := caughtExpected, Message := 'Empty name must raise Workfl
 caughtExpected := FALSE;
 
 __TRY
-	_ValidationWorkflow.RegisterVariable(name := 'Registered', plcVariable := _ValidationValue);
+	_ValidationWorkflow.BindPlcVariable(name := 'Registered', plcVariable := _ValidationValue);
 __CATCH(exceptionCode)
 	exception := TOF_Core.ExceptionManager.GetLastException(
 		exceptionCode := exceptionCode,
@@ -1558,7 +1568,7 @@ AssertTrue(Condition := _ValidationWorkflow.Busy, Message := 'The busy guard fix
 caughtExpected := FALSE;
 
 __TRY
-	_ValidationWorkflow.RegisterVariable(name := 'WhileBusy', plcVariable := _ValidationValue);
+	_ValidationWorkflow.BindPlcVariable(name := 'WhileBusy', plcVariable := _ValidationValue);
 __CATCH(exceptionCode)
 	exception := TOF_Core.ExceptionManager.GetLastException(
 		exceptionCode := exceptionCode,

@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <TcPlcObject Version="1.1.0.1">
   <POU Name="Condition" Id="{5ba1e305-1521-4876-bdb5-1f2abfdf8601}" SpecialFunc="None">
     <Declaration><![CDATA[(*
@@ -14,11 +14,14 @@ FB_init stores the workflow association and default name only. Dynamic instances
 RegisterChild after construction; static instances remain caller-owned. Named variable lookup searches local,
 parent condition, parent activity and workflow scopes without propagating exceptions. Variable conditions
 use TryResolveVariable to search local scopes, then the evaluating activity hierarchy, before workflow fallback.
+Condition declarations survive evaluation and reset with the owning activity.
 </description>
 *)
 
 {attribute 'no_explicit_call' := 'do not call this function block directly'}
-FUNCTION_BLOCK ABSTRACT Condition EXTENDS TOF_Core.Object IMPLEMENTS ICondition, ILocalVariableContainer
+FUNCTION_BLOCK ABSTRACT Condition EXTENDS TOF_Core.Object
+	IMPLEMENTS ICondition, ILocalVariableLookup, IDeclaredVariableContainer,
+		IVariableBinder, IVariableResetScopeProvider
 VAR
 	{attribute 'hide'} 
 	_Name : WSTRING;
@@ -29,12 +32,14 @@ VAR
 	
 	_ParentCondition : ICondition;
 
-	_Variables : TOF_Collections.Dictionary<0>(keyValidator := 0, valueValidator := 0, keyEqualityComparer := 0);
+	_VariableResetScope : VariableResetScope;
+	_VariableScope : VariableScope;
 END_VAR]]></Declaration>
     <Implementation>
       <ST><![CDATA[]]></ST>
     </Implementation>
     <Folder Name="Methods to override" Id="{5ed654de-488c-41a3-9dd6-d31befe37354}" />
+    <Folder Name="Service methods" Id="{7102e9a5-813c-42ef-9cb4-8a48ef0392bc}" />
     <Property Name="Configured" Id="{167f4971-9594-4ce6-95be-09c7e6a87131}">
       <Declaration><![CDATA[(*!
 <summary>Reports whether the condition is completely configured and ready for evaluation.</summary>
@@ -147,13 +152,37 @@ END_IF]]></ST>
         </Implementation>
       </Get>
     </Property>
+    <Property Name="EnclosingActivity" Id="{4cfa67f8-5c8c-41ea-9487-dd9a619745d2}">
+      <Declaration><![CDATA[(*!
+<summary>Resolves the nearest activity that hosts this condition, traversing parent conditions if needed.</summary>
+<description>
+Returns the direct ParentActivity when attached directly to an activity, or traverses the ParentCondition
+chain upward until the hosting activity is found. Returns 0 if unattached.
+</description>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY FINAL EnclosingActivity : IActivity]]></Declaration>
+      <Get Name="Get" Id="{f9e629fa-d4f1-4b2b-804f-6c6e3caf5584}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[IF _ParentActivity <> 0 THEN
+	EnclosingActivity := _ParentActivity;
+ELSIF _ParentCondition <> 0 THEN
+	EnclosingActivity := _ParentCondition.EnclosingActivity;
+END_IF]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
     <Property Name="ParentActivity" Id="{b6256e22-b8a0-4cc3-a832-607b87034c7f}">
       <Declaration><![CDATA[(*!
-<summary>Gets the inherited activity context or establishes a direct borrowed parent activity.</summary>
+<summary>Gets or sets the borrowed immediate parent activity to which this condition is attached.</summary>
 <description>
-An unchanged direct link is a no-op. Attachment validates topology and readiness before mutation. An existing
-activity or condition parent cannot be detached or replaced. No ownership transfer or cross-task safety is
-provided; borrowed parents must remain live for the tree lifetime.
+Returns 0 when the condition is attached to a parent condition rather than directly to an activity.
+Use EnclosingActivity to resolve the owning activity context through the parent condition chain.
+The standard implementation validates cycles, fixed workflow association and PASSIVE_READY before a new
+link is stored. Existing parent links cannot be detached or replaced; an unchanged link is a no-op.
+Parents are borrowed for the tree lifetime and do not transfer ownership. Configuration is single-task
+without reentry; a child with a known owner requires a parent from that same known workflow.
 </description>
 *)
 {attribute 'monitoring' := 'call'}
@@ -161,15 +190,13 @@ PROPERTY FINAL ParentActivity : IActivity]]></Declaration>
       <Get Name="Get" Id="{51d2327b-3bc3-49d3-8be6-ff68ae13904b}">
         <Declaration><![CDATA[]]></Declaration>
         <Implementation>
-          <ST><![CDATA[IF _ParentActivity <> 0 THEN
-	ParentActivity := _ParentActivity;
-ELSIF _ParentCondition <> 0 THEN
-	ParentActivity := _ParentCondition.ParentActivity;
-END_IF]]></ST>
+          <ST><![CDATA[ParentActivity := _ParentActivity;]]></ST>
         </Implementation>
       </Get>
       <Set Name="Set" Id="{41b8ec15-87fc-4bba-8ef5-a5827c202fef}">
-        <Declaration><![CDATA[]]></Declaration>
+        <Declaration><![CDATA[VAR
+	resetOwner : IVariableResetScopeProvider;
+END_VAR]]></Declaration>
         <Implementation>
           <ST><![CDATA[IF _ParentCondition = 0 AND_THEN _ParentActivity = ParentActivity THEN
 	RETURN;
@@ -187,6 +214,10 @@ END_IF
 
 Workflows.ValidateElementAttachment(parent := ParentActivity, child := THIS^);
 
+IF __QUERYINTERFACE(ParentActivity, resetOwner) THEN
+	_VariableResetScope.Attach(parent := resetOwner.GetResetScope());
+END_IF
+
 _ParentActivity := ParentActivity;]]></ST>
         </Implementation>
       </Set>
@@ -197,7 +228,8 @@ _ParentActivity := ParentActivity;]]></ST>
 <description>
 An unchanged link is a no-op. Topology and readiness are validated before mutation; an existing activity or
 condition parent cannot be detached or replaced. Activity context is resolved through the live parent chain,
-without caching a second parent link. No ownership transfer or cross-task safety is provided.
+without caching a second parent link. A standard parent links the subtree for reset. Both nodes are
+non-copyable after linking and are used in the same task.
 </description>
 *)
 {attribute 'monitoring' := 'call'}
@@ -209,7 +241,9 @@ PROPERTY FINAL ParentCondition : ICondition]]></Declaration>
         </Implementation>
       </Get>
       <Set Name="Set" Id="{dc850025-6a74-45a0-9116-b83341f47346}">
-        <Declaration><![CDATA[]]></Declaration>
+        <Declaration><![CDATA[VAR
+	resetOwner : IVariableResetScopeProvider;
+END_VAR]]></Declaration>
         <Implementation>
           <ST><![CDATA[IF _ParentActivity = 0 AND_THEN _ParentCondition = ParentCondition THEN
 	RETURN;
@@ -227,134 +261,53 @@ END_IF
 
 Workflows.ValidateElementAttachment(parent := ParentCondition, child := THIS^);
 
+IF __QUERYINTERFACE(ParentCondition, resetOwner) THEN
+	_VariableResetScope.Attach(parent := resetOwner.GetResetScope());
+END_IF
+
 _ParentCondition := ParentCondition;]]></ST>
         </Implementation>
       </Set>
     </Property>
-    <Method Name="RegisterVariable" Id="{6f5798da-6c21-457a-b2ca-224f01c47000}">
+    <Method Name="BindPlcVariable" Id="{6f5798da-6c21-457a-b2ca-224f01c47000}">
       <Declaration><![CDATA[(*!
-<summary>Registers a named PLC variable reference in this condition's local scope.</summary>
+<summary>Binds a named PLC variable reference in this condition's local scope.</summary>
 <description>
 Stores a borrowed reference to the supplied PLC variable in the condition variable dictionary under a unique name.
 Fails if the workflow is busy, the name is empty, the name already exists in this condition, or the variable resides
 in stack memory.
 Type mapping precedes allocation of the owned name key. Failure before dictionary acceptance releases
-that key and propagates the exception; successful registration transfers key ownership to the dictionary.
+that key and propagates the exception; successful binding transfers key ownership to the dictionary.
 The variable storage remains borrowed and must outlive its binding.
 </description>
 <param name="name">Unique non-empty variable name.</param>
 <param name="plcVariable">PLC variable to bind (instance field or global variable).</param>
 <param name="plcVariableIsObject">TRUE if the variable is an FB instance implementing IObject.</param>
 *)
-METHOD RegisterVariable : BOOL
+METHOD BindPlcVariable : BOOL
 VAR_INPUT
 	name : STRING;
 	plcVariable : ANY;
 	plcVariableIsObject : BOOL := FALSE;
 END_VAR
 VAR
-	formattedExceptionMessage : TOF_Core.ERROR_MESSAGE;
-	variableKey : TOF_Core.GENERIC_VALUE;
-	variableValue : TOF_Core.GENERIC_VALUE;
-	existingVariable : TOF_Core.GENERIC_VALUE;
-	exceptionCode : __SYSTEM.ExceptionCode;
+	ownerWorkflow : IWorkflow;
 END_VAR
 ]]></Declaration>
       <Implementation>
-        <ST><![CDATA[IF name = '' THEN
-	WorkflowExceptions.ThrowWorkflowConfiguration(
-		sourceNamespaceName := NamespaceName,
-		sourceClassName := ClassName,
-		sourcePOUName := __POUNAME(),
-		sourcePosition := __POSITION(),
-		message := "Variable name cannot be empty"
-	);
-END_IF
+        <ST><![CDATA[ownerWorkflow := Workflow;
 
-IF Workflow <> 0 AND_THEN Workflow.Busy THEN
-	formattedExceptionMessage := TOF_Core.WideStrings.Concat255(
-		"Unable to register variable '",
-		TO_WSTRING(name),
-		"' in condition '",
-		THIS^.Name,
-		"': workflow is busy"
-	);
-
-	WorkflowExceptions.ThrowWorkflowConfiguration(
-		sourceNamespaceName := NamespaceName,
-		sourceClassName := ClassName,
-		sourcePOUName := __POUNAME(),
-		sourcePosition := __POSITION(),
-		message := formattedExceptionMessage
-	);
-END_IF
-
-IF TOF_Core.Memory.IsStackData(dataAddress := plcVariable.pValue, dataSize := TO_UDINT(plcVariable.diSize)) THEN
-	formattedExceptionMessage := TOF_Core.WideStrings.Concat255(
-		"Unable to register variable '",
-		TO_WSTRING(name),
-		"' in condition '",
-		THIS^.Name,
-		"': variable resides in stack memory"
-	);
-
-	WorkflowExceptions.ThrowWorkflowConfiguration(
-		sourceNamespaceName := NamespaceName,
-		sourceClassName := ClassName,
-		sourcePOUName := __POUNAME(),
-		sourcePosition := __POSITION(),
-		message := formattedExceptionMessage
-	);
-END_IF
-
-IF _Variables.TryGetValueByKey(key := name, value => existingVariable) THEN
-	formattedExceptionMessage := TOF_Core.WideStrings.Concat255(
-		"Variable with name '",
-		TO_WSTRING(name),
-		"' is already registered in condition '",
-		THIS^.Name,
-		"'"
-	);
-
-	WorkflowExceptions.ThrowWorkflowConfiguration(
-		sourceNamespaceName := NamespaceName,
-		sourceClassName := ClassName,
-		sourcePOUName := __POUNAME(),
-		sourcePosition := __POSITION(),
-		message := formattedExceptionMessage
-	);
-END_IF
-
-variableValue := TOF_Core.GenericValueFactory.FromParts(
-	genericTypeClass := TOF_Core.GenericTypeClassConvertor.GetGenericTypeClassBySystemAnyType(
-		systemAnyType := plcVariable,
-		isObject := plcVariableIsObject
-	),
-	address := plcVariable.pValue,
-	size := TO_ULINT(plcVariable.diSize),
-	memoryManagementBehavior := TOF_Core.GENERIC_MEMORY_MANAGEMENT_BEHAVIOR.STORE_ORIGINAL_REFERENCE_AND_NOT_OWNS_MEMORY
-);
-
-variableKey := TOF_Core.GenericValueFactory.FromStringValue(value := name);
-
-// The dictionary accepts key ownership only after validation and storage growth succeed.
-
-__TRY
-	_Variables.SetGeneric(key := variableKey, value := variableValue);
-__CATCH(exceptionCode)
-	variableKey.Release();
-
-	TOF_Core.ExceptionManager.ReThrowLastException(
-		exceptionCode := exceptionCode,
-		catchPointNamespaceName := NamespaceName,
-		catchPointPOUName := __POUNAME(),
-		catchPointPosition := __POSITION()
-	);
-__ENDTRY
-
-variableKey.Reset();
-
-RegisterVariable := TRUE;]]></ST>
+BindPlcVariable := _VariableScope.BindPlcVariable(
+	name := name,
+	plcVariable := plcVariable,
+	plcVariableIsObject := plcVariableIsObject,
+	busy := ownerWorkflow <> 0 AND_THEN ownerWorkflow.Busy,
+	ownerKind := 'condition',
+	busyOwnerKind := 'workflow',
+	ownerName := THIS^.Name,
+	sourceClassName := ClassName,
+	sourcePOUName := __POUNAME()
+);]]></ST>
       </Implementation>
     </Method>
     <Method Name="TryGetVariable" Id="{54c0b438-a23e-4e9d-a1fa-12698a06e3ed}">
@@ -385,7 +338,7 @@ END_VAR
 END_IF
 
 __TRY
-	TryGetVariable := _Variables.TryGetValueByKey(key := name, value => variable);
+	TryGetVariable := _VariableScope.TryGetLocalVariable(name := name, variable => variable);
 
 	IF NOT TryGetVariable AND_THEN NOT TOF_Core.DynamicMemoryManager.HasAllocationFailed
 		AND_THEN _ParentCondition <> 0
@@ -453,26 +406,14 @@ VAR_OUTPUT
 	variable : TOF_Core.GENERIC_VALUE;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[IF TOF_Core.DynamicMemoryManager.HasAllocationFailed THEN
-	RETURN;
-END_IF
-
-__TRY
-	TryGetLocalVariable := _Variables.TryGetValueByKey(key := name, value => variable);
-__CATCH
-	TryGetLocalVariable := FALSE;
-__ENDTRY
-
-IF TOF_Core.DynamicMemoryManager.HasAllocationFailed THEN
-	TryGetLocalVariable := FALSE;
-END_IF]]></ST>
+        <ST><![CDATA[TryGetLocalVariable := _VariableScope.TryGetLocalVariable(name := name, variable => variable);]]></ST>
       </Implementation>
     </Method>
-    <Method Name="tryGetHierarchyVariable" Id="{0f916c1d-490f-4bd7-9055-aaa0242fb7fc}">
+    <Method Name="tryGetHierarchyVariable" Id="{0f916c1d-490f-4bd7-9055-aaa0242fb7fc}" FolderPath="Service methods\">
       <Declaration><![CDATA[(*!
 <summary>Searches one stable parent chain for direct bindings or legacy lookup providers.</summary>
 <description>
-The local pass queries only ILocalVariableContainer. The legacy pass calls TryGetVariable only on
+The local pass queries only ILocalVariableLookup. The legacy pass calls TryGetVariable only on
 elements without that capability. All callbacks are contained; a fatal allocation observation stops traversal.
 Parent links must remain acyclic and unchanged during lookup. Output is borrowed and usable only on TRUE.
 </description>
@@ -492,7 +433,7 @@ VAR_OUTPUT
 END_VAR
 VAR
 	currentScope : IWorkflowElement;
-	localContainer : ILocalVariableContainer;
+	lookupContainer : ILocalVariableLookup;
 	hasLocalLookup : BOOL;
 END_VAR]]></Declaration>
       <Implementation>
@@ -504,10 +445,10 @@ __TRY
 	currentScope := scope;
 
 	WHILE currentScope <> 0 AND_THEN NOT TOF_Core.DynamicMemoryManager.HasAllocationFailed DO
-		hasLocalLookup := __QUERYINTERFACE(currentScope, localContainer);
+		hasLocalLookup := __QUERYINTERFACE(currentScope, lookupContainer);
 
 		IF localLookup AND_THEN hasLocalLookup THEN
-			tryGetHierarchyVariable := localContainer.TryGetLocalVariable(name := name, variable => variable);
+			tryGetHierarchyVariable := lookupContainer.TryGetLocalVariable(name := name, variable => variable);
 		ELSIF NOT localLookup AND_THEN NOT hasLocalLookup THEN
 			tryGetHierarchyVariable := currentScope.TryGetVariable(name := name, variable => variable);
 		END_IF
@@ -527,12 +468,12 @@ IF TOF_Core.DynamicMemoryManager.HasAllocationFailed THEN
 END_IF]]></ST>
       </Implementation>
     </Method>
-    <Method Name="TryResolveVariable" Id="{b472ac93-f74b-43bc-a428-8805683e1486}">
+    <Method Name="TryResolveVariable" Id="{b472ac93-f74b-43bc-a428-8805683e1486}" FolderPath="Service methods\">
       <Declaration><![CDATA[(*!
 <summary>Resolves a variable for condition evaluation with workflow fallback last.</summary>
 <description>
 Searches this condition and its parent chain for direct bindings, then the evaluating activity and its
-ancestors. Legacy providers without ILocalVariableContainer are consulted afterward using their opaque
+ancestors. Legacy providers without ILocalVariableLookup are consulted afterward using their opaque
 lookup policy. Finally searches this condition's workflow, then a distinct evaluating activity workflow.
 Preserves nearest-scope shadowing for standard elements. The graph and registered storage must remain
 alive and stable in one owner task. Returns FALSE without exception escape or clearing terminal OOM;
@@ -620,6 +561,184 @@ __ENDTRY
 IF TOF_Core.DynamicMemoryManager.HasAllocationFailed THEN
 	TryResolveVariable := FALSE;
 END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="DeclareArray" Id="{d6f41a45-d7f0-411d-9a35-88ec1c6e6748}">
+      <Declaration><![CDATA[(*!
+<summary>Declares a nonempty one-dimensional array of elementary IEC values.</summary>
+<description>Copies every element in source order into independent zero-based storage of fixed length.
+Descriptors must borrow live, readable variables throughout the call and have identical IEC types and sizes,
+including string capacity. Duplicate names, unsupported shapes and busy scopes raise before insertion.
+Use in the owning task. Reset restores the complete initial sequence in place.</description>
+<param name="name">Unique local binding name.</param>
+<param name="initialValues">Typed initial element descriptors from Workflows.GetValueDescriptor,
+live for this call.</param>
+<param name="elementCount">Number of readable contiguous descriptors; positive and fixed at creation.</param>
+*)
+METHOD FINAL DeclareArray
+VAR_INPUT
+	name : STRING;
+	initialValues : POINTER TO __SYSTEM.AnyType;
+	elementCount : DINT;
+END_VAR
+VAR
+	ownerWorkflow : IWorkflow;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[ownerWorkflow := Workflow;
+
+_VariableScope.DeclareArray(
+	name := name,
+	initialValues := initialValues,
+	elementCount := elementCount,
+	busy := ownerWorkflow <> 0 AND_THEN ownerWorkflow.Busy
+);
+_VariableResetScope.SetBindings(bindings := _VariableScope.Bindings);]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="DeclareConfigurationVariable" Id="{255484f7-a486-4aff-bb4b-54c231a41ea6}">
+      <Declaration><![CDATA[(*!
+<summary>Copies a decoded scalar or fixed one-dimensional array into local storage.</summary>
+<description>Pass elementCount = 0 for a scalar variable, or a positive count for an array.
+Initial data is copied into local storage.</description>
+<param name="name">Unique local binding name.</param>
+<param name="typeName">Elementary IEC type name.</param>
+<param name="initialData">Pointer to contiguous decoded initial bytes.</param>
+<param name="elementCount">0 for a scalar variable, or positive count for an array.</param>
+*)
+METHOD FINAL DeclareConfigurationVariable
+VAR_INPUT
+	name : STRING;
+	typeName : STRING;
+	initialData : PVOID;
+	elementCount : DINT;
+END_VAR
+VAR
+	ownerWorkflow : IWorkflow;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[ownerWorkflow := Workflow;
+
+_VariableScope.DeclareConfigurationVariable(
+	busy := ownerWorkflow <> 0 AND_THEN ownerWorkflow.Busy,
+	name := name,
+	typeName := typeName,
+	initialData := initialData,
+	elementCount := elementCount
+);
+_VariableResetScope.SetBindings(bindings := _VariableScope.Bindings);]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="DeclareVariable" Id="{40875d7a-d6f9-46f5-9b19-1ddc02b9403a}">
+      <Declaration><![CDATA[(*!
+<summary>Declares a writable named value and copies its initial contents into this scope.</summary>
+<description>Use during idle configuration in one owning task. The name must be nonempty and unique among local
+bindings and declarations. Accepts elementary numeric, bit, date/time and string variables. Both copies retain
+the supplied storage size. Lookup borrows the current value until scope disposal. Successful owner reset
+restores it in place. Invalid declarations raise without replacing a binding. Terminal allocation failure propagates.
+</description>
+<param name="name">Case-sensitive local name.</param>
+<param name="initialValue">Typed initial contents, including the full declared string capacity.</param>
+*)
+METHOD FINAL DeclareVariable
+VAR_INPUT
+	name : STRING;
+	initialValue : ANY;
+END_VAR
+VAR
+	ownerWorkflow : IWorkflow;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[ownerWorkflow := Workflow;
+
+_VariableScope.DeclareVariable(
+	name := name,
+	initialValue := initialValue,
+	busy := ownerWorkflow <> 0 AND_THEN ownerWorkflow.Busy
+);
+_VariableResetScope.SetBindings(bindings := _VariableScope.Bindings);]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="GetResetScope" Id="{b718d2c5-86bd-4e79-92e2-8fc2a0de6036}">
+      <Declaration><![CDATA[(*!
+<summary>Borrows the reset scope embedded in this parent for condition attachment.</summary>
+<description>Returns live storage for the lifetime of the parent. Used by the validated parent setter
+in its owning task. The caller must not delete, copy or independently reconfigure the scope.</description>
+*)
+METHOD FINAL GetResetScope : IVariableResetScope]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[GetResetScope := _VariableResetScope;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="NextDeclaration" Id="{511621b3-ebda-4482-8995-2b8f1d28831c}">
+      <Declaration><![CDATA[(*!
+<summary>Enumerates owned declarations local to this node.</summary>
+<description>Start position at zero. TRUE supplies one declaration and advances the position; FALSE marks the end.
+Borrowed PLC bindings are skipped. The scope must stay live and unchanged for the enumeration.
+A negative position raises. Order follows dictionary storage and is not a serialization guarantee.</description>
+<param name="position">Next dictionary slot to scan.</param>
+<param name="name">Local name on TRUE.</param>
+<param name="declaration">IEC element type, storage width, shape and extent on TRUE.</param>
+*)
+METHOD FINAL NextDeclaration : BOOL
+VAR_IN_OUT
+	position : DINT;
+END_VAR
+VAR_OUTPUT
+	name : STRING;
+	declaration : VARIABLE_DECLARATION;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[NextDeclaration := _VariableScope.NextDeclaration(
+	position := position,
+	name => name,
+	declaration => declaration
+);]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="GetDeclaredElement" Id="{a987fa26-c59e-4222-8c19-73a1054576e2}">
+      <Declaration><![CDATA[(*!
+<summary>Borrows one writable element of a local declaration.</summary>
+<description>Indices start at zero. Scalar declarations accept index zero. Missing declarations, borrowed bindings
+and out-of-range indices raise. The element remains at the same address through reset. Use in the owning task
+only while the declaration exists.</description>
+<param name="name">Local declaration name.</param>
+<param name="index">Zero-based element index.</param>
+*)
+METHOD FINAL GetDeclaredElement : TOF_Core.GENERIC_VALUE
+VAR_INPUT
+	name : STRING;
+	index : DINT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[GetDeclaredElement := _VariableScope.GetDeclaredElement(name := name, index := index);]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="CopyInitialElement" Id="{a5da9ef7-8677-40df-9de1-6e82378bd62d}">
+      <Declaration><![CDATA[(*!
+<summary>Copies one initial element into caller-owned storage.</summary>
+<description>
+Reads the reset image even after the live value changes. The writable destination must have the exact
+IEC type and storage size of the element. Invalid names, indices and incompatible destinations raise
+before copying.
+</description>
+<param name="name">Local declaration name.</param>
+<param name="index">Zero-based element index, zero for a scalar.</param>
+<param name="destination">Descriptor of writable storage with the declared IEC type and capacity.
+Pass GetValueDescriptor for a PLC variable.</param>
+*)
+METHOD FINAL CopyInitialElement
+VAR_INPUT
+	name : STRING;
+	index : DINT;
+	destination : __SYSTEM.AnyType;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_VariableScope.CopyInitialElement(
+	name := name,
+	index := index,
+	destination := destination
+);]]></ST>
       </Implementation>
     </Method>
   </POU>

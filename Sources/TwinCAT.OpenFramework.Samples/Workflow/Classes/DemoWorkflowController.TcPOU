@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <TcPlcObject Version="1.1.0.1">
   <POU Name="DemoWorkflowController" Id="{dc096c7a-49dd-4129-a1d0-54dcfc137d76}" SpecialFunc="None">
     <Declaration><![CDATA[(*
@@ -17,6 +17,9 @@ before configuration.
 
 {attribute 'no_explicit_call' := 'do not call this function block directly'}
 FUNCTION_BLOCK DemoWorkflowController EXTENDS TOF_Automation.AutomationController<0>
+VAR
+	_ElementFactory : DemoWorkflowElementFactory;
+END_VAR
 VAR_OUTPUT
 	DemoWorkflow : DemoWorkflow;	
 END_VAR
@@ -33,28 +36,29 @@ END_VAR]]></Declaration>
       <Declaration><![CDATA[(*!
 <summary>Constructs workflow activities and transfers their ownership before configuration.</summary>
 <description>
-Checks each allocation and registers every new dynamic element before further use. Later failures leave
+Creates owned elements through the common factory path. Later configuration failures leave
 registered elements owned by the workflow for disposal.
 </description>
 <param name="workflow">Owner workflow instance.</param>
-<param name="parentSequence">Parent loop sequence to append the activities to.</param>
+<param name="parentSequence">Parent sequence to append the activities to.</param>
 <param name="cornerNumber">One-based corner index (1..4).</param>
 *)
 METHOD PRIVATE addMoveFromToActivity 
 VAR_INPUT
 	workflow : TOF_Workflow.IWorkflow;
-	parentSequence : TOF_Workflow.IWhileActivity;
+	parentSequence : TOF_Workflow.ISequenceActivity;
 	cornerNumber : BYTE;
 END_VAR
-VAR	
+VAR
+	element : TOF_Workflow.IWorkflowElement;
 	trueValue : BOOL := TRUE;
 	
 	needMoveVariableName : STRING;	
 	targetXPosition : INT;
 	targetYPosition : INT;
 	
-	waitButtonPressActivity : POINTER TO TOF_Workflow.WaitVariableValueActivity;
-	moveActivity : POINTER TO MoveFromToActivity;
+	waitButtonPressActivity : TOF_Workflow.IWaitVariableValueActivity;
+	moveActivity : IMoveFromToActivity;
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[// calculate variable values depending of current position (corner number 1-4)
@@ -80,31 +84,36 @@ CASE cornerNumber OF
 		targetYPosition := 0;
 END_CASE
 
-waitButtonPressActivity := __NEW(TOF_Workflow.WaitVariableValueActivity(workflow := workflow));
+element := TOF_Workflow.Workflows.CreateElement(
+	typeName := 'TOF_Workflow.WaitVariableValueActivity',
+	workflow := workflow
+);
 
-IF waitButtonPressActivity = 0 THEN
-	TOF_Core.DynamicMemoryManager.RaiseAllocationFailure();
-END_IF
+requireElementInterface(
+	found := __QUERYINTERFACE(element, waitButtonPressActivity),
+	interfaceName := 'TOF_Workflow.IWaitVariableValueActivity'
+);
 
-workflow.RegisterChild(child := waitButtonPressActivity^);
+waitButtonPressActivity.Name := TOF_Core.WideStrings.Concat255("Wait", TO_WSTRING(needMoveVariableName), "Activity");
+waitButtonPressActivity.Configure(monitoredVariableName := needMoveVariableName, referenceValue := trueValue);
 
-waitButtonPressActivity^.Name := TOF_Core.WideStrings.Concat255("Wait", TO_WSTRING(needMoveVariableName), "Activity");
-waitButtonPressActivity^.Configure(monitoredVariableName := needMoveVariableName, referenceValue := trueValue);
+parentSequence.AddChildActivity(activity := waitButtonPressActivity);
 
-parentSequence.AddChildActivity(activity := waitButtonPressActivity^);
+element := TOF_Workflow.Workflows.CreateElement(
+	typeName := TOF_Core.Strings.Concat255(CurrentNamespace.Name, '.MoveFromToActivity'),
+	workflow := workflow,
+	factory := _ElementFactory
+);
 
-moveActivity := __NEW(MoveFromToActivity(workflow := workflow));
+requireElementInterface(
+	found := __QUERYINTERFACE(element, moveActivity),
+	interfaceName := 'IMoveFromToActivity'
+);
 
-IF moveActivity = 0 THEN
-	TOF_Core.DynamicMemoryManager.RaiseAllocationFailure();
-END_IF
+moveActivity.Name := TOF_Core.WideStrings.Concat255(TO_WSTRING(needMoveVariableName), "Activity");
+moveActivity.Configure(toXPosition := targetXPosition, toYPosition := targetYPosition);
 
-workflow.RegisterChild(child := moveActivity^);
-
-moveActivity^.Name := TOF_Core.WideStrings.Concat255(TO_WSTRING(needMoveVariableName), "Activity");
-moveActivity^.Configure(toXPosition := targetXPosition, toYPosition := targetYPosition);
-
-parentSequence.AddChildActivity(activity := moveActivity^);]]></ST>
+parentSequence.AddChildActivity(activity := moveActivity);]]></ST>
       </Implementation>
     </Method>
     <Property Name="Children" Id="{8735154c-178f-4bcc-a2c4-80749379f15d}">
@@ -149,40 +158,56 @@ PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
       <Declaration><![CDATA[(*!
 <summary>Constructs workflow activities and transfers their ownership before configuration.</summary>
 <description>
-Checks each allocation and registers every new dynamic element before further use. Later failures leave
+Creates owned elements through the common factory path. Later configuration failures leave
 registered elements owned by the workflow for disposal.
 </description>
 *)
 METHOD PROTECTED OnBeforeChildrenInitializing
 VAR
-	whileActivity : POINTER TO TOF_Workflow.WhileActivity;		
-	trueCondition : POINTER TO TOF_Workflow.TrueCondition;
+	element : TOF_Workflow.IWorkflowElement;
+	whileActivity : TOF_Workflow.IWhileActivity;
+	loopSequence : TOF_Workflow.ISequenceActivity;
+	trueCondition : TOF_Workflow.ITrueCondition;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[whileActivity := __NEW(TOF_Workflow.WhileActivity(workflow := DemoWorkflow));
+        <ST><![CDATA[element := TOF_Workflow.Workflows.CreateElement(
+	typeName := 'TOF_Workflow.WhileActivity',
+	workflow := DemoWorkflow
+);
 
-IF whileActivity = 0 THEN
-	TOF_Core.DynamicMemoryManager.RaiseAllocationFailure();
-END_IF
+requireElementInterface(
+	found := __QUERYINTERFACE(element, whileActivity),
+	interfaceName := 'TOF_Workflow.IWhileActivity'
+);
 
-DemoWorkflow.RegisterChild(child := whileActivity^);
+element := TOF_Workflow.Workflows.CreateElement(
+	typeName := 'TOF_Workflow.SequenceActivity',
+	workflow := DemoWorkflow
+);
 
-trueCondition := __NEW(TOF_Workflow.TrueCondition(workflow := DemoWorkflow));
+requireElementInterface(
+	found := __QUERYINTERFACE(element, loopSequence),
+	interfaceName := 'TOF_Workflow.ISequenceActivity'
+);
 
-IF trueCondition = 0 THEN
-	TOF_Core.DynamicMemoryManager.RaiseAllocationFailure();
-END_IF
+element := TOF_Workflow.Workflows.CreateElement(
+	typeName := 'TOF_Workflow.TrueCondition',
+	workflow := DemoWorkflow
+);
 
-DemoWorkflow.RegisterChild(child := trueCondition^);
+requireElementInterface(
+	found := __QUERYINTERFACE(element, trueCondition),
+	interfaceName := 'TOF_Workflow.ITrueCondition'
+);
 
-whileActivity^.Configure(condition := trueCondition^);
+whileActivity.Configure(condition := trueCondition, body := loopSequence);
 
-addMoveFromToActivity(workflow := DemoWorkflow, parentSequence := whileActivity^, cornerNumber := 1);
-addMoveFromToActivity(workflow := DemoWorkflow, parentSequence := whileActivity^, cornerNumber := 2);
-addMoveFromToActivity(workflow := DemoWorkflow, parentSequence := whileActivity^, cornerNumber := 3);
-addMoveFromToActivity(workflow := DemoWorkflow, parentSequence := whileActivity^, cornerNumber := 4);
+addMoveFromToActivity(workflow := DemoWorkflow, parentSequence := loopSequence, cornerNumber := 1);
+addMoveFromToActivity(workflow := DemoWorkflow, parentSequence := loopSequence, cornerNumber := 2);
+addMoveFromToActivity(workflow := DemoWorkflow, parentSequence := loopSequence, cornerNumber := 3);
+addMoveFromToActivity(workflow := DemoWorkflow, parentSequence := loopSequence, cornerNumber := 4);
 
-DemoWorkflow.SetRootActivity(rootActivity := whileActivity^);]]></ST>
+DemoWorkflow.SetRootActivity(rootActivity := whileActivity);]]></ST>
       </Implementation>
     </Method>
     <Method Name="OnBeforeChildrenReset" Id="{c84e19b2-7a35-4d91-b620-9e4f1a8c2d73}" FolderPath="Overriden members\">
@@ -256,5 +281,35 @@ PROPERTY SelfSize : ULINT]]></Declaration>
         </Implementation>
       </Get>
     </Property>
+    <Method Name="requireElementInterface" Id="{9dadd88b-1193-4169-8e64-e0f75ed97dbe}">
+      <Declaration><![CDATA[(*!
+<summary>Checks the configuration interface requested for a factory-created sample node.</summary>
+<description>A failed query raises before the caller uses the result. The workflow retains the registered node.</description>
+<param name="found">Result of the interface query.</param>
+<param name="interfaceName">Expected configuration interface for diagnostics.</param>
+*)
+METHOD PRIVATE requireElementInterface
+VAR_INPUT
+	found : BOOL;
+	interfaceName : STRING;
+END_VAR
+VAR
+	message : TOF_Core.ERROR_MESSAGE;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF found THEN
+	RETURN;
+END_IF
+
+message := TOF_Core.WideStrings.Concat255("Created workflow element requires interface ", TO_WSTRING(interfaceName));
+TOF_Workflow.WorkflowExceptions.ThrowWorkflowConfiguration(
+	sourceNamespaceName := NamespaceName,
+	sourceClassName := ClassName,
+	sourcePOUName := __POUNAME(),
+	sourcePosition := __POSITION(),
+	message := message
+);]]></ST>
+      </Implementation>
+    </Method>
   </POU>
 </TcPlcObject>

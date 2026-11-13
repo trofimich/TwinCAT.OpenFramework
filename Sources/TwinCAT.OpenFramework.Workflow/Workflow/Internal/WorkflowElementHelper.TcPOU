@@ -1,0 +1,404 @@
+<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="WorkflowElementHelper" Id="{6b8d7a14-5c39-4e21-8f0a-92d14e6b7c35}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+SPDX-FileCopyrightText: © 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+SPDX-License-Identifier: MIT
+License: https://opensource.org/license/mit
+*)
+
+(*!
+<summary>Internal state transition table, graph topology validator and composite child resetting helper.</summary>
+<description>
+Encapsulates the canonical WORKFLOW_ELEMENT_STATE transition rules, parent-child attachment invariants, and single-step
+child activity resetting shared by composite activities and the Workflows facade.
+</description>
+*)
+
+{attribute 'no_explicit_call' := 'do not call this function block directly'}
+PROGRAM INTERNAL WorkflowElementHelper
+VAR
+	{attribute 'hide'}
+	_ClassName : STRING := __POUNAME();
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[]]></ST>
+    </Implementation>
+    <Property Name="ClassName" Id="{27a481e9-6f3b-4c52-91d0-83b5c4e2a1f6}">
+      <Declaration><![CDATA[(*!
+<summary>Returns the program name for diagnostic reporting.</summary>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{91e3c4a2-7b80-4d61-8f52-04c6a8d3e9b7}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ClassName REF= _ClassName;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="GetAllowedTransitionNames" Id="{f34a62d8-1e9b-47c0-9a51-68d2e4b0c7f3}">
+      <Declaration><![CDATA[(*!
+<summary>Returns a comma-separated list of target states permitted from the given state.</summary>
+<description>
+Lists targets accepted by ValidateTransition in diagnostic display order.
+</description>
+<param name="currentState">Current state of the workflow element.</param>
+*)
+METHOD GetAllowedTransitionNames : STRING(255)
+VAR_INPUT
+	currentState : WORKFLOW_ELEMENT_STATE;
+END_VAR
+VAR CONSTANT
+	//! <summary>All candidate destinations in the established diagnostic display order.</summary>
+	displayOrder : ARRAY [0..9] OF WORKFLOW_ELEMENT_STATE := [
+		WORKFLOW_ELEMENT_STATE.PASSIVE_READY,
+		WORKFLOW_ELEMENT_STATE.PASSIVE_SUSPENDED,
+		WORKFLOW_ELEMENT_STATE.PASSIVE_CANCELLED,
+		WORKFLOW_ELEMENT_STATE.PASSIVE_COMPLETED,
+		WORKFLOW_ELEMENT_STATE.ACTIVE_RUNNING,
+		WORKFLOW_ELEMENT_STATE.ACTIVE_SUSPENDING,
+		WORKFLOW_ELEMENT_STATE.ACTIVE_CANCELLING,
+		WORKFLOW_ELEMENT_STATE.PASSIVE_HALTED,
+		WORKFLOW_ELEMENT_STATE.PASSIVE_FAILED,
+		WORKFLOW_ELEMENT_STATE.ACTIVE_RESETTING
+	];
+END_VAR
+VAR
+	i : DINT;
+	targetName : STRING;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[FOR i := LOWER_BOUND(displayOrder, 1) TO UPPER_BOUND(displayOrder, 1) DO
+	IF ValidateTransition(currentState := currentState, newState := displayOrder[i]) THEN
+		targetName := TO_STRING(displayOrder[i]);
+
+		IF GetAllowedTransitionNames = '' THEN
+			GetAllowedTransitionNames := targetName;
+		ELSE
+			GetAllowedTransitionNames := TOF_Core.Strings.Concat255(GetAllowedTransitionNames, ',', targetName);
+		END_IF
+	END_IF
+END_FOR]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="NamespaceName" Id="{4d9b82c1-3a6e-4f70-81c5-72e0b4a9d6f8}">
+      <Declaration><![CDATA[(*!
+<summary>Returns the library namespace name for diagnostic reporting.</summary>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{c85e19a3-4f2b-48d6-90e7-16a3b5c8d2f4}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[NamespaceName REF= CurrentNamespace.Name;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="ResetChildActivity" Id="{a2d84e61-5c9b-43f0-87a1-39e2b4c6d8f0}">
+      <Declaration><![CDATA[(*!
+<summary>Advances resetting of a child activity toward PASSIVE_READY by one step.</summary>
+<description>
+Returns WORK_RESET immediately when childActivity is 0 or already in PASSIVE_READY. If the child was left in
+PASSIVE_SUSPENDED or ACTIVE_CANCELLING, drives cancellation to PASSIVE_CANCELLED before invoking RequestReset.
+In ACTIVE_RESETTING, advances the child via Execute; in finished passive states, invokes RequestReset.
+</description>
+<param name="childActivity">Child activity to reset, or 0.</param>
+<param name="cancelReason">Cancellation reason passed when cancelling a suspended child before reset.</param>
+<param name="sourceClassName">Diagnostic class name of the calling composite activity.</param>
+<param name="sourcePOUName">Diagnostic POU name of the calling method.</param>
+*)
+METHOD ResetChildActivity : ACTIVITY_RESETTING_STATE
+VAR_INPUT
+	childActivity : IActivity;
+	cancelReason : WSTRING(255);
+	sourceClassName : STRING;
+	sourcePOUName : STRING;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF childActivity = 0 OR_ELSE childActivity.State = WORKFLOW_ELEMENT_STATE.PASSIVE_READY THEN
+	ResetChildActivity := ACTIVITY_RESETTING_STATE.WORK_RESET;
+	RETURN;
+END_IF
+
+IF childActivity.State = WORKFLOW_ELEMENT_STATE.PASSIVE_SUSPENDED THEN
+	childActivity.RequestCancel(reason := cancelReason);
+
+	IF childActivity.State = WORKFLOW_ELEMENT_STATE.PASSIVE_CANCELLED THEN
+		childActivity.RequestReset();
+	END_IF
+ELSIF childActivity.State = WORKFLOW_ELEMENT_STATE.ACTIVE_CANCELLING THEN
+	childActivity.Execute();
+
+	IF childActivity.State = WORKFLOW_ELEMENT_STATE.PASSIVE_CANCELLED THEN
+		childActivity.RequestReset();
+	END_IF
+ELSIF childActivity.State = WORKFLOW_ELEMENT_STATE.ACTIVE_RESETTING THEN
+	childActivity.Execute();
+ELSE
+	childActivity.RequestReset();
+END_IF
+
+CASE childActivity.State OF
+	WORKFLOW_ELEMENT_STATE.ACTIVE_RESETTING,
+	WORKFLOW_ELEMENT_STATE.ACTIVE_CANCELLING:
+		ResetChildActivity := ACTIVITY_RESETTING_STATE.WORK_IN_PROGRESS;
+
+	WORKFLOW_ELEMENT_STATE.PASSIVE_READY:
+		ResetChildActivity := ACTIVITY_RESETTING_STATE.WORK_RESET;
+
+	ELSE
+		WorkflowExceptions.ThrowInvalidNestedWorkflowState(
+			sourceNamespaceName := NamespaceName,
+			sourceClassName := sourceClassName,
+			sourcePOUName := sourcePOUName,
+			sourcePosition := __POSITION(),
+			nestedActivityState := childActivity.State
+		);
+END_CASE]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="ValidateChildActivityAttachment" Id="{7e19c4b2-8d3a-46f5-90c2-54b8d1e6a3f9}">
+      <Declaration><![CDATA[(*!
+<summary>Verifies that a candidate child activity is specified and can be attached to a composite parent.</summary>
+<description>
+Validates non-null childActivity before delegating to ValidateElementAttachment for readiness, cycle detection,
+single-parent ownership, root exclusion, and workflow association.
+</description>
+<param name="parent">Composite activity receiving the child.</param>
+<param name="childActivity">Candidate child activity to validate.</param>
+<param name="argumentName">Parameter name for diagnostic reporting.</param>
+<param name="sourceClassName">Diagnostic class name of the calling composite activity.</param>
+<param name="sourcePOUName">Diagnostic POU name of the calling method.</param>
+*)
+METHOD ValidateChildActivityAttachment
+VAR_INPUT
+	parent : IWorkflowElement;
+	childActivity : IActivity;
+	argumentName : STRING(255);
+	sourceClassName : STRING;
+	sourcePOUName : STRING;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF childActivity = 0 THEN
+	TOF_Core.Exceptions.ThrowArgumentNotSpecified(
+		sourceNamespaceName := NamespaceName,
+		sourceClassName := sourceClassName,
+		sourcePOUName := sourcePOUName,
+		sourcePosition := __POSITION(),
+		argumentName := argumentName
+	);
+END_IF
+
+ValidateElementAttachment(parent := parent, child := childActivity);]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="ValidateElementAttachment" Id="{d4c28e51-9a3b-47f6-82e0-61b5d3c8a4f7}">
+      <Declaration><![CDATA[(*!
+<summary>Validates a borrowed parent-child link before any graph mutation.</summary>
+<description>
+Rejects nulls, self or ancestor cycles, a different existing parent, non-ready activity ancestors or children,
+and a non-ready owning workflow. A child with a known workflow requires a parent with that same known owner;
+an unassociated subtree may inherit its owner after attachment. This prevents hiding associated descendants
+inside an unassociated subtree. Configure may reuse a link to this parent; append APIs separately reject any
+occupied child slot. Does not detach, transfer ownership or mutate either operand. Caller callbacks and
+metadata must obey their single-task, no-reentry and lifetime contracts.
+</description>
+<param name="parent">Live prospective parent.</param>
+<param name="child">Live child candidate whose link is being validated.</param>
+*)
+METHOD ValidateElementAttachment
+VAR_INPUT
+	parent : IWorkflowElement;
+	child : IWorkflowElement;
+END_VAR
+VAR
+	ancestor : IWorkflowElement;
+	ancestorActivity : IActivity;
+	childActivity : IActivity;
+	childParent : IWorkflowElement;
+	parentWorkflow : IWorkflow;
+	childWorkflow : IWorkflow;
+	childRootActivity : IActivity;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF parent = 0 THEN
+	TOF_Core.Exceptions.ThrowArgumentNotSpecified(
+		sourceNamespaceName := NamespaceName,
+		sourceClassName := ClassName,
+		sourcePOUName := __POUNAME(),
+		sourcePosition := __POSITION(),
+		argumentName := 'parent'
+	);
+END_IF
+
+IF child = 0 THEN
+	TOF_Core.Exceptions.ThrowArgumentNotSpecified(
+		sourceNamespaceName := NamespaceName,
+		sourceClassName := ClassName,
+		sourcePOUName := __POUNAME(),
+		sourcePosition := __POSITION(),
+		argumentName := 'child'
+	);
+END_IF
+
+ancestor := parent;
+
+WHILE ancestor <> 0 DO
+
+	IF ancestor.SelfAddress = child.SelfAddress THEN
+		WorkflowExceptions.ThrowWorkflowAttachment(
+			sourceNamespaceName := NamespaceName,
+			sourceClassName := ClassName,
+			sourcePOUName := __POUNAME(),
+			sourcePosition := __POSITION(),
+			message := "Cannot attach an element to itself or its descendant"
+		);
+	END_IF
+
+	IF __QUERYINTERFACE(ancestor, ancestorActivity)
+		AND_THEN ancestorActivity.State <> WORKFLOW_ELEMENT_STATE.PASSIVE_READY
+	THEN
+		WorkflowExceptions.ThrowWorkflowConfiguration(
+			sourceNamespaceName := NamespaceName,
+			sourceClassName := ClassName,
+			sourcePOUName := __POUNAME(),
+			sourcePosition := __POSITION(),
+			message := "Cannot change a workflow tree outside PASSIVE_READY"
+		);
+	END_IF
+
+	ancestor := ancestor.Parent;
+END_WHILE
+
+childParent := child.Parent;
+
+IF childParent <> 0 AND_THEN childParent.SelfAddress <> parent.SelfAddress THEN
+	WorkflowExceptions.ThrowWorkflowAttachment(
+		sourceNamespaceName := NamespaceName,
+		sourceClassName := ClassName,
+		sourcePOUName := __POUNAME(),
+		sourcePosition := __POSITION(),
+		message := "Child element is already attached to another parent"
+	);
+END_IF
+
+IF __QUERYINTERFACE(child, childActivity)
+	AND_THEN childActivity.State <> WORKFLOW_ELEMENT_STATE.PASSIVE_READY
+THEN
+	WorkflowExceptions.ThrowWorkflowConfiguration(
+		sourceNamespaceName := NamespaceName,
+		sourceClassName := ClassName,
+		sourcePOUName := __POUNAME(),
+		sourcePosition := __POSITION(),
+		message := "Only a PASSIVE_READY child can be attached"
+	);
+END_IF
+
+parentWorkflow := parent.Workflow;
+childWorkflow := child.Workflow;
+
+IF parentWorkflow <> 0 AND_THEN parentWorkflow.State <> WORKFLOW_ELEMENT_STATE.PASSIVE_READY THEN
+	WorkflowExceptions.ThrowWorkflowConfiguration(
+		sourceNamespaceName := NamespaceName,
+		sourceClassName := ClassName,
+		sourcePOUName := __POUNAME(),
+		sourcePosition := __POSITION(),
+		message := "Cannot configure elements while their workflow is not PASSIVE_READY"
+	);
+END_IF
+
+IF childWorkflow <> 0 THEN
+
+	IF parentWorkflow = 0 OR_ELSE childWorkflow.SelfAddress <> parentWorkflow.SelfAddress THEN
+		WorkflowExceptions.ThrowWorkflowAttachment(
+			sourceNamespaceName := NamespaceName,
+			sourceClassName := ClassName,
+			sourcePOUName := __POUNAME(),
+			sourcePosition := __POSITION(),
+			message := "An associated child requires a parent from the same workflow"
+		);
+	END_IF
+
+	childRootActivity := childWorkflow.RootActivity;
+
+	IF childRootActivity <> 0
+		AND_THEN childRootActivity.SelfAddress = child.SelfAddress
+	THEN
+		WorkflowExceptions.ThrowWorkflowAttachment(
+			sourceNamespaceName := NamespaceName,
+			sourceClassName := ClassName,
+			sourcePOUName := __POUNAME(),
+			sourcePosition := __POSITION(),
+			message := "A workflow root cannot be attached as a child"
+		);
+	END_IF
+
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="ValidateTransition" Id="{e8f14c29-6b3d-45a8-91c7-20d4b6e8a3f5}">
+      <Declaration><![CDATA[(*!
+<summary>Reports whether transitioning from currentState to newState is permitted.</summary>
+<description>
+Does not mutate state or raise exceptions. Callers use this predicate before changing state or validating
+external requests.
+</description>
+<param name="currentState">Current state of the workflow element.</param>
+<param name="newState">Requested target state.</param>
+*)
+METHOD ValidateTransition : BOOL
+VAR_INPUT
+	currentState : WORKFLOW_ELEMENT_STATE;
+	newState : WORKFLOW_ELEMENT_STATE;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[CASE currentState OF
+	WORKFLOW_ELEMENT_STATE.PASSIVE_READY: // can be changed to ACTIVE_RUNNING (with RequestStart)
+		ValidateTransition := newState = WORKFLOW_ELEMENT_STATE.ACTIVE_RUNNING;
+
+	WORKFLOW_ELEMENT_STATE.PASSIVE_COMPLETED, // can be changed to ACTIVE_RESETTING (with RequestReset)
+	WORKFLOW_ELEMENT_STATE.PASSIVE_HALTED, // can be changed to ACTIVE_RESETTING (with RequestReset)
+	WORKFLOW_ELEMENT_STATE.PASSIVE_CANCELLED, // can be changed to ACTIVE_RESETTING (with RequestReset)
+	WORKFLOW_ELEMENT_STATE.PASSIVE_FAILED: // can be changed to ACTIVE_RESETTING (with RequestReset)
+		ValidateTransition := newState = WORKFLOW_ELEMENT_STATE.ACTIVE_RESETTING;
+
+	// Can be changed to ACTIVE_RUNNING (with RequestStart) or ACTIVE_CANCELLING (with RequestCancel)
+	WORKFLOW_ELEMENT_STATE.PASSIVE_SUSPENDED:
+		ValidateTransition := newState = WORKFLOW_ELEMENT_STATE.ACTIVE_RUNNING
+			OR_ELSE newState = WORKFLOW_ELEMENT_STATE.ACTIVE_CANCELLING;
+
+	// Can be changed to PASSIVE_COMPLETED (internally) or ACTIVE_SUSPENDING (RequestSuspend)
+	// or ACTIVE_CANCELLING (RequestCancel) or PASSIVE_HALTED (internally) or PASSIVE_FAILED (internally)
+	WORKFLOW_ELEMENT_STATE.ACTIVE_RUNNING:
+		ValidateTransition := newState = WORKFLOW_ELEMENT_STATE.PASSIVE_COMPLETED
+			OR_ELSE newState = WORKFLOW_ELEMENT_STATE.ACTIVE_SUSPENDING
+			OR_ELSE newState = WORKFLOW_ELEMENT_STATE.ACTIVE_CANCELLING
+			OR_ELSE newState = WORKFLOW_ELEMENT_STATE.PASSIVE_HALTED
+			OR_ELSE newState = WORKFLOW_ELEMENT_STATE.PASSIVE_FAILED;
+
+	// Can be changed to PASSIVE_CANCELLED (internally) or PASSIVE_COMPLETED (internally)
+	// or PASSIVE_HALTED (internally) or PASSIVE_FAILED (internally)
+	WORKFLOW_ELEMENT_STATE.ACTIVE_CANCELLING:
+		ValidateTransition := newState = WORKFLOW_ELEMENT_STATE.PASSIVE_CANCELLED
+			OR_ELSE newState = WORKFLOW_ELEMENT_STATE.PASSIVE_COMPLETED
+			OR_ELSE newState = WORKFLOW_ELEMENT_STATE.PASSIVE_HALTED
+			OR_ELSE newState = WORKFLOW_ELEMENT_STATE.PASSIVE_FAILED;
+
+	// Can be changed to PASSIVE_SUSPENDED (internally) or PASSIVE_COMPLETED (internally)
+	// or PASSIVE_HALTED (internally) or PASSIVE_FAILED (internally)
+	WORKFLOW_ELEMENT_STATE.ACTIVE_SUSPENDING:
+		ValidateTransition := newState = WORKFLOW_ELEMENT_STATE.PASSIVE_SUSPENDED
+			OR_ELSE newState = WORKFLOW_ELEMENT_STATE.PASSIVE_COMPLETED
+			OR_ELSE newState = WORKFLOW_ELEMENT_STATE.PASSIVE_HALTED
+			OR_ELSE newState = WORKFLOW_ELEMENT_STATE.PASSIVE_FAILED;
+
+	WORKFLOW_ELEMENT_STATE.ACTIVE_RESETTING: // can be changed to PASSIVE_READY (internally) or PASSIVE_FAILED (internally)
+		ValidateTransition := newState = WORKFLOW_ELEMENT_STATE.PASSIVE_READY
+			OR_ELSE newState = WORKFLOW_ELEMENT_STATE.PASSIVE_FAILED;
+END_CASE]]></ST>
+      </Implementation>
+    </Method>
+  </POU>
+</TcPlcObject>
+

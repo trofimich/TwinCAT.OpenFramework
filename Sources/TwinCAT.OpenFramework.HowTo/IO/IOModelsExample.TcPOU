@@ -1,0 +1,130 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="IOModelsExample" Id="{9f730a58-1625-419e-8973-501906339cec}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+SPDX-FileCopyrightText: © 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+SPDX-License-Identifier: MIT
+License: https://opensource.org/license/mit
+*)
+
+(*!
+<summary>Demonstrates explicit EL3001 mapping, input validity and update observation without a test framework.</summary>
+<description>
+Select the EL3001 standard status-plus-INT16 PDO. Link _Terminal.Ch1.Status and Value, WcState, InputToggle,
+State and AdsAddr to the corresponding slave entries in XAE, then set BindingsConfigured to TRUE.
+The flag records caller confirmation; software cannot detect unlinked zero-valued inputs.
+Map this program to one task or call Execute once per cycle from that task. Use only one execution path.
+Voltage is zero while InputValid is FALSE; use InputValid before consuming Voltage. InputUpdated observes
+a toggle transition, not the level of InputToggle. State and AdsAddr are acyclic and do not validate measurements.
+The program owns no dynamic resources. Execute checks the fatal allocation latch outside recoverable handlers;
+a hosting task remains responsible for cleanup after all of its transient-exception consumers.
+Do not copy the program or share its mutable state across tasks without external synchronization.
+</description>
+*)
+
+{attribute 'no_explicit_call' := 'do not call this function block directly'}
+PROGRAM IOModelsExample
+VAR CONSTANT
+	//! <summary>Positive full-scale signed raw code used for the EL3001 voltage scaling.</summary>
+	_FullScaleRawValue : LREAL := 32767.0;
+	//! <summary>Positive electrical full scale of the selected EL3001 range, in volts.</summary>
+	_FullScaleVoltage : LREAL := 10.0;
+END_VAR
+VAR
+	_ClassName : STRING := __POUNAME();
+	_Terminal : TOF_IOModels.EL3001_EX;
+	_BindingsConfigured : BOOL;
+	_InputValid : BOOL;
+	_InputUpdated : BOOL;
+	_PreviousToggle : BOOL;
+	_Voltage : LREAL;
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[Execute();]]></ST>
+    </Implementation>
+    <Method Name="Execute" Id="{d721979c-4110-4961-991d-bc83b5a4075d}">
+      <Declaration><![CDATA[(*!
+<summary>Samples the configured input and exposes guarded voltage and update observations.</summary>
+<description>
+Call once per scan from the owning task. Reading mapped fields is not an atomic cross-task snapshot.
+Fatal allocation failure propagates at this task boundary; no handler here can convert it into normal operation.
+</description>
+*)
+METHOD Execute]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[TOF_Core.DynamicMemoryManager.RaiseIfAllocationFailed();
+
+_InputValid := _BindingsConfigured
+	AND_THEN NOT _Terminal.WcState
+	AND_THEN NOT _Terminal.Ch1.Status.6
+	AND_THEN NOT _Terminal.Ch1.Status.14;
+_InputUpdated := _InputValid AND_THEN (_Terminal.InputToggle <> _PreviousToggle);
+_PreviousToggle := _Terminal.InputToggle;
+
+IF _InputValid THEN
+	_Voltage := TO_LREAL(_Terminal.Ch1.Value) * _FullScaleVoltage / _FullScaleRawValue;
+ELSE
+	_Voltage := 0.0;
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="BindingsConfigured" Id="{9e7344d4-bbd7-4339-a7bd-8f0ad32c49c4}">
+      <Declaration><![CDATA[(*!
+<summary>Records caller confirmation that all required XAE links and the selected PDO are configured.</summary>
+<description>Set TRUE only after mapping inspection. FALSE inhibits measurement use on the next Execute.</description>
+*)
+PROPERTY BindingsConfigured : BOOL]]></Declaration>
+      <Get Name="Get" Id="{c684d865-c1ee-49dc-964f-fc7d0750ab76}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation><ST><![CDATA[BindingsConfigured := _BindingsConfigured;]]></ST></Implementation>
+      </Get>
+      <Set Name="Set" Id="{65d82598-6b3d-44c3-a969-ab210154d1b3}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation><ST><![CDATA[_BindingsConfigured := BindingsConfigured;]]></ST></Implementation>
+      </Set>
+    </Property>
+    <Property Name="InputValid" Id="{7998cce7-4db0-4d5f-92c0-b35f4f0be0b0}">
+      <Declaration><![CDATA[//! <summary>Reports the bus/channel validity evaluated during the latest Execute.</summary>
+PROPERTY InputValid : BOOL]]></Declaration>
+      <Get Name="Get" Id="{e9799cb0-eaac-44c4-ade1-365208ca5de2}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation><ST><![CDATA[InputValid := _InputValid;]]></ST></Implementation>
+      </Get>
+    </Property>
+    <Property Name="InputUpdated" Id="{58b7f790-1b5f-4610-ac8b-6d0d46304f13}">
+      <Declaration><![CDATA[//! <summary>Reports a valid input-toggle transition observed during the latest Execute.</summary>
+PROPERTY InputUpdated : BOOL]]></Declaration>
+      <Get Name="Get" Id="{53ac499f-f36a-4537-8a24-d80554d7a7be}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation><ST><![CDATA[InputUpdated := _InputUpdated;]]></ST></Implementation>
+      </Get>
+    </Property>
+    <Property Name="Voltage" Id="{daaf458a-6eb8-44c2-98de-3642454e2a10}">
+      <Declaration><![CDATA[(*!
+<summary>Returns the latest guarded EL3001 voltage in volts.</summary>
+<description>Zero while InputValid is FALSE; inspect InputValid because a valid voltage can also be zero.</description>
+*)
+PROPERTY Voltage : LREAL]]></Declaration>
+      <Get Name="Get" Id="{ab71b7af-8206-4489-94cc-efc519c17e2a}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation><ST><![CDATA[Voltage := _Voltage;]]></ST></Implementation>
+      </Get>
+    </Property>
+    <Property Name="ClassName" Id="{df6dfc21-03f3-4ce2-a087-158a71988fc5}">
+      <Declaration><![CDATA[//! <summary>Borrows the program-owned concrete name; callers must not modify it.</summary>
+PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{573b105a-d43a-4cd5-9ccd-42ae716a0c36}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation><ST><![CDATA[ClassName REF= _ClassName;]]></ST></Implementation>
+      </Get>
+    </Property>
+    <Property Name="NamespaceName" Id="{ef78c24a-430f-4890-a3a7-f3aa6750e573}">
+      <Declaration><![CDATA[//! <summary>Borrows project namespace storage for the program lifetime; callers must not modify it.</summary>
+PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{cd912886-03e0-46d2-8600-9b0c384dbd20}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation><ST><![CDATA[NamespaceName REF= CurrentNamespace.Name;]]></ST></Implementation>
+      </Get>
+    </Property>
+  </POU>
+</TcPlcObject>

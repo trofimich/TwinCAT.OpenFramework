@@ -1,0 +1,474 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="StatefulWorkflowObject" Id="{6a4f2d18-7b31-49e5-a1c2-8f03945d1e72}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+SPDX-FileCopyrightText: © 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+SPDX-License-Identifier: MIT
+License: https://opensource.org/license/mit
+*)
+
+(*!
+<summary>
+Provides shared naming, variable scope management, state observation and exception capture for activities and workflows.
+</summary>
+<description>
+Initializes the default diagnostic name during FB_init, exposes Name via INamed, and encapsulates local variable
+registration, typed declarations and exception snapshot capture into FailError. Derived classes define concrete
+state representation, Busy/State/CancelReason/HaltReason accessors and cyclic Execute behavior.
+</description>
+*)
+
+{attribute 'no_explicit_call' := 'do not call this function block directly'}
+FUNCTION_BLOCK ABSTRACT StatefulWorkflowObject EXTENDS TOF_Core.Object
+	IMPLEMENTS TOF_Core.INamed, TOF_Core.IExecutable, IVariableLookup, IVariableBinder, IDeclaredVariableContainer
+VAR
+	{attribute 'hide'}
+	_Name : WSTRING;
+
+	_FailError : TOF_Core.ERROR;
+	_VariableScope : VariableScope;
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[]]></ST>
+    </Implementation>
+    <Folder Name="Methods to override" Id="{d119c4d9-b3a1-42e1-87a4-39958cfb5e1a}" />
+    <Folder Name="Service methods" Id="{91b8a514-bf72-46a2-a39c-720e5d0a68d4}" />
+    <Property Name="Busy" Id="{91f38c24-5e7a-4b16-8d40-2c71a93e6b05}">
+      <Declaration><![CDATA[(*!
+<summary>Reports whether this stateful workflow object is currently in an active state.</summary>
+<description>
+FALSE reflects the current object state and does not certify nested resource release after failure.
+</description>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY ABSTRACT Busy : BOOL]]></Declaration>
+      <Get Name="Get" Id="{4d2b19a7-38c5-4e92-a614-7f08b32d5e91}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="CancelReason" Id="{c72e41b8-63d9-48a2-9f51-3b84e20c7d69}">
+      <Declaration><![CDATA[(*!
+<summary>Gets a reference to the diagnostic reason recorded for the most recent cancellation request.</summary>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY ABSTRACT CancelReason : REFERENCE TO WSTRING(255)]]></Declaration>
+      <Get Name="Get" Id="{8e51a309-2f4c-47d8-b963-1a40c85f2e74}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="CaptureExecutionException" Id="{3f82c195-94b7-4d2e-85a1-6c30e749b218}" FolderPath="Service methods\">
+      <Declaration><![CDATA[(*!
+<summary>Retrieves, stabilizes and converts a caught execution exception into FailError.</summary>
+<description>
+Clones non-dynamic native exception wrappers so subsequent callback exceptions cannot overwrite the original
+payload, then populates _FailError via ToError. When exception retrieval, cloning or diagnostic conversion
+fails, clears partial state and sets fallbackMessage on _FailError. Returns the retrieved or stabilized
+exception reference when available.
+</description>
+<param name="exceptionCode">System exception code captured by __CATCH.</param>
+<param name="catchPointPOUName">Method name where the exception was caught.</param>
+<param name="catchPointPosition">Source position where the exception was caught.</param>
+<param name="fallbackMessage">Fallback diagnostic message stored when conversion fails.</param>
+<param name="snapshotAvailable">TRUE when ToError completed without throwing.</param>
+*)
+METHOD PROTECTED CaptureExecutionException : TOF_Core.IException
+VAR_INPUT
+	exceptionCode : __SYSTEM.ExceptionCode;
+	catchPointPOUName : STRING(255);
+	catchPointPosition : STRING(255);
+	fallbackMessage : WSTRING(255);
+END_VAR
+VAR_OUTPUT
+	snapshotAvailable : BOOL;
+END_VAR
+VAR
+	exception : TOF_Core.IException;
+	clonedObject : TOF_Core.IObject;
+	stabilizedException : TOF_Core.IException;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_FailError.Clear();
+
+__TRY
+	exception := TOF_Core.ExceptionManager.GetLastException(
+		exceptionCode := exceptionCode,
+		catchPointNamespaceName := NamespaceName,
+		catchPointPOUName := catchPointPOUName,
+		catchPointPosition := catchPointPosition
+	);
+
+	// Keep the native wrapper stable while callbacks may handle another exception.
+
+	IF exception <> 0 AND_THEN NOT exception.IsDynamicInstance THEN
+		clonedObject := exception.Clone();
+
+		IF clonedObject <> 0 AND_THEN __QUERYINTERFACE(clonedObject, stabilizedException) THEN
+			exception := stabilizedException;
+		END_IF
+	END_IF
+
+	IF exception <> 0 THEN
+		exception.ToError(targetError := _FailError, severity := TOF_Core.ERROR_SEVERITY.ERROR);
+		snapshotAvailable := TRUE;
+	END_IF
+__CATCH
+	snapshotAvailable := FALSE;
+__ENDTRY
+
+IF NOT snapshotAvailable THEN
+	_FailError.Clear();
+	_FailError.SetMessage(message := fallbackMessage);
+END_IF
+
+CaptureExecutionException := exception;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="CopyInitialElement" Id="{5b19d842-7c36-4a91-b280-4e63f10a9d25}">
+      <Declaration><![CDATA[(*!
+<summary>Copies one initial element into caller-owned storage.</summary>
+<description>
+Reads the reset image even after the live value changes. The writable destination must have the exact
+IEC type and storage size of the element. Invalid names, indices and incompatible destinations raise
+before copying.
+</description>
+<param name="name">Local declaration name.</param>
+<param name="index">Zero-based element index, zero for a scalar.</param>
+<param name="destination">Descriptor of writable storage with the declared IEC type and capacity.
+Pass GetValueDescriptor for a PLC variable.</param>
+*)
+METHOD FINAL CopyInitialElement
+VAR_INPUT
+	name : STRING;
+	index : DINT;
+	destination : __SYSTEM.AnyType;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_VariableScope.CopyInitialElement(
+	name := name,
+	index := index,
+	destination := destination
+);]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="DeclareArray" Id="{7c40e291-8a15-4f63-9d27-5b18c30e4a96}">
+      <Declaration><![CDATA[(*!
+<summary>Declares a nonempty one-dimensional array of elementary IEC values.</summary>
+<description>Copies every element in source order into independent zero-based storage of fixed length.
+Descriptors must borrow live, readable variables throughout the call and have identical IEC types and sizes,
+including string capacity. Duplicate names, unsupported shapes and busy scopes raise before insertion.
+Use in the owning task. Reset restores the complete initial sequence in place.</description>
+<param name="name">Unique local binding name.</param>
+<param name="initialValues">Typed initial element descriptors from Workflows.GetValueDescriptor,
+live for this call.</param>
+<param name="elementCount">Number of readable contiguous descriptors; positive and fixed at creation.</param>
+*)
+METHOD FINAL DeclareArray
+VAR_INPUT
+	name : STRING;
+	initialValues : POINTER TO __SYSTEM.AnyType;
+	elementCount : DINT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_VariableScope.DeclareArray(
+	busy := IsVariableScopeBusy(),
+	name := name,
+	initialValues := initialValues,
+	elementCount := elementCount
+);
+
+OnLocalVariableDeclared();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="DeclareConfigurationVariable" Id="{2e93a714-6b52-4c89-a130-8d47f29e5c13}">
+      <Declaration><![CDATA[(*!
+<summary>Copies a decoded scalar or fixed one-dimensional array into local storage.</summary>
+<description>Pass elementCount = 0 for a scalar variable, or a positive count for an array.
+Initial data is copied into local storage.</description>
+<param name="name">Unique local binding name.</param>
+<param name="typeName">Elementary IEC type name.</param>
+<param name="initialData">Pointer to contiguous decoded initial bytes.</param>
+<param name="elementCount">0 for a scalar variable, or positive count for an array.</param>
+*)
+METHOD FINAL DeclareConfigurationVariable
+VAR_INPUT
+	name : STRING;
+	typeName : STRING;
+	initialData : PVOID;
+	elementCount : DINT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_VariableScope.DeclareConfigurationVariable(
+	busy := IsVariableScopeBusy(),
+	name := name,
+	typeName := typeName,
+	initialData := initialData,
+	elementCount := elementCount
+);
+
+OnLocalVariableDeclared();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="DeclareVariable" Id="{1a84b629-3d71-4e58-9c42-7f10a38e6d54}">
+      <Declaration><![CDATA[(*!
+<summary>Declares a writable named value and copies its initial contents into this scope.</summary>
+<description>Use during idle configuration in one owning task. The name must be nonempty and unique among local
+bindings and declarations. Accepts elementary numeric, bit, date/time and string variables. Both copies retain
+the supplied storage size. Lookup borrows the current value until scope disposal. Successful owner reset
+restores it in place. Invalid declarations raise without replacing a binding. Terminal allocation failure propagates.
+</description>
+<param name="name">Case-sensitive local name.</param>
+<param name="initialValue">Typed initial contents, including the full declared string capacity.</param>
+*)
+METHOD FINAL DeclareVariable
+VAR_INPUT
+	name : STRING;
+	initialValue : ANY;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_VariableScope.DeclareVariable(
+	busy := IsVariableScopeBusy(),
+	name := name,
+	initialValue := initialValue
+);
+
+OnLocalVariableDeclared();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="Execute" Id="{9d37e148-2a65-4b89-8f13-5c92a40d7e81}">
+      <Declaration><![CDATA[(*!
+<summary>Advances the current execution state by one cyclic step.</summary>
+*)
+METHOD ABSTRACT Execute]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="FailError" Id="{6e28c419-7f35-4d91-b824-3a91e50c6f72}">
+      <Declaration><![CDATA[(*!
+<summary>Gets a reference to the durable error snapshot captured when this object failed.</summary>
+<description>
+Empty while no unhandled failure has occurred or after the object has been reset to PASSIVE_READY.
+Callers must not mutate the returned ERROR instance.
+</description>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY FailError : REFERENCE TO TOF_Core.ERROR]]></Declaration>
+      <Get Name="Get" Id="{5c19b308-4e26-4a79-9d15-2b80f49e5c61}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[FailError REF= _FailError;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="FB_init" Id="{4b71d926-8c43-4f15-a928-3e60b71d8f49}">
+      <Declaration><![CDATA[(*!
+<summary>Initializes the default diagnostic name from static class metadata.</summary>
+<description>
+ClassName must return initialized static storage without reading derived instance fields, raising or
+recursively reading Name during base initialization.
+</description>
+*)
+METHOD FB_init : BOOL
+VAR_INPUT
+	bInitRetains : BOOL; // TRUE: the retain variables are initialized (reset warm / reset cold)
+	bInCopyCode : BOOL; // TRUE: the instance will be copied to the copy code afterward (online change)
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_Name := GetDefaultName();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="GetDeclaredElement" Id="{8f52e317-9d46-4b82-a371-6e94c20f8b35}">
+      <Declaration><![CDATA[(*!
+<summary>Borrows one writable element of a local declaration.</summary>
+<description>Indices start at zero. Scalar declarations accept index zero. Missing declarations, borrowed bindings
+and out-of-range indices raise. The element remains at the same address through reset. Use in the owning task
+only while the declaration exists.</description>
+<param name="name">Local declaration name.</param>
+<param name="index">Zero-based element index.</param>
+*)
+METHOD FINAL GetDeclaredElement : TOF_Core.GENERIC_VALUE
+VAR_INPUT
+	name : STRING;
+	index : DINT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[GetDeclaredElement := _VariableScope.GetDeclaredElement(name := name, index := index);]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="HaltReason" Id="{7a19d528-3e47-4c91-b632-8f40c19e7d53}">
+      <Declaration><![CDATA[(*!
+<summary>Gets a reference to the diagnostic reason reported when execution halted internally.</summary>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY ABSTRACT HaltReason : REFERENCE TO WSTRING(255)]]></Declaration>
+      <Get Name="Get" Id="{2d48c619-5f37-4a82-9e14-7b30d28f6c42}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="IsVariableScopeBusy" Id="{3c61e829-4a57-4d93-b725-1f80e39d6c47}" FolderPath="Methods to override\">
+      <Declaration><![CDATA[(*!
+<summary>Reports whether variable registration and declaration are currently blocked by active execution.</summary>
+*)
+METHOD PROTECTED IsVariableScopeBusy : BOOL]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IsVariableScopeBusy := Busy;]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="Name" Id="{1e94b728-6c35-4d81-a529-9f30c48e7b61}">
+      <Declaration><![CDATA[(*!
+<summary>Returns a reference to the diagnostic name of this workflow object.</summary>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY FINAL Name : REFERENCE TO WSTRING]]></Declaration>
+      <Get Name="Get" Id="{8b27d419-3f56-4e92-b618-4c90e27f5a38}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[Name REF= _Name;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="NamespaceName" Id="{5d38c617-2e49-4b83-9a16-7f40d29e8b52}">
+      <Declaration><![CDATA[(*!
+<summary>Borrows the compiler-initialized library namespace.</summary>
+<description>
+Borrows storage from the live internal namespace provider. Reacquire references after application
+reinitialization or relocation. Treat the reference as read-only; no ownership or synchronization is provided.
+</description>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{9a17e528-4c36-4d91-b825-3e70f18c6d49}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[NamespaceName REF= CurrentNamespace.Name;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="NextDeclaration" Id="{6f49d218-5b37-4e82-a914-8c30f27e9d61}">
+      <Declaration><![CDATA[(*!
+<summary>Enumerates owned declarations local to this node.</summary>
+<description>Start position at zero. TRUE supplies one declaration and advances the position; FALSE marks the end.
+Borrowed PLC bindings are skipped. The scope must stay live and unchanged for the enumeration.
+A negative position raises. Order follows dictionary storage and is not a serialization guarantee.</description>
+<param name="position">Next dictionary slot to scan.</param>
+<param name="name">Local name on TRUE.</param>
+<param name="declaration">IEC element type, storage width, shape and extent on TRUE.</param>
+*)
+METHOD FINAL NextDeclaration : BOOL
+VAR_IN_OUT
+	position : DINT;
+END_VAR
+VAR_OUTPUT
+	name : STRING;
+	declaration : VARIABLE_DECLARATION;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[NextDeclaration := _VariableScope.NextDeclaration(
+	position := position,
+	name => name,
+	declaration => declaration
+);]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="OnLocalVariableDeclared" Id="{4e82b319-7d46-4c91-b528-9a30e17f6c48}" FolderPath="Methods to override\">
+      <Declaration><![CDATA[(*!
+<summary>Hook invoked after a local variable or array declaration is added to _VariableScope.</summary>
+*)
+METHOD PROTECTED OnLocalVariableDeclared]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="BindPlcVariable" Id="{2b59c418-8e37-4d92-a615-7f40d28e9b36}">
+      <Declaration><![CDATA[(*!
+<summary>Binds a named PLC variable reference in this object's local scope.</summary>
+<description>
+Stores a borrowed reference to the supplied PLC variable in the local variable dictionary under a unique name.
+Fails if this object is busy, the name is empty, the name already exists in this scope, or the variable resides
+in stack memory. Type mapping precedes allocation of the owned name key. Failure before dictionary acceptance
+releases that key and propagates the exception; successful binding transfers key ownership to the dictionary.
+The variable storage remains borrowed and must outlive its binding.
+</description>
+<param name="name">Unique non-empty variable name.</param>
+<param name="plcVariable">PLC variable to bind (instance field or global variable).</param>
+<param name="plcVariableIsObject">TRUE if the variable is an FB instance implementing IObject.</param>
+*)
+METHOD BindPlcVariable : BOOL
+VAR_INPUT
+	name : STRING;
+	plcVariable : ANY;
+	plcVariableIsObject : BOOL := FALSE;
+END_VAR
+VAR
+	busyOwnerKind : STRING;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF Busy THEN
+	busyOwnerKind := VariableScopeOwnerKind();
+ELSE
+	busyOwnerKind := 'workflow';
+END_IF
+
+BindPlcVariable := _VariableScope.BindPlcVariable(
+	name := name,
+	plcVariable := plcVariable,
+	plcVariableIsObject := plcVariableIsObject,
+	busy := IsVariableScopeBusy(),
+	ownerKind := VariableScopeOwnerKind(),
+	busyOwnerKind := busyOwnerKind,
+	ownerName := THIS^.Name,
+	sourceClassName := ClassName,
+	sourcePOUName := __POUNAME()
+);]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="State" Id="{8c37d519-4f26-4e81-9b25-6a40c18f7e39}">
+      <Declaration><![CDATA[(*!
+<summary>Returns the current lifecycle state of this workflow object.</summary>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY ABSTRACT State : WORKFLOW_ELEMENT_STATE]]></Declaration>
+      <Get Name="Get" Id="{3e58b417-6d29-4c83-a714-9f20d38e5b46}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="TryGetVariable" Id="{7d48e619-5c37-4b92-8a16-2f90d37e4c58}">
+      <Declaration><![CDATA[(*!
+<summary>Attempts to resolve a named variable from this scope or its fallback hierarchy.</summary>
+<param name="name">Case-sensitive variable name to look up.</param>
+<param name="variable">Resolved variable descriptor when TRUE is returned.</param>
+*)
+METHOD ABSTRACT TryGetVariable : BOOL
+VAR_INPUT
+	name : STRING;
+END_VAR
+VAR_OUTPUT
+	variable : TOF_Core.GENERIC_VALUE;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="VariableScopeOwnerKind" Id="{5a29c718-3e46-4d81-b925-8f10e37c6d42}" FolderPath="Methods to override\">
+      <Declaration><![CDATA[(*!
+<summary>Returns the diagnostic owner kind label ('activity' or 'workflow') for variable registration errors.</summary>
+*)
+METHOD PROTECTED ABSTRACT VariableScopeOwnerKind : STRING]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[]]></ST>
+      </Implementation>
+    </Method>
+  </POU>
+</TcPlcObject>

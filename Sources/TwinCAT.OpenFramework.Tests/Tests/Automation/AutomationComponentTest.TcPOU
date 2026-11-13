@@ -11,7 +11,9 @@ License: https://opensource.org/license/mit
 <summary>Exercises automation component lifecycle, policies, event routing and runner execution.</summary>
 <description>
 Owns the timeout root and composite as persistent instance fields so their constructor dependency is valid.
-The composite borrows its root for the suite lifetime; instances must not be copied with this binding.
+All valid child fixtures borrow the suite root. Regression cases cover retained child faults, callback
+reset, child hierarchy validation, required dependencies, initialization results, lookup containment and disabled HMI recovery.
+Do not copy bound fixtures. Fatal OOM requires isolated manual verification, outside this shared suite.
 </description>
 *)
 
@@ -37,8 +39,20 @@ TestEventBubbling();
 TestEventBubblingStopPropagation();
 TestEventBroadcasting();
 TestInputOutputPhases();
+TestOutputPhaseStop();
+TestInputPhaseStop();
+TestOutputPhaseContinuation();
+TestPrimaryErrorBeforeLogging();
 TestRunnerHappyPath();
-TestRunnerNullComponentGuard();]]></ST>
+TestRunnerNullComponentGuard();
+TestResetChildPolicies();
+TestResetFromStoppedHook();
+TestParentValidation();
+TestDuplicateChild();
+TestMismatchedChildParent();
+TestInitializationFailureResult();
+TestIndexedLookupContainment();
+TestControllerPluginRecovery();]]></ST>
     </Implementation>
     <Folder Name="Tests" Id="{fb544209-7e1e-40ef-9afd-dd619da7a44f}" />
     <Property Name="ClassName" Id="{8d30d36f-229f-45b8-98a3-42f3c16137ca}">
@@ -62,9 +76,16 @@ PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
       </Get>
     </Property>
     <Method Name="TestChildErrorPolicyIgnore" Id="{01202040-14b9-4360-9fc7-0264cddb1bf0}" FolderPath="Tests\">
-      <Declaration><![CDATA[METHOD PRIVATE TestChildErrorPolicyIgnore
+      <Declaration><![CDATA[(*!
+<summary>Checks continued child traversal with Ignore.</summary>
+<description>
+Uses the suite-owned root as the borrowed parent. Fixtures contain no cleanup-dependent local resources.
+</description>
+*)
+METHOD PRIVATE TestChildErrorPolicyIgnore
 VAR
-	composite : MockCompositeAutomationComponent("CompIgnore", parent := 0);
+	composite : MockCompositeAutomationComponent(name := "CompIgnore", parent := _TimeoutRoot);
+	i : INT;
 END_VAR
 VAR_INST
 	testFinished : BOOL;
@@ -80,7 +101,9 @@ composite.Initialize();
 composite.ChildCriticalErrorHandlingPolicy := TOF_Automation.ChildCriticalErrorHandlingPolicies.Ignore;
 composite.ChildA.FailOnWorking := TRUE;
 
-composite.Execute();
+FOR i := 1 TO 3 DO
+	composite.Execute();
+END_FOR
 
 AssertEquals_DINT(
 	Expected := TO_DINT(TOF_Automation.OPERATIONAL_STATE.STOPPED),
@@ -99,14 +122,32 @@ AssertFalse(
 	Message := 'Composite should not have error when policy is Ignore'
 );
 
+AssertEquals_INT(
+	Expected := 3,
+	Actual := composite.ChildB.WorkingCount,
+	Message := 'Later child must execute in every cycle with a retained critical sibling error'
+);
+AssertEquals_INT(
+	Expected := 3,
+	Actual := composite.AfterWorkingCount,
+	Message := 'After-working hook must run after every continued traversal'
+);
+
 testFinished := TRUE;
 TEST_FINISHED();]]></ST>
       </Implementation>
     </Method>
     <Method Name="TestChildErrorPolicySetErrorAndContinue" Id="{ede5e672-f08d-4357-b967-6ee4a24ae31f}" FolderPath="Tests\">
-      <Declaration><![CDATA[METHOD PRIVATE TestChildErrorPolicySetErrorAndContinue
+      <Declaration><![CDATA[(*!
+<summary>Checks continued child traversal with a copied noncritical error.</summary>
+<description>
+Uses the suite-owned root as the borrowed parent. Fixtures contain no cleanup-dependent local resources.
+</description>
+*)
+METHOD PRIVATE TestChildErrorPolicySetErrorAndContinue
 VAR
-	composite : MockCompositeAutomationComponent("CompContinue", parent := 0);
+	composite : MockCompositeAutomationComponent(name := "CompContinue", parent := _TimeoutRoot);
+	i : INT;
 END_VAR
 VAR_INST
 	testFinished : BOOL;
@@ -122,7 +163,9 @@ composite.Initialize();
 composite.ChildCriticalErrorHandlingPolicy := TOF_Automation.ChildCriticalErrorHandlingPolicies.SetErrorAndContinue;
 composite.ChildA.FailOnWorking := TRUE;
 
-composite.Execute();
+FOR i := 1 TO 3 DO
+	composite.Execute();
+END_FOR
 
 AssertTrue(
 	Condition := composite.HasError,
@@ -135,14 +178,31 @@ AssertEquals_DINT(
 	Message := 'Composite should remain WORKING when policy is SetErrorAndContinue'
 );
 
+AssertEquals_INT(
+	Expected := 3,
+	Actual := composite.ChildB.WorkingCount,
+	Message := 'Later child must execute in every cycle with a retained critical sibling error'
+);
+AssertEquals_INT(
+	Expected := 3,
+	Actual := composite.AfterWorkingCount,
+	Message := 'After-working hook must run after every continued traversal'
+);
+
 testFinished := TRUE;
 TEST_FINISHED();]]></ST>
       </Implementation>
     </Method>
     <Method Name="TestChildErrorPolicySetErrorAndStop" Id="{8f5eecc9-b753-4312-80a1-234c98becebc}" FolderPath="Tests\">
-      <Declaration><![CDATA[METHOD PRIVATE TestChildErrorPolicySetErrorAndStop
+      <Declaration><![CDATA[(*!
+<summary>Checks stopping before later children after a critical child failure.</summary>
+<description>
+Uses the suite-owned root as the borrowed parent. Fixtures contain no cleanup-dependent local resources.
+</description>
+*)
+METHOD PRIVATE TestChildErrorPolicySetErrorAndStop
 VAR
-	composite : MockCompositeAutomationComponent("CompStop", parent := 0);
+	composite : MockCompositeAutomationComponent(name := "CompStop", parent := _TimeoutRoot);
 END_VAR
 VAR_INST
 	testFinished : BOOL;
@@ -171,14 +231,31 @@ AssertEquals_DINT(
 	Message := 'Composite should transition to STOPPED when policy is SetErrorAndStop'
 );
 
+AssertEquals_INT(
+	Expected := 0,
+	Actual := composite.ChildB.WorkingCount,
+	Message := 'Stop policy must not execute later children'
+);
+AssertEquals_INT(
+	Expected := 0,
+	Actual := composite.AfterWorkingCount,
+	Message := 'Stop policy must not complete the working phase'
+);
+
 testFinished := TRUE;
 TEST_FINISHED();]]></ST>
       </Implementation>
     </Method>
     <Method Name="TestEnableDisable" Id="{60fcbd9b-6f61-4137-ad52-69213214cdde}" FolderPath="Tests\">
-      <Declaration><![CDATA[METHOD PRIVATE TestEnableDisable
+      <Declaration><![CDATA[(*!
+<summary>Checks leaf enablement with a live parent.</summary>
+<description>
+Uses the suite-owned root as the borrowed parent. Fixtures contain no cleanup-dependent local resources.
+</description>
+*)
+METHOD PRIVATE TestEnableDisable
 VAR
-	leaf : MockLeafAutomationComponent("EnDisLeaf", parent := 0);
+	leaf : MockLeafAutomationComponent(name := "EnDisLeaf", parent := _TimeoutRoot);
 END_VAR
 VAR_INST
 	testFinished : BOOL;
@@ -211,9 +288,15 @@ TEST_FINISHED();]]></ST>
       </Implementation>
     </Method>
     <Method Name="TestEventBroadcasting" Id="{6c47ad67-a55f-4e2f-8c93-70b3f7837080}" FolderPath="Tests\">
-      <Declaration><![CDATA[METHOD PRIVATE TestEventBroadcasting
+      <Declaration><![CDATA[(*!
+<summary>Checks broadcast delivery to two children.</summary>
+<description>
+Uses the suite-owned root as the borrowed parent. Fixtures contain no cleanup-dependent local resources.
+</description>
+*)
+METHOD PRIVATE TestEventBroadcasting
 VAR
-	composite : MockCompositeAutomationComponent("CompBcast", parent := 0);
+	composite : MockCompositeAutomationComponent(name := "CompBcast", parent := _TimeoutRoot);
 	broadcastEv : MockAutomationEvent(sourceObject := 0, eventId := 30, payload := "BcastPayload");
 END_VAR
 VAR_INST
@@ -245,9 +328,15 @@ TEST_FINISHED();]]></ST>
       </Implementation>
     </Method>
     <Method Name="TestEventBubbling" Id="{68fd4f50-9ab3-4228-a047-fa46671d58ac}" FolderPath="Tests\">
-      <Declaration><![CDATA[METHOD PRIVATE TestEventBubbling
+      <Declaration><![CDATA[(*!
+<summary>Checks event bubbling through a live parent.</summary>
+<description>
+Uses the suite-owned root as the borrowed parent. Fixtures contain no cleanup-dependent local resources.
+</description>
+*)
+METHOD PRIVATE TestEventBubbling
 VAR
-	composite : MockCompositeAutomationComponent("CompBubble", parent := 0);
+	composite : MockCompositeAutomationComponent(name := "CompBubble", parent := _TimeoutRoot);
 	bubbleEv : MockAutomationEvent(sourceObject := 0, eventId := 10, payload := "BubblePayload");
 END_VAR
 VAR_INST
@@ -279,9 +368,15 @@ TEST_FINISHED();]]></ST>
       </Implementation>
     </Method>
     <Method Name="TestEventBubblingStopPropagation" Id="{37edd6d1-b15f-43b4-8391-65e1a53b400e}" FolderPath="Tests\">
-      <Declaration><![CDATA[METHOD PRIVATE TestEventBubblingStopPropagation
+      <Declaration><![CDATA[(*!
+<summary>Checks local bubbling termination.</summary>
+<description>
+Uses the suite-owned root as the borrowed parent. Fixtures contain no cleanup-dependent local resources.
+</description>
+*)
+METHOD PRIVATE TestEventBubblingStopPropagation
 VAR
-	composite : MockCompositeAutomationComponent("CompStopBubble", parent := 0);
+	composite : MockCompositeAutomationComponent(name := "CompStopBubble", parent := _TimeoutRoot);
 	stopEv : MockAutomationEvent(sourceObject := 0, eventId := 20, payload := "StopPayload");
 END_VAR
 VAR_INST
@@ -373,9 +468,15 @@ END_IF]]></ST>
       </Implementation>
     </Method>
     <Method Name="TestInputOutputPhases" Id="{b867a494-236c-4c7d-bf99-09a73a9b9f29}" FolderPath="Tests\">
-      <Declaration><![CDATA[METHOD PRIVATE TestInputOutputPhases
+      <Declaration><![CDATA[(*!
+<summary>Checks direct leaf input, work and output calls.</summary>
+<description>
+Uses the suite-owned root as the borrowed parent. Fixtures contain no cleanup-dependent local resources.
+</description>
+*)
+METHOD PRIVATE TestInputOutputPhases
 VAR
-	leaf : MockLeafAutomationComponent("IOLeaf", parent := 0);
+	leaf : MockLeafAutomationComponent(name := "IOLeaf", parent := _TimeoutRoot);
 END_VAR
 VAR_INST
 	testFinished : BOOL;
@@ -403,9 +504,15 @@ TEST_FINISHED();]]></ST>
       </Implementation>
     </Method>
     <Method Name="TestLifecycleTransitions" Id="{fda17b75-15fd-48cb-8e63-bcb35e03deac}" FolderPath="Tests\">
-      <Declaration><![CDATA[METHOD PRIVATE TestLifecycleTransitions
+      <Declaration><![CDATA[(*!
+<summary>Checks leaf lifecycle transitions with a live parent.</summary>
+<description>
+Uses the suite-owned root as the borrowed parent. Fixtures contain no cleanup-dependent local resources.
+</description>
+*)
+METHOD PRIVATE TestLifecycleTransitions
 VAR
-	leaf : MockLeafAutomationComponent("TestLeaf", parent := 0);
+	leaf : MockLeafAutomationComponent(name := "TestLeaf", parent := _TimeoutRoot);
 END_VAR
 VAR_INST
 	testFinished : BOOL;
@@ -457,13 +564,18 @@ TEST_FINISHED();]]></ST>
       </Implementation>
     </Method>
     <Method Name="TestRunnerHappyPath" Id="{cb70e837-4514-4556-b56b-a83f4d6c6067}" FolderPath="Tests\">
-      <Declaration><![CDATA[METHOD PRIVATE TestRunnerHappyPath
+      <Declaration><![CDATA[(*!
+<summary>Reports the dedicated task observations for constructor binding and root execution.</summary>
+<description>
+TcUnit reads the synchronized final result. A ten-second deadline reports an absent or stalled test task.
+</description>
+*)
+METHOD PRIVATE TestRunnerHappyPath
 VAR
-	runner : TOF_Automation.AutomationRunner;
-	composite : MockCompositeAutomationComponent("RunnerComp", parent := 0);
-	components : ARRAY [0..0] OF TOF_Automation.IAutomationComponent := [composite];
+	failure : STRING(255);
 END_VAR
 VAR_INST
+	deadline : Tc2_Standard.TON;
 	testFinished : BOOL;
 END_VAR]]></Declaration>
       <Implementation>
@@ -472,36 +584,67 @@ END_VAR]]></Declaration>
 END_IF
 
 TEST(TestName := 'TestRunnerHappyPath');
+deadline(IN := TRUE, PT := T#10S);
 
-AssertEquals_DINT(
-	Expected := TO_DINT(TOF_Automation.AUTOMATION_RUNNER_STATE.INITIALIZING),
-	Actual := TO_DINT(runner.State),
-	Message := 'Runner should start in INITIALIZING state'
-);
-
-runner.Execute(components := components);
-
-AssertEquals_DINT(
-	Expected := TO_DINT(TOF_Automation.AUTOMATION_RUNNER_STATE.RUNNING),
-	Actual := TO_DINT(runner.State),
-	Message := 'Runner should reach RUNNING state after successful initialization'
-);
-
-runner.Execute(components := components);
-AssertTrue(
-	Condition := composite.ChildA.WorkingCount > 0,
-	Message := 'Runner should advance cyclic execution of registered components'
-);
+IF AutomationRunnerTestProgram.ReadResults(happyPathFailure => failure) THEN
+	AssertTrue(Condition := failure = '', Message := failure);
+ELSIF deadline.Q THEN
+	AssertTrue(Condition := FALSE, Message := 'RunnerTestTask did not publish within ten seconds');
+ELSE
+	RETURN;
+END_IF
 
 testFinished := TRUE;
 TEST_FINISHED();]]></ST>
       </Implementation>
     </Method>
     <Method Name="TestRunnerNullComponentGuard" Id="{d40c5d60-d89a-4cb1-aa31-e6bace6ef1c5}" FolderPath="Tests\">
-      <Declaration><![CDATA[METHOD PRIVATE TestRunnerNullComponentGuard
+      <Declaration><![CDATA[(*!
+<summary>Reports the dedicated task observations for empty, null and duplicate root configurations.</summary>
+<description>
+TcUnit reads the synchronized final result. A ten-second deadline reports an absent or stalled test task.
+</description>
+*)
+METHOD PRIVATE TestRunnerNullComponentGuard
 VAR
-	runner : TOF_Automation.AutomationRunner;
-	nullComponents : ARRAY [0..0] OF TOF_Automation.IAutomationComponent := [0];
+	failure : STRING(255);
+END_VAR
+VAR_INST
+	deadline : Tc2_Standard.TON;
+	testFinished : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN
+	RETURN;
+END_IF
+
+TEST(TestName := 'TestRunnerNullComponentGuard');
+deadline(IN := TRUE, PT := T#10S);
+
+IF AutomationRunnerTestProgram.ReadResults(invalidRootsFailure => failure) THEN
+	AssertTrue(Condition := failure = '', Message := failure);
+ELSIF deadline.Q THEN
+	AssertTrue(Condition := FALSE, Message := 'RunnerTestTask did not publish within ten seconds');
+ELSE
+	RETURN;
+END_IF
+
+testFinished := TRUE;
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="TestResetChildPolicies" Id="{46f71ea7-3238-49b4-8d34-32951914425c}">
+      <Declaration><![CDATA[(*!
+<summary>Checks reset traversal and parent recovery for all three critical-child policies.</summary>
+<description>
+Runs once through the existing TcUnit dispatch path; all borrowed fixtures remain live for the call.
+</description>
+*)
+METHOD PRIVATE TestResetChildPolicies
+VAR
+	ignoreBranch : MockCompositeAutomationComponent(name := "ResetIgnore", parent := _TimeoutRoot);
+	continueBranch : MockCompositeAutomationComponent(name := "ResetContinue", parent := _TimeoutRoot);
+	stopBranch : MockCompositeAutomationComponent(name := "ResetStop", parent := _TimeoutRoot);
 END_VAR
 VAR_INST
 	testFinished : BOOL;
@@ -511,20 +654,745 @@ END_VAR]]></Declaration>
 	RETURN;
 END_IF
 
-TEST(TestName := 'TestRunnerNullComponentGuard');
+TEST(TestName := 'TestResetChildPolicies');
 
-runner.Execute(components := nullComponents);
+ignoreBranch.Initialize();
+continueBranch.Initialize();
+stopBranch.Initialize();
+ignoreBranch.Stop(reason := "Reset regression");
+continueBranch.Stop(reason := "Reset regression");
+stopBranch.Stop(reason := "Reset regression");
+ignoreBranch.ChildCriticalErrorHandlingPolicy := TOF_Automation.ChildCriticalErrorHandlingPolicies.Ignore;
+continueBranch.ChildCriticalErrorHandlingPolicy := TOF_Automation.ChildCriticalErrorHandlingPolicies.SetErrorAndContinue;
+stopBranch.ChildCriticalErrorHandlingPolicy := TOF_Automation.ChildCriticalErrorHandlingPolicies.SetErrorAndStop;
+ignoreBranch.ChildA.ThrowOnReset := TRUE;
+continueBranch.ChildA.ThrowOnReset := TRUE;
+stopBranch.ChildA.ThrowOnReset := TRUE;
+
+ignoreBranch.Reset();
+continueBranch.Reset();
+stopBranch.Reset();
 
 AssertEquals_DINT(
-	Expected := TO_DINT(TOF_Automation.AUTOMATION_RUNNER_STATE.INVALID),
-	Actual := TO_DINT(runner.State),
-	Message := 'Runner should transition to INVALID when component is null'
+	Expected := TO_DINT(TOF_Automation.OPERATIONAL_STATE.WORKING),
+	Actual := TO_DINT(ignoreBranch.OperationalState),
+	Message := 'Ignore resumes parent despite stopped child'
+);
+AssertEquals_DINT(
+	Expected := TO_DINT(TOF_Automation.OPERATIONAL_STATE.WORKING),
+	Actual := TO_DINT(continueBranch.OperationalState),
+	Message := 'Continue resumes parent despite stopped child'
+);
+AssertEquals_DINT(
+	Expected := TO_DINT(TOF_Automation.OPERATIONAL_STATE.STOPPED),
+	Actual := TO_DINT(stopBranch.OperationalState),
+	Message := 'Stop refuses parent recovery'
+);
+AssertEquals_INT(Expected := 1, Actual := ignoreBranch.ChildB.ResetCount, Message := 'Ignore resets later child');
+AssertEquals_INT(Expected := 1, Actual := continueBranch.ChildB.ResetCount, Message := 'Continue resets later child');
+AssertEquals_INT(Expected := 0, Actual := stopBranch.ChildB.ResetCount, Message := 'Stop ends reset traversal');
+AssertFalse(Condition := ignoreBranch.HasError, Message := 'Ignore leaves the child diagnostic local');
+AssertTrue(Condition := continueBranch.HasError, Message := 'Continue retains the child diagnostic');
+AssertEquals_DINT(
+	Expected := TO_DINT(TOF_Core.ERROR_SEVERITY.ERROR),
+	Actual := TO_DINT(continueBranch.Error.Severity),
+	Message := 'Continue downgrades copied severity'
+);
+AssertTrue(Condition := stopBranch.HasError, Message := 'Stop records critical child failure');
+AssertEquals_DINT(
+	Expected := TO_DINT(TOF_Automation.OPERATIONAL_STATE.STOPPED),
+	Actual := TO_DINT(ignoreBranch.ChildA.OperationalState),
+	Message := 'Failed child stays stopped'
+);
+AssertEquals_DINT(
+	Expected := TO_DINT(TOF_Automation.OPERATIONAL_STATE.STOPPED),
+	Actual := TO_DINT(continueBranch.ChildA.OperationalState),
+	Message := 'Continue does not revive failed child'
 );
 
-AssertFalse(
-	Condition := TOF_Core.WideStrings.IsNullOrWhiteSpace(stringToCheck := runner.InitializationErrorMessage),
-	Message := 'InitializationErrorMessage should be set when component is null'
+testFinished := TRUE;
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="TestResetFromStoppedHook" Id="{b330cdf6-23be-40dd-a975-8318f6854a92}">
+      <Declaration><![CDATA[(*!
+<summary>Checks that reset from a stopped hook is not undone by the current traversal.</summary>
+<description>
+Runs once through the existing TcUnit dispatch path; all borrowed fixtures remain live for the call.
+</description>
+*)
+METHOD PRIVATE TestResetFromStoppedHook
+VAR
+	composite : MockCompositeAutomationComponent(name := "CallbackReset", parent := _TimeoutRoot);
+END_VAR
+VAR_INST
+	testFinished : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN
+	RETURN;
+END_IF
+
+TEST(TestName := 'TestResetFromStoppedHook');
+
+composite.Initialize();
+composite.Stop(reason := "Callback reset regression");
+composite.ResetOnBeforeChildrenStopped := TRUE;
+composite.Execute();
+
+AssertEquals_DINT(
+	Expected := TO_DINT(TOF_Automation.OPERATIONAL_STATE.WORKING),
+	Actual := TO_DINT(composite.OperationalState),
+	Message := 'Callback reset resumes the parent'
 );
+AssertEquals_DINT(
+	Expected := TO_DINT(TOF_Automation.OPERATIONAL_STATE.WORKING),
+	Actual := TO_DINT(composite.ChildA.OperationalState),
+	Message := 'Current doStop must not stop reset ChildA'
+);
+AssertEquals_DINT(
+	Expected := TO_DINT(TOF_Automation.OPERATIONAL_STATE.WORKING),
+	Actual := TO_DINT(composite.ChildB.OperationalState),
+	Message := 'Current doStop must not stop reset ChildB'
+);
+AssertEquals_INT(
+	Expected := 0,
+	Actual := composite.ChildA.WorkingCount,
+	Message := 'Recovery does not restart working traversal within the stopped phase'
+);
+
+composite.Execute();
+
+AssertEquals_INT(Expected := 1, Actual := composite.ChildA.WorkingCount, Message := 'ChildA works next cycle');
+AssertEquals_INT(Expected := 1, Actual := composite.ChildB.WorkingCount, Message := 'ChildB works next cycle');
+AssertEquals_INT(Expected := 1, Actual := composite.AfterWorkingCount, Message := 'Working traversal completes');
+
+testFinished := TRUE;
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="TestParentValidation" Id="{2eba3794-c485-4e76-ae2d-7f240d0d62fe}">
+      <Declaration><![CDATA[(*!
+<summary>Checks parent rejection before ready and pending initialization hooks.</summary>
+<description>
+Runs once through the existing TcUnit dispatch path; all borrowed fixtures remain live for the call.
+</description>
+*)
+METHOD PRIVATE TestParentValidation
+VAR
+	readyLeaf : MockLeafAutomationComponent(name := "OrphanReadyLeaf", parent := 0);
+	pendingLeaf : MockLeafAutomationComponent(name := "OrphanPendingLeaf", parent := 0);
+	readyBranch : MockCompositeAutomationComponent(name := "OrphanReadyBranch", parent := 0);
+	pendingBranch : MockCompositeAutomationComponent(name := "OrphanPendingBranch", parent := 0);
+	validLeaf : MockLeafAutomationComponent(name := "ValidPendingLeaf", parent := _TimeoutRoot);
+	emptyRoot : MockAutomationController(name := "EmptyRoot");
+	initialized : BOOL;
+END_VAR
+VAR_INST
+	testFinished : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN
+	RETURN;
+END_IF
+
+TEST(TestName := 'TestParentValidation');
+
+pendingLeaf.InitReturnValue := FALSE;
+pendingBranch.ChildA.InitReturnValue := FALSE;
+validLeaf.InitReturnValue := FALSE;
+
+initialized := readyLeaf.Initialize();
+AssertFalse(Condition := initialized, Message := 'Ready orphan leaf must fail');
+initialized := pendingLeaf.Initialize();
+AssertFalse(Condition := initialized, Message := 'Pending orphan leaf must fail');
+initialized := readyBranch.Initialize();
+AssertFalse(Condition := initialized, Message := 'Ready orphan branch must fail');
+initialized := pendingBranch.Initialize();
+AssertFalse(Condition := initialized, Message := 'Pending orphan branch must fail');
+AssertEquals_INT(Expected := 0, Actual := readyLeaf.InitializeCount, Message := 'Ready leaf hook must not run');
+AssertEquals_INT(Expected := 0, Actual := pendingLeaf.InitializeCount, Message := 'Pending leaf hook must not run');
+AssertEquals_INT(
+	Expected := 0,
+	Actual := readyBranch.BeforeInitializeCount,
+	Message := 'Ready branch hook must not run'
+);
+AssertEquals_INT(
+	Expected := 0,
+	Actual := pendingBranch.BeforeInitializeCount,
+	Message := 'Pending branch hook must not run'
+);
+AssertEquals_DINT(
+	Expected := TO_DINT(TOF_Automation.OPERATIONAL_STATE.INVALID),
+	Actual := TO_DINT(readyLeaf.OperationalState),
+	Message := 'Orphan leaf is terminal INVALID'
+);
+AssertEquals_DINT(
+	Expected := TO_DINT(TOF_Automation.OPERATIONAL_STATE.INVALID),
+	Actual := TO_DINT(readyBranch.OperationalState),
+	Message := 'Orphan branch is terminal INVALID'
+);
+AssertTrue(Condition := pendingLeaf.HasError, Message := 'Missing parent produces a copied error');
+AssertTrue(Condition := pendingBranch.HasError, Message := 'Missing parent produces a branch error');
+
+initialized := validLeaf.Initialize();
+AssertFalse(Condition := initialized, Message := 'Valid pending leaf reports incomplete work');
+AssertEquals_DINT(
+	Expected := TO_DINT(TOF_Automation.OPERATIONAL_STATE.INITIALIZING),
+	Actual := TO_DINT(validLeaf.OperationalState),
+	Message := 'Valid pending leaf remains initializing'
+);
+AssertEquals_INT(Expected := 1, Actual := validLeaf.InitializeCount, Message := 'Valid leaf hook is invoked');
+validLeaf.InitReturnValue := TRUE;
+initialized := validLeaf.Initialize();
+AssertTrue(Condition := initialized, Message := 'Valid leaf can finish initialization');
+initialized := emptyRoot.Initialize();
+AssertTrue(Condition := initialized, Message := 'Empty root composition is valid');
+
+testFinished := TRUE;
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="TestInitializationFailureResult" Id="{9f8ce8ce-9928-4d1b-b11b-3f8e0d214000}">
+      <Declaration><![CDATA[(*!
+<summary>Checks failure results, preflight and propagation through two branch levels.</summary>
+<description>
+Runs once through the existing TcUnit dispatch path; all borrowed fixtures remain live for the call.
+</description>
+*)
+METHOD PRIVATE TestInitializationFailureResult
+VAR
+	firstNull : MockCompositeAutomationComponent(name := "FirstNull", parent := _TimeoutRoot);
+	secondNull : MockCompositeAutomationComponent(name := "SecondNull", parent := _TimeoutRoot);
+	throwingChild : MockCompositeAutomationComponent(name := "ThrowingChild", parent := _TimeoutRoot);
+	outerBranch : MockCompositeAutomationComponent(name := "OuterBranch", parent := _TimeoutRoot);
+	innerBranch : MockCompositeAutomationComponent(name := "InnerBranch", parent := outerBranch);
+	initialized : BOOL;
+END_VAR
+VAR_INST
+	testFinished : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN
+	RETURN;
+END_IF
+
+TEST(TestName := 'TestInitializationFailureResult');
+
+firstNull.Children[0] := 0;
+secondNull.Children[1] := 0;
+throwingChild.ChildA.ThrowOnInitializing := TRUE;
+outerBranch.Children[0] := innerBranch;
+innerBranch.Children[1] := 0;
+
+initialized := firstNull.Initialize();
+AssertFalse(Condition := initialized, Message := 'First null slot must not return success');
+initialized := secondNull.Initialize();
+AssertFalse(Condition := initialized, Message := 'Later null slot must not return success');
+AssertEquals_INT(
+	Expected := 0,
+	Actual := firstNull.BeforeInitializeCount,
+	Message := 'Null slot rejection precedes branch callbacks'
+);
+AssertEquals_INT(
+	Expected := 0,
+	Actual := secondNull.ChildA.InitializeCount,
+	Message := 'Later null slot rejection precedes earlier child callbacks'
+);
+initialized := throwingChild.Initialize();
+AssertFalse(Condition := initialized, Message := 'Failed child initialization must not return success');
+AssertEquals_DINT(
+	Expected := TO_DINT(TOF_Automation.OPERATIONAL_STATE.INVALID),
+	Actual := TO_DINT(throwingChild.OperationalState),
+	Message := 'Parent immediately propagates INVALID child'
+);
+AssertEquals_INT(
+	Expected := 0,
+	Actual := throwingChild.ChildB.InitializeCount,
+	Message := 'No later child initializes after a terminal child failure'
+);
+AssertTrue(Condition := throwingChild.HasError, Message := 'Child failure is copied to parent');
+initialized := outerBranch.Initialize();
+AssertFalse(Condition := initialized, Message := 'Nested invalid branch must not appear ready');
+AssertEquals_DINT(
+	Expected := TO_DINT(TOF_Automation.OPERATIONAL_STATE.INVALID),
+	Actual := TO_DINT(innerBranch.OperationalState),
+	Message := 'Inner branch is INVALID'
+);
+AssertEquals_DINT(
+	Expected := TO_DINT(TOF_Automation.OPERATIONAL_STATE.INVALID),
+	Actual := TO_DINT(outerBranch.OperationalState),
+	Message := 'Outer branch immediately becomes INVALID'
+);
+AssertTrue(Condition := outerBranch.HasError, Message := 'Nested error survives propagation');
+
+testFinished := TRUE;
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="TestIndexedLookupContainment" Id="{68f71b2b-f7a4-4b10-84dd-f901581b266a}">
+      <Declaration><![CDATA[(*!
+<summary>Checks borrowed lookup identity, bounds and throwing or missing storage.</summary>
+<description>
+Catches unexpected escapes into an explicit test failure. Terminal OOM is excluded from this shared
+suite and is verified separately in an isolated application. No fixture owns cleanup-dependent resources.
+</description>
+*)
+METHOD PRIVATE TestIndexedLookupContainment
+VAR
+	composite : MockCompositeAutomationComponent(name := "LookupComposite", parent := _TimeoutRoot);
+	controller : MockPluginAutomationController(name := "LookupController");
+	expected : TOF_Automation.IChildAutomationComponent;
+	actual : TOF_Automation.IChildAutomationComponent;
+	exceptionEscaped : BOOL;
+	exceptionCode : __SYSTEM.ExceptionCode;
+END_VAR
+VAR_INST
+	testFinished : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN
+	RETURN;
+END_IF
+
+TEST(TestName := 'TestIndexedLookupContainment');
+
+__TRY
+	expected := composite.ChildA;
+	actual := composite.TryGetChildByIndex(index := 0);
+	AssertTrue(Condition := actual = expected, Message := 'Composite lookup returns the borrowed child');
+	actual := composite.TryGetChildByIndex(index := 2);
+	AssertTrue(Condition := actual = 0, Message := 'Out-of-range lookup returns null');
+	composite.ThrowOnGetChildren := TRUE;
+	actual := composite.TryGetChildByIndex(index := 0);
+	AssertTrue(Condition := actual = 0, Message := 'Composite getter exception is contained');
+	composite.ThrowOnGetChildren := FALSE;
+	composite.MissingChildrenReference := TRUE;
+	actual := composite.TryGetChildByIndex(index := 0);
+	AssertTrue(Condition := actual = 0, Message := 'Missing composite storage returns null');
+	expected := controller.Child;
+	actual := controller.TryGetChildByIndex(index := 0);
+	AssertTrue(Condition := actual = expected, Message := 'Controller lookup returns borrowed child');
+	controller.ThrowOnGetChildren := TRUE;
+	actual := controller.TryGetChildByIndex(index := 0);
+	AssertTrue(Condition := actual = 0, Message := 'Controller getter exception is contained');
+	controller.ThrowOnGetChildren := FALSE;
+	controller.MissingChildrenReference := TRUE;
+	actual := controller.TryGetChildByIndex(index := 0);
+	AssertTrue(Condition := actual = 0, Message := 'Missing controller storage returns null');
+__CATCH(exceptionCode)
+	exceptionEscaped := TRUE;
+__ENDTRY
+
+AssertFalse(Condition := exceptionEscaped, Message := 'No exception may escape an indexed Try lookup');
+
+testFinished := TRUE;
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="TestControllerPluginRecovery" Id="{bbb7a803-3fec-4f20-af28-de662c59eae5}">
+      <Declaration><![CDATA[(*!
+<summary>Checks disabled HMI service, same-cycle guards and stopped-tree reset.</summary>
+<description>
+Uses real base HMI command/status methods. An injected failure while disabled must require Reset.
+All borrowed fixtures remain live for the call; no cleanup-dependent resources are owned locally.
+</description>
+*)
+METHOD PRIVATE TestControllerPluginRecovery
+VAR
+	plugin : MockHmiControllerPlugin;
+	plugins : ARRAY [0..0] OF TOF_Automation.IAutomationControllerPlugin := [plugin];
+	controller : MockPluginAutomationController(name := "HmiController");
+	invalidController : MockPluginAutomationController(name := "InvalidHmiController");
+	actualPlugin : TOF_Automation.IAutomationControllerPlugin;
+	expectedPlugin : TOF_Automation.IAutomationControllerPlugin;
+END_VAR
+VAR_INST
+	testFinished : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN
+	RETURN;
+END_IF
+
+TEST(TestName := 'TestControllerPluginRecovery');
+
+controller.ConfigurePlugins(plugins := plugins);
+controller.Execute();
+AssertEquals_INT(Expected := 0, Actual := plugin.BeforeCount, Message := 'Initializing root has no plugin service');
+controller.Initialize();
+expectedPlugin := plugin;
+actualPlugin := controller.TryGetPluginByIndex(index := 0);
+AssertTrue(Condition := actualPlugin = expectedPlugin, Message := 'Plugin lookup preserves borrowed identity');
+actualPlugin := controller.TryGetPluginByIndex(index := 1);
+AssertTrue(Condition := actualPlugin = 0, Message := 'Missing plugin index returns null');
+plugin.AutomationComponentCommands.Disable := TRUE;
+controller.Execute();
+
+AssertFalse(Condition := controller.Enabled, Message := 'HMI Disable reaches the root');
+AssertFalse(Condition := plugin.AutomationComponentCommands.Disable, Message := 'Disable command is consumed');
+AssertFalse(Condition := plugin.AutomationComponentStatuses.Enabled, Message := 'Disabled status is refreshed');
+AssertEquals_INT(
+	Expected := 0,
+	Actual := controller.Child.ProcessInputCount,
+	Message := 'Disable skips same-cycle input'
+);
+AssertEquals_INT(Expected := 0, Actual := controller.Child.WorkingCount, Message := 'Disable skips same-cycle work');
+AssertEquals_INT(
+	Expected := 0,
+	Actual := controller.Child.ProcessOutputCount,
+	Message := 'Disable skips same-cycle output'
+);
+controller.Execute();
+AssertEquals_INT(Expected := 2, Actual := plugin.BeforeCount, Message := 'Disabled root keeps before service');
+AssertEquals_INT(Expected := 2, Actual := plugin.AfterCount, Message := 'Disabled root keeps after service');
+AssertEquals_INT(Expected := 0, Actual := controller.Child.WorkingCount, Message := 'Disabled interval has no work');
+plugin.AutomationComponentCommands.Enable := TRUE;
+controller.Execute();
+
+AssertTrue(Condition := controller.Enabled, Message := 'The same HMI channel can re-enable root');
+AssertTrue(Condition := plugin.AutomationComponentStatuses.Enabled, Message := 'Enabled status is refreshed');
+AssertFalse(Condition := plugin.AutomationComponentCommands.Enable, Message := 'Enable command is consumed');
+AssertEquals_INT(Expected := 1, Actual := controller.Child.ProcessInputCount, Message := 'Input resumes on Enable');
+AssertEquals_INT(Expected := 1, Actual := controller.Child.WorkingCount, Message := 'Work resumes on Enable');
+AssertEquals_INT(Expected := 1, Actual := controller.Child.ProcessOutputCount, Message := 'Output resumes on Enable');
+controller.Stop(reason := "HMI stopped recovery regression");
+controller.Execute();
+AssertEquals_INT(Expected := 1, Actual := controller.Child.StopCount, Message := 'Enabled stopped hooks still run');
+AssertEquals_INT(Expected := 2, Actual := controller.Child.ProcessInputCount, Message := 'Stopped root retains input');
+AssertEquals_INT(Expected := 2, Actual := controller.Child.ProcessOutputCount, Message := 'Stopped root retains output');
+plugin.AutomationComponentCommands.Reset := TRUE;
+controller.Execute();
+AssertEquals_DINT(
+	Expected := TO_DINT(TOF_Automation.OPERATIONAL_STATE.WORKING),
+	Actual := TO_DINT(controller.OperationalState),
+	Message := 'HMI Reset resumes root'
+);
+AssertEquals_INT(Expected := 2, Actual := controller.Child.WorkingCount, Message := 'HMI Reset resumes child work');
+AssertEquals_INT(Expected := 5, Actual := plugin.AfterCount, Message := 'Every managed cycle refreshes status');
+
+plugin.AutomationComponentCommands.Disable := TRUE;
+controller.Execute();
+plugin.ThrowOnBeforeExecute := TRUE;
+controller.Execute();
+AssertEquals_DINT(
+	Expected := TO_DINT(TOF_Automation.OPERATIONAL_STATE.STOPPED),
+	Actual := TO_DINT(controller.OperationalState),
+	Message := 'Failed disabled service must require Reset'
+);
+AssertTrue(Condition := controller.HasError, Message := 'Disabled plugin failure retains its copied error');
+AssertEquals_INT(Expected := 2, Actual := controller.Child.WorkingCount, Message := 'Disabled fault does no work');
+plugin.ThrowOnBeforeExecute := FALSE;
+plugin.AutomationComponentCommands.Enable := TRUE;
+plugin.AutomationComponentCommands.Reset := TRUE;
+controller.Execute();
+AssertFalse(Condition := controller.HasError, Message := 'Explicit recovery clears the plugin failure');
+AssertFalse(Condition := plugin.AutomationComponentCommands.Reset, Message := 'Recovery Reset is consumed');
+AssertEquals_INT(Expected := 3, Actual := controller.Child.WorkingCount, Message := 'Enable and Reset resume work');
+
+invalidController.ConfigurePlugins(plugins := plugins);
+invalidController.MissingChildrenReference := TRUE;
+invalidController.Initialize();
+invalidController.Execute();
+AssertEquals_INT(Expected := 8, Actual := plugin.BeforeCount, Message := 'INVALID root has no before service');
+AssertEquals_INT(Expected := 8, Actual := plugin.AfterCount, Message := 'INVALID root has no after service');
+
+testFinished := TRUE;
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="TestDuplicateChild" Id="{e268cb55-efc6-4592-b246-f290a469a965}" FolderPath="Tests\">
+      <Declaration><![CDATA[(*!
+<summary>Checks that a duplicate child invalidates a branch before initialization callbacks.</summary>
+*)
+METHOD PRIVATE TestDuplicateChild
+VAR
+	duplicateBranch : MockCompositeAutomationComponent(name := "Duplicate", parent := _TimeoutRoot);
+END_VAR
+VAR_INST
+	testFinished : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN
+	RETURN;
+END_IF
+
+TEST(TestName := 'TestDuplicateChild');
+
+duplicateBranch.Children[1] := duplicateBranch.Children[0];
+duplicateBranch.ChildCriticalErrorHandlingPolicy := TOF_Automation.ChildCriticalErrorHandlingPolicies.Ignore;
+
+AssertFalse(Condition := duplicateBranch.Initialize(), Message := 'Invalid composition must fail');
+AssertTrue(
+	Condition := duplicateBranch.OperationalState = TOF_Automation.OPERATIONAL_STATE.INVALID,
+	Message := 'Branch must enter INVALID'
+);
+AssertTrue(
+	Condition := duplicateBranch.HasError AND_THEN duplicateBranch.Error.Severity = TOF_Core.ERROR_SEVERITY.CRITICAL,
+	Message := 'Branch must retain a critical error'
+);
+AssertEquals_WSTRING(
+	Expected := "Duplicate: Children[1] (ChildA) duplicates Children[0]",
+	Actual := duplicateBranch.OperationalStateReason,
+	Message := 'Diagnosis identifies the conflicting slots'
+);
+AssertEquals_INT(Expected := 0, Actual := duplicateBranch.BeforeInitializeCount, Message := 'Branch hook must not run');
+AssertEquals_INT(Expected := 0, Actual := duplicateBranch.ChildA.InitializeCount, Message := 'First child must not start');
+AssertFalse(Condition := duplicateBranch.Initialize(), Message := 'Invalid branch must remain terminal');
+
+testFinished := TRUE;
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="TestMismatchedChildParent" Id="{b7d99828-f657-48d1-9c03-a550815b5520}" FolderPath="Tests\">
+      <Declaration><![CDATA[(*!
+<summary>Checks that a mismatched parent invalidates a branch before initialization callbacks.</summary>
+*)
+METHOD PRIVATE TestMismatchedChildParent
+VAR
+	branch : MockCompositeAutomationComponent(name := "WrongParent", parent := _TimeoutRoot);
+	foreignChild : MockLeafAutomationComponent(name := "Foreign", parent := _TimeoutRoot);
+END_VAR
+VAR_INST
+	testFinished : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN
+	RETURN;
+END_IF
+
+TEST(TestName := 'TestMismatchedChildParent');
+
+branch.Children[1] := foreignChild;
+branch.ChildCriticalErrorHandlingPolicy := TOF_Automation.ChildCriticalErrorHandlingPolicies.Ignore;
+
+AssertFalse(Condition := branch.Initialize(), Message := 'Invalid composition must fail');
+AssertTrue(
+	Condition := branch.OperationalState = TOF_Automation.OPERATIONAL_STATE.INVALID,
+	Message := 'Branch must enter INVALID'
+);
+AssertTrue(
+	Condition := branch.HasError AND_THEN branch.Error.Severity = TOF_Core.ERROR_SEVERITY.CRITICAL,
+	Message := 'Branch must retain a critical error'
+);
+AssertEquals_WSTRING(
+	Expected := "WrongParent: Children[1] (Foreign) has a different Parent",
+	Actual := branch.OperationalStateReason,
+	Message := 'Diagnosis identifies the conflicting slot'
+);
+AssertEquals_INT(Expected := 0, Actual := branch.BeforeInitializeCount, Message := 'Branch hook must not run');
+AssertEquals_INT(Expected := 0, Actual := branch.ChildA.InitializeCount, Message := 'First child must not start');
+AssertFalse(Condition := branch.Initialize(), Message := 'Invalid branch must remain terminal');
+
+testFinished := TRUE;
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="TestOutputPhaseStop" Id="{f7c0f41b-1cde-431b-ab5d-e7b9052b11c7}">
+      <Declaration><![CDATA[(*!
+<summary>Checks interrupted controller and composite output passes and the following stopped pass.</summary>
+*)
+METHOD PRIVATE TestOutputPhaseStop
+VAR
+	branch : MockCompositeAutomationComponent(name := "OutputBranch", parent := _TimeoutRoot);
+	controller : MockPluginAutomationController(name := "OutputController");
+END_VAR
+VAR_INST
+	testFinished : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN
+	RETURN;
+END_IF
+
+TEST(TestName := 'TestOutputPhaseStop');
+
+branch.Initialize();
+branch.ChildCriticalErrorHandlingPolicy := TOF_Automation.ChildCriticalErrorHandlingPolicies.SetErrorAndStop;
+branch.ChildA.ThrowOnNextOutput := TRUE;
+branch.ProcessOutput();
+AssertTrue(Condition := branch.OperationalState = TOF_Automation.OPERATIONAL_STATE.STOPPED, Message := 'Branch stops');
+AssertEquals_INT(Expected := 1, Actual := branch.ChildA.ProcessOutputCount, Message := 'First output already ran');
+AssertEquals_INT(Expected := 0, Actual := branch.ChildB.ProcessOutputCount, Message := 'Later output is deferred');
+AssertEquals_INT(Expected := 0, Actual := branch.AfterOutputCount, Message := 'Interrupted branch skips after hook');
+
+branch.ProcessOutput();
+AssertEquals_INT(Expected := 2, Actual := branch.ChildA.ProcessOutputCount, Message := 'Stopped pass starts at slot 0');
+AssertEquals_INT(Expected := 1, Actual := branch.ChildB.ProcessOutputCount, Message := 'Stopped pass reaches slot 1');
+AssertEquals_INT(Expected := 1, Actual := branch.AfterOutputCount, Message := 'Stopped pass completes');
+
+controller.Initialize();
+controller.ChildCriticalErrorHandlingPolicy := TOF_Automation.ChildCriticalErrorHandlingPolicies.SetErrorAndStop;
+controller.Child.ThrowOnNextOutput := TRUE;
+controller.Execute();
+AssertEquals_INT(Expected := 1, Actual := controller.Child.ProcessOutputCount, Message := 'Controller output ran');
+AssertEquals_INT(Expected := 0, Actual := controller.AfterOutputCount, Message := 'Interrupted last slot skips hook');
+
+controller.Execute();
+AssertEquals_INT(Expected := 2, Actual := controller.Child.ProcessOutputCount, Message := 'Stopped controller writes');
+AssertEquals_INT(Expected := 1, Actual := controller.AfterOutputCount, Message := 'Stopped controller finishes');
+
+testFinished := TRUE;
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="TestOutputPhaseContinuation" Id="{fba13227-5970-4181-9955-c348f2a69ecb}">
+      <Declaration><![CDATA[(*!
+<summary>Checks sibling writes under Ignore and Continue and interruption after a stop/reset callback.</summary>
+*)
+METHOD PRIVATE TestOutputPhaseContinuation
+VAR
+	branch : MockCompositeAutomationComponent(name := "OutputPolicies", parent := _TimeoutRoot);
+END_VAR
+VAR_INST
+	testFinished : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN
+	RETURN;
+END_IF
+
+TEST(TestName := 'TestOutputPhaseContinuation');
+
+branch.Initialize();
+branch.ChildCriticalErrorHandlingPolicy := TOF_Automation.ChildCriticalErrorHandlingPolicies.Ignore;
+branch.ChildA.ThrowOnNextOutput := TRUE;
+branch.ProcessOutput();
+AssertEquals_INT(Expected := 1, Actual := branch.ChildB.ProcessOutputCount, Message := 'Ignore reaches next output');
+AssertEquals_INT(Expected := 1, Actual := branch.AfterOutputCount, Message := 'Ignore completes the pass');
+
+branch.ChildCriticalErrorHandlingPolicy := TOF_Automation.ChildCriticalErrorHandlingPolicies.SetErrorAndContinue;
+branch.ProcessOutput();
+AssertEquals_INT(Expected := 2, Actual := branch.ChildB.ProcessOutputCount, Message := 'Continue reaches next output');
+AssertEquals_INT(Expected := 2, Actual := branch.AfterOutputCount, Message := 'Continue completes the pass');
+
+branch.StopAndResetBeforeOutput := TRUE;
+branch.ProcessOutput();
+AssertTrue(Condition := branch.OperationalState = TOF_Automation.OPERATIONAL_STATE.WORKING, Message := 'Reset restored work');
+AssertEquals_INT(Expected := 2, Actual := branch.ChildA.ProcessOutputCount, Message := 'Obsolete pass skips first output');
+AssertEquals_INT(Expected := 2, Actual := branch.AfterOutputCount, Message := 'Obsolete pass skips after hook');
+
+testFinished := TRUE;
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="checkPrimaryErrorCopy" Id="{7132d51e-db9d-445f-a9a8-1ab4f4b9e241}">
+      <Declaration><![CDATA[(*!
+<summary>Checks the component snapshot after the real filter reuses the task-local native exception.</summary>
+<param name="leaf">Fixture in the required lifecycle state.</param>
+<param name="reaction">Runtime reaction under test.</param>
+*)
+METHOD PRIVATE checkPrimaryErrorCopy
+VAR_INPUT
+	leaf : REFERENCE TO MockLeafAutomationComponent;
+	reaction : TOF_Core.EXCEPTION_REACTION;
+END_VAR
+VAR
+	primary : TOF_Core.IException;
+	primaryMessage : TOF_Core.ERROR_MESSAGE;
+	handlerThrew : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[primary := TOF_Core.ExceptionManager.GetLastException(
+	exceptionCode := __SYSTEM.ExceptionCode.RTSEXCPT_ARRAYBOUNDS,
+	catchPointNamespaceName := CurrentNamespace.Name,
+	catchPointPOUName := __POUNAME(),
+	catchPointPosition := __POSITION()
+);
+primaryMessage := primary.GetMessage();
+MAIN.DiagnosticLogFilter.SetSecondaryExceptionProbe(enabled := TRUE);
+
+__TRY
+	leaf.ApplyExceptionReaction(exception := primary, reaction := reaction);
+__CATCH
+	handlerThrew := TRUE;
+__ENDTRY
+
+MAIN.DiagnosticLogFilter.SetSecondaryExceptionProbe(enabled := FALSE);
+AssertFalse(Condition := handlerThrew, Message := 'Processing the native diagnostic must complete');
+AssertTrue(Condition := primary.GetMessage() <> primaryMessage, Message := 'Filter must overwrite the borrowed wrapper');
+AssertTrue(Condition := leaf.Error.TopMessage = primaryMessage, Message := 'Component must retain the primary message');]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="TestPrimaryErrorBeforeLogging" Id="{570a6237-af79-47a2-b63e-3ffa14f9380f}">
+      <Declaration><![CDATA[(*!
+<summary>Checks primary diagnostic capture for initialization, continue and stop reactions.</summary>
+<description>Uses the installed test filter and task-local native wrapper without generating a hardware fault.</description>
+*)
+METHOD PRIVATE TestPrimaryErrorBeforeLogging
+VAR
+	initializingLeaf : MockLeafAutomationComponent(name := "InitProbe", parent := _TimeoutRoot);
+	workingLeaf : MockLeafAutomationComponent(name := "WorkProbe", parent := _TimeoutRoot);
+END_VAR
+VAR_INST
+	testFinished : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN
+	RETURN;
+END_IF
+
+TEST(TestName := 'TestPrimaryErrorBeforeLogging');
+
+checkPrimaryErrorCopy(leaf := initializingLeaf, reaction := TOF_Core.EXCEPTION_REACTION.IGNORE);
+AssertTrue(
+	Condition := initializingLeaf.OperationalState = TOF_Automation.OPERATIONAL_STATE.INVALID
+		AND_THEN initializingLeaf.Error.Severity = TOF_Core.ERROR_SEVERITY.CRITICAL,
+	Message := 'Initialization failure always records a critical error'
+);
+
+workingLeaf.Initialize();
+checkPrimaryErrorCopy(leaf := workingLeaf, reaction := TOF_Core.EXCEPTION_REACTION.SET_ERROR_AND_CONTINUE);
+AssertTrue(
+	Condition := workingLeaf.OperationalState = TOF_Automation.OPERATIONAL_STATE.WORKING
+		AND_THEN workingLeaf.Error.Severity = TOF_Core.ERROR_SEVERITY.ERROR,
+	Message := 'Continue records an error and keeps the component working'
+);
+checkPrimaryErrorCopy(leaf := workingLeaf, reaction := TOF_Core.EXCEPTION_REACTION.SET_ERROR_AND_STOP);
+AssertTrue(
+	Condition := workingLeaf.OperationalState = TOF_Automation.OPERATIONAL_STATE.STOPPED
+		AND_THEN workingLeaf.Error.Severity = TOF_Core.ERROR_SEVERITY.CRITICAL,
+	Message := 'Stop replaces the lower severity error and stops the component'
+);
+
+testFinished := TRUE;
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="TestInputPhaseStop" Id="{94edb0f3-3330-49f3-9c51-1fc0865bc305}">
+      <Declaration><![CDATA[(*!
+<summary>Checks input completion and stopped dispatch after the first input faults in a nested branch.</summary>
+*)
+METHOD PRIVATE TestInputPhaseStop
+VAR
+	controller : MockPluginAutomationController(name := "InputController");
+	branch : MockCompositeAutomationComponent(name := "InputBranch", parent := controller);
+END_VAR
+VAR_INST
+	testFinished : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN
+	RETURN;
+END_IF
+
+TEST(TestName := 'TestInputPhaseStop');
+
+controller.Children[0] := branch;
+controller.ChildCriticalErrorHandlingPolicy := TOF_Automation.ChildCriticalErrorHandlingPolicies.SetErrorAndStop;
+controller.Initialize();
+branch.ChildA.ThrowOnNextInput := TRUE;
+controller.Execute();
+
+AssertTrue(
+	Condition := controller.OperationalState = TOF_Automation.OPERATIONAL_STATE.STOPPED
+		AND_THEN branch.OperationalState = TOF_Automation.OPERATIONAL_STATE.STOPPED,
+	Message := 'Critical input fault must stop both branches'
+);
+AssertEquals_INT(Expected := 1, Actual := branch.ChildB.ProcessInputCount, Message := 'Later input runs in the same scan');
+AssertEquals_INT(Expected := 1, Actual := branch.AfterInputCount, Message := 'Composite completes its input pass');
+AssertEquals_INT(Expected := 1, Actual := controller.AfterInputCount, Message := 'Controller completes its input pass');
+AssertEquals_INT(Expected := 0, Actual := branch.ChildB.WorkingCount, Message := 'Working logic must not follow the stop');
 
 testFinished := TRUE;
 TEST_FINISHED();]]></ST>

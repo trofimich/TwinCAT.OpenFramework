@@ -10,23 +10,85 @@ License: https://opensource.org/license/mit
 PROGRAM MAIN
 VAR_OUTPUT
 	TestAutomationUnit : TestAutomationController("TestController");
-	
-	Runner : TOF_Automation.AutomationRunner;
 END_VAR
 VAR	
 	_AutomationControllers : ARRAY [0..0] OF TOF_Automation.IAutomationComponent := 
 	[
 		TestAutomationUnit
 	];
-	
-	_LogFilter : LogFilter;
+	_StateInitialized : BOOL;
+	_LastState : TOF_Automation.OPERATIONAL_STATE;
+	_CycleCount : ULINT;
+	_HeartbeatTimer : Tc2_Standard.TON;
+	_StateMessage : STRING(255);
+	_ErrorMessage : TOF_Core.ERROR_MESSAGE;
+	_ReasonMessage : STRING(255);
+	_CycleMessage : STRING(255);
+END_VAR
+VAR_OUTPUT
+	//! <summary>Installed test filter with a task-local diagnostic probe.</summary>
+	DiagnosticLogFilter : LogFilter;
+	Runner : TOF_Automation.AutomationRunner(components := _AutomationControllers);
 END_VAR]]></Declaration>
     <Implementation>
-      <ST><![CDATA[IF Runner.State = TOF_Automation.AUTOMATION_RUNNER_STATE.INITIALIZING THEN
-	TOF_Core.LogManager.Filter := _LogFilter;	
+      <ST><![CDATA[_CycleCount := _CycleCount + 1;
+
+IF Runner.State = TOF_Automation.AUTOMATION_RUNNER_STATE.INITIALIZING THEN
+	TOF_Core.LogManager.Filter := DiagnosticLogFilter;	
 END_IF
 
-Runner.Execute(components := _AutomationControllers);]]></ST>
+Runner.Execute();
+
+IF Runner.State = TOF_Automation.AUTOMATION_RUNNER_STATE.INVALID THEN
+	Tc2_System.ADSLOGSTR(
+		msgCtrlMask := Tc2_System.Global_Variables.ADSLOG_MSGTYPE_ERROR,
+		msgFmtStr := 'CRITICAL: AutomationRunner is INVALID: %s',
+		strArg := TO_STRING(Runner.InitializationErrorMessage)
+	);
+END_IF
+
+IF NOT _StateInitialized OR_ELSE TestAutomationUnit.OperationalState <> _LastState THEN
+	_StateInitialized := TRUE;
+	_LastState := TestAutomationUnit.OperationalState;
+	_StateMessage := TO_STRING(TestAutomationUnit.OperationalState);
+
+	Tc2_System.ADSLOGSTR(
+		msgCtrlMask := Tc2_System.Global_Variables.ADSLOG_MSGTYPE_WARN,
+		msgFmtStr := 'STATUS: TestAutomationUnit state changed to: %s',
+		strArg := _StateMessage
+	);
+
+	IF TestAutomationUnit.OperationalState = TOF_Automation.OPERATIONAL_STATE.STOPPED
+		OR_ELSE TestAutomationUnit.OperationalState = TOF_Automation.OPERATIONAL_STATE.INVALID
+	THEN
+		_ReasonMessage := TO_STRING(TestAutomationUnit.OperationalStateReason);
+		_ErrorMessage := TestAutomationUnit.Error.TopMessage;
+
+		Tc2_System.ADSLOGSTR(
+			msgCtrlMask := Tc2_System.Global_Variables.ADSLOG_MSGTYPE_ERROR,
+			msgFmtStr := 'CRITICAL: TestAutomationUnit stopped/failed. Reason: %s',
+			strArg := _ReasonMessage
+		);
+
+		Tc2_System.ADSLOGSTR(
+			msgCtrlMask := Tc2_System.Global_Variables.ADSLOG_MSGTYPE_ERROR,
+			msgFmtStr := 'CRITICAL: TestAutomationUnit error message: %s',
+			strArg := TO_STRING(_ErrorMessage)
+		);
+	END_IF
+END_IF
+
+_HeartbeatTimer(IN := NOT _HeartbeatTimer.Q, PT := T#2S);
+
+IF _HeartbeatTimer.Q THEN
+	_CycleMessage := TO_STRING(_CycleCount);
+
+	Tc2_System.ADSLOGSTR(
+		msgCtrlMask := Tc2_System.Global_Variables.ADSLOG_MSGTYPE_WARN,
+		msgFmtStr := 'HEARTBEAT: TestTask running, cycle: %s',
+		strArg := _CycleMessage
+	);
+END_IF]]></ST>
     </Implementation>
   </POU>
 </TcPlcObject>

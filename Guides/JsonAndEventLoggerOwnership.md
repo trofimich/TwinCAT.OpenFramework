@@ -48,7 +48,7 @@ END_VAR
 
 IF serializeRequested THEN
     serializeRequested := FALSE;
-    jsonValid := serializer.TryCreateJsonFromStructure(
+    jsonValid := serializer.TrySerialize(
         sourceStructure := snapshot,
         extender := 0,
         targetJson := json,
@@ -72,7 +72,7 @@ END_VAR
 
 IF serializeRequested THEN
     serializeRequested := FALSE;
-    jsonValid := serializer.TryCreateJsonFromStructure(
+    jsonValid := serializer.TrySerialize(
         sourceStructure := snapshot,
         extender := 0,
         targetJson := json,
@@ -95,16 +95,16 @@ other tasks must not read a partially updated structure.
 
 ## Extender callbacks and nested conversion
 
-`ExtendAtStart` and `ExtendAtFinish` run synchronously in the serializer's owner
+`WritePrefix` and `WriteSuffix` run synchronously in the serializer's owner
 task. Each callback borrows the writer only until that callback returns. It must
 not retain the writer or hand it to another task.
 
-For example, while `outerSerializer` is inside `ExtendAtStart`:
+For example, while `outerSerializer` is inside `WritePrefix`:
 
 | Callback action | Contract |
 | --- | --- |
 | Write the prefix through the supplied SAX writer | Supported |
-| Call Create/TryCreate or Fill/TryFill on `outerSerializer` | Unsupported reentry |
+| Call Serialize/TrySerialize or Deserialize/TryDeserialize on `outerSerializer` | Unsupported reentry |
 | Read or change `outerSerializer.DecimalPlaces` | Unsupported access during its active operation |
 | Convert an independent structure with `nestedSerializer` and a separate buffer | Supported if that serializer is idle and belongs to this task |
 

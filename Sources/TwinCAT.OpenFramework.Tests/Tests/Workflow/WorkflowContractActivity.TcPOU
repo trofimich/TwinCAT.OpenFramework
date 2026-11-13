@@ -11,10 +11,11 @@ License: https://opensource.org/license/mit
 <summary>Provides controlled execution and formatter failures for workflow contract tests.</summary>
 <description>
 Persistent test instances own their borrowed configuration and exception template. No hardware effects or
-terminal allocation injection are performed. Configure flags before starting; all observations are task-local.
+terminal allocation injection are performed. The fixture can defer its initial resetting step. All observations are task-local.
 </description>
 *)
 
+{attribute 'enable_dynamic_creation'}
 {attribute 'no_explicit_call' := 'do not call this function block directly'}
 {attribute 'no_assign'}
 FUNCTION_BLOCK WorkflowContractActivity EXTENDS TOF_Workflow.Activity
@@ -25,6 +26,10 @@ VAR_INPUT
 	throwMessageFailure : BOOL;
 	//! <summary>Completes running immediately when no injected failure is enabled.</summary>
 	completeRunning : BOOL;
+	//! <summary>Keeps the first reset step pending until the next Execute call.</summary>
+	deferFirstResetStep : BOOL;
+	//! <summary>Optional persistent observer incremented on ordinary destruction of a factory fixture.</summary>
+	exitCount : REFERENCE TO DINT;
 END_VAR
 VAR_OUTPUT
 	//! <summary>Number of fresh or resumed start callbacks.</summary>
@@ -149,6 +154,39 @@ END_VAR]]></Declaration>
         <ST><![CDATA[stopCount := stopCount + 1;
 
 OnStopping := TOF_Workflow.ACTIVITY_STOPPING_STATE.WORK_STOPPED;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="OnResetting" Id="{d907286b-3240-4df7-a2de-d2d9d9e0e7a4}">
+      <Declaration><![CDATA[(*!
+<summary>Optionally defers reset completion by one step.</summary>
+<param name="startResetting">TRUE only on entry to reset.</param>
+*)
+METHOD PROTECTED OnResetting : TOF_Workflow.ACTIVITY_RESETTING_STATE
+VAR_INPUT
+	startResetting : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF startResetting AND_THEN deferFirstResetStep THEN
+	OnResetting := TOF_Workflow.ACTIVITY_RESETTING_STATE.WORK_IN_PROGRESS;
+ELSE
+	OnResetting := TOF_Workflow.ACTIVITY_RESETTING_STATE.WORK_RESET;
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="FB_exit" Id="{7310ebf6-2f69-4010-bbc9-8e626f7df266}">
+      <Declaration><![CDATA[(*!
+<summary>Reports ordinary destruction to an optional persistent counter.</summary>
+<description>The suite keeps the counter alive until disposal. Counting a callback does not certify physical deallocation.</description>
+<param name="bInCopyCode">TwinCAT online-change indicator.</param>
+*)
+METHOD FB_exit : BOOL
+VAR_INPUT
+	bInCopyCode : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF NOT bInCopyCode AND_THEN __ISVALIDREF(exitCount) THEN
+	exitCount := exitCount + 1;
+END_IF]]></ST>
       </Implementation>
     </Method>
   </POU>

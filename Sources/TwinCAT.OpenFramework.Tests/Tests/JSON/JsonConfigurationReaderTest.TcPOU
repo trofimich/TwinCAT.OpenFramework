@@ -1,0 +1,502 @@
+<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="JsonConfigurationReaderTest" Id="{d3b4aca7-e376-4a5d-a77c-d659d7eed02c}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+SPDX-FileCopyrightText: © 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+SPDX-License-Identifier: MIT
+License: https://opensource.org/license/mit
+*)
+
+(*!
+<summary>Exercises JsonConfigurationReader document opening, member navigation and value reading error cases.</summary>
+<description>
+Verifies object root requirement, mandatory and optional field retrieval, list inspection, item bounds,
+type and size mismatch detection, null rejection, buffer capacity checks, and repeated Open behavior.
+</description>
+*)
+
+{attribute 'no_assign'}
+{attribute 'no_explicit_call' := 'do not call this function block directly'}
+FUNCTION_BLOCK JsonConfigurationReaderTest EXTENDS TOF_Testing.SingleCycleTest
+VAR_STAT
+	{attribute 'hide'}
+	_ClassName : STRING := __POUNAME();
+END_VAR
+VAR
+	{attribute 'hide'}
+	{attribute 'init_namespace'}
+	_NamespaceName : STRING;
+END_VAR
+VAR
+	_Reader : TOF_JSON.JsonConfigurationReader;
+	_Doc : TOF_Core.JSON_DOCUMENT;
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[]]></ST>
+    </Implementation>
+    <Property Name="ClassName" Id="{92afd0f2-fb47-4809-b6ef-dfc13ec32c72}">
+      <Declaration><![CDATA[(*!
+<summary>Borrows the concrete class name for the lifetime of this instance.</summary>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{25d2401d-2585-4234-9eec-1c8e9bcb47a8}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ClassName REF= _ClassName;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="ExecuteTest" Id="{67721956-fd99-4d4c-b9f2-7e76d01ca4fc}">
+      <Declaration><![CDATA[(*!
+<summary>Executes all reader test scenarios in a single PLC cycle.</summary>
+*)
+METHOD PROTECTED ExecuteTest]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[testOpenObjectRoot();
+testOpenNonObjectRoot();
+testOpenInvalidJson();
+testFieldExistingAndMissing();
+testFieldOnNonObject();
+testTryField();
+testListOperations();
+testReadValueValidationAndErrors();
+testRepeatedOpen();]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="NamespaceName" Id="{87f06da3-491f-4214-bc4b-4b823ffc6357}">
+      <Declaration><![CDATA[(*!
+<summary>Borrows the compiler-initialized namespace for the lifetime of this instance.</summary>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{c91bfb88-6101-4769-9bdf-f67152487581}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[NamespaceName REF= CurrentNamespace.Name;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="SelfSize" Id="{b997dedc-4da5-47c3-af8c-1810dd3cf17e}">
+      <Declaration><![CDATA[(*!
+<summary>Reports the complete concrete instance size in bytes.</summary>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY SelfSize : ULINT]]></Declaration>
+      <Get Name="Get" Id="{e9bd6813-a087-4586-a6cf-bf22e450d774}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[SelfSize := XSIZEOF(THIS^);]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="testFieldExistingAndMissing" Id="{1882cb16-59af-4952-8201-e842009bc329}">
+      <Declaration><![CDATA[(*!
+<summary>Verifies mandatory field lookup and missing field exception.</summary>
+*)
+METHOD PRIVATE testFieldExistingAndMissing
+VAR
+	root : TOF_Core.CONFIGURATION_NODE;
+	fieldNode : TOF_Core.CONFIGURATION_NODE;
+	caught : BOOL;
+	exceptionCode : __SYSTEM.ExceptionCode;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_Doc := '{"existing": 42}';
+root := _Reader.Parse(document := _Doc);
+
+fieldNode := _Reader.GetField(node := root, name := 'existing');
+Assert.ThatBool(actual := _Reader.IsPresent(node := fieldNode)).IsTrue();
+
+caught := FALSE;
+__TRY
+	fieldNode := _Reader.GetField(node := root, name := 'missing');
+__CATCH (exceptionCode)
+	caught := TRUE;
+__ENDTRY
+
+Assert.ThatBool(actual := caught).IsTrue();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="testFieldOnNonObject" Id="{21c6c8e5-1f31-4f9e-b65d-43a7321a2b3e}">
+      <Declaration><![CDATA[(*!
+<summary>Verifies that Field on a non-object parent raises not an object.</summary>
+*)
+METHOD PRIVATE testFieldOnNonObject
+VAR
+	root : TOF_Core.CONFIGURATION_NODE;
+	scalarNode : TOF_Core.CONFIGURATION_NODE;
+	childNode : TOF_Core.CONFIGURATION_NODE;
+	caught : BOOL;
+	exceptionCode : __SYSTEM.ExceptionCode;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_Doc := '{"scalar": 42}';
+root := _Reader.Parse(document := _Doc);
+scalarNode := _Reader.GetField(node := root, name := 'scalar');
+
+caught := FALSE;
+__TRY
+	childNode := _Reader.GetField(node := scalarNode, name := 'child');
+__CATCH (exceptionCode)
+	caught := TRUE;
+__ENDTRY
+
+Assert.ThatBool(actual := caught).IsTrue();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="testListOperations" Id="{dc3ff508-9226-494a-a702-a5d11a4a2c9a}">
+      <Declaration><![CDATA[(*!
+<summary>Verifies IsList, Count, Item bounds and non-list error detection.</summary>
+*)
+METHOD PRIVATE testListOperations
+VAR
+	root : TOF_Core.CONFIGURATION_NODE;
+	listNode : TOF_Core.CONFIGURATION_NODE;
+	objNode : TOF_Core.CONFIGURATION_NODE;
+	item0 : TOF_Core.CONFIGURATION_NODE;
+	item2 : TOF_Core.CONFIGURATION_NODE;
+	itemBad : TOF_Core.CONFIGURATION_NODE;
+	countVal : UDINT;
+	caught : BOOL;
+	exceptionCode : __SYSTEM.ExceptionCode;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_Doc := '{"list": [10, 20, 30], "obj": {"x": 1}}';
+root := _Reader.Parse(document := _Doc);
+
+listNode := _Reader.GetField(node := root, name := 'list');
+Assert.ThatBool(actual := _Reader.IsArray(node := listNode)).IsTrue();
+Assert.ThatUDInt(actual := _Reader.GetArraySize(node := listNode)).ToBe(expected := 3);
+
+item0 := _Reader.GetItem(node := listNode, index := 0);
+Assert.ThatBool(actual := _Reader.IsPresent(node := item0)).IsTrue();
+
+item2 := _Reader.GetItem(node := listNode, index := 2);
+Assert.ThatBool(actual := _Reader.IsPresent(node := item2)).IsTrue();
+
+caught := FALSE;
+__TRY
+	itemBad := _Reader.GetItem(node := listNode, index := 3);
+__CATCH (exceptionCode)
+	caught := TRUE;
+__ENDTRY
+
+Assert.ThatBool(actual := caught).IsTrue();
+
+objNode := _Reader.GetField(node := root, name := 'obj');
+Assert.ThatBool(actual := _Reader.IsArray(node := objNode)).IsFalse();
+
+caught := FALSE;
+__TRY
+	countVal := _Reader.GetArraySize(node := objNode);
+__CATCH (exceptionCode)
+	caught := TRUE;
+__ENDTRY
+
+Assert.ThatBool(actual := caught).IsTrue();
+
+caught := FALSE;
+__TRY
+	itemBad := _Reader.GetItem(node := objNode, index := 0);
+__CATCH (exceptionCode)
+	caught := TRUE;
+__ENDTRY
+
+Assert.ThatBool(actual := caught).IsTrue();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="testOpenInvalidJson" Id="{2b4e1c79-8499-4416-8bb3-c230d976c1c6}">
+      <Declaration><![CDATA[(*!
+<summary>Verifies that Open raises parse failure on malformed JSON text.</summary>
+*)
+METHOD PRIVATE testOpenInvalidJson
+VAR
+	root : TOF_Core.CONFIGURATION_NODE;
+	caught : BOOL;
+	exceptionCode : __SYSTEM.ExceptionCode;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_Doc := '{unclosed object';
+
+caught := FALSE;
+__TRY
+	root := _Reader.Parse(document := _Doc);
+__CATCH (exceptionCode)
+	caught := TRUE;
+__ENDTRY
+
+Assert.ThatBool(actual := caught).IsTrue();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="testOpenNonObjectRoot" Id="{66a12c3f-811a-4227-9990-83fc8e6c85fe}">
+      <Declaration><![CDATA[(*!
+<summary>Verifies that Open rejects array or primitive roots.</summary>
+*)
+METHOD PRIVATE testOpenNonObjectRoot
+VAR
+	root : TOF_Core.CONFIGURATION_NODE;
+	caught : BOOL;
+	exceptionCode : __SYSTEM.ExceptionCode;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_Doc := '[1, 2, 3]';
+
+caught := FALSE;
+__TRY
+	root := _Reader.Parse(document := _Doc);
+__CATCH (exceptionCode)
+	caught := TRUE;
+__ENDTRY
+
+Assert.ThatBool(actual := caught).IsTrue();
+
+_Doc := '12345';
+
+caught := FALSE;
+__TRY
+	root := _Reader.Parse(document := _Doc);
+__CATCH (exceptionCode)
+	caught := TRUE;
+__ENDTRY
+
+Assert.ThatBool(actual := caught).IsTrue();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="testOpenObjectRoot" Id="{e8380616-e75f-4125-b106-f8b807100827}">
+      <Declaration><![CDATA[(*!
+<summary>Verifies successful document open with an object root.</summary>
+*)
+METHOD PRIVATE testOpenObjectRoot
+VAR
+	root : TOF_Core.CONFIGURATION_NODE;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_Doc := '{"key": 123}';
+root := _Reader.Parse(document := _Doc);
+
+Assert.ThatBool(actual := _Reader.IsPresent(node := root)).IsTrue();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="testReadValueValidationAndErrors" Id="{2a5b9cc7-0138-44b4-8b7c-88b4aeb8a5a3}">
+      <Declaration><![CDATA[(*!
+<summary>Verifies destination validation, shape checking, type mismatch and capacity errors in ReadValue.</summary>
+*)
+METHOD PRIVATE testReadValueValidationAndErrors
+VAR
+	root : TOF_Core.CONFIGURATION_NODE;
+	numNode : TOF_Core.CONFIGURATION_NODE;
+	strNode : TOF_Core.CONFIGURATION_NODE;
+	nullNode : TOF_Core.CONFIGURATION_NODE;
+	arrNode : TOF_Core.CONFIGURATION_NODE;
+	objNode : TOF_Core.CONFIGURATION_NODE;
+	emptyNode : TOF_Core.CONFIGURATION_NODE;
+	dstDint : DINT;
+	dstStr : STRING(80);
+	tinyStr : STRING(2);
+	caught : BOOL;
+	exceptionCode : __SYSTEM.ExceptionCode;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_Doc := '{"num": 42, "str": "hello world", "nullVal": null, "arr": [1], "obj": {}}';
+root := _Reader.Parse(document := _Doc);
+numNode := _Reader.GetField(node := root, name := 'num');
+strNode := _Reader.GetField(node := root, name := 'str');
+nullNode := _Reader.GetField(node := root, name := 'nullVal');
+arrNode := _Reader.GetField(node := root, name := 'arr');
+objNode := _Reader.GetField(node := root, name := 'obj');
+
+caught := FALSE;
+__TRY
+	_Reader.ReadValue(
+		node := numNode,
+		valueType := TOF_Core.CONFIGURATION_VALUE_TYPE.TYPE_DINT,
+		data := 0,
+		size := 4
+	);
+__CATCH (exceptionCode)
+	caught := TRUE;
+__ENDTRY
+
+Assert.ThatBool(actual := caught).IsTrue();
+
+caught := FALSE;
+__TRY
+	_Reader.ReadValue(
+		node := numNode,
+		valueType := TOF_Core.CONFIGURATION_VALUE_TYPE.TYPE_DINT,
+		data := ADR(dstDint),
+		size := 0
+	);
+__CATCH (exceptionCode)
+	caught := TRUE;
+__ENDTRY
+
+Assert.ThatBool(actual := caught).IsTrue();
+
+caught := FALSE;
+__TRY
+	_Reader.ReadValue(
+		node := emptyNode,
+		valueType := TOF_Core.CONFIGURATION_VALUE_TYPE.TYPE_DINT,
+		data := ADR(dstDint),
+		size := 4
+	);
+__CATCH (exceptionCode)
+	caught := TRUE;
+__ENDTRY
+
+Assert.ThatBool(actual := caught).IsTrue();
+
+caught := FALSE;
+__TRY
+	_Reader.ReadValue(
+		node := nullNode,
+		valueType := TOF_Core.CONFIGURATION_VALUE_TYPE.TYPE_DINT,
+		data := ADR(dstDint),
+		size := 4
+	);
+__CATCH (exceptionCode)
+	caught := TRUE;
+__ENDTRY
+
+Assert.ThatBool(actual := caught).IsTrue();
+
+caught := FALSE;
+__TRY
+	_Reader.ReadValue(
+		node := arrNode,
+		valueType := TOF_Core.CONFIGURATION_VALUE_TYPE.TYPE_DINT,
+		data := ADR(dstDint),
+		size := 4
+	);
+__CATCH (exceptionCode)
+	caught := TRUE;
+__ENDTRY
+
+Assert.ThatBool(actual := caught).IsTrue();
+
+caught := FALSE;
+__TRY
+	_Reader.ReadValue(
+		node := objNode,
+		valueType := TOF_Core.CONFIGURATION_VALUE_TYPE.TYPE_DINT,
+		data := ADR(dstDint),
+		size := 4
+	);
+__CATCH (exceptionCode)
+	caught := TRUE;
+__ENDTRY
+
+Assert.ThatBool(actual := caught).IsTrue();
+
+caught := FALSE;
+__TRY
+	_Reader.ReadValue(
+		node := numNode,
+		valueType := TOF_Core.CONFIGURATION_VALUE_TYPE.TYPE_DINT,
+		data := ADR(dstDint),
+		size := 3
+	);
+__CATCH (exceptionCode)
+	caught := TRUE;
+__ENDTRY
+
+Assert.ThatBool(actual := caught).IsTrue();
+
+// SA0175: ReadValue targets a raw string buffer; no character indexing is performed.
+{analysis -175}
+caught := FALSE;
+__TRY
+	_Reader.ReadValue(
+		node := numNode,
+		valueType := TOF_Core.CONFIGURATION_VALUE_TYPE.TYPE_STRING,
+		data := ADR(dstStr),
+		size := SIZEOF(dstStr)
+	);
+__CATCH (exceptionCode)
+	caught := TRUE;
+__ENDTRY
+
+Assert.ThatBool(actual := caught).IsTrue();
+
+caught := FALSE;
+__TRY
+	_Reader.ReadValue(
+		node := strNode,
+		valueType := TOF_Core.CONFIGURATION_VALUE_TYPE.TYPE_STRING,
+		data := ADR(tinyStr),
+		size := SIZEOF(tinyStr)
+	);
+__CATCH (exceptionCode)
+	caught := TRUE;
+__ENDTRY
+{analysis +175}
+
+Assert.ThatBool(actual := caught).IsTrue();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="testRepeatedOpen" Id="{c38aada2-fc95-494a-baf4-fd4fb3bd8af5}">
+      <Declaration><![CDATA[(*!
+<summary>Verifies that opening a new document invalidates old handles and works cleanly.</summary>
+*)
+METHOD PRIVATE testRepeatedOpen
+VAR
+	root1 : TOF_Core.CONFIGURATION_NODE;
+	root2 : TOF_Core.CONFIGURATION_NODE;
+	nodeVal : TOF_Core.CONFIGURATION_NODE;
+	val : DINT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_Doc := '{"id": 1}';
+root1 := _Reader.Parse(document := _Doc);
+nodeVal := _Reader.GetField(node := root1, name := 'id');
+_Reader.ReadValue(
+	node := nodeVal,
+	valueType := TOF_Core.CONFIGURATION_VALUE_TYPE.TYPE_DINT,
+	data := ADR(val),
+	size := SIZEOF(val)
+);
+Assert.ThatDInt(actual := val).ToBe(expected := 1);
+
+_Doc := '{"id": 2}';
+root2 := _Reader.Parse(document := _Doc);
+nodeVal := _Reader.GetField(node := root2, name := 'id');
+_Reader.ReadValue(
+	node := nodeVal,
+	valueType := TOF_Core.CONFIGURATION_VALUE_TYPE.TYPE_DINT,
+	data := ADR(val),
+	size := SIZEOF(val)
+);
+Assert.ThatDInt(actual := val).ToBe(expected := 2);]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="testTryField" Id="{a3b81e6d-75c9-418a-882a-2c19667c2318}">
+      <Declaration><![CDATA[(*!
+<summary>Verifies that TryField returns EMPTY_NODE on missing or invalid parent without throwing.</summary>
+*)
+METHOD PRIVATE testTryField
+VAR
+	root : TOF_Core.CONFIGURATION_NODE;
+	fieldNode : TOF_Core.CONFIGURATION_NODE;
+	missingNode : TOF_Core.CONFIGURATION_NODE;
+	emptyParent : TOF_Core.CONFIGURATION_NODE;
+	fieldOnEmpty : TOF_Core.CONFIGURATION_NODE;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_Doc := '{"present": 10}';
+root := _Reader.Parse(document := _Doc);
+
+fieldNode := _Reader.FindField(node := root, name := 'present');
+Assert.ThatBool(actual := _Reader.IsPresent(node := fieldNode)).IsTrue();
+
+missingNode := _Reader.FindField(node := root, name := 'absent');
+Assert.ThatBool(actual := _Reader.IsPresent(node := missingNode)).IsFalse();
+
+fieldOnEmpty := _Reader.FindField(node := emptyParent, name := 'any');
+Assert.ThatBool(actual := _Reader.IsPresent(node := fieldOnEmpty)).IsFalse();]]></ST>
+      </Implementation>
+    </Method>
+  </POU>
+</TcPlcObject>
+

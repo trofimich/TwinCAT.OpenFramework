@@ -7,8 +7,16 @@ SPDX-License-Identifier: MIT
 License: https://opensource.org/license/mit
 *)
 
+(*!
+<summary>Suppresses test log output and optionally simulates reuse of a native diagnostic during logging.</summary>
+<description>Probe state belongs to the calling cyclic task. The filter never retains the borrowed exception.</description>
+*)
+
 {attribute 'no_explicit_call' := 'do not call this function block directly'}
 FUNCTION_BLOCK LogFilter EXTENDS TOF_Core.Object IMPLEMENTS TOF_Core.ILogFilter
+VAR
+	_SecondaryExceptionPending : ARRAY [1..TOF_Core.System.TASK_COUNT] OF BOOL;
+END_VAR
 VAR_STAT
 	//! <summary>Class name shared by all instances of this function block.</summary>
 	{attribute 'hide'} 
@@ -48,13 +56,53 @@ PROPERTY SelfSize : ULINT]]></Declaration>
       </Get>
     </Property>
     <Method Name="ShouldLog" Id="{32b9de1c-02d2-47a5-837f-c1e69ba1998b}">
-      <Declaration><![CDATA[METHOD ShouldLog : BOOL
+      <Declaration><![CDATA[(*! <summary>Consumes any armed secondary diagnostic in this task and suppresses the log entry.</summary> *)
+METHOD ShouldLog : BOOL
 VAR_IN_OUT CONSTANT
 	category : TOF_Core.LOG_CATEGORY;
 	topics : ARRAY [*] OF WSTRING;		
+END_VAR
+VAR
+	taskIndex : DINT;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[ShouldLog := FALSE;]]></ST>
+        <ST><![CDATA[taskIndex := TOF_Core.System.GetCurrentTaskIndex();
+
+IF taskIndex >= 1
+	AND_THEN taskIndex <= TOF_Core.System.TASK_COUNT
+	AND_THEN _SecondaryExceptionPending[taskIndex]
+THEN
+	_SecondaryExceptionPending[taskIndex] := FALSE;
+	TOF_Core.ExceptionManager.GetLastException(
+		exceptionCode := __SYSTEM.ExceptionCode.RTSEXCPT_ACCESS_VIOLATION,
+		catchPointNamespaceName := NamespaceName,
+		catchPointPOUName := __POUNAME(),
+		catchPointPosition := __POSITION()
+	);
+END_IF
+
+ShouldLog := FALSE;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="SetSecondaryExceptionProbe" Id="{923620dc-252b-43bf-ab55-0111d4df69a4}">
+      <Declaration><![CDATA[(*!
+<summary>Enables or cancels one simulated secondary native diagnostic in the calling test task.</summary>
+<description>Each cyclic task owns its slot. Other tasks keep their configured filter behavior.</description>
+<param name="enabled">TRUE arms the next logging callback. FALSE cancels a pending probe.</param>
+*)
+METHOD SetSecondaryExceptionProbe
+VAR_INPUT
+	enabled : BOOL;
+END_VAR
+VAR
+	taskIndex : DINT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[taskIndex := TOF_Core.System.GetCurrentTaskIndex();
+
+IF taskIndex >= 1 AND_THEN taskIndex <= TOF_Core.System.TASK_COUNT THEN
+	_SecondaryExceptionPending[taskIndex] := enabled;
+END_IF]]></ST>
       </Implementation>
     </Method>
   </POU>

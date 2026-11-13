@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <TcPlcObject Version="1.1.0.1">
   <POU Name="BranchAutomationComponent" Id="{179de9c8-6fc8-497c-b86e-77d22d7559c0}" SpecialFunc="None">
     <Declaration><![CDATA[(*
@@ -14,7 +14,10 @@ Base automation component that coordinates children and routes requests through 
 <description>
 Action permissions are checked locally and then through parents, stopping at the first rejection. A missing
 local policy permits that level; permission is granted only if no level rejects the request. Indexed Try
-lookups return borrowed interfaces or null and do not propagate exceptions.
+lookups return borrowed interfaces or null and do not propagate exceptions. Initialization validates required
+dependencies before hooks. Each fixed child slot must identify a distinct child whose Parent is this branch.
+Cycle-service hooks remain available while disabled in WORKING or STOPPED;
+state changes end obsolete child phases. Use one owner task without recursive Execute.
 </description>
 *)
 
@@ -25,11 +28,14 @@ VAR
 	
 	{attribute 'hide'} 
 	_ChildCriticalErrorHandlingPolicy : IChildCriticalErrorHandlingPolicy;
+
+	_ChildHierarchyValidated : BOOL;
 END_VAR]]></Declaration>
     <Implementation>
       <ST><![CDATA[]]></ST>
     </Implementation>
     <Folder Name="Methods to override" Id="{cd048a51-ca56-4e6a-a6d5-8403d28a5210}">
+      <Folder Name="Cycle" Id="{e241a8b9-8315-4b35-90f7-8a965cad1045}" />
       <Folder Name="Disable" Id="{130fe9f2-bbd8-4e60-9441-ddfd0141901c}" />
       <Folder Name="Enable" Id="{12f5b865-199a-4dd7-8e41-d5e800625ca6}" />
       <Folder Name="Execute" Id="{00a453a1-ad8f-47bb-bef6-a6ffcd171789}" />
@@ -162,7 +168,14 @@ __ENDTRY]]></ST>
       </Implementation>
     </Method>
     <Method Name="doStop" Id="{15f6ef78-2e2a-4e13-b736-238af397f6d5}" FolderPath="Service methods\">
-      <Declaration><![CDATA[METHOD PRIVATE FINAL doStop
+      <Declaration><![CDATA[(*!
+<summary>Advances stopped children while the branch remains enabled and stopped.</summary>
+<description>
+OnBeforeChildrenStopped may call Reset. A state or enablement change ends this phase before remaining
+children or the after-stopped hook. Completed effects remain. Hook failures are logged; other failures may escape.
+</description>
+*)
+METHOD PRIVATE FINAL doStop
 VAR
 	exceptionCode : __SYSTEM.ExceptionCode;
 	exception : TOF_Core.IException;	
@@ -193,6 +206,10 @@ __CATCH(exceptionCode)
 	);
 __ENDTRY	
 
+IF NOT Enabled OR_ELSE _OperationalState <> OPERATIONAL_STATE.STOPPED THEN
+	RETURN;
+END_IF
+
 FOR i := 0 TO ChildCount - 1 DO
 	child := TryGetChildByIndex(index := i);
 	
@@ -207,6 +224,10 @@ FOR i := 0 TO ChildCount - 1 DO
 		OPERATIONAL_STATE.STOPPED:
 			child.Execute();
 	END_CASE
+
+	IF NOT Enabled OR_ELSE _OperationalState <> OPERATIONAL_STATE.STOPPED THEN
+		RETURN;
+	END_IF
 END_FOR
 
 __TRY
@@ -231,7 +252,14 @@ __ENDTRY]]></ST>
       </Implementation>
     </Method>
     <Method Name="doWork" Id="{1d2f758e-1d18-4c35-861d-3d2b41e9834b}" FolderPath="Service methods\">
-      <Declaration><![CDATA[METHOD PRIVATE doWork
+      <Declaration><![CDATA[(*!
+<summary>Advances children according to the selected critical-error reaction.</summary>
+<description>
+Ignore and continue preserve traversal of later children and the after-working hook. Stop ends traversal.
+State or enablement changes end the obsolete phase. Completed effects remain; noncritical errors recover automatically.
+</description>
+*)
+METHOD PRIVATE doWork
 VAR
 	exceptionCode : __SYSTEM.ExceptionCode;
 	exception : TOF_Core.IException;	
@@ -275,6 +303,10 @@ THEN
 	__ENDTRY
 END_IF
 
+IF NOT Enabled OR_ELSE _OperationalState <> OPERATIONAL_STATE.WORKING THEN
+	RETURN;
+END_IF
+
 __TRY
 	OnBeforeChildrenWorking();
 __CATCH(exceptionCode)
@@ -298,6 +330,10 @@ __CATCH(exceptionCode)
 	END_IF
 __ENDTRY	
 
+IF NOT Enabled OR_ELSE _OperationalState <> OPERATIONAL_STATE.WORKING THEN
+	RETURN;
+END_IF
+
 FOR i := 0 TO ChildCount - 1 DO
 	child := TryGetChildByIndex(index := i);
 	
@@ -319,8 +355,14 @@ FOR i := 0 TO ChildCount - 1 DO
 				childErrorSourceHint := TOF_Core.WideStrings.Concat255("Child[", TO_WSTRING(i), "](", child.Name, ").Execute error")
 			);
 			
-			RETURN;
+			IF childCriticalErrorReaction = CHILD_CRITICAL_ERROR_REACTION.SET_ERROR_AND_STOP THEN
+				RETURN;
+			END_IF
 		END_IF
+	END_IF
+
+	IF NOT Enabled OR_ELSE _OperationalState <> OPERATIONAL_STATE.WORKING THEN
+		RETURN;
 	END_IF
 END_FOR
 
@@ -388,11 +430,12 @@ __TRY
 	
 	OnAfterChildrenEnable();
 	
-	IF __QUERYINTERFACE(THIS^, thisAsChildAutomationComponent) 
-		AND_THEN (parent := thisAsChildAutomationComponent.Parent) <> 0 
-		AND_THEN NOT parent.Enabled 
-	THEN
-		thisAsChildAutomationComponent.Parent.Enable(includeChildren := FALSE);
+	IF __QUERYINTERFACE(THIS^, thisAsChildAutomationComponent) THEN
+		parent := thisAsChildAutomationComponent.Parent;
+
+		IF parent <> 0 AND_THEN NOT parent.Enabled THEN
+			parent.Enable(includeChildren := FALSE);
+		END_IF
 	END_IF
 	
 	_Enabled := TRUE;
@@ -411,23 +454,35 @@ __ENDTRY]]></ST>
       </Implementation>
     </Method>
     <Method Name="Execute" Id="{25cb1f34-284f-498c-958b-8dfda7cade8f}">
-      <Declaration><![CDATA[{attribute 'estimated-stack-usage' := '99'}
+      <Declaration><![CDATA[(*!
+<summary>Services an initialized branch and advances its enabled execution phases.</summary>
+<description>
+Only WORKING and STOPPED are serviced. Cycle-service hooks run even while disabled, before and after
+enabled input, working or stopped, and output phases. They may enable, disable, stop or reset the branch;
+enablement is checked again before work and output. INITIALIZING and INVALID do nothing. The final service
+hook also follows handled stop reactions; an escaping nested failure may abort the call. Use one owner task
+without recursive Execute. Completed callback effects are not rolled back.
+</description>
+*)
+{attribute 'estimated-stack-usage' := '99'}
 METHOD FINAL Execute
 VAR
 	exceptionCode : __SYSTEM.ExceptionCode;
 	exception : TOF_Core.IException;
 	exceptionReaction : TOF_Core.EXCEPTION_REACTION;
+	runEnabledPhases : BOOL;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[
-IF NOT Enabled
-	OR_ELSE (_OperationalState <> OPERATIONAL_STATE.WORKING AND_THEN _OperationalState <> OPERATIONAL_STATE.STOPPED)
+        <ST><![CDATA[IF _OperationalState <> OPERATIONAL_STATE.WORKING
+	AND_THEN _OperationalState <> OPERATIONAL_STATE.STOPPED
 THEN
 	RETURN;
 END_IF
 
+runEnabledPhases := TRUE;
+
 __TRY
-	OnBeforeExecute();
+	OnCycleStart();
 __CATCH(exceptionCode)
 	exception := TOF_Core.ExceptionManager.GetLastException(
 		exceptionCode := exceptionCode,
@@ -435,30 +490,75 @@ __CATCH(exceptionCode)
 		catchPointPOUName := __POUNAME(),
 		catchPointPosition := __POSITION()
 	);
-						
-	exceptionReaction := OnHandleException(exception := exception, failedMethodName := 'OnBeforeExecute');
+	exceptionReaction := OnHandleException(exception := exception, failedMethodName := 'OnCycleStart');
 
 	ProcessException(
 		exception := exception,
 		exceptionReaction := exceptionReaction,
-		exceptionSourceHint := "OnBeforeExecute error"
+		exceptionSourceHint := "OnCycleStart error"
 	);
 
 	IF exceptionReaction = TOF_Core.EXCEPTION_REACTION.SET_ERROR_AND_STOP THEN
-		RETURN;
-	END_IF		
+		runEnabledPhases := FALSE;
+	END_IF
 __ENDTRY
 
-CASE _OperationalState OF
-	OPERATIONAL_STATE.WORKING:
-		doWork();
-		
-	OPERATIONAL_STATE.STOPPED:
-		doStop();	
-END_CASE
+IF runEnabledPhases AND_THEN Enabled THEN
+	__TRY
+		OnBeforeExecute();
+	__CATCH(exceptionCode)
+		exception := TOF_Core.ExceptionManager.GetLastException(
+			exceptionCode := exceptionCode,
+			catchPointNamespaceName := NamespaceName,
+			catchPointPOUName := __POUNAME(),
+			catchPointPosition := __POSITION()
+		);
+		exceptionReaction := OnHandleException(exception := exception, failedMethodName := 'OnBeforeExecute');
+
+		ProcessException(
+			exception := exception,
+			exceptionReaction := exceptionReaction,
+			exceptionSourceHint := "OnBeforeExecute error"
+		);
+
+		IF exceptionReaction = TOF_Core.EXCEPTION_REACTION.SET_ERROR_AND_STOP THEN
+			runEnabledPhases := FALSE;
+		END_IF
+	__ENDTRY
+
+	IF runEnabledPhases AND_THEN Enabled THEN
+		CASE _OperationalState OF
+			OPERATIONAL_STATE.WORKING:
+				doWork();
+
+			OPERATIONAL_STATE.STOPPED:
+				doStop();
+		END_CASE
+	END_IF
+
+	IF runEnabledPhases AND_THEN Enabled THEN
+		__TRY
+			OnAfterExecute();
+		__CATCH(exceptionCode)
+			exception := TOF_Core.ExceptionManager.GetLastException(
+				exceptionCode := exceptionCode,
+				catchPointNamespaceName := NamespaceName,
+				catchPointPOUName := __POUNAME(),
+				catchPointPosition := __POSITION()
+			);
+			exceptionReaction := OnHandleException(exception := exception, failedMethodName := 'OnAfterExecute');
+
+			ProcessException(
+				exception := exception,
+				exceptionReaction := exceptionReaction,
+				exceptionSourceHint := "OnAfterExecute error"
+			);
+		__ENDTRY
+	END_IF
+END_IF
 
 __TRY
-	OnAfterExecute();
+	OnCycleEnd();
 __CATCH(exceptionCode)
 	exception := TOF_Core.ExceptionManager.GetLastException(
 		exceptionCode := exceptionCode,
@@ -466,18 +566,13 @@ __CATCH(exceptionCode)
 		catchPointPOUName := __POUNAME(),
 		catchPointPosition := __POSITION()
 	);
-						
-	exceptionReaction := OnHandleException(exception := exception, failedMethodName := 'OnAfterExecute');
+	exceptionReaction := OnHandleException(exception := exception, failedMethodName := 'OnCycleEnd');
 
 	ProcessException(
 		exception := exception,
 		exceptionReaction := exceptionReaction,
-		exceptionSourceHint := "OnAfterExecute error"
+		exceptionSourceHint := "OnCycleEnd error"
 	);
-
-	IF exceptionReaction = TOF_Core.EXCEPTION_REACTION.SET_ERROR_AND_STOP THEN
-		RETURN;
-	END_IF		
 __ENDTRY]]></ST>
       </Implementation>
     </Method>
@@ -485,13 +580,17 @@ __ENDTRY]]></ST>
       <Declaration><![CDATA[METHOD GetEffectiveChildCriticalErrorHandlingPolicy : IChildCriticalErrorHandlingPolicy
 VAR
 	thisAsChildAutomationComponent : IChildAutomationComponent;
+	parent : IParentAutomationComponent;
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[IF _ChildCriticalErrorHandlingPolicy <> 0 THEN
 	GetEffectiveChildCriticalErrorHandlingPolicy := _ChildCriticalErrorHandlingPolicy;
-ELSIF __QUERYINTERFACE(THIS^, thisAsChildAutomationComponent) AND_THEN thisAsChildAutomationComponent.Parent <> 0 THEN
-	GetEffectiveChildCriticalErrorHandlingPolicy :=
-		thisAsChildAutomationComponent.Parent.GetEffectiveChildCriticalErrorHandlingPolicy();
+ELSIF __QUERYINTERFACE(THIS^, thisAsChildAutomationComponent) THEN
+	parent := thisAsChildAutomationComponent.Parent;
+
+	IF parent <> 0 THEN
+		GetEffectiveChildCriticalErrorHandlingPolicy := parent.GetEffectiveChildCriticalErrorHandlingPolicy();
+	END_IF
 END_IF]]></ST>
       </Implementation>
     </Method>
@@ -517,11 +616,29 @@ END_IF]]></ST>
       </Implementation>
     </Method>
     <Method Name="Initialize" Id="{24ac7d54-bfdf-430c-8d4e-40b667f55780}">
-      <Declaration><![CDATA[METHOD FINAL Initialize : BOOL
+      <Declaration><![CDATA[(*!
+<summary>Validates required dependencies and advances branch initialization.</summary>
+<description>
+Required storage and child slots are checked before initialization hooks. Empty compositions are valid.
+Before the first initialization hook, each child must name this branch as Parent and appear in exactly one slot.
+Keep the composition stable thereafter. A mismatch or duplicate records a critical error and makes the branch INVALID.
+An INVALID child immediately makes this branch INVALID and copies its error when available.
+FALSE reports pending work or failure. Caught initialization failures return FALSE and record a critical
+error in terminal INVALID. TRUE reports completed initialization, including an already stopped component.
+Callback effects are not rolled back. Child types require a live constructor-bound parent.
+</description>
+*)
+METHOD FINAL Initialize : BOOL
 VAR
 	i : INT;
+	previousIndex : INT;
+	expectedParent : IParentAutomationComponent;
+	childParent : IParentAutomationComponent;
+	hierarchyError : WSTRING(255);
 		
 	child : IChildAutomationComponent;
+	previousChild : IChildAutomationComponent;
+	childInitialized : BOOL;
 	
 	exceptionCode : __SYSTEM.ExceptionCode;
 	exception : TOF_Core.IException;
@@ -534,10 +651,9 @@ END_VAR]]></Declaration>
 	RETURN;
 END_IF
 
-__TRY	
-	OnBeforeChildrenInitializing();
-	
-	Initialize := TRUE;
+__TRY
+	Validate();
+	expectedParent := THIS^;
 
 	FOR i := 0 TO ChildCount - 1 DO
 		child := TryGetChildByIndex(index := i);
@@ -551,8 +667,98 @@ __TRY
 				dataMemberName := TOF_Core.Strings.Concat255('Child[', TO_STRING(i), ']')
 			);			
 		END_IF
-			
-		Initialize := Initialize AND child.Initialize();
+
+		IF _ChildHierarchyValidated THEN
+			CONTINUE;
+		END_IF
+
+		childParent := child.Parent;
+
+		IF childParent <> expectedParent THEN
+			hierarchyError := TOF_Core.WideStrings.Concat255(
+				Name,
+				": Children[",
+				TO_WSTRING(i),
+				"] (",
+				child.Name,
+				") has a different Parent"
+			);
+		ELSE
+			FOR previousIndex := 0 TO i - 1 DO
+				previousChild := TryGetChildByIndex(index := previousIndex);
+
+				IF previousChild = child THEN
+					hierarchyError := TOF_Core.WideStrings.Concat255(
+						Name,
+						": Children[",
+						TO_WSTRING(i),
+						"] (",
+						child.Name,
+						") duplicates Children[",
+						TO_WSTRING(previousIndex),
+						"]"
+					);
+
+					EXIT;
+				END_IF
+			END_FOR
+		END_IF
+
+		IF hierarchyError <> "" THEN
+			TOF_Core.Exceptions.ThrowClassInitialization(
+				sourceNamespaceName := NamespaceName,
+				sourceClassName := ClassName,
+				sourcePOUName := __POUNAME(),
+				sourcePosition := __POSITION(),
+				errorMessage := hierarchyError
+			);
+		END_IF
+	END_FOR
+
+	_ChildHierarchyValidated := TRUE;
+	OnBeforeChildrenInitializing();
+
+	Initialize := TRUE;
+
+	FOR i := 0 TO ChildCount - 1 DO
+		child := TryGetChildByIndex(index := i);
+
+		IF child = 0 THEN
+			TOF_Core.Exceptions.ThrowDataMemberNotSpecified(
+				sourceNamespaceName := NamespaceName,
+				sourceClassName := ClassName,
+				sourcePOUName := __POUNAME(),
+				sourcePosition := __POSITION(),
+				dataMemberName := TOF_Core.Strings.Concat255('Child[', TO_STRING(i), ']')
+			);
+		END_IF
+
+		childInitialized := child.Initialize();
+
+		IF child.OperationalState = OPERATIONAL_STATE.INVALID THEN
+			Initialize := FALSE;
+
+			IF child.HasError THEN
+				_Error := child.Error;
+				_Error.SetSeverity(severity := TOF_Core.ERROR_SEVERITY.CRITICAL);
+				SetOperationalState(
+					state := OPERATIONAL_STATE.INVALID,
+					reason := TOF_Core.WideStrings.Concat255("Child[", TO_WSTRING(i), "] initialization failed")
+				);
+
+				RETURN;
+			END_IF
+
+			TOF_Core.Exceptions.ThrowStandard(
+				sourceNamespaceName := NamespaceName,
+				sourceClassName := ClassName,
+				sourcePOUName := __POUNAME(),
+				sourcePosition := __POSITION(),
+				message := "A child entered INVALID during initialization without an error diagnostic."
+			);
+		END_IF
+
+		Initialize := Initialize AND childInitialized;
 	END_FOR
 
 	Initialize := Initialize AND OnAfterChildrenInitializing();
@@ -560,10 +766,6 @@ __TRY
 	IF Initialize THEN
 		SetOperationalState(state := OPERATIONAL_STATE.WORKING, reason := "Successfull initialization");
 	ELSE
-		IF NOT _InitializationTimer.IN THEN
-			Validate();
-		END_IF
-		
 		IF _InitializationTimer.PT = T#0S THEN
 			_InitializationTimer.PT := Parameters.InitializationTimeout;
 		END_IF
@@ -582,6 +784,12 @@ __TRY
 		END_IF		
 	END_IF	
 __CATCH(exceptionCode)
+	Initialize := FALSE;
+
+	IF hierarchyError = "" THEN
+		hierarchyError := "Initialization error";
+	END_IF
+
 	exception := TOF_Core.ExceptionManager.GetLastException(
 		exceptionCode := exceptionCode,
 		catchPointNamespaceName := NamespaceName,
@@ -592,7 +800,7 @@ __CATCH(exceptionCode)
 	ProcessException(
 		exception := exception,
 		exceptionReaction := TOF_Core.EXCEPTION_REACTION.SET_ERROR_AND_CONTINUE,
-		exceptionSourceHint := "Initialization error"
+		exceptionSourceHint := hierarchyError
 	);					
 __ENDTRY]]></ST>
       </Implementation>
@@ -622,7 +830,11 @@ __ENDTRY]]></ST>
       </Implementation>
     </Method>
     <Method Name="OnAfterChildrenProcessOutput" Id="{4df73bdb-052a-4635-a8e1-07d1334a7f95}" FolderPath="Methods to override\ProcessOutput\">
-      <Declaration><![CDATA[METHOD PROTECTED OnAfterChildrenProcessOutput]]></Declaration>
+      <Declaration><![CDATA[(*!
+<summary>Runs after the branch completes an output pass without changing its operational state.</summary>
+<description>Both working and stopped passes may complete. An interrupted pass skips this hook.</description>
+*)
+METHOD PROTECTED OnAfterChildrenProcessOutput]]></Declaration>
       <Implementation>
         <ST><![CDATA[]]></ST>
       </Implementation>
@@ -646,7 +858,15 @@ __ENDTRY]]></ST>
       </Implementation>
     </Method>
     <Method Name="OnAfterExecute" Id="{84b329ef-503d-46aa-959d-1e51716064ee}" FolderPath="Methods to override\Execute\">
-      <Declaration><![CDATA[METHOD PROTECTED OnAfterExecute]]></Declaration>
+      <Declaration><![CDATA[(*!
+<summary>Completes enabled processing after the working or stopped phase.</summary>
+<description>
+Execute checks Enabled again before calling this hook. STOPPED branches remain eligible. A handled stop
+reaction in OnCycleStart or OnBeforeExecute skips this hook. The base implementation does nothing.
+Exceptions follow the branch exception policy.
+</description>
+*)
+METHOD PROTECTED OnAfterExecute]]></Declaration>
       <Implementation>
         <ST><![CDATA[]]></ST>
       </Implementation>
@@ -688,7 +908,14 @@ __ENDTRY]]></ST>
       </Implementation>
     </Method>
     <Method Name="OnBeforeChildrenStopped" Id="{0d5d7b0c-eb69-4a7f-b28d-1c85b2de514f}" FolderPath="Methods to override\Stopped\">
-      <Declaration><![CDATA[METHOD PROTECTED OnBeforeChildrenStopped]]></Declaration>
+      <Declaration><![CDATA[(*!
+<summary>Runs before stopped-child traversal.</summary>
+<description>
+May call Reset. A state or enablement change ends this stopped phase before remaining children
+and the after-stopped hook. Do not recursively call Execute.
+</description>
+*)
+METHOD PROTECTED OnBeforeChildrenStopped]]></Declaration>
       <Implementation>
         <ST><![CDATA[]]></ST>
       </Implementation>
@@ -700,7 +927,43 @@ __ENDTRY]]></ST>
       </Implementation>
     </Method>
     <Method Name="OnBeforeExecute" Id="{a21a9af0-faff-4c04-9440-53aa1ff069b9}" FolderPath="Methods to override\Execute\">
-      <Declaration><![CDATA[METHOD PROTECTED OnBeforeExecute]]></Declaration>
+      <Declaration><![CDATA[(*!
+<summary>Prepares an enabled branch for its working or stopped phase.</summary>
+<description>
+Execute calls this hook after OnCycleStart if the branch is enabled and the enabled phases may proceed.
+Execute then checks Enabled again and selects the phase using the current operational state. The base
+implementation does nothing. Exceptions follow the branch exception policy.
+</description>
+*)
+METHOD PROTECTED OnBeforeExecute]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="OnCycleEnd" Id="{27d674c2-6f32-44de-ad23-3cb4bd83856e}" FolderPath="Methods to override\Cycle\">
+      <Declaration><![CDATA[(*!
+<summary>Services the branch after the enabled phases have run or been skipped.</summary>
+<description>
+Execute reaches this hook even while disabled and after a handled stop reaction. An escaping exception
+can end Execute before this hook runs. The base implementation does nothing. Exceptions raised here follow
+the branch exception policy.
+</description>
+*)
+METHOD PROTECTED OnCycleEnd]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="OnCycleStart" Id="{ce98bb7a-d884-48b6-9057-a833671427c7}" FolderPath="Methods to override\Cycle\">
+      <Declaration><![CDATA[(*!
+<summary>Services the branch before Execute checks Enabled.</summary>
+<description>
+Execute calls this hook in WORKING and STOPPED, including while disabled. An override can process commands
+that enable or disable the branch for this call. The base implementation does nothing. Exceptions follow
+the branch exception policy.
+</description>
+*)
+METHOD PROTECTED OnCycleStart]]></Declaration>
       <Implementation>
         <ST><![CDATA[]]></ST>
       </Implementation>
@@ -728,7 +991,8 @@ VAR_IN_OUT
 	rejectReason : WSTRING(255);
 END_VAR
 VAR
-	thisAsChildAutomationComponent : IChildAutomationComponent; 
+	thisAsChildAutomationComponent : IChildAutomationComponent;
+	parent : IParentAutomationComponent;
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[IF _ActionPermissionPolicy <> 0 THEN 
@@ -744,18 +1008,30 @@ END_IF
 
 IF RequestActionPermission
 	AND_THEN __QUERYINTERFACE(THIS^, thisAsChildAutomationComponent)
-	AND_THEN thisAsChildAutomationComponent.Parent <> 0
 THEN
-	RequestActionPermission := thisAsChildAutomationComponent.Parent.RequestActionPermission(
-		actionDescriptor := actionDescriptor,
-		requestingObject := requestingObject,
-		rejectReason := rejectReason
-	);
+	parent := thisAsChildAutomationComponent.Parent;
+
+	IF parent <> 0 THEN
+		RequestActionPermission := parent.RequestActionPermission(
+			actionDescriptor := actionDescriptor,
+			requestingObject := requestingObject,
+			rejectReason := rejectReason
+		);
+	END_IF
 END_IF]]></ST>
       </Implementation>
     </Method>
     <Method Name="Reset" Id="{0fac72fb-ac13-45be-8a20-c7e96145e4d2}">
-      <Declaration><![CDATA[METHOD FINAL Reset
+      <Declaration><![CDATA[(*!
+<summary>Attempts to resume an enabled stopped branch and its enabled children.</summary>
+<description>
+Clears the previous branch error before reset hooks. Ignore and continue allow later children to reset
+and the branch to enter WORKING even if a child remains stopped. Continue copies that error at ERROR severity;
+ignore leaves it local. Stop leaves the branch STOPPED. Reset may be called from a stopped-cycle hook,
+but reset hooks must not reenter Reset. State or enablement changes end traversal; completed effects remain.
+</description>
+*)
+METHOD FINAL Reset
 VAR
 	exceptionCode : __SYSTEM.ExceptionCode;
 	exception : TOF_Core.IException;	
@@ -797,6 +1073,10 @@ __CATCH(exceptionCode)
 	END_IF
 __ENDTRY
 
+IF NOT Enabled OR_ELSE _OperationalState <> OPERATIONAL_STATE.STOPPED THEN
+	RETURN;
+END_IF
+
 FOR i := 0 TO ChildCount - 1 DO
 	child := TryGetChildByIndex(index := i);
 	
@@ -812,15 +1092,23 @@ FOR i := 0 TO ChildCount - 1 DO
 				childErrorSourceHint := TOF_Core.WideStrings.Concat255("Child[", TO_WSTRING(i), "](", child.Name, ").Reset error")
 			);
 
-			RETURN;
+			IF childCriticalErrorReaction = CHILD_CRITICAL_ERROR_REACTION.SET_ERROR_AND_STOP THEN
+				RETURN;
+			END_IF
 		END_IF
+	END_IF
+
+	IF NOT Enabled OR_ELSE _OperationalState <> OPERATIONAL_STATE.STOPPED THEN
+		RETURN;
 	END_IF
 END_FOR
 
 __TRY
 	OnAfterChildrenReset();
 	
-	SetOperationalState(state := OPERATIONAL_STATE.WORKING, reason := "Reset");
+	IF Enabled AND_THEN _OperationalState = OPERATIONAL_STATE.STOPPED THEN
+		SetOperationalState(state := OPERATIONAL_STATE.WORKING, reason := "Reset");
+	END_IF
 __CATCH(exceptionCode)		
 	exception := TOF_Core.ExceptionManager.GetLastException(
 		exceptionCode := exceptionCode,
@@ -893,6 +1181,7 @@ END_FOR]]></ST>
 <summary>Returns a borrowed child by its zero-based index.</summary>
 <description>
 Returns null when the entry is unavailable, the index is out of range or a nested call raises an exception.
+Fatal allocation observations return null and leave the fatal latch set for the outer task boundary.
 Does not transfer ownership or extend lifetime. Implementations must not propagate exceptions.
 </description>
 *)

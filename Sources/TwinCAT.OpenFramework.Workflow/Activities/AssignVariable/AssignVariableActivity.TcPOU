@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <TcPlcObject Version="1.1.0.1">
   <POU Name="AssignVariableActivity" Id="{32a165d9-60ff-40be-8f8a-539a0f50eb72}" SpecialFunc="None">
     <Declaration><![CDATA[(*
@@ -18,7 +18,8 @@ during execution and updates the target storage with type compatibility checks.
 
 {attribute 'no_explicit_call' := 'do not call this function block directly'}
 {attribute 'enable_dynamic_creation'}
-FUNCTION_BLOCK AssignVariableActivity EXTENDS Activity IMPLEMENTS IAssignVariableActivity
+FUNCTION_BLOCK AssignVariableActivity EXTENDS Activity
+	IMPLEMENTS IAssignVariableActivity, TOF_Core.IConfigurationSerializable
 VAR_STAT
 	{attribute 'hide'}
 	_ClassName : STRING := __POUNAME();
@@ -39,6 +40,8 @@ END_VAR]]></Declaration>
     <Implementation>
       <ST><![CDATA[]]></ST>
     </Implementation>
+    <Folder Name="Overriden methods" Id="{8e7b1a03-71cd-40a8-bcf6-a947bca841b9}" />
+    <Folder Name="Service methods" Id="{39d54e18-6ec7-4ca2-8a71-d68a91b4c3e5}" />
     <Property Name="ClassName" Id="{a0718470-ec87-4179-8f55-bd00be796833}">
       <Declaration><![CDATA[(*!
 <summary>Borrows the initialized class name used in diagnostics.</summary>
@@ -72,40 +75,7 @@ VAR_INPUT
 	value : ANY;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[IF targetVariableName = '' THEN
-	TOF_Core.Exceptions.ThrowArgumentOutOfRange(
-		sourceNamespaceName := NamespaceName,
-		sourceClassName := ClassName,
-		sourcePOUName := __POUNAME(),
-		sourcePosition := __POSITION(),
-		argumentName := 'targetVariableName',
-		argumentValue := targetVariableName
-	);
-END_IF
-
-IF value.pValue = TOF_Core.Memory.NULL_ADDRESS OR_ELSE value.diSize = TOF_Core.SignedInt32.ZERO THEN
-	TOF_Core.Exceptions.ThrowArgumentNotSpecified(
-		sourceNamespaceName := NamespaceName,
-		sourceClassName := ClassName,
-		sourcePOUName := __POUNAME(),
-		sourcePosition := __POSITION(),
-		argumentName := 'value'
-	);
-END_IF
-
-_Configured := FALSE;
-
-_AssignedValue.Release();
-_AssignedValue := TOF_Core.GenericValueFactory.FromAnyType(
-		value := value,
-		isObject := FALSE,
-		memoryManagementBehavior := TOF_Core.GENERIC_MEMORY_MANAGEMENT_BEHAVIOR.CLONE_ORIGINAL_VALUE_AND_OWNS_MEMORY
-	);
-
-_TargetVariableName := targetVariableName;
-_SourceVariableName := '';
-
-_Configured := TRUE;]]></ST>
+        <ST><![CDATA[configureLiteral(targetVariableName := targetVariableName, value := value);]]></ST>
       </Implementation>
     </Method>
     <Property Name="Configured" Id="{fdc15444-eea1-490d-914f-0f479d8637f4}">
@@ -135,9 +105,24 @@ METHOD ConfigureFromVariable
 VAR_INPUT
 	targetVariableName : STRING;
 	sourceVariableName : STRING;
+END_VAR
+VAR
+	ownerWorkflow : IWorkflow;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[IF targetVariableName = '' THEN
+        <ST><![CDATA[ownerWorkflow := Workflow;
+
+IF State <> WORKFLOW_ELEMENT_STATE.PASSIVE_READY OR_ELSE (ownerWorkflow <> 0 AND_THEN ownerWorkflow.Busy) THEN
+	WorkflowExceptions.ThrowWorkflowConfiguration(
+		sourceNamespaceName := NamespaceName,
+		sourceClassName := ClassName,
+		sourcePOUName := __POUNAME(),
+		sourcePosition := __POSITION(),
+		message := "Cannot configure assignment activity outside PASSIVE_READY"
+	);
+END_IF
+
+IF targetVariableName = '' THEN
 	TOF_Core.Exceptions.ThrowArgumentOutOfRange(
 		sourceNamespaceName := NamespaceName,
 		sourceClassName := ClassName,
@@ -203,7 +188,7 @@ PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
         </Implementation>
       </Get>
     </Property>
-    <Method Name="OnResetting" Id="{7387fd59-0ec5-41b8-9da6-70db88d548b0}">
+    <Method Name="OnResetting" Id="{7387fd59-0ec5-41b8-9da6-70db88d548b0}" FolderPath="Overriden methods\">
       <Declaration><![CDATA[(*!
 <summary>Completes resetting in a single step.</summary>
 <param name="startResetting">TRUE on the initial call from RequestReset.</param>
@@ -216,7 +201,7 @@ END_VAR]]></Declaration>
         <ST><![CDATA[OnResetting := ACTIVITY_RESETTING_STATE.WORK_RESET;]]></ST>
       </Implementation>
     </Method>
-    <Method Name="OnRunning" Id="{0e8dbe1d-2057-4c8e-84fe-f660b1c4d37a}">
+    <Method Name="OnRunning" Id="{0e8dbe1d-2057-4c8e-84fe-f660b1c4d37a}" FolderPath="Overriden methods\">
       <Declaration><![CDATA[(*!
 <summary>Assigns or copies the configured value to the target variable and completes immediately.</summary>
 <param name="startRunning">TRUE on the initial call of a fresh start.</param>
@@ -295,7 +280,7 @@ END_IF
 OnRunning := ACTIVITY_RUNNING_STATE.WORK_COMPLETED;]]></ST>
       </Implementation>
     </Method>
-    <Method Name="OnStopping" Id="{cc70d4e0-e6c6-4d38-adb5-6a7926af8bfe}">
+    <Method Name="OnStopping" Id="{cc70d4e0-e6c6-4d38-adb5-6a7926af8bfe}" FolderPath="Overriden methods\">
       <Declaration><![CDATA[(*!
 <summary>Completes stopping immediately on cancel or suspend.</summary>
 <param name="startCancelling">TRUE when stopping due to cancellation.</param>
@@ -357,5 +342,167 @@ PROPERTY TargetVariableName : STRING]]></Declaration>
         </Implementation>
       </Get>
     </Property>
+    <Method Name="Serialize" Id="{5870f4a4-9fec-4fd6-94c5-ef27fb82be24}">
+      <Declaration><![CDATA[(*!
+<summary>Writes the configuration fields for this object.</summary>
+<description>Borrows the writer for this call. A failure invalidates the current output document.</description>
+*)
+METHOD Serialize
+VAR_INPUT
+	writer : TOF_Core.IConfigurationWriter;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[Workflows.WriteConfigurationHeader(writer := writer, source := THIS^, displayName := Name, scope := THIS^);
+writer.WriteValue(
+	name := 'target',
+	valueType := TOF_Core.CONFIGURATION_VALUE_TYPE.TYPE_STRING,
+	data := ADR(_TargetVariableName),
+	size := SIZEOF(_TargetVariableName)
+);
+
+IF _SourceVariableName <> '' THEN
+	writer.WriteValue(
+		name := 'source',
+		valueType := TOF_Core.CONFIGURATION_VALUE_TYPE.TYPE_STRING,
+		data := ADR(_SourceVariableName),
+		size := SIZEOF(_SourceVariableName)
+	);
+ELSE
+	Workflows.WriteConfigurationLiteral(writer := writer, name := 'value', value := _AssignedValue.AsAnyType());
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="configureLiteral" Id="{a0a9e987-e57d-432a-a258-695b8f13328d}" FolderPath="Service methods\">
+      <Declaration><![CDATA[(*!
+<summary>Validates the names and copies the typed literal operand.</summary>
+<description>The descriptor and its payload are borrowed only for this call.</description>
+*)
+METHOD PRIVATE configureLiteral
+VAR_INPUT
+	targetVariableName : STRING;
+	value : __SYSTEM.AnyType;
+END_VAR
+VAR
+	ownerWorkflow : IWorkflow;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[ownerWorkflow := Workflow;
+
+IF State <> WORKFLOW_ELEMENT_STATE.PASSIVE_READY OR_ELSE (ownerWorkflow <> 0 AND_THEN ownerWorkflow.Busy) THEN
+	WorkflowExceptions.ThrowWorkflowConfiguration(
+		sourceNamespaceName := NamespaceName,
+		sourceClassName := ClassName,
+		sourcePOUName := __POUNAME(),
+		sourcePosition := __POSITION(),
+		message := "Cannot configure assignment activity outside PASSIVE_READY"
+	);
+END_IF
+
+IF targetVariableName = '' THEN
+	TOF_Core.Exceptions.ThrowArgumentOutOfRange(
+		sourceNamespaceName := NamespaceName,
+		sourceClassName := ClassName,
+		sourcePOUName := __POUNAME(),
+		sourcePosition := __POSITION(),
+		argumentName := 'targetVariableName',
+		argumentValue := targetVariableName
+	);
+END_IF
+
+IF value.pValue = TOF_Core.Memory.NULL_ADDRESS OR_ELSE value.diSize = TOF_Core.SignedInt32.ZERO THEN
+	TOF_Core.Exceptions.ThrowArgumentNotSpecified(
+		sourceNamespaceName := NamespaceName,
+		sourceClassName := ClassName,
+		sourcePOUName := __POUNAME(),
+		sourcePosition := __POSITION(),
+		argumentName := 'value'
+	);
+END_IF
+
+_Configured := FALSE;
+
+_AssignedValue.Release();
+_AssignedValue := TOF_Core.GenericValueFactory.FromAnyType(
+		value := value,
+		isObject := FALSE,
+		memoryManagementBehavior := TOF_Core.GENERIC_MEMORY_MANAGEMENT_BEHAVIOR.CLONE_ORIGINAL_VALUE_AND_OWNS_MEMORY
+	);
+
+_TargetVariableName := targetVariableName;
+_SourceVariableName := '';
+
+_Configured := TRUE;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="Deserialize" Id="{5f8ccb1c-3d78-4b9a-a570-639a8d533708}">
+      <Declaration><![CDATA[(*!
+<summary>Restores this fresh instance from its configuration object.</summary>
+<description>
+The reader, document node and deserialization context are borrowed for this call.
+On failure discard the partial instance.
+</description>
+<param name="reader">Active configuration reader.</param>
+<param name="node">Object node to read fields from.</param>
+<param name="context">Active configuration deserialization context providing workflow reconstruction services.</param>
+*)
+METHOD Deserialize
+VAR_INPUT
+	reader : TOF_Core.IConfigurationReader;
+	node : TOF_Core.CONFIGURATION_NODE;
+	context : TOF_Core.IConfigurationDeserializationContext;
+END_VAR
+VAR
+	loader : IWorkflowLoader;
+	targetVariableName : STRING;
+	sourceVariableName : STRING;
+	sourceNode : TOF_Core.CONFIGURATION_NODE;
+	valueNode : TOF_Core.CONFIGURATION_NODE;
+	literal : __SYSTEM.AnyType;
+	storage : POINTER TO BYTE;
+	exceptionCode : __SYSTEM.ExceptionCode;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[loader := WorkflowConfigurationSerializer.ResolveWorkflowLoader(context := context);
+Workflows.ReadConfigurationHeader(reader := reader, node := node, target := THIS^, scope := THIS^);
+
+targetVariableName := Workflows.ReadName(reader := reader, node := reader.GetField(node := node, name := 'target'));
+loader.AddRequiredVariable(scope := THIS^, name := targetVariableName);
+sourceNode := reader.FindField(node := node, name := 'source');
+valueNode := reader.FindField(node := node, name := 'value');
+
+IF (sourceNode.Handle = 0) = (valueNode.Handle = 0) THEN
+	WorkflowExceptions.ThrowWorkflowConfiguration(
+		sourceNamespaceName := NamespaceName,
+		sourceClassName := ClassName,
+		sourcePOUName := __POUNAME(),
+		sourcePosition := __POSITION(),
+		message := "Expected exactly one assignment source"
+	);
+END_IF
+
+IF sourceNode.Handle <> 0 THEN
+	sourceVariableName := Workflows.ReadName(reader := reader, node := sourceNode);
+	loader.AddRequiredVariable(scope := THIS^, name := sourceVariableName);
+	ConfigureFromVariable(targetVariableName := targetVariableName, sourceVariableName := sourceVariableName);
+ELSE
+	literal := Workflows.ReadLiteral(reader := reader, node := valueNode);
+	storage := literal.pValue;
+
+	__TRY
+		configureLiteral(targetVariableName := targetVariableName, value := literal);
+	__CATCH(exceptionCode)
+		__DELETE(storage);
+		TOF_Core.ExceptionManager.ReThrowLastException(
+			exceptionCode := exceptionCode,
+			catchPointNamespaceName := NamespaceName,
+			catchPointPOUName := __POUNAME(),
+			catchPointPosition := __POSITION()
+		);
+	__ENDTRY
+
+	__DELETE(storage);
+END_IF]]></ST>
+      </Implementation>
+    </Method>
   </POU>
 </TcPlcObject>

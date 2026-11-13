@@ -1,0 +1,479 @@
+<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="WorkflowLoader" Id="{93460c27-200f-44c9-a045-0220edd52a77}">
+    <Declaration><![CDATA[(*
+SPDX-FileCopyrightText: © 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+SPDX-License-Identifier: MIT
+License: https://opensource.org/license/mit
+*)
+
+(*!
+<summary>Builds a fresh configuration tree and owns rollback until successful publication.</summary>
+<description>Use a single instance from one task without reentry.</description>
+*)
+
+{attribute 'no_explicit_call' := 'do not call this function block directly'}
+FUNCTION_BLOCK WorkflowLoader EXTENDS TOF_Core.Object IMPLEMENTS IWorkflowLoader
+VAR_STAT
+	_ClassName : STRING := __POUNAME();
+END_VAR
+VAR
+	_Workflow : IWorkflow;
+	_ElementFactory : IWorkflowElementFactory;
+	_DependencyFactory : IWorkflowDependencyFactory;
+	_Resolver : IWorkflowDependencyResolver;
+	_VariableBinder : IWorkflowVariableBinder;
+	_Reader : TOF_Core.IConfigurationReader;
+	_RequiredVariables : POINTER TO VARIABLE_REQUIREMENT;
+END_VAR]]></Declaration>
+    <Implementation><ST><![CDATA[]]></ST></Implementation>
+    <Folder Name="Service methods" Id="{386f7b19-e587-425d-bb85-df0a195f22e8}" />
+    <Property Name="ClassName" Id="{8284a0ba-33b3-445e-9b51-b7f8f5d457bd}">
+      <Declaration><![CDATA[(*!
+<summary>Borrows the initialized class name used in diagnostics.</summary>
+<description>
+Returns initialized metadata storage without allocation. Callers must not modify the returned string.
+Derived function blocks must use distinct initialized static storage when overriding this metadata.
+</description>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{a82b3616-8fe9-4f27-940f-1274d80e16d4}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ClassName REF= _ClassName;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="NamespaceName" Id="{762f649c-0459-43e6-8bf9-14dde8c6a82a}">
+      <Declaration><![CDATA[(*!
+<summary>Borrows the compiler-initialized library namespace.</summary>
+<description>
+Borrows storage from the live internal namespace provider. Reacquire references after application
+reinitialization or relocation. Treat the reference as read-only; no ownership or synchronization is provided.
+</description>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{9679f93e-5dd2-45ba-bc99-26bb6f7980d9}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[NamespaceName REF= CurrentNamespace.Name;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="SelfSize" Id="{0b2329de-9daf-4118-aad4-d6607a7fb4b7}">
+      <Declaration><![CDATA[(*!
+<summary>Reports the size of this concrete function block instance in bytes.</summary>
+<description>
+Reports the instance layout rather than dynamic allocations owned by its fields. A derived function block
+with a different layout must override this property; the value does not grant disposal rights.
+</description>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY SelfSize : ULINT]]></Declaration>
+      <Get Name="Get" Id="{0637f900-6a3f-4efe-8eab-6459e76603fb}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[SelfSize := XSIZEOF(THIS^);]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="clearLoad" Id="{6348b39f-f60d-4223-9c12-621cbd6a088c}" FolderPath="Service methods\">
+      <Declaration><![CDATA[(*!
+<summary>Clears borrowed state and releases pending name checks.</summary>
+<description>Called on both normal return and rollback.</description>
+*)
+METHOD PRIVATE clearLoad
+VAR
+	entry : POINTER TO VARIABLE_REQUIREMENT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_Workflow := 0;
+_Reader := 0;
+_ElementFactory := 0;
+_DependencyFactory := 0;
+_Resolver := 0;
+_VariableBinder := 0;
+
+WHILE _RequiredVariables <> 0 DO
+	entry := _RequiredVariables;
+	_RequiredVariables := entry^.Next;
+	__DELETE(entry);
+END_WHILE]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="Load" Id="{74fec7d8-498f-4cd6-baf9-3f56e448f51b}">
+      <Declaration><![CDATA[(*!
+<summary>Builds a separate workflow, validates its bindings and transfers ownership on success.</summary>
+<description>Does not start execution. The caller owns the returned dynamic workflow and must release it.
+Partial graphs are disposed on failure.</description>
+<param name="reader">Active configuration reader.</param>
+<param name="root">Root configuration node of the workflow.</param>
+<param name="factory">Optional custom workflow element factory.</param>
+<param name="dependencyFactory">Optional custom workflow and dependency factory.</param>
+<param name="resolver">Optional external dependency resolver.</param>
+<param name="binder">Optional external variable binder.</param>
+*)
+METHOD Load : IWorkflow
+VAR_INPUT
+	reader : TOF_Core.IConfigurationReader;
+	root : TOF_Core.CONFIGURATION_NODE;
+	factory : IWorkflowElementFactory := 0;
+	dependencyFactory : IWorkflowDependencyFactory := 0;
+	resolver : IWorkflowDependencyResolver := 0;
+	binder : IWorkflowVariableBinder := 0;
+END_VAR
+VAR
+	version : UINT;
+	typeName : STRING(255);
+	workflowInstance : POINTER TO Workflow;
+	object : TOF_Core.IObject;
+	serializable : TOF_Core.IConfigurationSerializable;
+	entry : POINTER TO VARIABLE_REQUIREMENT;
+	variable : TOF_Core.GENERIC_VALUE;
+	found : BOOL;
+	rootActivity : IActivity;
+	exceptionCode : __SYSTEM.ExceptionCode;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF _Reader <> 0 OR_ELSE reader = 0 OR_ELSE root.Handle = 0 THEN
+	WorkflowExceptions.ThrowWorkflowConfiguration(
+		sourceNamespaceName := NamespaceName,
+		sourceClassName := ClassName,
+		sourcePOUName := __POUNAME(),
+		sourcePosition := __POSITION(),
+		message := "Loading requires a reader, document and idle loader"
+	);
+END_IF
+
+reader.ReadValue(
+	node := reader.GetField(node := root, name := 'version'),
+	valueType := TOF_Core.CONFIGURATION_VALUE_TYPE.TYPE_UINT,
+	data := ADR(version),
+	size := SIZEOF(version)
+);
+
+IF version <> 1 THEN
+	WorkflowExceptions.ThrowWorkflowConfiguration(
+		sourceNamespaceName := NamespaceName,
+		sourceClassName := ClassName,
+		sourcePOUName := __POUNAME(),
+		sourcePosition := __POSITION(),
+		message := "Unsupported workflow format version"
+	);
+END_IF
+
+typeName := Workflows.ReadTypeName(reader := reader, node := reader.GetField(node := root, name := 'type'));
+_Reader := reader;
+_ElementFactory := factory;
+_DependencyFactory := dependencyFactory;
+_Resolver := resolver;
+_VariableBinder := binder;
+
+__TRY
+	IF typeName = TOF_Core.Strings.Concat255(NamespaceName, '.Workflow') THEN
+		workflowInstance := __NEW(Workflow);
+
+		IF workflowInstance = 0 THEN
+			TOF_Core.DynamicMemoryManager.RaiseAllocationFailure();
+		END_IF
+
+		object := workflowInstance^;
+	ELSIF dependencyFactory <> 0 THEN
+		object := dependencyFactory.CreateDependency(typeName := typeName);
+	END_IF
+
+	IF object = 0 OR_ELSE NOT object.IsDynamicInstance
+		OR_ELSE typeName <> TOF_Core.Strings.Concat255(object.NamespaceName, '.', object.ClassName)
+		OR_ELSE NOT __QUERYINTERFACE(object, _Workflow) OR_ELSE NOT __QUERYINTERFACE(object, serializable)
+	THEN
+		WorkflowExceptions.ThrowWorkflowConfiguration(
+			sourceNamespaceName := NamespaceName,
+			sourceClassName := ClassName,
+			sourcePOUName := __POUNAME(),
+			sourcePosition := __POSITION(),
+			message := "Invalid workflow factory result"
+		);
+	END_IF
+
+	serializable.Deserialize(reader := reader, node := root, context := THIS^);
+
+	IF binder <> 0 THEN
+		binder.BindVariables(workflow := _Workflow);
+	END_IF
+
+	entry := _RequiredVariables;
+
+	WHILE entry <> 0 DO
+		found := entry^.Scope.TryGetVariable(name := entry^.Name, variable => variable);
+		TOF_Core.DynamicMemoryManager.RaiseIfAllocationFailed();
+
+		IF NOT found THEN
+			WorkflowExceptions.ThrowWorkflowConfiguration(
+				sourceNamespaceName := NamespaceName,
+				sourceClassName := ClassName,
+				sourcePOUName := __POUNAME(),
+				sourcePosition := __POSITION(),
+				message := TOF_Core.WideStrings.Concat255("Unresolved workflow variable: ", TO_WSTRING(entry^.Name))
+			);
+		END_IF
+
+		entry := entry^.Next;
+	END_WHILE
+
+	rootActivity := _Workflow.RootActivity;
+
+	IF rootActivity = 0 OR_ELSE _Workflow.State <> WORKFLOW_ELEMENT_STATE.PASSIVE_READY THEN
+		WorkflowExceptions.ThrowWorkflowConfiguration(
+			sourceNamespaceName := NamespaceName,
+			sourceClassName := ClassName,
+			sourcePOUName := __POUNAME(),
+			sourcePosition := __POSITION(),
+			message := "Loaded workflow has no ready root"
+		);
+	END_IF
+
+	TOF_Core.DynamicMemoryManager.RaiseIfAllocationFailed();
+__CATCH(exceptionCode)
+	clearLoad();
+
+	IF object <> 0 THEN
+		TOF_Core.Memory.TryReleaseDynamicObject(instance := object);
+	END_IF
+	TOF_Core.ExceptionManager.ReThrowLastException(
+		exceptionCode := exceptionCode,
+		catchPointNamespaceName := NamespaceName,
+		catchPointPOUName := __POUNAME(),
+		catchPointPosition := __POSITION()
+	);
+__ENDTRY
+
+Load := _Workflow;
+clearLoad();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="ReadElement" Id="{6feb6585-ff58-424d-aec4-de3964241129}">
+      <Declaration><![CDATA[(*!
+<summary>Creates and restores a fresh registered element.</summary>
+<description>Use within one synchronous load. Handles borrow the active document and expire when it is replaced.</description>
+<param name="node">Configuration node of the element.</param>
+*)
+METHOD ReadElement : IWorkflowElement
+VAR_INPUT
+	node : TOF_Core.CONFIGURATION_NODE;
+END_VAR
+VAR
+	typeName : STRING(255);
+	element : IWorkflowElement;
+	serializable : TOF_Core.IConfigurationSerializable;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[typeName := Workflows.ReadTypeName(
+	reader := _Reader,
+	node := _Reader.GetField(node := node, name := 'type')
+);
+element := Workflows.CreateElement(typeName := typeName, workflow := _Workflow, factory := _ElementFactory);
+
+IF NOT __QUERYINTERFACE(element, serializable) THEN
+	WorkflowExceptions.ThrowWorkflowConfiguration(
+		sourceNamespaceName := NamespaceName,
+		sourceClassName := ClassName,
+		sourcePOUName := __POUNAME(),
+		sourcePosition := __POSITION(),
+		message := "Element does not implement configuration loading"
+	);
+END_IF
+
+serializable.Deserialize(reader := _Reader, node := node, context := THIS^);
+ReadElement := element;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="AddRequiredVariable" Id="{45b85b64-01a9-49ba-81c7-1aa74cd68f99}">
+      <Declaration><![CDATA[(*!
+<summary>Records a required variable operand for lookup after the tree has been attached.</summary>
+<description>Use within one synchronous load.</description>
+<param name="scope">Scope requiring the variable.</param>
+<param name="name">Variable name.</param>
+*)
+METHOD AddRequiredVariable
+VAR_INPUT
+	scope : IVariableLookup;
+	name : STRING;
+END_VAR
+VAR
+	entry : POINTER TO VARIABLE_REQUIREMENT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF scope = 0 OR_ELSE name = '' THEN
+	WorkflowExceptions.ThrowWorkflowConfiguration(
+		sourceNamespaceName := NamespaceName,
+		sourceClassName := ClassName,
+		sourcePOUName := __POUNAME(),
+		sourcePosition := __POSITION(),
+		message := "Missing required configuration variable name"
+	);
+END_IF
+
+entry := __NEW(VARIABLE_REQUIREMENT);
+
+IF entry = 0 THEN
+	TOF_Core.DynamicMemoryManager.RaiseAllocationFailure();
+END_IF
+
+entry^.Scope := scope;
+entry^.Name := name;
+entry^.Next := _RequiredVariables;
+_RequiredVariables := entry;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="BindDependency" Id="{e36e70c3-0558-4b71-a09b-7e7078467507}">
+      <Declaration><![CDATA[(*!
+<summary>Restores an embedded configuration or resolves a borrowed external key.</summary>
+<description>Use within one synchronous load. Handles borrow the active document and expire when it is replaced.</description>
+<param name="node">Dependency configuration node.</param>
+<param name="target">Target workflow element receiving the dependency.</param>
+<param name="isTask">TRUE for task dependency, FALSE for comparer.</param>
+*)
+METHOD BindDependency
+VAR_INPUT
+	node : TOF_Core.CONFIGURATION_NODE;
+	target : IWorkflowElement;
+	isTask : BOOL;
+END_VAR
+VAR
+	typeField : TOF_Core.CONFIGURATION_NODE;
+	keyField : TOF_Core.CONFIGURATION_NODE;
+	configuration : TOF_Core.CONFIGURATION_NODE;
+	embedded : BOOL;
+	key : STRING;
+	typeName : STRING(255);
+	object : TOF_Core.IObject;
+	task : TOF_Tasks.ITask;
+	invoke : IInvokeTaskActivity;
+	condition : ICompareVariableCondition;
+	comparer : TOF_Core.IComparer;
+	serializable : TOF_Core.IConfigurationSerializable;
+	exceptionCode : __SYSTEM.ExceptionCode;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[keyField := _Reader.FindField(node := node, name := 'key');
+typeField := _Reader.FindField(node := node, name := 'type');
+configuration := _Reader.FindField(node := node, name := 'configuration');
+embedded := NOT _Reader.IsPresent(node := keyField);
+
+IF (embedded AND_THEN (NOT _Reader.IsPresent(node := typeField) OR_ELSE NOT _Reader.IsPresent(node := configuration)))
+	OR_ELSE (NOT embedded AND_THEN (_Reader.IsPresent(node := typeField) OR_ELSE _Reader.IsPresent(node := configuration)))
+THEN
+	WorkflowExceptions.ThrowWorkflowConfiguration(
+		sourceNamespaceName := NamespaceName,
+		sourceClassName := ClassName,
+		sourcePOUName := __POUNAME(),
+		sourcePosition := __POSITION(),
+		message := "Expected an embedded configuration or external key"
+	);
+END_IF
+
+IF embedded THEN
+	IF _DependencyFactory = 0 THEN
+		WorkflowExceptions.ThrowWorkflowConfiguration(
+			sourceNamespaceName := NamespaceName,
+			sourceClassName := ClassName,
+			sourcePOUName := __POUNAME(),
+			sourcePosition := __POSITION(),
+			message := "Dependency factory required for embedded dependency"
+		);
+	END_IF
+
+	typeName := Workflows.ReadTypeName(reader := _Reader, node := typeField);
+	object := _DependencyFactory.CreateDependency(typeName := typeName);
+ELSE
+	IF _Resolver = 0 THEN
+		WorkflowExceptions.ThrowWorkflowConfiguration(
+			sourceNamespaceName := NamespaceName,
+			sourceClassName := ClassName,
+			sourcePOUName := __POUNAME(),
+			sourcePosition := __POSITION(),
+			message := "Dependency resolver required for external key"
+		);
+	END_IF
+
+	key := Workflows.ReadName(reader := _Reader, node := keyField);
+	object := _Resolver.ResolveExternal(key := key);
+END_IF
+
+__TRY
+	IF object = 0 THEN
+		WorkflowExceptions.ThrowWorkflowConfiguration(
+			sourceNamespaceName := NamespaceName,
+			sourceClassName := ClassName,
+			sourcePOUName := __POUNAME(),
+			sourcePosition := __POSITION(),
+			message := "Unresolved task or comparer"
+		);
+	END_IF
+
+	IF embedded THEN
+		IF NOT object.IsDynamicInstance OR_ELSE NOT __QUERYINTERFACE(object, serializable)
+			OR_ELSE typeName <> TOF_Core.Strings.Concat255(object.NamespaceName, '.', object.ClassName)
+		THEN
+			WorkflowExceptions.ThrowWorkflowConfiguration(
+				sourceNamespaceName := NamespaceName,
+				sourceClassName := ClassName,
+				sourcePOUName := __POUNAME(),
+				sourcePosition := __POSITION(),
+				message := "Invalid embedded dependency factory result"
+			);
+		END_IF
+
+		serializable.Deserialize(reader := _Reader, node := configuration, context := THIS^);
+	END_IF
+
+	IF isTask THEN
+		IF NOT __QUERYINTERFACE(target, invoke) OR_ELSE NOT __QUERYINTERFACE(object, task) THEN
+			WorkflowExceptions.ThrowWorkflowConfiguration(
+				sourceNamespaceName := NamespaceName,
+				sourceClassName := ClassName,
+				sourcePOUName := __POUNAME(),
+				sourcePosition := __POSITION(),
+				message := "Expected task dependency"
+			);
+		END_IF
+
+		IF embedded THEN
+			invoke.ConfigureEmbeddedTask(task := task);
+		ELSE
+			invoke.ConfigureExternalTask(task := task, key := key);
+		END_IF
+	ELSE
+		IF NOT __QUERYINTERFACE(target, condition) OR_ELSE NOT __QUERYINTERFACE(object, comparer) THEN
+			WorkflowExceptions.ThrowWorkflowConfiguration(
+				sourceNamespaceName := NamespaceName,
+				sourceClassName := ClassName,
+				sourcePOUName := __POUNAME(),
+				sourcePosition := __POSITION(),
+				message := "Expected comparer dependency"
+			);
+		END_IF
+
+		IF embedded THEN
+			condition.ConfigureEmbeddedComparer(comparer := comparer);
+		ELSE
+			condition.ConfigureExternalComparer(comparer := comparer, key := key);
+		END_IF
+	END_IF
+__CATCH(exceptionCode)
+	IF embedded AND_THEN object <> 0 THEN
+		TOF_Core.Memory.TryReleaseDynamicObject(instance := object);
+	END_IF
+	TOF_Core.ExceptionManager.ReThrowLastException(
+		exceptionCode := exceptionCode,
+		catchPointNamespaceName := NamespaceName,
+		catchPointPOUName := __POUNAME(),
+		catchPointPosition := __POSITION()
+	);
+__ENDTRY]]></ST>
+      </Implementation>
+    </Method>
+  </POU>
+</TcPlcObject>

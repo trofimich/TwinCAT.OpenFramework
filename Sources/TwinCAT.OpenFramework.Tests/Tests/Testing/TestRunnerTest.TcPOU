@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <TcPlcObject Version="1.1.0.1" ProductVersion="3.1.4026.21">
   <POU Name="TestRunnerTest" Id="{959461be-86e6-492c-8744-09aecb04c199}" SpecialFunc="None">
     <Declaration><![CDATA[(*
@@ -54,6 +54,7 @@ VAR
 	_DeadlineRun : DeadlineTestRunner;
 	_DeadlineReport : TOF_Testing.JUnitXmlReporter;
 	_DeadlineConfigured : BOOL;
+	_DeadlineBusyFailureRun : BOOL;
 	_DeadlineFinished : BOOL;
 	_DeadlineCalls : UDINT;
 	_ActiveConfigurationChecked : BOOL;
@@ -879,14 +880,17 @@ TEST_FINISHED();]]></ST>
     </Method>
     <Method Name="checkDeadline" Id="{0888955c-9f21-487f-840a-fe1dbcd675d8}">
       <Declaration><![CDATA[(*!
-<summary>Checks deadline completion and runner mutation guards with an owned static group.</summary>
-<description>Configures the persistent output leaf through a local reference without copying it.</description>
+<summary>Checks deadline completion, BUSY failure termination and mutation guards.</summary>
+<description>
+Configures the persistent output leaf through a local reference without copying it.
+</description>
 *)
 METHOD PRIVATE checkDeadline
 VAR
 	deadlineProbe : REFERENCE TO AssertionIsolationProbe;
 	exceptionCode : __SYSTEM.ExceptionCode;
 	rejected : BOOL;
+	actualParent : TOF_Testing.ITestElement;
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[IF _DeadlineFinished THEN
@@ -938,8 +942,9 @@ IF deadlineProbe.IsRunning AND_THEN NOT _ActiveConfigurationChecked THEN
 	__ENDTRY
 
 	AssertTrue(Condition := rejected, Message := 'Active runner rejects Reporter mutation');
+	actualParent := deadlineProbe.Parent;
 	AssertTrue(
-		Condition := deadlineProbe.Parent = _DeadlineRun.Children[0],
+		Condition := actualParent = _DeadlineRun.Children[0],
 		Message := 'The active leaf retains its constructor-assigned parent'
 	);
 	_ActiveConfigurationChecked := TRUE;
@@ -949,13 +954,38 @@ IF NOT _DeadlineRun.IsFinished AND_THEN _DeadlineCalls < 20000 THEN
 	RETURN;
 END_IF
 
-AssertTrue(Condition := _DeadlineRun.IsFinished, Message := 'A one-millisecond nominal deadline terminates');
-AssertEquals_UDINT(Expected := 1, Actual := _DeadlineRun.FailedTests, Message := 'Deadline is one failed leaf');
-AssertEquals_UDINT(
-	Expected := 1,
-	Actual := deadlineProbe.TeardownCalls,
-	Message := 'Deadline cleanup occurs once'
-);
+IF NOT _DeadlineBusyFailureRun THEN
+	AssertTrue(Condition := _DeadlineRun.IsFinished, Message := 'A one-millisecond nominal deadline terminates');
+	AssertEquals_UDINT(Expected := 1, Actual := _DeadlineRun.FailedTests, Message := 'Deadline is one failed leaf');
+	AssertEquals_UDINT(
+		Expected := 1,
+		Actual := deadlineProbe.TeardownCalls,
+		Message := 'Deadline cleanup occurs once'
+	);
+
+	IF _DeadlineRun.IsFinished THEN
+		_DeadlineBusyFailureRun := TRUE;
+		_DeadlineCalls := 0;
+		_DeadlineRun.Reset();
+		deadlineProbe.Timeout := T#0S;
+		deadlineProbe.FailSelfWhileBusy := TRUE;
+		RETURN;
+	END_IF
+ELSE
+	AssertTrue(Condition := _DeadlineRun.IsFinished, Message := 'A failed BUSY step terminates immediately');
+	AssertEquals_UDINT(Expected := 1, Actual := _DeadlineRun.FailedTests, Message := 'BUSY failure counts once');
+	AssertEquals_UDINT(
+		Expected := 1,
+		Actual := deadlineProbe.BodyCalls,
+		Message := 'Failed BUSY step does not run another body cycle'
+	);
+	AssertEquals_UDINT(
+		Expected := 1,
+		Actual := deadlineProbe.TeardownCalls,
+		Message := 'Failed BUSY cleanup occurs once'
+	);
+END_IF
+
 _DeadlineFinished := TRUE;
 TEST_FINISHED();]]></ST>
       </Implementation>
@@ -1131,6 +1161,7 @@ VAR
 	exceptionCode : __SYSTEM.ExceptionCode;
 	rejected : BOOL;
 	externalCase : REFERENCE TO ExternalElementProbe;
+	actualParent : TOF_Testing.ITestElement;
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[IF _ExternalFinished THEN
@@ -1186,7 +1217,8 @@ IF NOT _ExternalRecovered THEN
 	externalCase.ThrowOnReset := FALSE;
 	externalCase.ThrowOnExecute := FALSE;
 	_ExternalRun.Reset();
-	AssertTrue(Condition := _ExternalRun.ExternalCase.Parent = 0, Message := 'The recovered root remains parentless');
+	actualParent := _ExternalRun.ExternalCase.Parent;
+	AssertTrue(Condition := actualParent = 0, Message := 'The recovered root remains parentless');
 	AssertEquals_UDINT(
 		Expected := 3,
 		Actual := _ExternalRun.ExternalCase.ResetCalls,
@@ -1461,6 +1493,7 @@ VAR
 	exceptionCode : __SYSTEM.ExceptionCode;
 	rejected : BOOL;
 	diagnostic : TOF_Core.ERROR_MESSAGE;
+	actualParent : TOF_Testing.ITestElement;
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[IF _AbortFinished THEN
@@ -1540,7 +1573,8 @@ AssertTrue(
 );
 _AbortRun.Reset();
 AssertTrue(Condition := _AbortRun.CallbackMessage = "", Message := 'Reset clears copied callback diagnostic');
-AssertTrue(Condition := _AbortRun.AbortCase.Parent = 0, Message := 'The same root remains parentless after recovery');
+actualParent := _AbortRun.AbortCase.Parent;
+AssertTrue(Condition := actualParent = 0, Message := 'The same root remains parentless after recovery');
 _AbortRun.Reporter := _AbortRecoveryReport;
 _AbortRecovered := TRUE;
 _AbortCalls := 0;]]></ST>
@@ -1556,6 +1590,7 @@ VAR
 	exceptionCode : __SYSTEM.ExceptionCode;
 	rejected : BOOL;
 	runningRoot : REFERENCE TO AssertionIsolationProbe;
+	actualParent : TOF_Testing.ITestElement;
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[IF _RootTopologyFinished THEN
@@ -1705,9 +1740,11 @@ AssertEquals_UDINT(
 	Actual := _RootTopologyRunner.RootTopologyGroup.Child.BodyCalls,
 	Message := 'The nested group executes its owned leaf'
 );
-AssertTrue(Condition := _RootTopologyRunner.RootTopologyFirst.Parent = 0, Message := 'Runner roots remain parentless');
+actualParent := _RootTopologyRunner.RootTopologyFirst.Parent;
+AssertTrue(Condition := actualParent = 0, Message := 'Runner roots remain parentless');
+actualParent := _RootTopologyRunner.RootTopologyGroup.Child.Parent;
 AssertTrue(
-	Condition := _RootTopologyRunner.RootTopologyGroup.Child.Parent <> 0,
+	Condition := actualParent <> 0,
 	Message := 'A nested leaf retains its constructor-assigned parent'
 );
 _RootTopologyFinished := TRUE;
@@ -1727,6 +1764,7 @@ VAR
 	exceptionCode : __SYSTEM.ExceptionCode;
 	rejected : BOOL;
 	expectedParent : TOF_Testing.ITestElement;
+	actualParent : TOF_Testing.ITestElement;
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[IF _TopologyFinished THEN
@@ -1735,8 +1773,10 @@ END_IF
 
 TEST(TestName := 'Static group topology is validated before child callbacks');
 expectedParent := _DuplicateGroup;
-AssertTrue(Condition := _DuplicateGroup.First.Parent = expectedParent, Message := 'Parent is assigned at construction');
-AssertTrue(Condition := _DuplicateGroup.Parent = 0, Message := 'A root is constructed without a parent');
+actualParent := _DuplicateGroup.First.Parent;
+AssertTrue(Condition := actualParent = expectedParent, Message := 'Parent is assigned at construction');
+actualParent := _DuplicateGroup.Parent;
+AssertTrue(Condition := actualParent = 0, Message := 'A root is constructed without a parent');
 
 // Deliberately corrupt the borrowed test-only array to inject topology faults.
 // A later execution probe restores its unused slot before that slot is reached.
@@ -1777,7 +1817,8 @@ __CATCH(exceptionCode)
 __ENDTRY
 
 AssertTrue(Condition := rejected, Message := 'A child assigned to another group is rejected');
-AssertTrue(Condition := _DuplicateGroup.First.Parent = expectedParent, Message := 'Rejection never changes Parent');
+actualParent := _DuplicateGroup.First.Parent;
+AssertTrue(Condition := actualParent = expectedParent, Message := 'Rejection never changes Parent');
 _DuplicateGroup.Children[1] := _DuplicateGroup.Second;
 rejected := FALSE;
 
@@ -1821,7 +1862,8 @@ AssertEquals_UDINT(
 	Actual := _DuplicateGroup.First.BodyCalls,
 	Message := 'A repeated leaf executes once'
 );
-AssertTrue(Condition := _DuplicateGroup.First.Parent = expectedParent, Message := 'Repeated runs preserve Parent');
+actualParent := _DuplicateGroup.First.Parent;
+AssertTrue(Condition := actualParent = expectedParent, Message := 'Repeated runs preserve Parent');
 _DuplicateGroup.Children[1] := 0;
 rejected := FALSE;
 

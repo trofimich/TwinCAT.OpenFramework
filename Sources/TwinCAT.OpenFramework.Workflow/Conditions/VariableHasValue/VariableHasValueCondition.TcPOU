@@ -14,7 +14,7 @@ Evaluates whether a named workflow variable matches a configured reference value
 <description>
 Standard elements resolve condition-local and ancestor bindings first, then evaluating activity/ancestor
 bindings, then workflow fallback. The condition-associated workflow precedes a distinct context workflow.
-Custom elements expose direct bindings through ILocalVariableContainer; legacy opaque lookups run after
+Custom elements expose direct bindings through ILocalVariableLookup; legacy opaque lookups run after
 discoverable local scopes and before workflow fallback. Raises an
 exception when evaluated before Configure or when the monitored variable cannot be found.
 </description>
@@ -22,7 +22,8 @@ exception when evaluated before Configure or when the monitored variable cannot 
 
 {attribute 'no_explicit_call' := 'do not call this function block directly'}
 {attribute 'enable_dynamic_creation'}
-FUNCTION_BLOCK VariableHasValueCondition EXTENDS Condition IMPLEMENTS IVariableHasValueCondition
+FUNCTION_BLOCK VariableHasValueCondition EXTENDS Condition
+	IMPLEMENTS IVariableHasValueCondition, TOF_Core.IConfigurationSerializable
 VAR_STAT
 	{attribute 'hide'}
 	_ClassName : STRING := __POUNAME();
@@ -37,8 +38,8 @@ END_VAR]]></Declaration>
     <Implementation>
       <ST><![CDATA[]]></ST>
     </Implementation>
-    <Folder Name="Internal methods" Id="{49e947e5-a970-42b5-94f3-6c9b90e734da}" />
-    <Folder Name="Overriden members" Id="{d7c51a79-76d5-4e54-8ba0-beccf5464437}" />
+    <Folder Name="Overriden methods" Id="{d7c51a79-76d5-4e54-8ba0-beccf5464437}" />
+    <Folder Name="Service methods" Id="{49e947e5-a970-42b5-94f3-6c9b90e734da}" />
     <Property Name="ClassName" Id="{b7bad684-4c7d-44fa-b9f3-59356c9c0af6}">
       <Declaration><![CDATA[(*!
 <summary>Borrows the initialized class name used in diagnostics.</summary>
@@ -91,7 +92,7 @@ IF referenceValue.pValue = TOF_Core.Memory.NULL_ADDRESS OR_ELSE referenceValue.d
 	);
 END_IF
 
-InternalConfigure(monitoredWorkflowVariableName := monitoredVariableName, referenceValue := referenceValue);]]></ST>
+configureInternal(monitoredWorkflowVariableName := monitoredVariableName, referenceValue := referenceValue);]]></ST>
       </Implementation>
     </Method>
     <Property Name="Configured" Id="{d3138cc2-4f83-42fd-a975-721b3efc8f84}">
@@ -107,13 +108,13 @@ PROPERTY Configured : BOOL]]></Declaration>
         </Implementation>
       </Get>
     </Property>
-    <Method Name="InternalConfigure" Id="{0fc36eec-48f7-4ec9-ab94-4c8afdbe1add}" FolderPath="Internal methods\">
+    <Method Name="configureInternal" Id="{0fc36eec-48f7-4ec9-ab94-4c8afdbe1add}" FolderPath="Service methods\">
       <Declaration><![CDATA[(*!
 <summary>Stores the variable name and copies the reference value into the equality predicate.</summary>
 <param name="monitoredWorkflowVariableName">Validated variable name.</param>
 <param name="referenceValue">Validated reference value.</param>
 *)
-METHOD INTERNAL InternalConfigure
+METHOD PRIVATE configureInternal
 VAR_INPUT
 	monitoredWorkflowVariableName : STRING;
 	referenceValue : __SYSTEM.AnyType; 
@@ -153,7 +154,7 @@ PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
         </Implementation>
       </Get>
     </Property>
-    <Method Name="OnEvaluate" Id="{8440fe50-06b4-43d8-bb22-4354c386b514}" FolderPath="Overriden members\">
+    <Method Name="OnEvaluate" Id="{8440fe50-06b4-43d8-bb22-4354c386b514}" FolderPath="Overriden methods\">
       <Declaration><![CDATA[(*!
 <summary>Resolves the monitored variable with local scopes before workflow and compares its value.</summary>
 <param name="activity">Activity context for variable lookup.</param>
@@ -243,5 +244,73 @@ PROPERTY SelfSize : ULINT]]></Declaration>
         </Implementation>
       </Get>
     </Property>
+    <Method Name="Serialize" Id="{2fb31a9c-6d60-4f08-9976-e0cba68a71c7}">
+      <Declaration><![CDATA[(*!
+<summary>Writes the configuration fields for this object.</summary>
+<description>Borrows the writer for this call. A failure invalidates the current output document.</description>
+*)
+METHOD Serialize
+VAR_INPUT
+	writer : TOF_Core.IConfigurationWriter;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[Workflows.WriteConfigurationHeader(writer := writer, source := THIS^, displayName := Name, scope := THIS^);
+writer.WriteValue(
+	name := 'variable',
+	valueType := TOF_Core.CONFIGURATION_VALUE_TYPE.TYPE_STRING,
+	data := ADR(_MonitoredVariableName),
+	size := SIZEOF(_MonitoredVariableName)
+);
+Workflows.WriteConfigurationLiteral(writer := writer, name := 'value', value := ReferenceValue.AsAnyType());]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="Deserialize" Id="{ffbe41a7-f2d3-4696-919d-167500a0615a}">
+      <Declaration><![CDATA[(*!
+<summary>Restores this fresh instance from its configuration object.</summary>
+<description>
+The reader, document node and deserialization context are borrowed for this call.
+On failure discard the partial instance.
+</description>
+<param name="reader">Active configuration reader.</param>
+<param name="node">Object node to read fields from.</param>
+<param name="context">Active configuration deserialization context providing workflow reconstruction services.</param>
+*)
+METHOD Deserialize
+VAR_INPUT
+	reader : TOF_Core.IConfigurationReader;
+	node : TOF_Core.CONFIGURATION_NODE;
+	context : TOF_Core.IConfigurationDeserializationContext;
+END_VAR
+VAR
+	loader : IWorkflowLoader;
+	operand : STRING;
+	literal : __SYSTEM.AnyType;
+	storage : POINTER TO BYTE;
+	exceptionCode : __SYSTEM.ExceptionCode;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[loader := WorkflowConfigurationSerializer.ResolveWorkflowLoader(context := context);
+Workflows.ReadConfigurationHeader(reader := reader, node := node, target := THIS^, scope := THIS^);
+
+operand := Workflows.ReadName(reader := reader, node := reader.GetField(node := node, name := 'variable'));
+loader.AddRequiredVariable(scope := THIS^, name := operand);
+literal := Workflows.ReadLiteral(reader := reader, node := reader.GetField(node := node, name := 'value'));
+storage := literal.pValue;
+
+__TRY
+	configureInternal(monitoredWorkflowVariableName := operand, referenceValue := literal);
+__CATCH(exceptionCode)
+	__DELETE(storage);
+	TOF_Core.ExceptionManager.ReThrowLastException(
+		exceptionCode := exceptionCode,
+		catchPointNamespaceName := NamespaceName,
+		catchPointPOUName := __POUNAME(),
+		catchPointPosition := __POSITION()
+	);
+__ENDTRY
+
+__DELETE(storage);]]></ST>
+      </Implementation>
+    </Method>
   </POU>
 </TcPlcObject>

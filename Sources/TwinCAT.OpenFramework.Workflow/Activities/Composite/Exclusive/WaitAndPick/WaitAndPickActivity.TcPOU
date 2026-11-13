@@ -1,0 +1,485 @@
+<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="WaitAndPickActivity" Id="{98b3e546-b646-44e7-bb5b-488f34e41fc2}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+SPDX-FileCopyrightText: © 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+SPDX-License-Identifier: MIT
+License: https://opensource.org/license/mit
+*)
+
+(*!
+<summary>Waits for the first branch condition that evaluates to TRUE and runs its paired activity.</summary>
+<description>
+When no branches are configured, completes immediately. While waiting for a ready branch, suspending or
+cancelling stops immediately without selecting a branch. Resetting resets any non-ready branch activity back
+to PASSIVE_READY and clears CurrentBranchIndex.
+</description>
+*)
+
+{attribute 'no_explicit_call' := 'do not call this function block directly'}
+{attribute 'enable_dynamic_creation'}
+FUNCTION_BLOCK WaitAndPickActivity EXTENDS ExclusiveCompositeActivity
+	IMPLEMENTS IWaitAndPickActivity, TOF_Core.IConfigurationSerializable
+VAR_STAT
+	{attribute 'hide'}
+	_ClassName : STRING := __POUNAME();
+END_VAR
+VAR
+	{attribute 'OPC.UA.DA' := '0'}
+	_BranchConditions : TOF_Collections.List<0>(valueValidator := 0);
+
+	{attribute 'OPC.UA.DA' := '0'}
+	_BranchActivities : TOF_Collections.List<0>(valueValidator := 0);
+	
+	{attribute 'OPC.UA.DA' := '0'}	
+	_CurrentBranchIndex : DINT := Workflows.NO_SELECTED_ACTIVITY_INDEX;
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[]]></ST>
+    </Implementation>
+    <Folder Name="Overriden methods" Id="{3e218559-4ac2-43bb-a511-df7487291a84}" />
+    <Folder Name="Service methods" Id="{5438ee75-7621-4c52-a4d9-4dfea8dac7a8}" />
+    <Method Name="AddBranch" Id="{f3946fdc-ede0-4f71-bb51-f1411208bc91}">
+      <Declaration><![CDATA[(*!
+<summary>Appends a condition-activity branch pair and returns its zero-based branch index.</summary>
+<description>
+Permitted only in PASSIVE_READY. Validates both condition and activity before appending the pair.
+The child must be unattached, including to this parent; duplicate slots are rejected before insertion.
+The parent chain and owning workflow must be PASSIVE_READY. Fixed workflow association is validated.
+Storage allocation precedes parent callbacks; callback exceptions may leave a partial configuration.
+Child references remain borrowed and must outlive the tree. No implicit detach or ownership transfer occurs.
+</description>
+<param name="condition">Required branch condition.</param>
+<param name="activity">Required branch activity.</param>
+*)
+METHOD AddBranch : DINT
+VAR_INPUT
+	condition : ICondition;
+	activity : IActivity;
+END_VAR
+VAR
+	exceptionCode : __SYSTEM.ExceptionCode;
+	conditionParent : IWorkflowElement;
+	activityParent : IWorkflowElement;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF condition = 0 THEN
+	TOF_Core.Exceptions.ThrowArgumentNotSpecified(
+		sourceNamespaceName := NamespaceName,
+		sourceClassName := ClassName,
+		sourcePOUName := __POUNAME(),
+		sourcePosition := __POSITION(),
+		argumentName := 'condition'
+	);
+END_IF
+
+ValidateChildActivityAttachment(childActivity := activity, argumentName := 'activity');
+
+Workflows.ValidateElementAttachment(parent := THIS^, child := condition);
+
+conditionParent := condition.Parent;
+
+IF conditionParent <> 0 THEN
+	WorkflowExceptions.ThrowWorkflowAttachment(
+		sourceNamespaceName := NamespaceName,
+		sourceClassName := ClassName,
+		sourcePOUName := __POUNAME(),
+		sourcePosition := __POSITION(),
+		message := "Child element already occupies a parent slot"
+	);
+END_IF
+
+activityParent := activity.Parent;
+
+IF activityParent <> 0 THEN
+	WorkflowExceptions.ThrowWorkflowAttachment(
+		sourceNamespaceName := NamespaceName,
+		sourceClassName := ClassName,
+		sourcePOUName := __POUNAME(),
+		sourcePosition := __POSITION(),
+		message := "Child element already occupies a parent slot"
+	);
+END_IF
+
+_BranchConditions.AppendGeneric(
+	value := TOF_Core.GenericValueFactory.FromParts(
+		genericTypeClass := TOF_Core.GENERIC_TYPE_CLASS.OBJECT,
+		address := condition.SelfAddress,
+		size := condition.SelfSize,
+		memoryManagementBehavior := TOF_Core.GENERIC_MEMORY_MANAGEMENT_BEHAVIOR.STORE_ORIGINAL_REFERENCE_AND_NOT_OWNS_MEMORY
+	)
+);
+
+__TRY
+	_BranchActivities.AppendGeneric(
+		value := TOF_Core.GenericValueFactory.FromParts(
+			genericTypeClass := TOF_Core.GENERIC_TYPE_CLASS.OBJECT,
+			address := activity.SelfAddress,
+			size := activity.SelfSize,
+			memoryManagementBehavior := TOF_Core.GENERIC_MEMORY_MANAGEMENT_BEHAVIOR.STORE_ORIGINAL_REFERENCE_AND_NOT_OWNS_MEMORY
+		),
+		index => AddBranch
+	);
+__CATCH(exceptionCode)
+	IF _BranchConditions.Length > _BranchActivities.Length THEN
+		_BranchConditions.RemoveAt(index := _BranchConditions.Length - 1);
+	END_IF
+
+	TOF_Core.ExceptionManager.ReThrowLastException(
+		exceptionCode := exceptionCode,
+		catchPointNamespaceName := NamespaceName,
+		catchPointPOUName := __POUNAME(),
+		catchPointPosition := __POSITION()
+	);
+__ENDTRY
+
+condition.ParentActivity := THIS^;
+activity.ParentActivity := THIS^;]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="ClassName" Id="{0fd055e5-b559-4b38-9ea0-4ca6dfde96f4}">
+      <Declaration><![CDATA[(*!
+<summary>Borrows the initialized class name used in diagnostics.</summary>
+<description>
+Returns initialized metadata storage without allocation. Callers must not modify the returned string.
+Derived function blocks must use distinct initialized static storage when overriding this metadata.
+</description>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{03123722-c59b-4f8b-8e1d-57ef078fc153}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ClassName REF= _ClassName;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="CurrentActivity" Id="{ff44d870-a64f-40ed-9ac5-63b06e2e61c2}">
+      <Declaration><![CDATA[(*!
+<summary>Returns the activity of the currently picked branch, or 0 while waiting or idle.</summary>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY FINAL CurrentActivity : IActivity]]></Declaration>
+      <Get Name="Get" Id="{8185d1d9-3e50-4bb8-a6f5-2467a7aadc60}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[
+IF _BranchActivities.Length > TOF_Core.SignedInt32.ZERO
+	AND_THEN _CurrentBranchIndex >= TOF_Core.SignedInt32.ZERO
+	AND_THEN _CurrentBranchIndex < _BranchActivities.Length
+THEN
+	__QUERYINTERFACE(_BranchActivities.Get(index := _CurrentBranchIndex).AsObject(), CurrentActivity);
+END_IF]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="CurrentBranchIndex" Id="{33275b8e-2247-47e4-9607-47cd580c7b26}">
+      <Declaration><![CDATA[(*!
+<summary>Returns the zero-based index of the currently picked branch, or -1 while waiting or idle.</summary>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY FINAL CurrentBranchIndex : DINT]]></Declaration>
+      <Get Name="Get" Id="{b77479ef-312c-49a9-8f3c-c0dff4b2b548}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[CurrentBranchIndex := _CurrentBranchIndex;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="NamespaceName" Id="{71b51e02-0e7f-400d-98b6-f6fe9b6e421d}">
+      <Declaration><![CDATA[(*!
+<summary>Borrows the compiler-initialized library namespace.</summary>
+<description>
+Borrows storage from the live internal namespace provider. Reacquire references after application
+reinitialization or relocation. Treat the reference as read-only; no ownership or synchronization is provided.
+</description>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{39b886bb-35c4-4342-9cee-6cf1f6e0a2e1}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[NamespaceName REF= CurrentNamespace.Name;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="OnResetting" Id="{d4c7143e-4666-46e4-a666-26a19c0a8171}" FolderPath="Overriden methods\">
+      <Declaration><![CDATA[(*!
+<summary>Resets all non-ready branch activities back to PASSIVE_READY and clears CurrentBranchIndex.</summary>
+<param name="startResetting">TRUE on the initial call from RequestReset.</param>
+*)
+METHOD PROTECTED OnResetting : ACTIVITY_RESETTING_STATE
+VAR_INPUT
+	startResetting : BOOL;
+END_VAR
+VAR
+	i : DINT;
+	branchActivity : IActivity;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[FOR i := 0 TO _BranchActivities.Length - 1 DO
+	__QUERYINTERFACE(_BranchActivities.Get(index := i).AsObject(), branchActivity);
+
+	IF branchActivity <> 0 AND_THEN branchActivity.State <> WORKFLOW_ELEMENT_STATE.PASSIVE_READY THEN
+		IF ResetChildActivity(childActivity := branchActivity) = ACTIVITY_RESETTING_STATE.WORK_IN_PROGRESS THEN
+			OnResetting := ACTIVITY_RESETTING_STATE.WORK_IN_PROGRESS;
+			RETURN;
+		END_IF
+	END_IF
+END_FOR
+
+_CurrentBranchIndex := Workflows.NO_SELECTED_ACTIVITY_INDEX;
+OnResetting := ACTIVITY_RESETTING_STATE.WORK_RESET;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="OnRunning" Id="{6bdc48e7-942d-42d5-a41d-15bff80339b4}" FolderPath="Overriden methods\">
+      <Declaration><![CDATA[(*!
+<summary>
+Polls branch conditions until one is satisfied, then starts and advances the selected branch activity.
+</summary>
+<param name="startRunning">TRUE on the initial call of a fresh start.</param>
+<param name="startResuming">TRUE on the initial call when resuming from suspension.</param>
+<param name="haltReason">Receives the selected branch activity's HaltReason when halted.</param>
+*)
+METHOD PROTECTED OnRunning : ACTIVITY_RUNNING_STATE
+VAR_INPUT
+	startRunning : BOOL;
+	startResuming : BOOL;
+END_VAR
+VAR_OUTPUT
+	haltReason : WSTRING(255);
+END_VAR
+VAR
+	activity : IActivity;
+	branchJustPicked : BOOL;
+	
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF _BranchConditions.Length = TOF_Core.SignedInt32.ZERO THEN
+	OnRunning := ACTIVITY_RUNNING_STATE.WORK_COMPLETED;
+	RETURN;
+END_IF
+
+IF startRunning THEN
+	_CurrentBranchIndex := Workflows.NO_SELECTED_ACTIVITY_INDEX;
+END_IF
+
+IF _CurrentBranchIndex < TOF_Core.SignedInt32.ZERO THEN
+	_CurrentBranchIndex := findReadyBranch();
+	branchJustPicked := _CurrentBranchIndex >= TOF_Core.SignedInt32.ZERO;
+END_IF
+
+IF _CurrentBranchIndex < TOF_Core.SignedInt32.ZERO THEN
+	RETURN;
+END_IF
+
+activity := CurrentActivity;
+
+IF activity = 0 THEN
+	TOF_Core.Exceptions.ThrowNullReference(
+		sourceNamespaceName := NamespaceName,
+		sourceClassName := ClassName,
+		sourcePOUName := __POUNAME(),
+		sourcePosition := __POSITION(),
+		variableOrPropertyName := 'CurrentActivity'
+	);
+END_IF
+
+IF startRunning OR_ELSE startResuming OR_ELSE branchJustPicked THEN
+	activity.RequestStart();
+ELSE
+	activity.Execute();
+END_IF
+
+OnRunning := MapChildRunningState(childState := activity.State);
+
+IF OnRunning = ACTIVITY_RUNNING_STATE.WORK_HALTED THEN
+	haltReason := activity.HaltReason;
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="OnStopping" Id="{90584366-9ed4-4c76-823f-f6583e8cb7e4}" FolderPath="Overriden methods\">
+      <Declaration><![CDATA[(*!
+<summary>Stops waiting immediately if no branch is picked, or stops the picked branch activity.</summary>
+<param name="startCancelling">TRUE on the initial call from RequestCancel.</param>
+<param name="startSuspending">TRUE on the initial call from RequestSuspend.</param>
+<param name="haltReason">Receives the picked branch activity's HaltReason if it halts while stopping.</param>
+*)
+METHOD PROTECTED OnStopping : ACTIVITY_STOPPING_STATE
+VAR_INPUT
+	startCancelling : BOOL;
+	startSuspending : BOOL;
+END_VAR
+VAR_OUTPUT
+	haltReason : WSTRING(255);
+END_VAR
+VAR
+	activity : IActivity;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF _BranchConditions.Length = TOF_Core.SignedInt32.ZERO THEN
+	OnStopping := ACTIVITY_STOPPING_STATE.WORK_COMPLETED;
+	RETURN;
+END_IF
+
+activity := CurrentActivity;
+
+IF activity = 0 THEN
+	IF startCancelling OR_ELSE startSuspending THEN
+		OnStopping := ACTIVITY_STOPPING_STATE.WORK_STOPPED;
+	ELSE
+		OnStopping := ACTIVITY_STOPPING_STATE.WORK_COMPLETED;
+	END_IF
+
+	RETURN;
+END_IF
+
+IF NOT activity.Busy THEN
+	IF startCancelling AND_THEN activity.State = WORKFLOW_ELEMENT_STATE.PASSIVE_SUSPENDED THEN
+		activity.RequestCancel(reason := _CancelReason);
+	END_IF
+
+	OnStopping := MapChildStoppingState(childState := activity.State);
+
+	IF OnStopping = ACTIVITY_STOPPING_STATE.WORK_HALTED THEN
+		haltReason := activity.HaltReason;
+	END_IF
+
+	RETURN;
+END_IF
+
+IF startCancelling THEN
+	activity.RequestCancel(reason := _CancelReason);
+ELSIF startSuspending THEN
+	activity.RequestSuspend();
+ELSE
+	activity.Execute();
+END_IF
+
+OnStopping := MapChildStoppingState(childState := activity.State);
+
+IF OnStopping = ACTIVITY_STOPPING_STATE.WORK_HALTED THEN
+	haltReason := activity.HaltReason;
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="SelfSize" Id="{f48717c6-b99e-47cb-94a9-c8d92c921628}">
+      <Declaration><![CDATA[(*!
+<summary>Reports the size of this concrete function block instance in bytes.</summary>
+<description>
+Reports the instance layout rather than dynamic allocations owned by its fields. A derived function block
+with a different layout must override this property; the value does not grant disposal rights.
+</description>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY SelfSize : ULINT]]></Declaration>
+      <Get Name="Get" Id="{2bce559c-e271-4c1b-b7e1-6e1feaa74956}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[SelfSize := XSIZEOF(THIS^);]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="findReadyBranch" Id="{8cf25bf3-94b9-4b19-951a-3c1cbb21bad6}" FolderPath="Service methods\">
+      <Declaration><![CDATA[(*!
+<summary>Finds the first branch whose condition evaluates to TRUE.</summary>
+<description>
+Returns -1 when no condition is satisfied. Evaluation exceptions propagate to the activity error handler; they
+must not be interpreted as continued waiting.
+</description>
+*)
+METHOD PRIVATE findReadyBranch : DINT
+VAR
+	i : DINT;
+	condition : ICondition;
+END_VAR
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[findReadyBranch := Workflows.NO_SELECTED_ACTIVITY_INDEX;
+
+FOR i := 0 TO _BranchConditions.Length - 1 DO
+	__QUERYINTERFACE(_BranchConditions.Get(index := i).AsObject(), condition);
+
+	IF condition.Evaluate(activity := THIS^) THEN
+		findReadyBranch := i;
+		RETURN;
+	END_IF
+END_FOR]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="Serialize" Id="{c0e33e65-0673-4051-aaf1-31c9838cad8f}">
+      <Declaration><![CDATA[(*!
+<summary>Writes the configuration fields for this object.</summary>
+<description>Borrows the writer for this call. A failure invalidates the current output document.</description>
+*)
+METHOD Serialize
+VAR_INPUT
+	writer : TOF_Core.IConfigurationWriter;
+END_VAR
+VAR
+	i : DINT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[Workflows.WriteConfigurationHeader(writer := writer, source := THIS^, displayName := Name, scope := THIS^);
+writer.BeginArray(name := 'branches');
+
+FOR i := 0 TO _BranchConditions.Length - 1 DO
+	writer.BeginObject(name := '');
+	Workflows.WriteConfigurationObject(
+		writer := writer,
+		name := 'condition',
+		source := _BranchConditions.Get(index := i).AsObject()
+	);
+	Workflows.WriteConfigurationObject(
+		writer := writer,
+		name := 'activity',
+		source := _BranchActivities.Get(index := i).AsObject()
+	);
+	writer.EndObject();
+END_FOR
+
+writer.EndArray();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="Deserialize" Id="{c1ab665b-da90-41bd-afae-005a35b3ee1f}">
+      <Declaration><![CDATA[(*!
+<summary>Restores this fresh instance from its configuration object.</summary>
+<description>
+The reader, document node and deserialization context are borrowed for this call.
+On failure discard the partial instance.
+</description>
+<param name="reader">Active configuration reader.</param>
+<param name="node">Object node to read fields from.</param>
+<param name="context">Active configuration deserialization context providing workflow reconstruction services.</param>
+*)
+METHOD Deserialize
+VAR_INPUT
+	reader : TOF_Core.IConfigurationReader;
+	node : TOF_Core.CONFIGURATION_NODE;
+	context : TOF_Core.IConfigurationDeserializationContext;
+END_VAR
+VAR
+	loader : IWorkflowLoader;
+	items : TOF_Core.CONFIGURATION_NODE;
+	count : DINT;
+	i : DINT;
+	branch : TOF_Core.CONFIGURATION_NODE;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[loader := WorkflowConfigurationSerializer.ResolveWorkflowLoader(context := context);
+Workflows.ReadConfigurationHeader(reader := reader, node := node, target := THIS^, scope := THIS^);
+
+items := reader.GetField(node := node, name := 'branches');
+count := TO_DINT(reader.GetArraySize(node := items));
+
+FOR i := 0 TO count - 1 DO
+	branch := reader.GetItem(node := items, index := TO_UDINT(i));
+	AddBranch(
+		condition := Workflows.ReadCondition(loader := loader, node := reader.GetField(node := branch, name := 'condition')),
+		activity := Workflows.ReadActivity(loader := loader, node := reader.GetField(node := branch, name := 'activity'))
+	);
+END_FOR]]></ST>
+      </Implementation>
+    </Method>
+  </POU>
+</TcPlcObject>

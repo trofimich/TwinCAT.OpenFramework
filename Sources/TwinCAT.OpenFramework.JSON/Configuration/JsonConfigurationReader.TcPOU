@@ -1,0 +1,333 @@
+<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="JsonConfigurationReader" Id="{236a8e5c-23da-49c0-8af5-0fa696e16ceb}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+SPDX-FileCopyrightText: © 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+SPDX-License-Identifier: MIT
+License: https://opensource.org/license/mit
+*)
+
+(*!
+<summary>Reads a JSON document using scoped DOM handles.</summary>
+<description>Use a single instance from one task without reentry.</description>
+*)
+
+{attribute 'no_explicit_call' := 'do not call this function block directly'}
+FUNCTION_BLOCK JsonConfigurationReader EXTENDS TOF_Core.Object IMPLEMENTS TOF_Core.IConfigurationReader
+VAR_STAT
+	_ClassName : STRING := __POUNAME();
+END_VAR
+VAR
+	_Parser : Tc3_JsonXml.FB_JsonDomParser;
+	_Converter : Tc3_JsonXml.FB_JsonReadWriteDatatype;
+	_Value : TOF_Core.JSON_DOCUMENT;
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[]]></ST>
+    </Implementation>
+    <Folder Name="Service methods" Id="{bec439dc-2b8a-4719-bfbc-2186f8994348}" />
+    <Property Name="ClassName" Id="{cb3e6f75-e064-4b44-9538-0a7bd332335c}">
+      <Declaration><![CDATA[(*!
+<summary>Provides the concrete serializer class name.</summary>
+<description>Borrows read-only instance storage that remains valid for the instance lifetime.</description>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY ClassName : REFERENCE TO STRING
+]]></Declaration>
+      <Get Name="Get" Id="{512664b3-26d4-4b25-8af0-39c7b7d2485a}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ClassName REF= _ClassName;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="FindField" Id="{cd757efd-cff4-4b37-b363-1b9042c90708}">
+      <Declaration><![CDATA[(*!
+<summary>Attempts to find an optional object member without throwing.</summary>
+<description>Returns EMPTY_NODE when absent. No exception escapes this method.</description>
+<param name="node">Parent object node.</param>
+<param name="name">Optional member field name.</param>
+*)
+METHOD FindField : TOF_Core.CONFIGURATION_NODE
+VAR_INPUT
+	node : TOF_Core.CONFIGURATION_NODE;
+	name : STRING;
+END_VAR
+VAR
+	member : __XWORD;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF node.Handle = 0 OR_ELSE NOT _Parser.IsObject(v := node.Handle) THEN
+	FindField := TOF_Core.ConfigurationNodes.EMPTY_NODE;
+	RETURN;
+END_IF
+
+member := _Parser.FindMember(v := node.Handle, member := name);
+FindField.Handle := member;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="GetArraySize" Id="{49417c52-e7f4-414e-92d2-72a8f1d07e48}">
+      <Declaration><![CDATA[(*!
+<summary>Returns the number of elements of an array. Other shapes raise.</summary>
+<description>
+Use within one synchronous load. Handles borrow the active document and expire when it is replaced.
+</description>
+<param name="node">Array node.</param>
+*)
+METHOD GetArraySize : UDINT
+VAR_INPUT
+	node : TOF_Core.CONFIGURATION_NODE;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF NOT IsArray(node := node) THEN
+	throwInvalidDocumentException(reason := 'not an array', fieldName := '');
+END_IF
+
+GetArraySize := _Parser.GetArraySize(v := node.Handle);]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="GetField" Id="{b6f25c33-3a9f-4d17-b447-fe531a426ea2}">
+      <Declaration><![CDATA[(*!
+<summary>Finds a mandatory object member or raises.</summary>
+<description>
+Use within one synchronous load. Handles borrow the active document and expire when it is replaced.
+</description>
+<param name="node">Parent object node.</param>
+<param name="name">Member field name.</param>
+*)
+METHOD GetField : TOF_Core.CONFIGURATION_NODE
+VAR_INPUT
+	node : TOF_Core.CONFIGURATION_NODE;
+	name : STRING;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF node.Handle = 0 OR_ELSE NOT _Parser.IsObject(v := node.Handle) THEN
+	throwInvalidDocumentException(reason := 'not an object', fieldName := name);
+END_IF
+
+GetField.Handle := _Parser.FindMember(v := node.Handle, member := name);
+
+IF GetField.Handle = 0 THEN
+	throwInvalidDocumentException(reason := 'missing field', fieldName := name);
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="GetItem" Id="{6d689d67-8cfe-4aac-b45f-4635cb27afba}">
+      <Declaration><![CDATA[(*!
+<summary>Returns an existing array item by zero-based index or raises.</summary>
+<description>Use within one synchronous load. Out-of-bounds index raises an exception.</description>
+<param name="node">Array node.</param>
+<param name="index">Zero-based element index.</param>
+*)
+METHOD GetItem : TOF_Core.CONFIGURATION_NODE
+VAR_INPUT
+	node : TOF_Core.CONFIGURATION_NODE;
+	index : UDINT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF NOT IsArray(node := node) THEN
+	throwInvalidDocumentException(reason := 'not an array', fieldName := '');
+END_IF
+
+IF index >= _Parser.GetArraySize(v := node.Handle) THEN
+	throwInvalidDocumentException(reason := 'index out of range', fieldName := '');
+END_IF
+
+GetItem.Handle := _Parser.GetArrayValueByIdx(v := node.Handle, idx := index);]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="IsArray" Id="{91240330-ce82-4217-ad18-08ada72cf717}">
+      <Declaration><![CDATA[(*!
+<summary>Reports whether the supplied value is an array.</summary>
+<description>
+Use within one synchronous load. Handles borrow the active document and expire when it is replaced.
+</description>
+<param name="node">Node to inspect.</param>
+*)
+METHOD IsArray : BOOL
+VAR_INPUT
+	node : TOF_Core.CONFIGURATION_NODE;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IsArray := node.Handle <> 0 AND_THEN _Parser.IsArray(v := node.Handle);]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="IsPresent" Id="{6af041a0-5276-4f46-9640-1ea64cfd1a53}">
+      <Declaration><![CDATA[(*!
+<summary>Reports whether the supplied node refers to a present document element.</summary>
+<description>Returns FALSE for an empty or unassigned node handle.</description>
+<param name="node">Node to inspect.</param>
+*)
+METHOD IsPresent : BOOL
+VAR_INPUT
+	node : TOF_Core.CONFIGURATION_NODE;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IsPresent := node.Handle <> 0;]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="NamespaceName" Id="{ed4f9045-a704-45f7-9e75-4d04cfcac736}">
+      <Declaration><![CDATA[(*!
+<summary>Provides the compiler-initialized library namespace.</summary>
+<description>Borrows read-only library storage; no allocation or ownership transfer occurs.</description>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{f1a7faa9-09f0-4b68-81b8-f301754cf572}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[NamespaceName REF= CurrentNamespace.Name;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="Parse" Id="{458f1032-13e5-4c9a-9aa5-8b26b6414885}">
+      <Declaration><![CDATA[(*!
+<summary>Parses a JSON configuration document and returns its root cursor node.</summary>
+<description>Requires an object root. A new call invalidates all previously issued cursors.</description>
+<param name="document">Null-terminated JSON document text.</param>
+*)
+METHOD Parse : TOF_Core.CONFIGURATION_NODE
+VAR_IN_OUT CONSTANT
+	document : TOF_Core.JSON_DOCUMENT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[Parse.Handle := _Parser.ParseDocument(sJson := document);
+
+IF Parse.Handle = 0 THEN
+	throwInvalidDocumentException(reason := 'parse failure', fieldName := '');
+ELSIF NOT _Parser.IsObject(v := Parse.Handle) THEN
+	throwInvalidDocumentException(reason := 'not an object', fieldName := '');
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="ReadValue" Id="{ce16e1f6-9681-4b51-a5a6-ee3bdb56e190}">
+      <Declaration><![CDATA[(*!
+<summary>Reads one elementary value into a live typed destination or raises.</summary>
+<description>
+Use within one synchronous load. Handles borrow the active document and expire when it is replaced.
+</description>
+<param name="node">Node containing the elementary value.</param>
+<param name="valueType">Elementary IEC type class to decode.</param>
+<param name="data">Writable pointer to the destination memory.</param>
+<param name="size">Destination memory size in bytes.</param>
+*)
+METHOD ReadValue
+VAR_INPUT
+	node : TOF_Core.CONFIGURATION_NODE;
+	valueType : TOF_Core.CONFIGURATION_VALUE_TYPE;
+	data : PVOID;
+	size : UDINT;
+END_VAR
+VAR
+	typeName : STRING;
+	target : POINTER TO STRING;
+	result : HRESULT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF data = 0 OR_ELSE size = 0 THEN
+	throwInvalidDocumentException(reason := 'type/size mismatch', fieldName := '');
+END_IF
+
+IF node.Handle = 0 THEN
+	throwInvalidDocumentException(reason := 'missing field', fieldName := '');
+END_IF
+
+IF _Parser.IsNull(v := node.Handle)
+	OR_ELSE _Parser.IsArray(v := node.Handle)
+	OR_ELSE _Parser.IsObject(v := node.Handle)
+THEN
+	throwInvalidDocumentException(reason := 'type/size mismatch', fieldName := '');
+END_IF
+
+typeName := JsonDatatypes.ToDatatypeName(valueType := valueType, size := size);
+
+IF typeName = '' THEN
+	throwInvalidDocumentException(reason := 'type/size mismatch', fieldName := '');
+END_IF
+
+IF valueType = TOF_Core.CONFIGURATION_VALUE_TYPE.TYPE_STRING THEN
+	target := data;
+
+	IF NOT _Parser.IsString(v := node.Handle) THEN
+		throwInvalidDocumentException(reason := 'type/size mismatch', fieldName := '');
+	END_IF
+
+	IF _Parser.CopyString(v := node.Handle, pStr := target^, nStr := size) = 0 THEN
+		throwInvalidDocumentException(reason := 'value too large', fieldName := '');
+	END_IF
+
+	RETURN;
+END_IF
+
+IF _Parser.CopyJson(v := node.Handle, pDoc := _Value, nDoc := SIZEOF(_Value)) = 0 THEN
+	throwInvalidDocumentException(reason := 'value too large', fieldName := '');
+END_IF
+
+IF NOT _Converter.SetSymbolFromJson(
+	sJson := _Value,
+	sDatatype := typeName,
+	nData := size,
+	pData := data,
+	hrErrorCode => result
+) OR_ELSE result <> 0 THEN
+	throwInvalidDocumentException(reason := 'parse failure', fieldName := '');
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="SelfSize" Id="{e1ba1bb4-ae22-42ad-8dba-e61c26974727}">
+      <Declaration><![CDATA[(*!
+<summary>Reports the complete instance size in bytes.</summary>
+<description>Uses XSIZEOF; separately allocated native resources are not included.</description>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY SelfSize : ULINT]]></Declaration>
+      <Get Name="Get" Id="{38e6e3a8-2e64-402d-9fcd-d603b0515426}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[SelfSize := XSIZEOF(THIS^);]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="throwInvalidDocumentException" Id="{e0005382-6117-4a05-a35e-b58f52a8f44d}" FolderPath="Service methods\">
+      <Declaration><![CDATA[(*!
+<summary>Reports an invalid or incompatible configuration value or document structure.</summary>
+<description>
+Constructs a diagnostic error message with the failure cause and optional member name, and raises StandardException.
+The reader remains reusable by opening another document.
+</description>
+<param name="reason">Specific failure description.</param>
+<param name="fieldName">Associated member field name, or empty when not applicable.</param>
+*)
+METHOD PRIVATE throwInvalidDocumentException
+VAR_INPUT
+	reason : STRING;
+	fieldName : STRING;
+END_VAR
+VAR
+	diagnosticMessage : TOF_Core.ERROR_MESSAGE;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF fieldName <> '' THEN
+	diagnosticMessage := TO_WSTRING(TOF_Core.Strings.Concat255(
+		'Invalid JSON configuration: ',
+		reason,
+		' (field: ',
+		fieldName,
+		')'
+	));
+ELSE
+	diagnosticMessage := TO_WSTRING(TOF_Core.Strings.Concat255('Invalid JSON configuration: ', reason));
+END_IF
+
+TOF_Core.Exceptions.ThrowStandard(
+	sourceNamespaceName := NamespaceName,
+	sourceClassName := ClassName,
+	sourcePOUName := __POUNAME(),
+	sourcePosition := __POSITION(),
+	message := diagnosticMessage,
+	errorCode := 16#80070057
+);]]></ST>
+      </Implementation>
+    </Method>
+  </POU>
+</TcPlcObject>

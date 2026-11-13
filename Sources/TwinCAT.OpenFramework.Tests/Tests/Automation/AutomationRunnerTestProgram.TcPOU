@@ -1,0 +1,187 @@
+<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="AutomationRunnerTestProgram" Id="{6568b24a-f65c-427b-b9dc-1580668c1ae0}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+SPDX-FileCopyrightText: © 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+SPDX-License-Identifier: MIT
+License: https://opensource.org/license/mit
+*)
+
+(*!
+<summary>Exercises automation runners at the outer boundary of the dedicated runner test task.</summary>
+<description>
+Only the scheduled task advances the fixtures. Each scan calls at most one runner.
+The TcUnit task reads the immutable final diagnostics through ReadResults after synchronized publication.
+Reinitialize the test application to repeat both cases.
+</description>
+*)
+
+{attribute 'no_explicit_call' := 'do not call this function block directly'}
+{attribute 'global_init_slot' := '49990'}
+PROGRAM AutomationRunnerTestProgram
+VAR
+	_ClassName : STRING := __POUNAME();
+	_Phase : RUNNER_TEST_PHASE := RUNNER_TEST_PHASE.CHECK_CONSTRUCTION;
+
+	_Parent : MockAutomationController(name := "FixtureParent");
+	_Composite : MockCompositeAutomationComponent(name := "RunnerComp", parent := _Parent);
+	_SecondRoot : MockLeafAutomationComponent(name := "SecondRoot", parent := _Parent);
+	_Components : ARRAY [-2..-1] OF TOF_Automation.IAutomationComponent := [_Composite, _SecondRoot];
+	_Runner : TOF_Automation.AutomationRunner(components := _Components);
+
+	_NullComponents : ARRAY [7..7] OF TOF_Automation.IAutomationComponent := [0];
+	_NullRunner : TOF_Automation.AutomationRunner(components := _NullComponents);
+	_EmptyRunner : TOF_Automation.AutomationRunner(components := AutomationRunnerTestGlobals.EmptyComponents);
+
+	_FirstProbe : MockLeafAutomationComponent(name := "FirstProbe", parent := _Parent);
+	_SecondProbe : MockLeafAutomationComponent(name := "SecondProbe", parent := _Parent);
+	_DuplicateRoots : ARRAY [-1..1] OF TOF_Automation.IAutomationComponent := [_FirstProbe, _SecondProbe, _FirstProbe];
+	_DuplicateRunner : TOF_Automation.AutomationRunner(components := _DuplicateRoots);
+
+	_HappyPathFailure : STRING(255);
+	_InvalidRootsFailure : STRING(255);
+	// SA0006: Mutex coordinating test results across RunnerTestTask and TestTask.
+	{attribute 'analysis' := '-6'}
+	_ResultLock : Tc2_System.FB_IecCriticalSection;
+	_Published : BOOL;
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[TOF_Core.DynamicMemoryManager.RaiseIfAllocationFailed();
+
+CASE _Phase OF
+	RUNNER_TEST_PHASE.CHECK_CONSTRUCTION:
+		IF _Runner.State <> TOF_Automation.AUTOMATION_RUNNER_STATE.INITIALIZING
+			OR_ELSE _SecondRoot.InitializeCount <> 0
+		THEN
+			_HappyPathFailure := 'Constructor must bind storage and defer initialization';
+		END_IF
+
+		_Phase := RUNNER_TEST_PHASE.INITIALIZE_ROOTS;
+
+	RUNNER_TEST_PHASE.INITIALIZE_ROOTS:
+		_Runner.Execute();
+
+		IF NOT TOF_Core.System.SystemDataValid THEN
+			RETURN;
+		END_IF
+
+		IF _HappyPathFailure = '' AND_THEN _Runner.State <> TOF_Automation.AUTOMATION_RUNNER_STATE.RUNNING THEN
+			_HappyPathFailure := 'Ready roots must reach RUNNING on the first ready cycle';
+		END_IF
+
+		_Phase := RUNNER_TEST_PHASE.EXECUTE_ROOTS;
+
+	RUNNER_TEST_PHASE.EXECUTE_ROOTS:
+		_Runner.Execute();
+
+		IF _HappyPathFailure = ''
+			AND_THEN (_Composite.ChildA.WorkingCount <> 1 OR_ELSE _SecondRoot.WorkingCount <> 1)
+		THEN
+			_HappyPathFailure := 'Both constructor-bound roots must execute once';
+		END_IF
+
+		_Phase := RUNNER_TEST_PHASE.CHECK_NULL_ROOT;
+
+	RUNNER_TEST_PHASE.CHECK_NULL_ROOT:
+		_NullRunner.Execute();
+
+		IF _NullRunner.State <> TOF_Automation.AUTOMATION_RUNNER_STATE.INVALID
+			OR_ELSE _NullRunner.InitializationErrorMessage <> "controller[7] is null"
+		THEN
+			_InvalidRootsFailure := 'Null root must enter INVALID and report declared index 7';
+		END_IF
+
+		_Phase := RUNNER_TEST_PHASE.CHECK_EMPTY_ROOTS;
+
+	RUNNER_TEST_PHASE.CHECK_EMPTY_ROOTS:
+		_EmptyRunner.Execute();
+
+		IF _InvalidRootsFailure = '' AND_THEN _EmptyRunner.State <> TOF_Automation.AUTOMATION_RUNNER_STATE.INVALID THEN
+			_InvalidRootsFailure := 'Empty root array must enter INVALID';
+		END_IF
+
+		_Phase := RUNNER_TEST_PHASE.CHECK_DUPLICATE_ROOT;
+
+	RUNNER_TEST_PHASE.CHECK_DUPLICATE_ROOT:
+		_DuplicateRunner.Execute();
+
+		IF _InvalidRootsFailure = '' THEN
+			IF _DuplicateRunner.State <> TOF_Automation.AUTOMATION_RUNNER_STATE.INVALID
+				OR_ELSE _DuplicateRunner.InitializationErrorMessage <> "controller[1] duplicates controller[-1]"
+			THEN
+				_InvalidRootsFailure := 'Repeated root must enter INVALID and report declared indices 1 and -1';
+			ELSIF _FirstProbe.InitializeCount <> 0 OR_ELSE _SecondProbe.InitializeCount <> 0 THEN
+				_InvalidRootsFailure := 'No root may initialize before the duplicate in the last slot is detected';
+			END_IF
+		END_IF
+
+		_Phase := RUNNER_TEST_PHASE.PUBLISH_RESULTS;
+
+	RUNNER_TEST_PHASE.PUBLISH_RESULTS:
+		// SA0006: Mutex coordinating test results across RunnerTestTask and TestTask.
+		{analysis -6}
+		IF _ResultLock.Enter() THEN
+			_Published := TRUE;
+			_ResultLock.Leave();
+			_Phase := RUNNER_TEST_PHASE.FINISHED;
+		END_IF
+		{analysis +6}
+
+	RUNNER_TEST_PHASE.FINISHED:
+		RETURN;
+END_CASE]]></ST>
+    </Implementation>
+    <Method Name="ReadResults" Id="{c0f91b4d-d98f-483a-a72d-0ac745a3908f}">
+      <Declaration><![CDATA[(*!
+<summary>Copies final runner test diagnostics to the caller when both scenarios have completed.</summary>
+<description>
+Returns FALSE until publication or if the lock cannot be acquired. Consume outputs only on TRUE.
+Publication and observation use the same lock. Published messages remain immutable until reinitialization.
+</description>
+<param name="happyPathFailure">First failed happy-path expectation, or empty on success.</param>
+<param name="invalidRootsFailure">First failed invalid-root expectation, or empty on success.</param>
+*)
+METHOD ReadResults : BOOL
+VAR_OUTPUT
+	happyPathFailure : STRING(255);
+	invalidRootsFailure : STRING(255);
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[// SA0006: Mutex coordinating test results across RunnerTestTask and TestTask.
+{analysis -6}
+IF NOT _ResultLock.Enter() THEN
+	RETURN;
+END_IF
+
+IF _Published THEN
+	happyPathFailure := _HappyPathFailure;
+	invalidRootsFailure := _InvalidRootsFailure;
+	ReadResults := TRUE;
+END_IF
+
+_ResultLock.Leave();
+{analysis +6}]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="ClassName" Id="{1cb0d35c-9b87-419f-927d-06590258e785}">
+      <Declaration><![CDATA[(*! <summary>Borrows the program class name.</summary> *)
+PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{f0dcc952-9739-4fd7-9343-ab5a88f340d4}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ClassName REF= _ClassName;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="NamespaceName" Id="{20058ea6-2c44-4522-be7b-195ec558db0e}">
+      <Declaration><![CDATA[(*! <summary>Borrows the test project namespace.</summary> *)
+PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{440b32b8-ceab-4a07-a06c-3d36019a4834}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[NamespaceName REF= CurrentNamespace.Name;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+  </POU>
+</TcPlcObject>

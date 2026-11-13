@@ -18,7 +18,8 @@ MonitoredVariableName is empty and ReferenceValue is null.
 
 {attribute 'no_explicit_call' := 'do not call this function block directly'}
 {attribute 'enable_dynamic_creation'}
-FUNCTION_BLOCK WaitVariableValueActivity EXTENDS Activity IMPLEMENTS IWaitVariableValueActivity
+FUNCTION_BLOCK WaitVariableValueActivity EXTENDS Activity
+	IMPLEMENTS IWaitVariableValueActivity, TOF_Core.IConfigurationSerializable
 VAR_STAT
 	{attribute 'hide'}
 	_ClassName : STRING := __POUNAME();
@@ -33,6 +34,7 @@ END_VAR]]></Declaration>
     <Implementation>
       <ST><![CDATA[]]></ST>
     </Implementation>
+    <Folder Name="Overriden methods" Id="{8412ec91-76db-482a-a924-118e69d7a5b3}" />
     <Property Name="ClassName" Id="{5c1e7de8-a73a-4579-86b9-30ac60fa937d}">
       <Declaration><![CDATA[(*!
 <summary>Borrows the initialized class name used in diagnostics.</summary>
@@ -105,6 +107,16 @@ IF ownerWorkflow = 0 THEN
 	);
 END_IF
 
+IF State <> WORKFLOW_ELEMENT_STATE.PASSIVE_READY OR_ELSE ownerWorkflow.Busy THEN
+	WorkflowExceptions.ThrowWorkflowConfiguration(
+		sourceNamespaceName := NamespaceName,
+		sourceClassName := ClassName,
+		sourcePOUName := __POUNAME(),
+		sourcePosition := __POSITION(),
+		message := "Cannot configure activity outside PASSIVE_READY"
+	);
+END_IF
+
 _Configured := FALSE;
 
 IF _Condition = 0 THEN
@@ -158,7 +170,7 @@ PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
         </Implementation>
       </Get>
     </Property>
-    <Method Name="OnRunning" Id="{7256e873-ad90-40ce-9bfb-e8e3b6c4fdf7}">
+    <Method Name="OnRunning" Id="{7256e873-ad90-40ce-9bfb-e8e3b6c4fdf7}" FolderPath="Overriden methods\">
       <Declaration><![CDATA[(*!
 <summary>Evaluates the internal variable condition and completes when it becomes TRUE.</summary>
 <param name="startRunning">TRUE on the initial call of a fresh start.</param>
@@ -191,7 +203,7 @@ IF _Condition.Evaluate(activity := THIS^) THEN
 END_IF]]></ST>
       </Implementation>
     </Method>
-    <Method Name="OnStopping" Id="{cb35b0b4-7e4b-4f21-962e-9df35e5ede20}">
+    <Method Name="OnStopping" Id="{cb35b0b4-7e4b-4f21-962e-9df35e5ede20}" FolderPath="Overriden methods\">
       <Declaration><![CDATA[(*!
 <summary>Stops waiting immediately on cancel or suspend.</summary>
 <param name="startCancelling">TRUE when stopping due to cancellation.</param>
@@ -249,5 +261,52 @@ PROPERTY SelfSize : ULINT]]></Declaration>
         </Implementation>
       </Get>
     </Property>
+    <Method Name="Serialize" Id="{7cada42d-e6a0-4826-b6cd-e9c00b08cf5d}">
+      <Declaration><![CDATA[(*!
+<summary>Writes the configuration fields for this object.</summary>
+<description>Borrows the writer for this call. A failure invalidates the current output document.</description>
+*)
+METHOD Serialize
+VAR_INPUT
+	writer : TOF_Core.IConfigurationWriter;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[Workflows.WriteConfigurationHeader(writer := writer, source := THIS^, displayName := Name, scope := THIS^);
+Workflows.WriteConfigurationObject(writer := writer, name := 'condition', source := _Condition);]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="Deserialize" Id="{43b2cbf5-b442-4130-a1af-02370066edad}">
+      <Declaration><![CDATA[(*!
+<summary>Restores this fresh instance from its configuration object.</summary>
+<description>
+The reader, document node and deserialization context are borrowed for this call.
+On failure discard the partial instance.
+</description>
+<param name="reader">Active configuration reader.</param>
+<param name="node">Object node to read fields from.</param>
+<param name="context">Active configuration deserialization context providing workflow reconstruction services.</param>
+*)
+METHOD Deserialize
+VAR_INPUT
+	reader : TOF_Core.IConfigurationReader;
+	node : TOF_Core.CONFIGURATION_NODE;
+	context : TOF_Core.IConfigurationDeserializationContext;
+END_VAR
+VAR
+	loader : IWorkflowLoader;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[loader := WorkflowConfigurationSerializer.ResolveWorkflowLoader(context := context);
+Workflows.ReadConfigurationHeader(reader := reader, node := node, target := THIS^, scope := THIS^);
+
+_Condition := Workflows.ReadVariableHasValueCondition(
+	loader := loader,
+	node := reader.GetField(node := node, name := 'condition')
+);
+Workflows.ValidateElementAttachment(parent := THIS^, child := _Condition);
+_Condition.ParentActivity := THIS^;
+_Configured := TRUE;]]></ST>
+      </Implementation>
+    </Method>
   </POU>
 </TcPlcObject>

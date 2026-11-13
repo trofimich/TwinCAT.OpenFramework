@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <TcPlcObject Version="1.1.0.1">
   <POU Name="InvokeTaskActivity" Id="{3b07755b-3665-4737-9ad2-6fdac9fdd07d}" SpecialFunc="None">
     <Declaration><![CDATA[(*
@@ -13,13 +13,13 @@ License: https://opensource.org/license/mit
 Starts the task on entry, cyclically executes it while RUNNING, and coordinates cancellation and resetting.
 When the task completes with WORK_DONE, this activity completes. When the task aborts or cancels, it
 transitions to PASSIVE_HALTED with the task's stop message. When the task terminates with FAILURE, it raises a
-standard exception.
+standard exception. Explicit dependency bindings persist either an embedded configuration or an external key.
 </description>
 *)
 
 {attribute 'no_explicit_call' := 'do not call this function block directly'}
 {attribute 'enable_dynamic_creation'}
-FUNCTION_BLOCK InvokeTaskActivity EXTENDS Activity IMPLEMENTS IInvokeTaskActivity
+FUNCTION_BLOCK InvokeTaskActivity EXTENDS Activity IMPLEMENTS IInvokeTaskActivity, TOF_Core.IConfigurationSerializable
 VAR_STAT
 	{attribute 'hide'}
 	_ClassName : STRING := __POUNAME();
@@ -27,6 +27,8 @@ END_VAR
 VAR
 	{attribute 'OPC.UA.DA' := '0'}
 	_Task : TOF_Tasks.ITask;
+	_BindingKind : DEPENDENCY_BINDING_KIND;
+	_ExternalKey : STRING;
 
 	{attribute 'OPC.UA.DA' := '0'}
 	_Configured : BOOL;
@@ -34,6 +36,7 @@ END_VAR]]></Declaration>
     <Implementation>
       <ST><![CDATA[]]></ST>
     </Implementation>
+    <Folder Name="Overriden methods" Id="{719a842b-e51c-4394-bb92-491cba05f421}" />
     <Property Name="ClassName" Id="{535d0327-a4db-4687-8471-79785ff04224}">
       <Declaration><![CDATA[(*!
 <summary>Borrows the initialized class name used in diagnostics.</summary>
@@ -57,6 +60,7 @@ PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
 <description>
 Requires a nonzero task instance and PASSIVE_READY. Validation precedes mutation; rejection preserves the
 previous dependency and its execution. The task remains borrowed and must stay alive until cleanup completes.
+This execution-only binding requires an explicit role before serialization.
 Reset the activity before replacing the dependency after a finished run; no hot replacement is performed.
 </description>
 <param name="task">The task instance to execute.</param>
@@ -89,6 +93,8 @@ END_IF
 _Configured := FALSE;
 
 _Task := task;
+_BindingKind := DEPENDENCY_BINDING_KIND.UNSPECIFIED;
+_ExternalKey := '';
 
 _Configured := TRUE;]]></ST>
       </Implementation>
@@ -123,7 +129,7 @@ PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
         </Implementation>
       </Get>
     </Property>
-    <Method Name="OnFail" Id="{15e3e2ba-cf2d-4b9f-b585-b21dd25c7dfc}">
+    <Method Name="OnFail" Id="{15e3e2ba-cf2d-4b9f-b585-b21dd25c7dfc}" FolderPath="Overriden methods\">
       <Declaration><![CDATA[(*!
 <summary>Requests cancellation of the running task when this activity fails.</summary>
 <description>
@@ -145,7 +151,7 @@ END_VAR]]></Declaration>
 END_IF]]></ST>
       </Implementation>
     </Method>
-    <Method Name="OnResetting" Id="{fc8824f6-0635-4038-8338-6908a83b9dda}">
+    <Method Name="OnResetting" Id="{fc8824f6-0635-4038-8338-6908a83b9dda}" FolderPath="Overriden methods\">
       <Declaration><![CDATA[(*!
 <summary>Resets the underlying task and completes resetting when the task reaches READY.</summary>
 <param name="startResetting">TRUE on the initial call from RequestReset.</param>
@@ -179,7 +185,7 @@ ELSIF _Task.State.Running THEN
 END_IF]]></ST>
       </Implementation>
     </Method>
-    <Method Name="OnRunning" Id="{daa8b942-4160-4730-8ecd-7d466d9d1fc2}">
+    <Method Name="OnRunning" Id="{daa8b942-4160-4730-8ecd-7d466d9d1fc2}" FolderPath="Overriden methods\">
       <Declaration><![CDATA[(*!
 <summary>Starts and cyclically executes the configured task until completion, halting or failure.</summary>
 <param name="startRunning">TRUE on the initial call of a fresh start.</param>
@@ -291,7 +297,7 @@ IF _Task.State.Stopped THEN
 END_IF]]></ST>
       </Implementation>
     </Method>
-    <Method Name="OnStopping" Id="{4046a63a-9467-4603-b5c9-9c196f6321b4}">
+    <Method Name="OnStopping" Id="{4046a63a-9467-4603-b5c9-9c196f6321b4}" FolderPath="Overriden methods\">
       <Declaration><![CDATA[(*!
 <summary>Drives task stopping and translates its final outcome without hiding failures.</summary>
 <description>
@@ -391,5 +397,145 @@ PROPERTY Task : TOF_Tasks.ITask]]></Declaration>
         </Implementation>
       </Get>
     </Property>
+    <Method Name="ConfigureEmbeddedTask" Id="{ad46853c-8808-4e69-91f7-1549d17fdd55}">
+      <Declaration><![CDATA[(*!
+<summary>Adopts a fresh workflow-owned task.</summary>
+<description>Requires a ready node in a workflow and a dynamic serializable instance available for exclusive transfer.
+The workflow owns it on success. A duplicate in the same workflow raises before changing this node.</description>
+*)
+METHOD ConfigureEmbeddedTask
+VAR_INPUT
+	task : TOF_Tasks.ITask;
+END_VAR
+VAR
+	owner : IEmbeddedDependencyOwner;
+	ownerWorkflow : IWorkflow;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[ownerWorkflow := Workflow;
+
+IF State <> WORKFLOW_ELEMENT_STATE.PASSIVE_READY
+	OR_ELSE (ownerWorkflow <> 0 AND_THEN ownerWorkflow.Busy)
+THEN
+	WorkflowExceptions.ThrowWorkflowConfiguration(
+		sourceNamespaceName := NamespaceName,
+		sourceClassName := ClassName,
+		sourcePOUName := __POUNAME(),
+		sourcePosition := __POSITION(),
+		message := "Cannot change the binding during execution"
+	);
+END_IF
+
+IF ownerWorkflow = 0 OR_ELSE NOT __QUERYINTERFACE(ownerWorkflow, owner) THEN
+	WorkflowExceptions.ThrowWorkflowConfiguration(
+		sourceNamespaceName := NamespaceName,
+		sourceClassName := ClassName,
+		sourcePOUName := __POUNAME(),
+		sourcePosition := __POSITION(),
+		message := "Workflow does not accept embedded dependencies"
+	);
+END_IF
+
+owner.AttachEmbeddedDependency(dependency := task, node := THIS^);
+
+_Task := task;
+_BindingKind := DEPENDENCY_BINDING_KIND.EMBEDDED;
+_ExternalKey := '';
+_Configured := TRUE;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="ConfigureExternalTask" Id="{aab9db27-f8c8-4560-98d6-ea267cddaa22}">
+      <Declaration><![CDATA[(*!
+<summary>Binds an externally owned task.</summary>
+<description>Requires a live dependency and a nonempty stable key. Several nodes may borrow the same external instance.
+The provider keeps it alive. Rejection preserves the previous binding.</description>
+*)
+METHOD ConfigureExternalTask
+VAR_INPUT
+	task : TOF_Tasks.ITask;
+	key : STRING;
+END_VAR
+VAR
+	ownerWorkflow : IWorkflow;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[ownerWorkflow := Workflow;
+
+IF State <> WORKFLOW_ELEMENT_STATE.PASSIVE_READY
+	OR_ELSE (ownerWorkflow <> 0 AND_THEN ownerWorkflow.Busy)
+THEN
+	WorkflowExceptions.ThrowWorkflowConfiguration(
+		sourceNamespaceName := NamespaceName,
+		sourceClassName := ClassName,
+		sourcePOUName := __POUNAME(),
+		sourcePosition := __POSITION(),
+		message := "Cannot change the binding during execution"
+	);
+END_IF
+
+IF task = 0 OR_ELSE key = '' THEN
+	WorkflowExceptions.ThrowWorkflowConfiguration(
+		sourceNamespaceName := NamespaceName,
+		sourceClassName := ClassName,
+		sourcePOUName := __POUNAME(),
+		sourcePosition := __POSITION(),
+		message := "External binding requires a live dependency and a key"
+	);
+END_IF
+
+_Task := task;
+_BindingKind := DEPENDENCY_BINDING_KIND.EXTERNAL_KEY;
+_ExternalKey := key;
+_Configured := TRUE;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="Serialize" Id="{c830f548-196a-4d2b-8dc5-8a2bec6f0c39}">
+      <Declaration><![CDATA[(*!
+<summary>Writes the configuration fields for this object.</summary>
+<description>Borrows the writer for this call. A failure invalidates the current output document.</description>
+*)
+METHOD Serialize
+VAR_INPUT
+	writer : TOF_Core.IConfigurationWriter;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[Workflows.WriteConfigurationHeader(writer := writer, source := THIS^, displayName := Name, scope := THIS^);
+Workflows.WriteDependency(
+	writer := writer,
+	role := 'task',
+	kind := _BindingKind,
+	key := _ExternalKey,
+	dependency := _Task,
+	nodeName := Name
+);]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="Deserialize" Id="{abb6c1cc-abe4-442f-9e98-a8eeee2bb29b}">
+      <Declaration><![CDATA[(*!
+<summary>Restores this fresh instance from its configuration object.</summary>
+<description>
+The reader, document node and deserialization context are borrowed for this call.
+On failure discard the partial instance.
+</description>
+<param name="reader">Active configuration reader.</param>
+<param name="node">Object node to read fields from.</param>
+<param name="context">Active configuration deserialization context providing workflow reconstruction services.</param>
+*)
+METHOD Deserialize
+VAR_INPUT
+	reader : TOF_Core.IConfigurationReader;
+	node : TOF_Core.CONFIGURATION_NODE;
+	context : TOF_Core.IConfigurationDeserializationContext;
+END_VAR
+VAR
+	loader : IWorkflowLoader;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[loader := WorkflowConfigurationSerializer.ResolveWorkflowLoader(context := context);
+Workflows.ReadConfigurationHeader(reader := reader, node := node, target := THIS^, scope := THIS^);
+
+loader.BindDependency(node := reader.GetField(node := node, name := 'task'), target := THIS^, isTask := TRUE);]]></ST>
+      </Implementation>
+    </Method>
   </POU>
 </TcPlcObject>

@@ -12,7 +12,8 @@ License: https://opensource.org/license/mit
 <description>
 Leaf components have no children and represent terminal devices, sensors, or actuators.
 Events received at this level bubble upwards to the parent component unless propagation is stopped.
-Lifecycle methods execute leaf-specific state transitions and invoke overridable hooks.
+Lifecycle methods execute leaf-specific state transitions and invoke overridable hooks. Parent is mandatory
+and borrowed for the leaf lifetime. It is checked before initialization hooks. Use one owner task per instance.
 </description>
 *)
 
@@ -248,13 +249,16 @@ END_VAR]]></Declaration>
     </Method>
     <Method Name="Initialize" Id="{3f657450-0a0b-4d21-8c85-c39655b515b8}">
       <Declaration><![CDATA[(*!
-<summary>Initializes the leaf component and invokes OnInitializing.</summary>
+<summary>Validates the parent and advances leaf-specific initialization.</summary>
+<description>
+Parent is mandatory and borrowed for the leaf lifetime. Missing Parent fails before OnInitializing,
+even if that hook would complete immediately. FALSE reports pending work or a caught failure; failures
+record a critical error in terminal INVALID. TRUE reports completed initialization, including an already
+stopped leaf. Completed hook effects are not rolled back.
+</description>
 *)
 METHOD FINAL Initialize : BOOL
 VAR
-	thisAsParentComponent : IChildAutomationComponent;
-	parent : IAutomationComponent;
-	
 	exceptionCode : __SYSTEM.ExceptionCode;
 	exception : TOF_Core.IException;
 	
@@ -267,6 +271,16 @@ END_VAR]]></Declaration>
 END_IF
 
 __TRY
+	IF _Parent = 0 THEN
+		TOF_Core.Exceptions.ThrowDataMemberNotSpecified(
+			sourceNamespaceName := NamespaceName,
+			sourceClassName := ClassName,
+			sourcePOUName := __POUNAME(),
+			sourcePosition := __POSITION(),
+			dataMemberName := 'Parent'
+		);
+	END_IF
+
 	Initialize := OnInitializing();
 	
 	IF Initialize THEN
@@ -289,17 +303,10 @@ __TRY
 			);
 		END_IF
 		
-		IF __QUERYINTERFACE(THIS^, thisAsParentComponent) AND_THEN (parent := thisAsParentComponent.Parent) = 0 THEN
-			TOF_Core.Exceptions.ThrowDataMemberNotSpecified(
-				sourceNamespaceName := NamespaceName,
-				sourceClassName := ClassName,
-				sourcePOUName := __POUNAME(),
-				sourcePosition := __POSITION(),
-				dataMemberName := 'Parent'
-			);						
-		END_IF
 	END_IF	
 __CATCH(exceptionCode)
+	Initialize := FALSE;
+
 	exception := TOF_Core.ExceptionManager.GetLastException(
 		exceptionCode := exceptionCode,
 		catchPointNamespaceName := NamespaceName,
@@ -372,7 +379,11 @@ METHOD PROTECTED OnWorking]]></Declaration>
     </Method>
     <Property Name="Parent" Id="{8fb3d4d7-c400-4c92-9c99-1346029f28e7}">
       <Declaration><![CDATA[(*!
-<summary>Gets or sets the parent automation component in the hierarchy.</summary>
+<summary>Borrows the constructor-bound parent automation component.</summary>
+<description>
+Parent is mandatory for initialization and must remain live for the leaf lifetime. The getter does not
+transfer ownership or permit reassignment.
+</description>
 *)
 {attribute 'monitoring' := 'call'}
 PROPERTY FINAL Parent : IParentAutomationComponent]]></Declaration>

@@ -9,7 +9,13 @@ License: https://opensource.org/license/mit
 
 (*!
 <summary>Provides automation components with indexed access to their related objects.</summary>
-<description>Indexed Try lookups return borrowed interfaces or null and do not propagate exceptions.</description>
+<description>
+Indexed Try lookups borrow interfaces and contain exceptions. Fatal allocation observations return null
+without clearing the latch.
+A state transition during output processing skips remaining outputs and the after-output hook.
+Completed writes remain effective. A pass started in STOPPED proceeds while the branch stays in that state.
+Parent is mandatory and borrowed for the component lifetime.
+</description>
 *)
 
 FUNCTION_BLOCK ABSTRACT CompositeAutomationComponent
@@ -81,7 +87,13 @@ END_VAR]]></Declaration>
       </Implementation>
     </Method>
     <Property Name="Parent" Id="{8abf624b-c9ed-4996-8788-b464b8e15520}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Borrows the constructor-bound parent for the composite lifetime.</summary>
+<description>
+The parent is mandatory for initialization and must remain live. Ownership is not transferred.
+</description>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY FINAL Parent : IParentAutomationComponent]]></Declaration>
       <Get Name="Get" Id="{872e7375-00a6-46e3-b1e4-754a1ea8aef4}">
         <Declaration><![CDATA[]]></Declaration>
@@ -91,7 +103,14 @@ PROPERTY FINAL Parent : IParentAutomationComponent]]></Declaration>
       </Get>
     </Property>
     <Method Name="ProcessInput" Id="{169f608c-73af-42d0-b266-fd32baea3032}">
-      <Declaration><![CDATA[METHOD FINAL ProcessInput
+      <Declaration><![CDATA[(*!
+<summary>Processes enabled input children in slot order.</summary>
+<description>
+While the branch remains enabled, a transition to STOPPED continues the input pass through the remaining
+enabled input children and the after-input hook. Input callbacks must support execution in STOPPED.
+</description>
+*)
+METHOD FINAL ProcessInput
 VAR
 	exceptionCode : __SYSTEM.ExceptionCode;
 	exception : TOF_Core.IException;	
@@ -172,8 +191,16 @@ __ENDTRY]]></ST>
       </Implementation>
     </Method>
     <Method Name="ProcessOutput" Id="{d8822de7-f12d-43fe-bdcd-3812e5246f80}">
-      <Declaration><![CDATA[METHOD FINAL ProcessOutput
+      <Declaration><![CDATA[(*!
+<summary>Processes enabled output children in slot order.</summary>
+<description>
+A state transition during output processing skips remaining outputs and the after-output hook.
+Completed writes remain effective. A pass started in STOPPED proceeds while the branch stays in that state.
+</description>
+*)
+METHOD FINAL ProcessOutput
 VAR
+	entryRevision : UDINT;
 	exceptionCode : __SYSTEM.ExceptionCode;
 	exception : TOF_Core.IException;	
 	exceptionReaction : TOF_Core.EXCEPTION_REACTION;
@@ -187,7 +214,9 @@ VAR
 	outputDevice : IOutputLeafAutomationComponent;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[__TRY
+        <ST><![CDATA[entryRevision := _OperationalStateRevision;
+
+__TRY
 	OnBeforeChildrenProcessOutput();
 __CATCH(exceptionCode)		
 	exception := TOF_Core.ExceptionManager.GetLastException(
@@ -207,12 +236,20 @@ __CATCH(exceptionCode)
 __ENDTRY
 
 FOR i := 0 TO _ChildCount - 1 DO
+	IF _OperationalStateRevision <> entryRevision THEN
+		RETURN;
+	END_IF
+
 	child := TryGetChildByIndex(index := i);
 
 	IF child = 0 OR_ELSE NOT child.Enabled OR_ELSE NOT __QUERYINTERFACE(child, outputDevice) THEN
 		CONTINUE;
 	END_IF
 	
+	IF _OperationalStateRevision <> entryRevision THEN
+		RETURN;
+	END_IF
+
 	outputDevice.ProcessOutput();
 	
 	IF outputDevice.HasError AND_THEN outputDevice.Error.Severity = TOF_Core.ERROR_SEVERITY.CRITICAL THEN
@@ -231,6 +268,10 @@ FOR i := 0 TO _ChildCount - 1 DO
 		);
 	END_IF
 END_FOR
+
+IF _OperationalStateRevision <> entryRevision THEN
+	RETURN;
+END_IF
 
 __TRY
 	OnAfterChildrenProcessOutput();
@@ -257,21 +298,35 @@ __ENDTRY]]></ST>
 <summary>Returns a borrowed child by its zero-based index.</summary>
 <description>
 Returns null when the entry is unavailable, the index is out of range or a nested call raises an exception.
-Does not transfer ownership or extend lifetime. Implementations must not propagate exceptions.
+Fatal allocation observations before or after the storage getter return null and preserve the latch for
+the outer task boundary. Does not transfer ownership or extend lifetime. Getter exceptions are contained.
 </description>
 *)
 METHOD FINAL TryGetChildByIndex : IChildAutomationComponent
 VAR_INPUT
 	index : TOF_Core.INT_INDEX;
+END_VAR
+VAR
+	childStorage : REFERENCE TO ARRAY [0.._ChildCount - 1] OF IChildAutomationComponent;
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[__TRY
-	IF __ISVALIDREF(Children) AND_THEN index >= 0 AND_THEN index < _ChildCount THEN
-		TryGetChildByIndex := Children[index];
+	IF TOF_Core.DynamicMemoryManager.HasAllocationFailed OR_ELSE index < 0 OR_ELSE index >= _ChildCount THEN
+		RETURN;
+	END_IF
+
+	childStorage REF= Children;
+
+	IF NOT TOF_Core.DynamicMemoryManager.HasAllocationFailed AND_THEN __ISVALIDREF(childStorage) THEN
+		TryGetChildByIndex := childStorage[index];
 	END_IF
 __CATCH
 	TryGetChildByIndex := 0;
-__ENDTRY]]></ST>
+__ENDTRY
+
+IF TOF_Core.DynamicMemoryManager.HasAllocationFailed THEN
+	TryGetChildByIndex := 0;
+END_IF]]></ST>
       </Implementation>
     </Method>
     <Method Name="Validate" Id="{cbb4acd1-d175-4a92-bf2b-4e4a64c68356}" FolderPath="Overriden methods\">

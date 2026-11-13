@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <TcPlcObject Version="1.1.0.1">
   <POU Name="AutomationComponent" Id="{b4897826-50fc-4a14-bfab-9ca314d8ba3a}" SpecialFunc="None">
     <Declaration><![CDATA[(*
@@ -16,6 +16,10 @@ and borrowed, without retaining the event or transferring ownership. Delivery an
 of Enabled and operational state. OnEventReceived decides whether the component should react in its current
 state; inactivity alone does not stop propagation. The event must be non-null and live. Handler exceptions
 abort delivery and propagate to the caller; effects of handlers already invoked are not rolled back.
+Initialization validates required dependencies before hooks. Child types require a live borrowed parent.
+FALSE reports pending initialization or failure; INVALID must never report successful initialization.
+Required error snapshots precede logging callbacks so they preserve the primary diagnostic.
+A runtime stop reaction also marks a disabled working component STOPPED, preserving its Reset requirement.
 </description>
 *)
 
@@ -28,7 +32,9 @@ VAR
 	_Enabled : BOOL := TRUE;
 	
 	{attribute 'hide'} 
-	_OperationalState : OPERATIONAL_STATE;	
+	_OperationalState : OPERATIONAL_STATE;
+	//! <summary>Counts state transitions so output traversal can detect a stop followed by an immediate reset.</summary>
+	_OperationalStateRevision : UDINT;	
 	{attribute 'hide'} 
 	_OperationalStateReason : WSTRING(255);	
 
@@ -164,12 +170,17 @@ _InitializationTimer.PT := Parameters.InitializationTimeout;]]></ST>
       <Declaration><![CDATA[METHOD FINAL GetEffectiveExceptionHandlingPolicy : TOF_Core.IExceptionHandlingPolicy
 VAR
 	thisAsChildAutomationComponent : IChildAutomationComponent;
+	parent : IParentAutomationComponent;
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[IF _ExceptionHandlingPolicy <> 0 THEN
 	GetEffectiveExceptionHandlingPolicy := _ExceptionHandlingPolicy;
-ELSIF __QUERYINTERFACE(THIS^, thisAsChildAutomationComponent) AND_THEN thisAsChildAutomationComponent.Parent <> 0 THEN
-	GetEffectiveExceptionHandlingPolicy := thisAsChildAutomationComponent.Parent.GetEffectiveExceptionHandlingPolicy();
+ELSIF __QUERYINTERFACE(THIS^, thisAsChildAutomationComponent) THEN
+	parent := thisAsChildAutomationComponent.Parent;
+
+	IF parent <> 0 THEN
+		GetEffectiveExceptionHandlingPolicy := parent.GetEffectiveExceptionHandlingPolicy();
+	END_IF
 END_IF]]></ST>
       </Implementation>
     </Method>
@@ -224,7 +235,14 @@ PROPERTY FINAL HasError : BOOL]]></Declaration>
       </Get>
     </Property>
     <Property Name="InitializationTimeout" Id="{9b430821-2485-45c1-aea1-812b2962dbb2}">
-      <Declaration><![CDATA[{attribute 'monitoring' := 'call'}
+      <Declaration><![CDATA[(*!
+<summary>Sets the maximum wait for pending initialization.</summary>
+<description>
+T#0S selects Parameters.InitializationTimeout. The first pending initialization call replaces T#0S
+with that duration before evaluating the timer.
+</description>
+*)
+{attribute 'monitoring' := 'call'}
 PROPERTY FINAL InitializationTimeout : TIME]]></Declaration>
       <Get Name="Get" Id="{87c850fb-dc27-4c26-beea-f228fa9042e3}">
         <Declaration><![CDATA[]]></Declaration>
@@ -240,7 +258,15 @@ PROPERTY FINAL InitializationTimeout : TIME]]></Declaration>
       </Set>
     </Property>
     <Method Name="Initialize" Id="{dc8b4ac8-c6c4-4b95-8f4f-93a38c521c55}">
-      <Declaration><![CDATA[METHOD ABSTRACT Initialize : BOOL]]></Declaration>
+      <Declaration><![CDATA[(*!
+<summary>Validates mandatory dependencies and advances initialization.</summary>
+<description>
+FALSE reports pending work or failure. An INVALID component must never report TRUE. Caught failures
+record a critical copied error and enter terminal INVALID. Completed callback effects are not rolled back.
+Only a pending call evaluates the timeout. Completion on the deadline cycle succeeds.
+</description>
+*)
+METHOD ABSTRACT Initialize : BOOL]]></Declaration>
       <Implementation>
         <ST><![CDATA[]]></ST>
       </Implementation>
@@ -380,7 +406,18 @@ END_IF]]></ST>
       </Implementation>
     </Method>
     <Method Name="ProcessException" Id="{7e03d0ad-992f-40a8-92de-f216a0c3449a}" FolderPath="Service methods\">
-      <Declaration><![CDATA[METHOD PROTECTED ProcessException
+      <Declaration><![CDATA[(*!
+<summary>Applies an exception reaction to copied diagnostics and operational state.</summary>
+<description>
+Initialization failures enter INVALID with a critical error. At runtime a stop reaction records a
+critical error and stops a working component, including when disabled. Disabled components need the
+direct state transition because their public Stop method does no work. Only the own state changes while
+disabled; child stopping, where applicable, is deferred to enabled stopped traversal. This preserves the Reset
+requirement after a failed disabled service callback. When the reaction requires an error copy, it is completed before logging callbacks can
+reuse a task-local exception. Conversion failures may propagate before logging and state transitions.
+</description>
+*)
+METHOD PROTECTED ProcessException
 VAR_INPUT
 	exception : TOF_Core.IException;  
 	exceptionReaction : TOF_Core.EXCEPTION_REACTION;	
@@ -391,33 +428,39 @@ END_VAR]]></Declaration>
 	RETURN;
 END_IF
 
-IF OperationalState <> OPERATIONAL_STATE.INITIALIZING THEN
-	TOF_Core.LogManager.TryLogException(
-		exception := exception,
-		severity := GetErrorSeverityByExceptionReaction(exceptionReaction := exceptionReaction)
-	);
-	
-	CASE exceptionReaction OF
-		TOF_Core.EXCEPTION_REACTION.SET_ERROR_AND_CONTINUE:
-			IF _Error.Empty THEN
-				exception.ToError(targetError := _Error, severity := TOF_Core.ERROR_SEVERITY.ERROR);
-			END_IF		
-		
-		TOF_Core.EXCEPTION_REACTION.SET_ERROR_AND_STOP:
-			IF _Error.Empty OR_ELSE _Error.Severity < TOF_Core.ERROR_SEVERITY.CRITICAL THEN
-				exception.ToError(targetError := _Error, severity := TOF_Core.ERROR_SEVERITY.CRITICAL);
-			END_IF	
-			
-			IF OperationalState = OPERATIONAL_STATE.WORKING THEN
-				Stop(reason := exceptionSourceHint);		
-			END_IF
-	END_CASE
-ELSE
-	TOF_Core.LogManager.TryLogException(exception := exception, severity := TOF_Core.ERROR_SEVERITY.CRITICAL);
-			
+IF OperationalState = OPERATIONAL_STATE.INITIALIZING THEN
 	exception.ToError(targetError := _Error, severity := TOF_Core.ERROR_SEVERITY.CRITICAL);
-
+	TOF_Core.LogManager.TryLogException(exception := exception, severity := TOF_Core.ERROR_SEVERITY.CRITICAL);
 	SetOperationalState(state := OPERATIONAL_STATE.INVALID, reason := exceptionSourceHint);
+
+	RETURN;
+END_IF
+
+CASE exceptionReaction OF
+	TOF_Core.EXCEPTION_REACTION.SET_ERROR_AND_CONTINUE:
+		IF _Error.Empty THEN
+			exception.ToError(targetError := _Error, severity := TOF_Core.ERROR_SEVERITY.ERROR);
+		END_IF
+
+	TOF_Core.EXCEPTION_REACTION.SET_ERROR_AND_STOP:
+		IF _Error.Empty OR_ELSE _Error.Severity < TOF_Core.ERROR_SEVERITY.CRITICAL THEN
+			exception.ToError(targetError := _Error, severity := TOF_Core.ERROR_SEVERITY.CRITICAL);
+		END_IF
+END_CASE
+
+TOF_Core.LogManager.TryLogException(
+	exception := exception,
+	severity := GetErrorSeverityByExceptionReaction(exceptionReaction := exceptionReaction)
+);
+
+IF exceptionReaction = TOF_Core.EXCEPTION_REACTION.SET_ERROR_AND_STOP
+	AND_THEN OperationalState = OPERATIONAL_STATE.WORKING
+THEN
+	IF Enabled THEN
+		Stop(reason := exceptionSourceHint);
+	ELSE
+		SetOperationalState(state := OPERATIONAL_STATE.STOPPED, reason := exceptionSourceHint);
+	END_IF
 END_IF]]></ST>
       </Implementation>
     </Method>
@@ -428,7 +471,13 @@ END_IF]]></ST>
       </Implementation>
     </Method>
     <Method Name="SetOperationalState" Id="{5277f682-bec2-4af0-819a-10cc9e1fbd19}" FolderPath="Service methods\">
-      <Declaration><![CDATA[METHOD PROTECTED SetOperationalState
+      <Declaration><![CDATA[(*!
+<summary>Records the state and reason and notifies descendants on a transition.</summary>
+<description>Advances the transition counter before callbacks so an interrupted output pass can be detected.</description>
+<param name="state">New operational state.</param>
+<param name="reason">Reason recorded even when the state stays the same.</param>
+*)
+METHOD PROTECTED SetOperationalState
 VAR_INPUT
 	state : OPERATIONAL_STATE;
 	reason : WSTRING(255);
@@ -449,6 +498,7 @@ END_IF
 previousState := _OperationalState;
 
 _OperationalState := state;
+_OperationalStateRevision := _OperationalStateRevision + 1;
 
 __TRY
 	OnOperationalStateChanged(previousState := previousState);

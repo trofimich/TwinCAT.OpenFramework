@@ -1,0 +1,286 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="JsonConfigurationWriter" Id="{07475d06-1d68-41f6-95ff-9582f0495df6}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+SPDX-FileCopyrightText: © 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+SPDX-License-Identifier: MIT
+License: https://opensource.org/license/mit
+*)
+
+(*!
+<summary>Serializes configuration objects into a JSON document.</summary>
+<description>
+The instance owns its native SAX writer. Use sequentially from one task without reentry.
+The writer does not track key uniqueness or nesting depth; maintaining unique property names and balanced
+object/array calls is the responsibility of the caller. Structural violations are propagated from the native writer.
+</description>
+*)
+
+{attribute 'no_explicit_call' := 'do not call this function block directly'}
+FUNCTION_BLOCK JsonConfigurationWriter EXTENDS TOF_Core.Object IMPLEMENTS TOF_Core.IConfigurationWriter
+VAR CONSTANT
+	// Standard HRESULT for an invalid writer operand.
+	_InvalidArgument : HRESULT := TO_DINT(16#80070057);
+	// Standard HRESULT for a failed operation without a native error code.
+	_UnspecifiedFailure : HRESULT := TO_DINT(16#80004005);
+END_VAR
+VAR_STAT
+	_ClassName : STRING := __POUNAME();
+END_VAR
+VAR
+	_Writer : Tc3_JsonXml.FB_JsonSaxWriter;
+	_Converter : Tc3_JsonXml.FB_JsonReadWriteDatatype;
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[]]></ST>
+    </Implementation>
+    <Folder Name="Service methods" Id="{13852a9b-32b4-46c8-8fbe-12f7db1a7453}" />
+    <Method Name="BeginArray" Id="{1e2dd894-7f79-4eee-978e-b86e13d62f9a}">
+      <Declaration><![CDATA[(*!
+<summary>Opens an ordered list.</summary>
+<description>
+Writes a property key when name is nonempty, then opens a JSON array. Property names within an enclosing object
+must be unique. Propagates native writer errors to the active serialization call.
+</description>
+<param name="name">List property name, or empty for array items or root.</param>
+*)
+METHOD BeginArray
+VAR_INPUT
+	name : STRING;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF name <> '' THEN
+	// Tc3_JsonXml.FB_JsonSaxWriter.AddKey returns VOID; state errors are caught by subsequent calls.
+	_Writer.AddKey(key := name);
+END_IF
+
+checkResult(result := _Writer.StartArray());]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="BeginDocument" Id="{6be29a43-8545-4dcd-93a2-9f849d4ae618}">
+      <Declaration><![CDATA[(*!
+<summary>Resets the native writer and opens the document root object.</summary>
+<description>Prepares writer for streaming a fresh configuration object.</description>
+*)
+METHOD BeginDocument]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[checkResult(result := _Writer.ResetDocument());
+BeginObject(name := '');]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="BeginObject" Id="{fdeab639-23b0-491f-bec8-02cca02664b7}">
+      <Declaration><![CDATA[(*!
+<summary>Opens an object.</summary>
+<description>
+Writes a property key when name is nonempty, then opens a JSON object. Property names within an enclosing object
+must be unique. Propagates native writer errors to the active serialization call.
+</description>
+<param name="name">Object property name, or empty for array items or root.</param>
+*)
+METHOD BeginObject
+VAR_INPUT
+	name : STRING;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF name <> '' THEN
+	// Tc3_JsonXml.FB_JsonSaxWriter.AddKey returns VOID; state errors are caught by subsequent calls.
+	_Writer.AddKey(key := name);
+END_IF
+
+checkResult(result := _Writer.StartObject());]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="checkResult" Id="{d79406aa-8c8c-476b-8e9c-bf842fb09c28}" FolderPath="Service methods\">
+      <Declaration><![CDATA[(*!
+<summary>Propagates a native writer failure.</summary>
+<description>The caller discards an incomplete document.</description>
+<param name="result">HRESULT returned by native writer operation.</param>
+*)
+METHOD PRIVATE checkResult
+VAR_INPUT
+	result : HRESULT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF result <> 0 THEN
+	TOF_Core.Exceptions.ThrowStandard(
+		sourceNamespaceName := NamespaceName,
+		sourceClassName := ClassName,
+		sourcePOUName := __POUNAME(),
+		sourcePosition := __POSITION(),
+		message := "Cannot write configuration document",
+		errorCode := TO_UDINT(result)
+	);
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="ClassName" Id="{91e1529d-4885-4730-975b-71579ddf2c58}">
+      <Declaration><![CDATA[(*!
+<summary>Provides the concrete serializer class name.</summary>
+<description>Borrows read-only instance storage that remains valid for the instance lifetime.</description>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY ClassName : REFERENCE TO STRING
+]]></Declaration>
+      <Get Name="Get" Id="{f04ef9e0-9185-475c-b109-70f81a824f89}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ClassName REF= _ClassName;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="EndArray" Id="{8ecdc68b-b7d9-46f4-aa86-7ae5053d396f}">
+      <Declaration><![CDATA[(*!
+<summary>Closes the current list.</summary>
+<description>Propagates native writer errors to the active serialization call.</description>
+*)
+METHOD EndArray]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[checkResult(result := _Writer.EndArray());]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="EndDocument" Id="{45cfa451-8421-4b09-9d0e-e10a33e51372}">
+      <Declaration><![CDATA[(*!
+<summary>Closes the root object and extracts the serialized JSON document text.</summary>
+<description>Copies output text into document. An incomplete or zero-length result raises.</description>
+<param name="document">Destination text buffer for the JSON document.</param>
+*)
+METHOD EndDocument
+VAR_IN_OUT
+	document : TOF_Core.JSON_DOCUMENT;
+END_VAR
+VAR
+	result : HRESULT;
+	length : UDINT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[EndObject();
+length := _Writer.CopyDocument(pDoc := document, nDoc := SIZEOF(document), hrErrorCode => result);
+checkResult(result := result);
+
+IF length = 0 THEN
+	checkResult(result := _UnspecifiedFailure);
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="EndObject" Id="{321d4164-fa68-4548-851c-c820a089a6b7}">
+      <Declaration><![CDATA[(*!
+<summary>Closes the current object.</summary>
+<description>Propagates native writer errors to the active serialization call.</description>
+*)
+METHOD EndObject]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[checkResult(result := _Writer.EndObject());]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="NamespaceName" Id="{3ff34bfa-5112-4bb7-b972-5abc98517eb2}">
+      <Declaration><![CDATA[(*!
+<summary>Provides the compiler-initialized library namespace.</summary>
+<description>Borrows read-only library storage; no allocation or ownership transfer occurs.</description>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{974d0ea6-525f-47dd-ad39-ac19601ff20a}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[NamespaceName REF= CurrentNamespace.Name;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="SelfSize" Id="{23b8e044-53bf-4c58-bde4-a3491ae8bf6a}">
+      <Declaration><![CDATA[(*!
+<summary>Reports the complete instance size in bytes.</summary>
+<description>Uses XSIZEOF; separately allocated native resources are not included.</description>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY SelfSize : ULINT]]></Declaration>
+      <Get Name="Get" Id="{7cee206c-2aa7-43e4-9ee3-f05035d07292}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[SelfSize := XSIZEOF(THIS^);]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="Serialize" Id="{1b9309f2-1f45-497f-998a-8022272368fc}">
+      <Declaration><![CDATA[(*!
+<summary>Writes a fresh JSON document from a serializable configuration object.</summary>
+<description>
+Accepts any object implementing IConfigurationSerializable. Use from one task without reentry. Only consume
+the destination after normal return; on failure document is cleared before writing and must be discarded.
+Each call resets the native writer before invoking source.Serialize.
+</description>
+<param name="source">Configuration source to serialize.</param>
+<param name="document">Destination text buffer for the JSON document.</param>
+*)
+METHOD Serialize
+VAR_INPUT
+	source : TOF_Core.IConfigurationSerializable;
+END_VAR
+VAR_IN_OUT
+	document : TOF_Core.JSON_DOCUMENT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[document := '';
+
+IF source = 0 THEN
+	checkResult(result := _InvalidArgument);
+END_IF
+
+BeginDocument();
+source.Serialize(writer := THIS^);
+EndDocument(document := document);]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="WriteValue" Id="{c4ddae7a-fcbd-437b-b658-808c57877a4e}">
+      <Declaration><![CDATA[(*!
+<summary>Copies one elementary IEC value.</summary>
+<description>
+Writes a property key when name is nonempty, then writes the symbol value. Property names within an enclosing
+object must be unique. Propagates native writer errors to the active serialization call.
+</description>
+<param name="name">Value property name, or empty for array items.</param>
+<param name="valueType">Elementary IEC type class.</param>
+<param name="data">Pointer to readable source memory.</param>
+<param name="size">Source memory size in bytes.</param>
+*)
+METHOD WriteValue
+VAR_INPUT
+	name : STRING;
+	valueType : TOF_Core.CONFIGURATION_VALUE_TYPE;
+	data : PVOID;
+	size : UDINT;
+END_VAR
+VAR
+	typeName : STRING;
+	result : HRESULT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF name <> '' THEN
+	// Tc3_JsonXml.FB_JsonSaxWriter.AddKey returns VOID; state errors are caught by subsequent calls.
+	_Writer.AddKey(key := name);
+END_IF
+
+IF data = 0 OR_ELSE size = 0 THEN
+	checkResult(result := _InvalidArgument);
+END_IF
+
+typeName := JsonDatatypes.ToDatatypeName(valueType := valueType, size := size);
+
+IF typeName = '' THEN
+	checkResult(result := _InvalidArgument);
+END_IF
+
+IF NOT _Converter.AddJsonValueFromSymbol(
+	fbWriter := _Writer,
+	sDatatype := typeName,
+	nData := size,
+	pData := data,
+	hrErrorCode => result) 
+THEN
+	checkResult(result := SEL(result = 0, result, _UnspecifiedFailure));
+END_IF
+
+checkResult(result := result);]]></ST>
+      </Implementation>
+    </Method>
+  </POU>
+</TcPlcObject>

@@ -10,6 +10,8 @@ License: https://opensource.org/license/mit
 (*!
 <summary>Initializes automation components and advances their cyclic execution.</summary>
 <description>
+FB_init borrows the root array. Its storage and components must outlive all runner calls. Keep its bounds,
+slot identities and order fixed. Each root instance must occupy exactly one slot. The runner uses this binding from one task.
 Execute updates system services, services the calling task's LogManager destination and processes components
 according to the runner state. Its normal epilogue clears the exception payload and releases registered
 auto-disposed objects. Call outside handlers that swallow fatal runtime exceptions.
@@ -28,6 +30,10 @@ END_VAR
 VAR
 	{attribute 'hide'} 
 	_State : AUTOMATION_RUNNER_STATE;
+	_Components : POINTER TO IAutomationComponent;
+	_FirstIndex : DINT;
+	_LastIndex : DINT;
+	_RootsValidated : BOOL;
 END_VAR
 ]]></Declaration>
     <Implementation>
@@ -46,74 +52,67 @@ PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
         </Implementation>
       </Get>
     </Property>
-    <Property Name="CodeExecutionPhase" Id="{efb7b0b9-70db-41a4-b4ff-ce52174473b3}">
-      <Declaration><![CDATA[(*!
-<summary>Gets whether the runner is currently in the component execution phase.</summary>
-*)
-{attribute 'monitoring' := 'call'}
-PROPERTY FINAL CodeExecutionPhase : BOOL]]></Declaration>
-      <Get Name="Get" Id="{cecc6bd9-038a-46c9-8b45-fbc1f53aeac6}">
-        <Declaration><![CDATA[]]></Declaration>
-        <Implementation>
-          <ST><![CDATA[CodeExecutionPhase := GlobalState.CodeExecutionPhase;]]></ST>
-        </Implementation>
-      </Get>
-    </Property>
     <Method Name="Execute" Id="{16952208-3067-4c16-b350-7fd85c7e6a7d}">
       <Declaration><![CDATA[(*!
-<summary>Call outside handlers that swallow fatal runtime exceptions.</summary>
+<summary>Initializes or executes the constructor-bound roots in array order.</summary>
 <description>
-Services the current task logger through LogManager.ExecuteCurrentTaskLogger on each call.
+Once system data is ready, the runner checks the complete root array before initializing any root.
+An empty array, null slot or repeated root makes the runner INVALID. Duplicate diagnostics identify both array indices.
+Call from the outer task boundary. Nested runner execution is unsupported because cleanup covers the calling task.
+Call outside recoverable handlers. Services the current task logger through LogManager.ExecuteCurrentTaskLogger on each call.
 A registry allocation failure caught by a callback is raised again at FINAL_ACTIONS.
 </description>
 *)
 
 METHOD FINAL Execute
-VAR_IN_OUT CONSTANT
-	components : ARRAY [*] OF IAutomationComponent;
-END_VAR
 VAR
-	i : DINT;
+	i : LINT;
+	component : IAutomationComponent;
 			
 	initialized : BOOL;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[GlobalState.CodeExecutionPhase := TRUE;
-
-TOF_Core.System.Execute();		
+        <ST><![CDATA[TOF_Core.System.Execute();		
 
 TOF_Core.LogManager.ExecuteCurrentTaskLogger();
 
 IF TOF_Core.System.SystemDataValid THEN
 	CASE _State OF
 		AUTOMATION_RUNNER_STATE.INITIALIZING:
-			IF UPPER_BOUND(components, 1) - LOWER_BOUND(components, 1) < 0 THEN
-				_State := AUTOMATION_RUNNER_STATE.INVALID;		
-				InitializationErrorMessage := "No controllers to run";
-				JMP FINAL_ACTIONS;		
+			IF NOT _RootsValidated THEN
+				InitializationErrorMessage := getRootConfigurationError();
+
+				IF InitializationErrorMessage <> "" THEN
+					_State := AUTOMATION_RUNNER_STATE.INVALID;
+					JMP FINAL_ACTIONS;
+				END_IF
+
+				_RootsValidated := TRUE;
 			END_IF
 
 			initialized := TRUE;
 			
-			FOR i := LOWER_BOUND(components, 1) TO UPPER_BOUND(components, 1) DO
-				IF components[i] = 0 THEN
+			FOR i := _FirstIndex TO _LastIndex DO
+				component := _Components[TO_UDINT(i - _FirstIndex)];
+
+				IF component = 0 THEN
 					_State := AUTOMATION_RUNNER_STATE.INVALID;					
 					InitializationErrorMessage := TOF_Core.WideStrings.Concat255("controller[", TO_WSTRING(i), "] is null");					
 					JMP FINAL_ACTIONS;					
 				END_IF
 
-				components[i].Initialize();
+				component.Initialize();
 				
-				CASE components[i].OperationalState OF
+				CASE component.OperationalState OF
 					OPERATIONAL_STATE.INVALID:
 						_State := AUTOMATION_RUNNER_STATE.INVALID;
 
-						IF TOF_Core.WideStrings.IsNullOrWhiteSpace(stringToCheck := components[i].OperationalStateReason) THEN
+						IF TOF_Core.WideStrings.IsNullOrWhiteSpace(stringToCheck := component.OperationalStateReason) THEN
 							InitializationErrorMessage := TOF_Core.WideStrings.Concat255(
 								"controller[",
 								TO_WSTRING(i),
 								"] (",
-								components[i].Name,
+								component.Name,
 								") failed"
 							);
 						ELSE
@@ -121,9 +120,9 @@ IF TOF_Core.System.SystemDataValid THEN
 								"controller[",
 								TO_WSTRING(i),
 								"] (",
-								components[i].Name,
+								component.Name,
 								") failed: ",
-								components[i].OperationalStateReason
+								component.OperationalStateReason
 							);
 						END_IF
 
@@ -139,9 +138,11 @@ IF TOF_Core.System.SystemDataValid THEN
 			END_IF
 		
 		AUTOMATION_RUNNER_STATE.RUNNING:
-			FOR i := LOWER_BOUND(components, 1) TO UPPER_BOUND(components, 1) DO
-				IF components[i] <> 0 THEN
-					components[i].Execute();
+			FOR i := _FirstIndex TO _LastIndex DO
+				component := _Components[TO_UDINT(i - _FirstIndex)];
+
+				IF component <> 0 THEN
+					component.Execute();
 				END_IF
 			END_FOR		
 	END_CASE
@@ -152,19 +153,75 @@ FINAL_ACTIONS:
 TOF_Core.DynamicMemoryManager.RaiseIfAllocationFailed();
 
 TOF_Core.ExceptionManager.Cleanup();
-TOF_Core.DynamicMemoryManager.CleanupMemory();
+TOF_Core.DynamicMemoryManager.CleanupMemory();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="getRootConfigurationError" Id="{86163466-39f9-478e-95d9-8afe8b683141}">
+      <Declaration><![CDATA[(*!
+<summary>Returns the first configuration error in the bound root array, or an empty message on success.</summary>
+<description>
+Compares interface identities in slot order without invoking root callbacks. Indices use the caller's declared bounds.
+</description>
+*)
+METHOD PRIVATE getRootConfigurationError : WSTRING(255)
+VAR
+	i : LINT;
+	previousIndex : LINT;
+	component : IAutomationComponent;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF _Components = 0 OR_ELSE _LastIndex < _FirstIndex THEN
+	getRootConfigurationError := "No controllers to run";
+	RETURN;
+END_IF
 
-GlobalState.CodeExecutionPhase := FALSE;]]></ST>
+FOR i := _FirstIndex TO _LastIndex DO
+	component := _Components[TO_UDINT(i - _FirstIndex)];
+
+	IF component = 0 THEN
+		getRootConfigurationError := TOF_Core.WideStrings.Concat255("controller[", TO_WSTRING(i), "] is null");
+		RETURN;
+	END_IF
+
+	FOR previousIndex := _FirstIndex TO i - 1 DO
+		IF _Components[TO_UDINT(previousIndex - _FirstIndex)] = component THEN
+			getRootConfigurationError := TOF_Core.WideStrings.Concat255(
+				"controller[",
+				TO_WSTRING(i),
+				"] duplicates controller[",
+				TO_WSTRING(previousIndex),
+				"]"
+			);
+			RETURN;
+		END_IF
+	END_FOR
+END_FOR]]></ST>
       </Implementation>
     </Method>
     <Method Name="FB_init" Id="{9dcb424f-eaa9-4a0f-923f-5afac333563a}">
-      <Declaration><![CDATA[METHOD FB_init : BOOL
+      <Declaration><![CDATA[(*!
+<summary>Binds the runner to the caller's root array for its lifetime.</summary>
+<description>
+Borrows storage and records the declared index bounds. Root validation and callbacks begin in Execute.
+The caller keeps the array and its ordered component references valid for every call.
+</description>
+<param name="components">Array of automation roots in execution order.</param>
+*)
+METHOD FB_init : BOOL
 VAR_INPUT
 	bInitRetains : BOOL; // TRUE: the retain variables are initialized (reset warm / reset cold)
-	bInCopyCode : BOOL;  // TRUE: the instance will be copied to the copy code afterward (online change)
+	bInCopyCode : BOOL; // TRUE: the instance will be copied to the copy code afterward (online change)
+END_VAR
+VAR_IN_OUT CONSTANT
+	components : ARRAY [*] OF IAutomationComponent;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[]]></ST>
+        <ST><![CDATA[_FirstIndex := LOWER_BOUND(components, 1);
+_LastIndex := UPPER_BOUND(components, 1);
+
+IF _FirstIndex <= _LastIndex THEN
+	_Components := components;
+END_IF]]></ST>
       </Implementation>
     </Method>
     <Property Name="NamespaceName" Id="{d334c947-0a4c-4dfb-8401-47625a37779f}">
