@@ -2,81 +2,103 @@
 
 # TwinCAT.OpenFramework: Technical Capabilities
 
-This is an **object-oriented framework** developed for **TwinCAT 3.1.4026+**, providing a set of ready-to-use, scalable components for industrial automation. 
+This is an **object-oriented framework** developed for **TwinCAT 3.1 Build 4026+**, providing a set of modular, deterministic libraries for industrial automation (current library release: `1.0.12.0`).
 
-It bridges the gap between traditional PLC programming and modern software engineering, bringing IT-standard approaches (like those in C# or Java) directly into Structured Text.
+It bridges the gap between traditional PLC programming and modern software engineering, bringing structured OOP abstractions, collections, exception diagnostics, JSON configuration, and automated testing directly into Structured Text.
 
 ---
 
 ## 🛠️ Core Capabilities
 
-To make large-scale application development manageable, the framework's features are divided into three main pillars:
-
 ### 1. Enterprise-Grade Automation Architecture
-*   **Basic Automation Engine:** A ready-to-use state machine. `AutomationRunner` handles top-level execution states (Initializing, Running, Failed), while managing multiple `AutomationComponent` instances with their own lifecycles. *Concept described [here](Concepts/AutomationEngine/AutomationEngine.md).*
-*   **Controllable Devices & Hierarchy:** Intuitive modeling of complex machines composed of nested sub-devices. Ready-made abstractions for interacting with the external world (e.g., digital and analog I/O, axes). *Concept described [here](Concepts/AutomationEngine/AutomationEngine.md).*
-*   **I/O Separation:** Device classes contain *only* business logic. Physical mapping is done at the terminal model level, meaning hardware changes don't require rewriting device logic.
-*   **Workflow Engine:** A powerful engine for composing complex, dynamic execution scenarios (Sequence, IfThenElse, While, WaitAndPick, TryCatch, etc.). Custom activities can be easily integrated.
+* **Automation Execution Engine (`TOF_Automation`):** `AutomationRunner` manages constructor-bound root components across `INITIALIZING`, `RUNNING`, and `INVALID` states, servicing `TOF_Core.System`, task-local logging, fatal allocation checks, and per-task exception cleanup. Individual nodes derive from `AutomationComponent` (`OPERATIONAL_STATE`: `INITIALIZING`, `WORKING`, `STOPPED`, `INVALID`) through `BranchAutomationComponent` (`AutomationController<N>`, `CompositeAutomationComponent<N>`) and `LeafAutomationComponent` (`InputLeafAutomationComponent`, `OutputLeafAutomationComponent`, `InputOutputLeafAutomationComponent`). *Concept described [here](Concepts/AutomationEngine/AutomationEngine.md).*
+* **Machine Hierarchy, Policies & HMI:** Static component trees enforce single-slot ownership and mandatory constructor-bound parents, with synchronous `BubbleEvent` / `BroadcastEvent` propagation, hierarchical `IActionPermissionPolicy` checks, `IChildCriticalErrorHandlingPolicy` (`Ignore`, `SetErrorAndContinue`, `SetErrorAndStop`), simulation contracts (`ISimulatable`), and `IAutomationControllerPlugin` / `HmiAutomationComponentElement` service hooks that remain responsive even while a controller is disabled.
+* **I/O Separation (`TOF_IOModels` & `TOF_Devices_IO`):** `TwinCAT.OpenFramework.IO.Models` provides passive EtherCAT terminal process-image structures aligned with Beckhoff ESI declarations (`EL*`, `EP*`, and `_EX` variants with bus/status diagnostics). `TwinCAT.OpenFramework.Devices.IO` wraps digital and analog I/O channels with `Direct`, `StaticRange`, and `DynamicRange` value converters, keeping hardware mapping separate from machine logic. *See [IO Models Guide](Guides/IOModels.md).*
+* **Dynamic Workflow Engine (`TOF_Workflow`):** Unlike static `AutomationController` state machines for fixed hardware, `Workflow` orchestrates dynamic runtime scenarios and external recipes (such as JSON-loaded sequences). Includes `SequenceActivity`, `WhileActivity` (`Body`), `IfElseActivity`, `WaitAndPickActivity`, `ParallelActivity`, `TryCatchActivity` + `CatchActivity`, `DelayActivity`, `WaitConditionActivity`, `WaitVariableValueActivity`, `AssignVariableActivity`, and `InvokeTaskActivity`, along with lexically scoped variables (`DeclareVariable`, `DeclareArray`, `BindPlcVariable`) and unified configuration serialization via `WorkflowLoader`. *See [Workflow Construction Guide](Guides/WorkflowConstruction.md).*
 
 ### 2. Modern IT Practices in PLC
-*   **Advanced Exception Handling:** An error management system unique to Structured Text. It provides not just the error code, but the exact context, place, and time the problem occurred, drastically reducing troubleshooting time. *Concept described [here](Concepts/Exceptions/ExceptionsConcept.md).*
-*   **Dynamic and Generic Static Collections:** Break free from rigid arrays. Support for `List`, `ByteList`, `Dictionary`, `UniqueDataSet`, and `Queue` — working with an unknown number of elements at runtime or defining static sizes at instantiation. *Concept described [here](Concepts/Collections/CollectionsConcept.md).*
-*   **Tasks & Queues:** Abstractions for asynchronous operations. Tasks can be aborted, cancelled, or fail with exceptions. The Task Queue allows composing multiple tasks into continuous sequences or background workers.
-*   **JSON Support:** Native, simplified serialization and deserialization of PLC structures to and from JSON documents, crucial for IT/MES/ERP integration.
+* **Zero-Allocation Exception Throwing & Task Diagnostics (`TOF_Core`):** Exceptions carry a textual message (`ERROR_MESSAGE`, default 500 wide chars via `Parameters.ERROR_MESSAGE_WIDE_CHAR_SIZE`), numeric error code, throw/catch locations, local/UTC timestamps, and inner-cause chains. Static facade methods (`TOF_Core.Exceptions.ThrowStandard`, `ThrowArgumentNotSpecified`, `ThrowArgumentOutOfRange`, `ThrowDataMemberNotSpecified`, `ThrowNullReference`, etc.) format messages on the stack without dynamic string builders. Persistent diagnostics are copied into `ERROR` structs, while `DynamicMemoryManager` enforces a global fatal-allocation latch at task boundaries. *Concept described [here](Concepts/Exceptions/ExceptionsConcept.md).*
+* **Static & Dynamic Collections (`TOF_Collections` & `TOF_Comparison`):** Generic containers (`List`, `ByteList`, `Dictionary`, `UniqueDataSet`, `Queue`, `Stack`) backed by `GENERIC_VALUE` descriptors (25 `GENERIC_TYPE_CLASS` categories) and `Comparison` strategies (`IComparer`, `IEqualityComparer`, and exact `GENERIC_VALUE.CompareTo`). Static capacity (`N > 0`) avoids runtime heap growth; `no_assign` protects container ownership; `List.Sort` supports optional default `GENERIC_VALUE.CompareTo` ordering. *Concepts: [Collections](Concepts/Collections/CollectionsConcept.md), [Generic Values](Concepts/Generics/GenericsConcept.md).*
+* **Cooperative Tasks & Timers (`TOF_Tasks` & `TOF_Timers`):** State-machine abstractions for asynchronous operations (`Task` with unified `STOPPING` / `OnStopping` release sequencing and optional borrowed `DiagnosticLogger`), `TaskQueue` for sequential background work, and `Timer`.
+* **JSON & Configuration Serialization (`TOF_JSON` & `TOF_Core`):** `AutomaticJsonSerializer` serializes and deserializes PLC structures via `ANY` / `VAR_INFO` (with `IJsonExtender`), while `JsonConfigurationReader` and `JsonConfigurationWriter` implement `TOF_Core`'s format-independent `IConfigurationReader` / `IConfigurationWriter` for `IConfigurationSerializable` object graphs such as `Workflow`. *Ownership rules: [JSON & EventLogger Guide](Guides/JsonAndEventLoggerOwnership.md).*
 
-### 3. Developer Productivity Tools
-*   **Advanced String Handling:** Convenient manipulation (concatenation, trimming, splitting, joining) for `STRING` and `WSTRING`, including support for strings larger than 255 characters.
-*   **Modular Logging System:** Topic-based filtering with support for custom logger implementations (e.g., simple file logging is provided out of the box). Exception logging is handled automatically by the engine.
-*   **File System Abstraction:** File operations are represented as safe, sequence-based tasks. Resource management (opening/closing files) is handled automatically behind the scenes.
+### 3. Developer Productivity & Testing Tools
+* **String & Wide-String Utilities:** `Strings`, `WideStrings`, `StringBuilder`, `WideStringBuilder`, and `Fit` truncation helpers (`ConcatFit255`, `AppendFit`, `AnyToStringFit255`) for both `STRING` and `WSTRING` (>255 characters supported via builders).
+* **Modular Task-Local Logging (`TOF_Core` & `TOF_Loggers`):** `TOF_Core.LogManager` routes per-task logs (`CurrentTaskLogger`, `ExecuteCurrentTaskLogger`) with topic filtering, defaulting to task-local `AdsLogger` instances. `TOF_Loggers` adds `SimpleTextFileLogger` (zero-allocation 50-slot ring buffer), `EventLogger` (built on `TOF_Core.EventLoggerMessage`), and `QueuedLogger` (safe bridge for shared backends).
+* **Asynchronous File System (`TOF_FileSystem`):** Non-blocking file and directory tasks (`FileContentManager`, `FileHandleResourceManager`, directory/file operations) with explicit cancellation, draining, and online-change preparation rules. *See [FileSystem Online Change Guide](Guides/FileSystemOnlineChange.md).*
+* **Native PLC Testing Framework (`TOF_Testing`):** Standalone test framework with `SingleCycleTest`, `MultiCycleTest` (`TEST_CYCLE_RESULT`: `BUSY`/`DONE`), static `TestGroup<N>` / `TestRunner<N>`, 26 typed fluent assertion contexts plus generic `AssertionContext`, `AdsReporter`, and `JUnitXmlReporter`. *See [Testing Library Guide](Sources/TwinCAT.OpenFramework.Testing/README.md).*
+
+---
+
+## 📦 Solution Projects Overview
+
+| Project (`Sources/`) | Namespace | Role |
+|---|---|---|
+| `TwinCAT.OpenFramework.Core` | `TOF_Core` | Base `Object`, `GENERIC_VALUE`, `System`, `Exceptions`, `DynamicMemoryManager`, `LogManager`, `EventLoggerMessage`, strings, math, `IConfigurationSerializable` |
+| `TwinCAT.OpenFramework.Comparison` | `TOF_Comparison` | Equality and ordering comparers over `GENERIC_VALUE` |
+| `TwinCAT.OpenFramework.Collections` | `TOF_Collections` | `List`, `ByteList`, `Dictionary`, `UniqueDataSet`, `Queue`, `Stack`, enumerators |
+| `TwinCAT.OpenFramework.Tasks` | `TOF_Tasks` | Cooperative `Task`, `TaskQueue`, `STOPPING` resource lifecycle |
+| `TwinCAT.OpenFramework.Timers` | `TOF_Timers` | Cyclic `Timer` built on `TOF_Tasks` |
+| `TwinCAT.OpenFramework.JSON` | `TOF_JSON` | `AutomaticJsonSerializer`, `JsonConfigurationReader`, `JsonConfigurationWriter` |
+| `TwinCAT.OpenFramework.FileSystem` | `TOF_FileSystem` | Async file & directory tasks, `FileContentManager` |
+| `TwinCAT.OpenFramework.Loggers` | `TOF_Loggers` | `SimpleTextFileLogger`, `EventLogger`, `QueuedLogger` |
+| `TwinCAT.OpenFramework.IO.Models` | `TOF_IOModels` | Passive EtherCAT terminal process-image records (ESI-verified) |
+| `TwinCAT.OpenFramework.Devices.IO` | `TOF_Devices_IO` | `DigitalInput`/`Output`, `AnalogInput`/`Output`, range converters |
+| `TwinCAT.OpenFramework.Automation` | `TOF_Automation` | `AutomationRunner`, `AutomationController`, `Composite`/`Leaf` components, HMI plugin base |
+| `TwinCAT.OpenFramework.Workflow` | `TOF_Workflow` | Dynamic activity/condition graph engine, scoped variables, `WorkflowLoader` |
+| `TwinCAT.OpenFramework.Testing` | `TOF_Testing` | Native PLC unit-test runner, typed assertions, ADS & JUnit XML reporters |
+| `TwinCAT.OpenFramework.HowTo` | `TOF_HowTo` | Minimal standalone learning examples (`IO`, `Testing`) without test-framework dependencies |
+| `TwinCAT.OpenFramework.Samples` | `TOF_Samples` | Complete demo applications (`Intersection`, `Workflow`) |
+| `TwinCAT.OpenFramework.Tests` | `TOF_Tests` | Automated unit and contract regression suites (`TcUnit` & `TOF_Testing`) |
 
 ---
 
 ## 🚀 Visual Feature Comparison
 
-Seeing is believing. Compare traditional ST approaches with the framework:
-*   [Simple string concatenation](Screenshots/FunctionalityComparision/SimpleConcat.png)
-*   [Long string concatenation](Screenshots/FunctionalityComparision/ConcatLongString.png)
-*   [Dynamic collections](Screenshots/FunctionalityComparision/List.png)
-*   [Structured Logging](Screenshots/FunctionalityComparision/Logging.png)
-*   [Exception Handling](Screenshots/FunctionalityComparision/Exceptions.png)
+Compare traditional ST approaches with the framework:
+* [Simple string concatenation](Screenshots/FunctionalityComparision/SimpleConcat.png)
+* [Long string concatenation](Screenshots/FunctionalityComparision/ConcatLongString.png)
+* [Dynamic collections](Screenshots/FunctionalityComparision/List.png)
+* [Structured Logging](Screenshots/FunctionalityComparision/Logging.png)
+* [Exception Handling](Screenshots/FunctionalityComparision/Exceptions.png)
 
 ---
 
-## 🧪 Examples & Getting Started
+## 🧪 Examples, Guides & Getting Started
 
-You don't have to start from scratch. The repository includes:
-1.  **`TwinCAT.OpenFramework.Tests`** — Unit tests and usage examples for specific classes.
-2.  **`TwinCAT.OpenFramework.Samples`** — A complete demo application with visualization (e.g., [Signal-Controlled Intersection Demo](Guides/SignalControlledIntersectionDemo.md)).
+1. **`TwinCAT.OpenFramework.HowTo`** — Minimal, standalone runnable examples (such as `IOModelsExample` and `Testing` examples).
+2. **`TwinCAT.OpenFramework.Samples`** — Complete application demos with visualization ([Signal-Controlled Intersection Demo](Guides/SignalControlledIntersectionDemo.md) and `DemoWorkflowController`).
+3. **`TwinCAT.OpenFramework.Tests`** — Automated regression suites across all libraries.
 
 **To try it out:**
-1. Install the latest **TwinCAT XAE**.
+1. Install **TwinCAT 3.1 Build 4026** (XAE).
 2. Clone the [TwinCAT.OpenFramework repository](https://github.com/trofimich/TwinCAT.OpenFramework.git).
-3. Open the solution and run the samples.
+3. Open `Sources/TwinCAT.OpenFramework.sln`, ensure library placeholders resolve to the solution projects, build, and run `Samples` or `HowTo`.
 
 ---
 
 ## 📈 Roadmap & Community
 
-TwinCAT.OpenFramework is an actively evolving open-source project. Future development focuses on:
-*   Wrapping more standard Beckhoff libraries in OOP-style interfaces.
-*   Broadening unit test coverage (TcUnit-based).
-*   Expanding enterprise-level documentation.
+Active development focuses on:
+* Gradual migration of existing unit tests from `TcUnit` to `TwinCAT.OpenFramework.Testing`.
+* Resolving remaining `Devices.IO` diagnostic/converter edge cases and expanding `HowTo` examples (`FileSystem`, `Tasks`, `Collections`, `Exceptions`, `JSON`).
+* Expanding industrial device abstractions with `ISimulatable` support (valves, cylinders, drives, `Tc2_MC2` axes) and `TwinCAT HMI` integration.
 
-**Want to contribute?** 
-Whether you want to share architectural ideas, request features, or contribute code, feedback is highly appreciated. Open an issue or reach out via GitHub.
+**Want to contribute?**
+Open an issue or pull request on GitHub with architectural ideas, bug reports, or improvements.
 
 ---
 
 ## 💡 Technical Notes
 
-**Why do all classes inherit from `Object`?**
-Structured Text doesn't provide a universal base class for function blocks. To manage **dynamic memory deallocation** safely and ensure TwinCAT calls the `FB_Exit` method, we enforce inheritance from a unified base class (`Object`). This guarantees memory safety across dynamic collections.
+**Why do framework classes extend `Object`?**
+Structured Text has no universal root class for function blocks. Extending `TOF_Core.Object` provides unified identity/equality (`Equals`, `GetHashCode`), metadata (`ClassName` via `VAR_STAT`, `NamespaceName`, `SelfSize`), and a base `FB_exit` destructor so dynamic objects can be safely released through typed `Object` references via `TOF_Core.Memory.TryReleaseDynamicObject`.
 
 ---
 
-## 🖼️ Screenshots 
+## 🖼️ Screenshots
 
-*(Visualizations of Workflow Engine, Collections, and File Manager)*
+*(Visualizations of Signal-Controlled Intersection, Workflow Engine, Collections, and File Manager)*
 ![Signal-controlled intersection visualization](Screenshots/SignalControlledIntersection.png)
 ![Demo workflow visualization](Screenshots/DemoWorkflow.png)
 ![File manager test](Screenshots/FileManager.png)

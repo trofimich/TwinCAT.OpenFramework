@@ -1,6 +1,7 @@
 # JSON and EventLogger: task ownership
 
-`TOF_JSON.AutomaticJsonSerializer` and `TOF_EventLogger.EventLoggerMessage`
+`TOF_JSON.AutomaticJsonSerializer`, `TOF_JSON.JsonConfigurationReader`,
+`TOF_JSON.JsonConfigurationWriter`, and `TOF_Core.EventLoggerMessage`
 have **one owner task per instance**. All application method calls and property
 access, including configuration, belong to that task. A call must finish before
 another operation starts on the same instance. Initialization and destruction
@@ -133,7 +134,7 @@ VAR_IN_OUT CONSTANT
     jsonData : STRING(1000);
 END_VAR
 
-TrySend := InternalTrySend(jsonData);
+TrySend := InternalTrySend(jsonData := jsonData);
 ```
 
 With that application-specific descendant defined, use independent instances:
@@ -150,7 +151,7 @@ END_VAR
 
 IF sendRequested THEN
     sendRequested := FALSE;
-    sent := message.TrySend(payload);
+    sent := message.TrySend(jsonData := payload);
 END_IF
 ```
 
@@ -166,7 +167,7 @@ END_VAR
 
 IF sendRequested THEN
     sendRequested := FALSE;
-    sent := message.TrySend(payload);
+    sent := message.TrySend(jsonData := payload);
 END_IF
 ```
 

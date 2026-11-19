@@ -47,7 +47,7 @@ This framework extends the default behavior to include additional contextual inf
 
 Each exception can carry:
 
-1. A textual error message
+1. A textual error message (`ERROR_MESSAGE`, capacity configured by `TOF_Core.Parameters.ERROR_MESSAGE_WIDE_CHAR_SIZE`, default 500 wide characters)
 2. A numeric error code
 3. Supplied error location (namespace, class, POU and source position)
 4. Timestamp (both local time and UTC)
@@ -61,11 +61,12 @@ Native errors are represented by `SystemException`. Their original throw locatio
 
 To support this functionality, several internal components are implemented. Below is a simplified overview:
 
-### 3.1 Exception Class
+### 3.1 `Exception` Class & `TOF_Core.Exceptions` Facade
 
-A dedicated class used to describe errors. Has many descendants for specific exception types.
+A dedicated base class (`Exception`) used to describe errors, with specialized descendants (`StandardException`, `ArgumentNotSpecifiedException`, `ArgumentOutOfRangeException`, `DataMemberNotSpecifiedException`, `NullReferenceException`, `AggregateException`, etc.).
 
-* Contains a `Throw` method used to raise an exception
+* `TOF_Core.Exceptions` provides static zero-allocation `Throw*` helpers (such as `ThrowStandard`, `ThrowArgumentNotSpecified`, `ThrowArgumentOutOfRange`, `ThrowDataMemberNotSpecified`, `ThrowNullReference`) using stack-allocated fixed formatting without dynamic string builders.
+* Custom exception classes can still call their own static template `Throw` method when specialized fields are required.
 
 ---
 
@@ -135,7 +136,7 @@ Declaration:
 PROGRAM MAIN
 VAR
 	requestException : BOOL;
-	demoException : TOF_Core.StandardException;
+	demoMessage : TOF_Core.ERROR_MESSAGE := "Demonstration exception";
 	exceptionCode : __SYSTEM.ExceptionCode;
 	caughtException : TOF_Core.IException;
 
@@ -153,14 +154,12 @@ IF TOF_Core.System.SystemDataValid THEN
 		IF requestException THEN
 			requestException := FALSE;
 
-			demoException.Throw(
+			TOF_Core.Exceptions.ThrowStandard(
 				sourceNamespaceName := '',
 				sourceClassName := '',
 				sourcePOUName := __POUNAME(),
 				sourcePosition := __POSITION(),
-				message := "Demonstration exception",
-				errorCode := 0,
-				innerException := 0
+				message := demoMessage
 			);
 		END_IF
 	__CATCH(exceptionCode)
@@ -171,7 +170,10 @@ IF TOF_Core.System.SystemDataValid THEN
 			catchPointPosition := __POSITION()
 		);
 
-		caughtException.ToError(lastError, TOF_Core.ERROR_SEVERITY.ERROR);
+		caughtException.ToError(
+			targetError := lastError,
+			severity := TOF_Core.ERROR_SEVERITY.ERROR
+		);
 	__ENDTRY
 END_IF
 

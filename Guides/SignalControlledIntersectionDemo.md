@@ -1,107 +1,109 @@
 # Signal-Controlled Intersection Automation – Technical Guide
 
-This description shows how to create simple application using `TwinCAT_OpenFramework_Automation` library
-
-## 1. Enumeration Definitions
-
-### 1.1. INTERSECTION_MODE  
-Defines the general control mode of the intersection.
-
-### 1.2. INTERSECTION_STATE  
-Defines the current state of the intersection. Based on this state, the logic activates appropriate signals on four traffic lights. 
-The values `ALL_YELLOW`, `_1_3_YELLOW_AND_2_4_YELLOW`, and `_2_4_YELLOW_AND_1_3_YELLOW` are similar because they turn on yellow on all traffic lights, but carry additional information to determine the next state transition.
-
-### 1.3. TRAFFIC_LIGHT_COLOR  
-Defines the state of a single traffic light.
+This guide walks through the `Intersection` demo application in `Sources/TwinCAT.OpenFramework.Samples/Intersection/`, built using `TwinCAT_OpenFramework_Automation` (`TOF_Automation`), `TwinCAT_OpenFramework_Devices_IO` (`TOF_Devices_IO`), `TwinCAT_OpenFramework_IO_Models` (`TOF_IOModels`), and `TwinCAT_OpenFramework_Timers` (`TOF_Timers`).
 
 ---
 
-## 2. Implement the TrafficLight Device
+## 1. Enumeration and Range Types
 
-The TrafficLight device consists of three standard `DigitalOutput` sub-devices (for red, yellow, and green light). It inherits from the abstract class `TOF_Automation.CompositeDevice<3>`, where `<3>` indicates that it includes 3 subdevices.
+### 1.1. `INTERSECTION_MODE`
+Defines the controller operating mode: `OFF`, `WORKING`, `FLASHING_YELLOW`.
 
-Implementation consists of:
-- Properties: `BoundToIO`, `Children`, `ClassName`, `NamespaceName`, `SelfSize`
-- Methods: `BindToIO`, `SetLight`
+### 1.2. `INTERSECTION_LIGHTS_STATE`
+Defines the signal phase of the four traffic lights: `ALL_OFF`, `ALL_YELLOW`, `GROUP1_GREEN_GROUP2_RED`, `GROUP1_RED_GROUP2_GREEN`.
 
-#### 2.1. BoundToIO  
-Required by `IIOBindable` interface. Indicates if all lights (digital outputs) are mapped to I/O models (terminal variables).
+### 1.3. `TRAFFIC_LIGHT_COLOR`
+Defines the color state of a single traffic light: `NO_COLOR`, `RED`, `YELLOW`, `GREEN`.
 
-#### 2.2. Children  
-Required by ancestor (`CompositeDevice`). Returns a reference to the array containing sub-devices (digital outputs for turning on the lights).
-
-#### 2.3. ClassName  
-Required by the framework. Returns the name of the current class (function block). Used for exception reporting.
-
-#### 2.4. NamespaceName  
-Required by the framework. Returns the namespace of the current class (function block). Used for exception reporting.
-
-#### 2.5. SelfSize  
-Required by the framework. Used in case of dynamic memory management.
-
-#### 2.6. BindToIO  
-Creates mapping from lights (digital outputs) to I/O terminal variables.
-
-#### 2.7. SetLight  
-Method to control the traffic light by passing a color to activate.
+### 1.4. `SPEED_CORRECTION_PERCENT`
+Subrange `SINT` defining the switching-interval speed correction percentage (`-20..+20`, bounded by `IntersectionConstants`).
 
 ---
 
-## 3. Implement the controller: `IntersectionController`
+## 2. Implement the `TrafficLight` Composite Device
 
-This module contains logic for interaction between seven devices:
-  - ON/OFF input
-  - Mode switch (standard vs blinking yellow)
-  - Switch speed adjuster
-  - Four traffic lights
-It inherits from `TOF_AutomationEngine.AutomationController<7>`.
-It implements public properties: `Children`, `ClassName`, `NamespaceName`, `OperationalStateName`, `SelfSize`
-Overrides: `OnBeforeChildrenInitializing`, `OnBeforeChildrenStopped`, `OnBeforeChildrenWorking`, `OnGetExceptionSeverity`, `OnOperationalStateChanged`
-Also some constants and variables for intersection devices modeling and control organization.
+`TrafficLight` encapsulates three `TOF_Devices_IO.DigitalOutput` leaves (`_RedLight`, `_YellowLight`, `_GreenLight`) and extends `TOF_Automation.CompositeAutomationComponent<3>` implementing `ITrafficLight`.
 
-#### 3.1. OnBeforeChildrenInitializing  
-Called cyclically by engine in `INITIALIZING` operational state. Initializes internal timers and bind devices to hardware (I/O terminal) models.
-
-#### 3.2. OnBeforeChildrenStopped  
-Called cyclicallyd by engine in `STOPPED` operational state. Turns off all traffic lights.
-
-#### 3.3. OnBeforeChildrenWorking  
-Called cyclicallyd by engine in `WORKING` operational state. Implements core traffic light logic.
-
-#### 3.4. OnGetExceptionSeverity  
-Called automatically by engine to resolve severity for exception. Used to demonstrate exception mechanism.
-
-#### 3.5. OnOperationalStateChanged  
-Called automatically by engine after operational state change. Used for internal logic.
+Key members:
+* **Properties**: `ActiveLight`, `BoundToIO`, `Children` (returns `_Children` by reference), `RedLight` / `YellowLight` / `GreenLight` (`IReadOnlyDigitalOutput`), `ClassName` (from `VAR_STAT _ClassName`), `NamespaceName`, `SelfSize`.
+* **Methods**:
+  * `BindToIO(redLightRawValue, yellowLightRawValue, greenLightRawValue)` — binds the three `DigitalOutput` sub-devices to raw `BOOL` variables in the terminal process image.
+  * `TrySetLight(color, rejectReason) : BOOL` — checks hierarchical action permission via `Parent.RequestActionPermission(...)` (with `TrySetLightActionDescriptor`), updates the three outputs, contains exceptions, and observes `TOF_Core.DynamicMemoryManager.HasAllocationFailed` before and after the permission callback.
 
 ---
 
-## 4. Implement I/O model: `Terminals`
+## 3. Implement the Controller: `IntersectionController`
 
-This class contain model of physical equipment:
-#### 4.1. DI_1 - digital output termial (EL1018).  
-#### 4.2. DO_2 - digital input terminal (EL2409).
-#### 4.3. AI_3 - analog input terminal (EL3001).
+`IntersectionController` extends `TOF_Automation.AutomationController<12>` implementing `IIntersectionController`. It coordinates 12 child components (`_Devices`), three `TOF_Timers.Timer` instances (`_RedGreenLightTimer`, `_YellowLightTimer`, `_FlashingYellowLightTimer`), and a `DemoExceptionHandlingPolicy`:
 
----
+* **6 `TOF_Devices_IO.DigitalInput` buttons**: `_ResetButton`, `_TurnOnButton`, `_TurnOffButton`, `_SetYellowFlashingModeOnButton`, `_SetYellowFlashingModeOffButton`, `_AdjustSpeedButton`.
+* **1 `TOF_Devices_IO.AnalogInput`**: `_SwitchSpeedAdjuster` scaled `-20..+20` via `StaticRangeAnalogValueConverter`.
+* **4 `TrafficLight` composites**: `_TrafficLight1`..`_TrafficLight4` (grouped into `_SignalGroup1` = `{1, 3}` and `_SignalGroup2` = `{2, 4}`).
+* **1 `DemoExceptionGenerator`**: `_DemoExceptionGenerator` (`"WatchdogDevice"`, configured with `_DemoExceptionHandlingPolicy` in `FB_init`).
 
-## 5. Visualization elements (optional)
-
-#### 5.1. TrafficLight - control to represent single traffic light
-#### 6.2. Intersection - control to represent whole intersection
-
----
-
-## 6. MAIN Program Setup
-
-In the `MAIN` program, declare the controllers before their root array.
-
-- Populate `_AutomationControllers` with the root interfaces in execution order.
-- Declare `Runner : TOF_Automation.AutomationRunner(components := _AutomationControllers);` after the array.
-- Keep the array and its entries valid and in the same order for the runner's lifetime. Call `Runner.Execute();` each cycle.
+Key lifecycle and cyclic members:
+* **`FB_init(name, plugins)`**: assigns `_DemoExceptionHandlingPolicy` to `_DemoExceptionGenerator` and registers the borrowed HMI plugin array via `AssignPlugins(plugins := plugins)`.
+* **`OnBeforeChildrenInitializing`**: sets timer intervals from `IntersectionConstants` and invokes `bindIO()` to map child devices to `TerminalModels`.
+* **`OnBeforeChildrenStopped`**: monitors `_ResetButton` so a hardware reset signal can call `Reset()` while `STOPPED`.
+* **`OnBeforeChildrenWorking`**: runs the timers, reads buttons and speed adjuster, and executes `processNormalMode()` or `processBlinkingYellowMode()`.
+* **`OnOperationalStateChanged`**: turns the intersection off when entering `OPERATIONAL_STATE.STOPPED`.
+* **Commands & Statuses**: `TurnOn`, `TurnOff`, `SetYellowFlashingModeOn`, `SetYellowFlashingModeOff`, `SetSwitchingSpeedCorrectionPercent`, `ThrowExceptionInDemoExceptionGenerator`, `Mode`, `LightsState`, `OperationalStateName`.
 
 ---
 
-## Conclusion
+## 4. Implement the HMI Plugin: `HmiIntersectionController` & `HmiTrafficLight`
 
-That’s all you need. Everything is straightforward once you understand the framework ideology. Visualizations are just auxiliary components for demonstration and verification.
+`HmiIntersectionController` extends `TOF_Automation.HmiAutomationComponentElement` and implements `TOF_Automation.IAutomationControllerPlugin`:
+
+* **`OnBeforeControllerExecute`**: calls `ProcessAutomationComponentCommands(automationComponent := controller)` first so root `Enable`, `Disable`, and `Reset` HMI commands remain serviced even while the controller is disabled. Technological commands (`TurnOn`, `TurnOff`, flashing mode, speed correction, traffic light overrides via `HmiTrafficLight`) run only when `controller.Enabled` is `TRUE`.
+* **`OnAfterControllerExecute`**: calls `UpdateAutomationComponentStatuses(automationComponent := controller)` and refreshes intersection and per-light statuses every serviced cycle (`WORKING` and `STOPPED`).
+
+---
+
+## 5. Implement I/O Terminal Models: `TerminalModels`
+
+`PROGRAM TerminalModels` owns the passive `TOF_IOModels` endpoints used by `IntersectionController.bindIO()`:
+* **`DI_1` (`TOF_IOModels.EL1018`)** — 8-channel digital input terminal (buttons).
+* **`DO_2` (`TOF_IOModels.EL2409`)** — 16-channel digital output terminal (traffic light lamps).
+* **`AI_3` (`TOF_IOModels.EL3001`)** — single-channel standard INT16 analog input terminal (requires standard status-plus-INT16 PDO).
+
+*(Note: `TerminalModels` uses basic terminal records without EtherCAT bus diagnostics. For an example showing explicit `WcState` and channel-status validation with `_EX` models, see `Sources/TwinCAT.OpenFramework.HowTo/IO/IOModelsExample.TcPOU` and [IO Models Guide](IOModels.md).)*
+
+---
+
+## 6. `MAIN` Program Setup
+
+In `Sources/TwinCAT.OpenFramework.Samples/MAIN.TcPOU`, declare the HMI plugin, plugin array, controllers, and root array **before** `AutomationRunner`:
+
+```iecst
+PROGRAM MAIN
+VAR_OUTPUT
+	IntersectionHMI : HmiIntersectionController;
+END_VAR
+VAR
+	{attribute 'hide'}
+	_IntersectionPlugings : ARRAY [0..0] OF TOF_Automation.IAutomationControllerPlugin := [IntersectionHMI];
+END_VAR
+VAR_OUTPUT
+	IntersectionController : IntersectionController("IntersectionController", _IntersectionPlugings);
+	DemoWorkflowController : DemoWorkflowController("DemoWorkflowController");
+END_VAR
+VAR
+	{attribute 'hide'}
+	_AutomationControllers : ARRAY [0..1] OF TOF_Automation.IAutomationComponent :=
+	[
+		IntersectionController,
+		DemoWorkflowController
+	];
+
+	{attribute 'hide'}
+	_LogFilter : LogFilter;
+	{attribute 'hide'}
+	_LogFilterInitialized : BOOL;
+END_VAR
+VAR_OUTPUT
+	Runner : TOF_Automation.AutomationRunner(components := _AutomationControllers);
+END_VAR
+```
+
+On the first cycle, `MAIN` installs `_LogFilter` via `TOF_Core.LogManager.Filter := _LogFilter;`, then calls `Runner.Execute();` once per task cycle. Keep `_AutomationControllers`, `_IntersectionPlugings`, and all referenced instances alive and in fixed order for the lifetime of `Runner`.

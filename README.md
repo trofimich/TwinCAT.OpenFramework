@@ -2,16 +2,19 @@
 
 # TwinCAT.OpenFramework
 
-**A structured application framework for TwinCAT (IEC 61131-3)** is an architectural template and extended standard library that brings modern software engineering practices to Beckhoff PLCs, providing a standardized way to model hardware machines and eliminating the chaos of scattered utility functions.
+**A structured application framework for TwinCAT 3.1 (Build 4026+, IEC 61131-3)** — an architectural foundation and extended standard library that brings modern software engineering practices to Beckhoff PLCs, providing deterministic machine modeling, workflow orchestration, dynamic/static collections, structured exceptions, and native PLC testing.
+
+Licensed under the [MIT License](LICENSE.txt).
 
 ### Why use this framework?
 
-1. **Organized Utility Classes:** Replaces scattered standard functions with logically grouped static methods (e.g., a `Strings` program providing `.GetLength()`, `.Concat()`, `.Replace()`, `.Split()`, `.Join()`).
-2. **Advanced Data Structures:** Adds crucial missing functionality, such as powerful and easy-to-use dynamic collections.
-3. **Exception Handling:** Establishes a robust mechanism for exception handling, error tracking, and system logging. Use exceptions deliberately according to the API contract; represent supported outcomes through results or state. See [when to use exceptions](Concepts/Exceptions/ExceptionsConcept.md#when-to-use-exceptions).
-4. **Unified Interfaces:** Provides standard interfaces and ready-to-use implementations for common services, such as `ILogger`, IO terminal models, devices.
-5. **Standardized Machine Modeling:** Offers a unified architectural approach to building a software model of your hardware. It standardizes system initialization, I/O interaction, error handling, logging, events dispatching and permission check across your entire project.
-6. **And many more** You can find technical description [here](TECHNICAL_DESCRIPTION.md)
+1. **Organized Utility Classes:** Replaces scattered standard functions with logically grouped static methods (e.g., `TOF_Core.Strings` providing `.GetLength()`, `.Concat255()`, `.ConcatFit255()`, `.Append()`, `.ReplaceInSource()`, `.CreateSplitter()`, `.Join()`, `.TrimChars()`).
+2. **Advanced Data Structures:** Provides both fixed-capacity static and heap-backed dynamic collections (`List`, `ByteList`, `Dictionary`, `UniqueDataSet`, `Queue`, `Stack`) with unified `GENERIC_VALUE` descriptors and ownership guards.
+3. **Structured Exception Handling:** Establishes a task-scoped mechanism for exception propagation, contextual diagnostics (`ERROR`), and modular logging. Use exceptions deliberately according to the API contract; represent supported outcomes through results or state. See [when to use exceptions](Concepts/Exceptions/ExceptionsConcept.md#when-to-use-exceptions).
+4. **Unified Interfaces:** Provides standard interfaces and ready-to-use implementations for logging (`ILogger`), action permissions (`IActionPermissionPolicy`), events (`IEvent`), configuration serialization (`IConfigurationSerializable`), IO terminal process-image models (`TOF_IOModels`), and field devices (`TOF_Devices_IO`).
+5. **Standardized Machine Modeling & Workflow Orchestration:** Offers a deterministic hierarchy (`AutomationRunner` → `AutomationController` → `CompositeAutomationComponent` → `LeafAutomationComponent`) for fixed machine hardware alongside a dynamic `Workflow` engine for external/JSON-configured recipes.
+6. **Native PLC Testing:** Includes `TwinCAT.OpenFramework.Testing` with fluent typed assertions, cycle-bounded tests, and ADS/JUnit XML reporting.
+7. **Full Technical Overview:** See [TECHNICAL_DESCRIPTION.md](TECHNICAL_DESCRIPTION.md).
 
 ---
 
@@ -26,9 +29,9 @@ As TwinCAT projects grow, they often evolve into implicit state machines with sc
 
 Typical PLC code mixes execution flow, business logic, and error handling. This leads to:
 
-* fragile systems
-* slow development
-* high cost of change and maintenance
+* Fragile systems
+* Slow development
+* High cost of change and maintenance
 
 ---
 
@@ -40,10 +43,10 @@ Instead of ad-hoc code, you get:
 
 * A structured execution model
 * A consistent programming model
-* A reusable foundation library
+* A modular, reusable foundation library
 
 ---
-  
+
 ## 🧱 Architecture
 
 The framework is built around three main layers:
@@ -52,53 +55,34 @@ The framework is built around three main layers:
 - Programming Model → "language extensions"
 - Foundation Library → "standard library"
 
----
-
 ### 1. Execution Layer
 
-Defines a predictable and explicit execution model, replacing ad-hoc control flow typical for PLC applications.
+Defines a predictable and explicit execution model, replacing ad-hoc control flow typical for PLC applications:
 
-Includes concepts like:
-
-* AutomationRunner
-* AutomationController
-* Workflow / execution orchestration
+* `AutomationRunner` (top-level root scheduler and per-task runtime boundary)
+* `AutomationController` / `CompositeAutomationComponent` / `LeafAutomationComponent`
+* Cooperative `Task` / `TaskQueue` / `Timer` state machines
+* `Workflow` orchestration engine for dynamic recipes and sequences
 
 This layer separates **how code runs** from **what it does**.
 
----
-
 ### 2. Programming Model
 
-Defines how you write logic.
+Defines how you write logic:
 
-Includes:
-
-* Exception-like error handling (`__TRY / __CATCH`)
-* Result and error models
-* Base abstractions and patterns
-
-This layer makes code:
-
-* more predictable
-* easier to reason about
-* less error-prone
-
----
+* Exception-like error handling (`__TRY / __CATCH`) with `TOF_Core.Exceptions`
+* Copied diagnostic state (`ERROR` and `ERROR_MESSAGE`) independent of transient exception lifetimes
+* Base abstractions (`Object`, `GENERIC_VALUE`, policies, events, permissions)
 
 ### 3. Foundation Library
 
-Provides reusable low-level components.
+Provides reusable low-level components:
 
-Includes:
-
-* Collections
-* String utilities
-* Date & time helpers
-* Base types and primitives
-* Full list you can find [here](TECHNICAL_DESCRIPTION.md)
-
-This layer reduces boilerplate and standardizes common operations.
+* Collections (`List`, `ByteList`, `Dictionary`, `UniqueDataSet`, `Queue`, `Stack`) and `Comparison`
+* String, wide-string, math, bit, and date/time utilities
+* Task-local `LogManager`, `AdsLogger`, `EventLogger`, `SimpleTextFileLogger`, `QueuedLogger`
+* Asynchronous `FileSystem`, `JSON` serialization, EtherCAT `IO.Models`, `Devices.IO`, and `Testing`
+* Full list in [TECHNICAL_DESCRIPTION.md](TECHNICAL_DESCRIPTION.md)
 
 ---
 
@@ -114,12 +98,42 @@ This layer reduces boilerplate and standardizes common operations.
 
 ## 🚀 Example: Structured Error Handling
 
-Instead of unexpected machine stops or untraceable bugs, the framework allows graceful error recovery and structured logging, directly reducing equipment downtime:
+When using `AutomationRunner.Execute()`, system time updates, task-local logger servicing, fatal allocation checks, and exception cleanup are managed automatically at the task boundary. For standalone code outside `AutomationRunner`, wrap operations with `__TRY / __CATCH`:
 
 ```iecst
 __TRY
     controller.Execute();
 __CATCH(errorCode)
-    exception := TOF_Core.ExceptionManager.GetLastException(errorCode);
-    TOF_Core.LogManager.TryLogException(exception);
+    exception := TOF_Core.ExceptionManager.GetLastException(
+        exceptionCode := errorCode,
+        catchPointNamespaceName := '',
+        catchPointPOUName := __POUNAME(),
+        catchPointPosition := __POSITION()
+    );
+    TOF_Core.LogManager.TryLogException(
+        exception := exception,
+        severity := TOF_Core.ERROR_SEVERITY.ERROR
+    );
 __ENDTRY
+```
+
+See [Concepts/Exceptions/ExceptionsConcept.md](Concepts/Exceptions/ExceptionsConcept.md#5-example-without-automationrunner) for the full standalone task epilogue (`RaiseIfAllocationFailed`, `ExceptionManager.Cleanup`, and `DynamicMemoryManager.CleanupMemory`).
+
+---
+
+## 📚 Documentation Map
+
+### Architecture & Concepts
+* [Technical Capabilities & Library Overview](TECHNICAL_DESCRIPTION.md)
+* [Automation Architecture Concept](Concepts/AutomationEngine/AutomationEngine.md)
+* [Exception Handling Concept](Concepts/Exceptions/ExceptionsConcept.md)
+* [Collections Concept](Concepts/Collections/CollectionsConcept.md)
+* [Generic Values (`GENERIC_VALUE`) Concept](Concepts/Generics/GenericsConcept.md)
+
+### Guides & Examples
+* [Signal-Controlled Intersection Demo](Guides/SignalControlledIntersectionDemo.md)
+* [Building & Loading Dynamic Workflows](Guides/WorkflowConstruction.md)
+* [IO Models: Mapping & Supported Process Images](Guides/IOModels.md)
+* [FileSystem: Preparing for Online Change](Guides/FileSystemOnlineChange.md)
+* [JSON & EventLogger: Task Ownership](Guides/JsonAndEventLoggerOwnership.md)
+* [Testing Library Guide](Sources/TwinCAT.OpenFramework.Testing/README.md)

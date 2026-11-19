@@ -1,4 +1,4 @@
-<?xml version="1.0" encoding="utf-8"?>
+﻿<?xml version="1.0" encoding="utf-8"?>
 <TcPlcObject Version="1.1.0.1">
   <POU Name="LeafAutomationComponent" Id="{7c21300f-1ad4-4217-9d49-d0f060249ecb}" SpecialFunc="None">
     <Declaration><![CDATA[(*
@@ -14,6 +14,8 @@ Leaf components have no children and represent terminal devices, sensors, or act
 Events received at this level bubble upwards to the parent component unless propagation is stopped.
 Lifecycle methods execute leaf-specific state transitions and invoke overridable hooks. Parent is mandatory
 and borrowed for the leaf lifetime. It is checked before initialization hooks. Use one owner task per instance.
+Execute() can recover the stored non-critical execution error. Descendants can defer recovery until its
+cause clears and can report other diagnostics independently.
 </description>
 *)
 
@@ -50,6 +52,20 @@ END_IF
 IF __QUERYINTERFACE(Parent, parentAsBubbleEventDispatcher) THEN
 	parentAsBubbleEventDispatcher.BubbleEvent(event := event);
 END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="CanRecoverExecutionError" Id="{48c1b0e0-7803-454f-9bc7-2cc9f5c9719b}" FolderPath="Methods to override\">
+      <Declaration><![CDATA[(*!
+<summary>Reports whether Execute() can clear a pending non-critical execution error.</summary>
+<description>
+The base allows immediate recovery. A descendant can defer recovery by returning FALSE. Execute() calls
+this only in WORKING with an active non-critical execution error. Returning FALSE retains the diagnostic
+and allows OnWorking to run. Overrides must observe current state without side effects or exceptions.
+</description>
+*)
+METHOD PROTECTED CanRecoverExecutionError : BOOL]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[CanRecoverExecutionError := TRUE;]]></ST>
       </Implementation>
     </Method>
     <Method Name="Disable" Id="{e7be34cc-e7d9-4568-8b6a-522ee606d568}">
@@ -140,9 +156,10 @@ __ENDTRY]]></ST>
       <Declaration><![CDATA[(*!
 <summary>Advances cyclic execution for an enabled WORKING or STOPPED leaf.</summary>
 <description>
-In WORKING, clears any existing non-critical error and invokes OnRecover before OnWorking; an exception in
-OnRecover always records a copied CRITICAL error, stops the leaf without consulting ExceptionHandlingPolicy,
-and skips OnWorking. In STOPPED, invokes OnStopped on each Execute call and logs failures.
+In WORKING, checks CanRecoverExecutionError() for a pending non-critical execution error. When ready,
+clears that record and invokes OnRecover before OnWorking. An exception during recovery always records
+a copied CRITICAL error, stops the leaf without consulting ExceptionHandlingPolicy, and skips OnWorking.
+In STOPPED, invokes OnStopped on each Execute call and logs failures.
 </description>
 *)
 {attribute 'estimated-stack-usage' := '99'}
@@ -162,15 +179,12 @@ END_IF
 
 CASE _OperationalState OF
 	OPERATIONAL_STATE.WORKING:
-		// automatic non-critical error recovering
-		IF _OperationalState = OPERATIONAL_STATE.WORKING
-			AND_THEN HasError
-			AND_THEN _Error.Severity <> TOF_Core.ERROR_SEVERITY.CRITICAL
-		THEN
-			_Error.Clear();
-			
+		IF _Error.HasError AND_THEN _Error.Severity <> TOF_Core.ERROR_SEVERITY.CRITICAL THEN
 			__TRY
-				OnRecover();
+				IF CanRecoverExecutionError() THEN
+					_Error.Clear();
+					OnRecover();
+				END_IF
 			__CATCH(exceptionCode)		
 				exception := TOF_Core.ExceptionManager.GetLastException(
 					exceptionCode := exceptionCode,
@@ -179,7 +193,7 @@ CASE _OperationalState OF
 					catchPointPosition := __POSITION()
 				);
 
-				// An OnRecover failure always stops the leaf with a critical error without consulting the policy.
+				// A recovery failure stops the leaf with a critical error without consulting the policy.
 				ProcessException(
 					exception := exception,
 					exceptionReaction := TOF_Core.EXCEPTION_REACTION.SET_ERROR_AND_STOP,
@@ -404,7 +418,7 @@ PROPERTY FINAL Parent : IParentAutomationComponent]]></Declaration>
       <Declaration><![CDATA[(*!
 <summary>Resets the leaf component from an error state and transitions back to WORKING.</summary>
 <description>
-Served only while Enabled and STOPPED. Clears the previous error before invoking OnReset. If OnReset raises
+Served only while Enabled and STOPPED. Clears the execution error before invoking OnReset. If OnReset raises
 an exception, the leaf remains STOPPED with a copied CRITICAL error without consulting ExceptionHandlingPolicy.
 Completed hook effects are not rolled back.
 </description>

@@ -1,159 +1,80 @@
-# AutomationEngine Concept
+# AutomationEngine Concept (`TOF_Automation`)
 
 ## 1. General Description
 
-This is a deterministic PLC architectural platform designed to build modular control systems ranging from standalone machines to complex production lines. It provides built-in error handling, logging, event propagation, permission check, multi-level simulation, and selective node disabling within nested component hierarchies.
+`TwinCAT.OpenFramework.Automation` (`TOF_Automation`) is a deterministic PLC architectural platform designed to model modular machines and production lines as static component hierarchies. It provides standardized lifecycle control, I/O phase separation, exception and child critical-error policies, synchronous event propagation, action permission checks, simulation contracts, HMI controller plugins, and selective node disabling.
 
 ---
 
-## 2. Architecture: `AutomationRunner -> AutomationControllers -> Devices`
+## 2. Architecture: `AutomationRunner -> AutomationController -> Branches & Leaves`
 
-At its core, this concept enforces a strict separation between **infrastructure code** (how hardware works) and **technological logic** (what the machine should do) through a rigid hierarchy of static objects.
-
-## 3. Control Triad
-
-The system is built on the interaction of three independent entities:
-
-### 3.1. AutomationRunner
-
-The lifecycle orchestrator — the **heart of the system**.
-
-* Initializes all controllers
-* Ensures their cyclic execution
-
-Supported states are: `INITIALIZING`, `RUNNING`, `INITIALIZATION_FAILED`
-
-### 3.2. AutomationComponent
-
-The base class for all other automation components.
-
-Supported states are: 
-* `INITIALIZING` - state immediately after program start; performs initialization logic
-* `WORKING` - normal working state after successful initialization
-* `STOPPED` - state entered after a critical error occurs in the WORKING state or Stop method call; reset is required to return to the WORKING state
-* `INVALID` - state entered when initialization cannot be completed successfully
-* 
-### 3.3. AutomationController (extends AutomationComponent)
-
-The **logic conductor**.
-
-* Owns a set of children (devices)
-* Manipulates them to perform a specific technological task
-* Does **not** interact with I/O directly
-* Operates through high-level device methods
-
-### 3.4. Device (extends AutomationComponent)
-
-The **atomic unit** (or node) of the system.
-
-* Encapsulates interaction with physical devices, communication channels, etc.
-* Handles local state and error processing
-* Has no knowledge of the overall process
-* Exposes only a control interface
-
-Supported device types: `InputDevice`, `OutputDevice`, `InputOutputDevice`, `CompositeDevice`
+At its core, the architecture separates **hardware interaction** (leaves and I/O models) from **technological orchestration** (controllers and composites) using a fixed, constructor-bound hierarchy of static function blocks.
 
 ---
 
-## 4. Recursive Device Composition (Composite Pattern)
+## 3. Core Entities
 
-Instead of a flat structure (`Module -> Component`), the system uses **unlimited nesting**:
+### 3.1. `AutomationRunner`
 
-* A device can be **simple** (sensor, motor) or **composite**
-* A composite device consists of other devices
-* The hierarchy is built using `Parent` reference and `Children` collection
+The cyclic orchestrator at the application task boundary (`TOF_Automation.AutomationRunner`):
 
----
+* Accepts a persistent array of root `IAutomationComponent` interfaces in `FB_init(components := ...)` (bounds and order remain fixed for its lifetime).
+* Drives initialization and cyclic execution across one owning task (`Execute()` takes no arguments; nested runner calls are unsupported).
+* Updates `TOF_Core.System.Execute()`, services `TOF_Core.LogManager.ExecuteCurrentTaskLogger()`, raises latched terminal OOM via `DynamicMemoryManager.RaiseIfAllocationFailed()`, and cleans up task-scoped exceptions and auto-disposed objects at the end of each call.
+* States (`AUTOMATION_RUNNER_STATE`): `INITIALIZING`, `RUNNING`, `INVALID` (terminal configuration or root-initialization failure; reports `InitializationErrorMessage`).
 
-## 5. Static Polymorphism via `VAR_GENERIC CONSTANT`
+### 3.2. `AutomationComponent`
 
-To preserve PLC determinism and ensure efficient memory usage, child collections in composite devices are implemented using `VAR_GENERIC CONSTANT`.
+The abstract base class for all nodes (`TOF_Automation.AutomationComponent` extending `TOF_Core.Object`):
 
-### Benefits
+* Operational states (`OPERATIONAL_STATE`):
+  * `INITIALIZING` — initial state after PLC start; runs dependency validation and `Initialize()` until ready or timeout (`InitializationTimeout`; `T#0S` resolves immediately to `Parameters.InitializationTimeout`).
+  * `WORKING` — normal cyclic execution state after successful initialization.
+  * `STOPPED` — entered via `Stop(reason)` (transitions `WORKING -> STOPPED` regardless of `Enabled`) or a runtime stop reaction; requires an explicit `Reset()` while `Enabled` to return to `WORKING`.
+  * `INVALID` — terminal state entered when mandatory dependencies, topology validation, or initialization fail.
+* **Recovery guarantees**: failures in a component's own `Reset` hooks (`OnReset`, `OnBeforeChildrenReset`, `OnAfterChildrenReset`) or automatic `OnRecover` always record a `CRITICAL` error and leave/transition the component to `STOPPED` without consulting `ExceptionHandlingPolicy`.
+* **Events**: synchronous borrowed `BroadcastEvent` (top-down) and `BubbleEvent` (bottom-up) work regardless of `Enabled` or operational state; `stopPropagation` halts further routing on the current branch.
 
-**Safety**
+### 3.3. `BranchAutomationComponent`
 
-* The number and types of subdevices are fixed at compile time
+Base class for nodes that coordinate children (`IParentAutomationComponent`):
 
-**Optimization**
+* **`AutomationController<N>`** — top-level machine or unit root (`Children` array of size `N`; `N = 0` empty compositions are valid on TwinCAT 3.1 Build 4026). Supports `IAutomationControllerPlugin` plugins (e.g., `HmiAutomationComponentElement`) whose `OnBeforeControllerExecute` / `OnAfterControllerExecute` cycle-service hooks continue running in `WORKING` and `STOPPED` even when `Enabled = FALSE`. Overrides `OnBeforeExecute` / `OnAfterExecute` to drive enabled child `ProcessInput` and `ProcessOutput` phases.
+* **`CompositeAutomationComponent<N>`** — intermediate sub-machine node (requires a live constructor-bound `Parent`). Groups child devices into a reusable unit and forwards `ProcessInput` / `ProcessOutput` / `BubbleEvent`.
+* Validates non-null slots, matching `Parent` references, and slot uniqueness before running initialization hooks; invokes `OnAfterChildrenInitializing` (via `AND_THEN`) only after all children finish initializing, and expands its effective `InitializationTimeout` to at least the maximum child timeout.
+* Handles critical errors from children via `IChildCriticalErrorHandlingPolicy` (`SetErrorAndStop`, `SetErrorAndContinue`, `Ignore`) and hierarchical `IActionPermissionPolicy` requests (`RequestActionPermission`). Under `SetErrorAndContinue`, the branch retains its copied non-critical error without invoking `OnRecover` until no enabled child holds an active critical error.
 
-* Memory is allocated exactly for the defined number of devices
+### 3.4. `LeafAutomationComponent`
 
-**Strict static model**
+Terminal node (`IChildAutomationComponent`, mandatory constructor-bound `Parent`, no children):
 
-* No dynamic allocation at runtime
-* The object tree is created once during startup
-
----
-
-### 6. Dependency Injection
-
-Dependencies are established via the `FB_Init` method and some properties.
-
-* Each device receives a reference to its `Parent` during initialization
-* Builds a complete object tree **before the first execution cycle**
-* Custom ActionPermissionPolicy can be set to implement the permissions check you need before calling actions.
-
-### 7. Advantages
-
-* Accelerates time-to-market
-* Improves testability
-* Enables modular design
+* `InputLeafAutomationComponent` (`ProcessInput` / `OnProcessInput`)
+* `OutputLeafAutomationComponent` (`ProcessOutput` / `OnProcessOutput`)
+* `InputOutputLeafAutomationComponent` (both phases)
+* Concrete I/O devices (`DigitalInput`, `DigitalOutput`, `AnalogInput`, `AnalogOutput`) live in `TwinCAT.OpenFramework.Devices.IO` (`TOF_Devices_IO`). Simulation contracts (`ISimulatable`, `IConfigurableSimulatable`, `IChildSimulatable`, `IChildConfigurableSimulatable`, `SIMULATION_MODE_OVERRIDE`) are implemented by device classes where needed.
 
 ---
 
-## 8. Why is it effective?
+## 4. Recursive Composition & Static Storage via `VAR_GENERIC CONSTANT`
 
-### 8.1 Scalability
+Composites and controllers parameterize child capacity with `VAR_GENERIC CONSTANT _ChildCount : TOF_Core.INT_LENGTH := 0`:
 
-You can:
-
-* Build a complex unit (e.g., a dosing station)
-* Test it as a single `Device`
-* Integrate it into a larger system as a single hierarchy element
-
-> Nesting depth is unlimited.
+* Child arrays (`ARRAY [0.._ChildCount - 1] OF IChildAutomationComponent`) are sized at compile time (including empty `N = 0` on Build 4026) with zero runtime heap allocation.
+* Each child receives its `Parent` in `FB_init` and occupies a single fixed slot in its parent's `Children` array.
+* Arbitrary static nesting depth is supported structurally, bounded by PLC task stack depth and cycle time (WCET).
 
 ---
 
-### 8.2 Clean Logic Separation
+## 5. Static Automation vs. Dynamic Workflow
 
-* Controllers (**business logic**) are isolated from hardware drivers
-* Changing a motor or sensor type does **not** require rewriting controller logic
-* As long as the device interface remains unchanged
-
----
-
-### 8.3. Reusability
-
-* A device library (valves, drives, sensors) can be reused across projects
-* Devices are:
-
-  * framework-agnostic
-  * self-contained
+* Use **`AutomationController` + typed `ENUM` state machines + `Tasks`** for fixed physical equipment, deterministic cycle-by-cycle I/O control, and HMI supervision.
+* Use **`TOF_Workflow.Workflow`** when executing variable, externally configured recipes or sequences (including configurations loaded from JSON at runtime). See [Workflow Construction Guide](../../Guides/WorkflowConstruction.md).
 
 ---
 
-## 9. Developer Summary
+## 6. Hierarchy Diagram & Example
 
-This architecture mirrors the **physical structure of a machine** in code.
+![Automation object hierarchy](AutomationObjectHierarchy.png)
 
-Example:
-
-* A conveyor with three sections:
-	* One `AutomationController`
-  		* Controls one `CompositeDevice` (Conveyor)
-    		* Contains three `CompositeDevices` (Sections)
-      			* Each contains its own `Devices` (Motors and Sensors)
-	  
----
-
-## 10. Result
-
-![Exception catching result](AutomationObjectHierarchy.png)
-
----
-
-## 11. Example
-
-TwinCAT_OpenFramework_Samples -> SignalControlledIntersection
+Complete demo application: `TwinCAT.OpenFramework.Samples` (`Intersection` and `Workflow`).
+Walkthrough: [Signal-Controlled Intersection Demo Guide](../../Guides/SignalControlledIntersectionDemo.md).

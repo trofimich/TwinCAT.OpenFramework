@@ -1,51 +1,45 @@
-# `GENERIC_VALUE` Concept
+# `GENERIC_VALUE` Concept (`TOF_Core`)
 
 ## 1. General Description
 
-Using `GENERIC_VALUE`, you can store data of any type along with additional metadata, such as the type class and memory management rules.
+`GENERIC_VALUE` is a function block data descriptor (not extending `Object`) that pairs a memory `Address` and byte `Size` with a normalized `TypeClass : GENERIC_TYPE_CLASS`, an `IsMemoryOwner : BOOL` flag, and `IsNull`.
 
-It is similar to `__SYSTEM.AnyType`, but addresses its shortcomings:
-1) Eliminates duplication of type classes: for example, `__SYSTEM.TYPE_CLASS.TYPE_WORD` is the same as `__SYSTEM.TYPE_CLASS.TYPE_UINT`;
-2) Provides clearer naming: instead of `__SYSTEM.TYPE_CLASS.TYPE_UINT`, you get `GENERIC_TYPE_CLASS.UINT_16`;
-3) Adds additional, highly useful type classes: for example, `GENERIC_TYPE_CLASS.OBJECT`;
-4) Preserves memory management rules for the stored value.
+It improves upon raw `__SYSTEM.AnyType` by:
+1. Eliminating duplicate type classes (for example, collapsing bit-width aliases into explicit categories such as `GENERIC_TYPE_CLASS.UINT_16`).
+2. Covering 25 well-defined categories in `GENERIC_TYPE_CLASS` (`UNSPECIFIED`, `BOOLEAN`, signed/unsigned 8/16/32/64-bit integers, `REAL_32`, `REAL_64`, `STRING_ASCII`, `STRING_UTF16`, 32/64-bit `TIME`/`DATE`/`DATE_AND_TIME`/`TIME_OF_DAY`, `POINTER_TO`, `USER_DEFINED`, `OBJECT`).
+3. Preserving memory ownership rules (`IsMemoryOwner`) for dynamic values and collections.
 
-## 2. Important Notes
+---
 
-1. This is a class, not a structure: a class consumes more memory, but provides capabilities that a structure cannot offer.
+## 2. Operations, Comparison & Ownership Notes
 
-2. Contains multiple methods to retrieve the value in a typed form. Example: `AsInt`, `AsBool`, `AsObject`.
+1. **Descriptor vs. Payload**: Copying a `GENERIC_VALUE` by value copies its metadata fields (`Address`, `Size`, `TypeClass`, `IsMemoryOwner`), not the underlying payload. Keep external borrowed storage alive and stable while used.
+2. **Typed Access (`As*`)**: Provides `AsBool`, `AsSInt`/`AsInt`/`AsDInt`/`AsLInt`, `AsUSInt`/`AsUInt`/`AsUDInt`/`AsULInt`, `AsByte`/`AsWord`/`AsDWord`/`AsLWord`, `AsReal`/`AsLReal`, `AsString255`/`AsStringReference`, `AsWString255`/`AsWStringReference`, `AsTime`/`AsLTime`/`AsDate`/`AsLDate`/`AsDateAndTime`/`AsLDateAndTime`/`AsTimeOfDay`/`AsLTimeOfDay`, `AsObject`, `AsIObject`, and `AsAnyType`. Integer narrowing checks actual range unless `allowTypeCastWithDataLoss := TRUE` is specified.
+3. **Value Semantics (`Equals`, `GetHashCode`, `CompareTo`)**:
+   * `Equals` and `GetHashCode` accept an optional borrowed `IEqualityComparer`, preserve type categories, normalize floating-point `NaN` and signed zero, and delegate non-empty `OBJECT` values to `IObject.Equals` / `GetHashCode`.
+   * `CompareTo` places all `NaN` values first (equal to each other), compares mixed integer/floating-point numbers exactly without lossy float rounding, compares full strings beyond 255 characters, and delegates `OBJECT` comparisons to `IComparable`.
+   * `IsConvertibleTo` checks static `TypeClass` pair support without reading payload range or lifetime.
+4. **Copying, Mutation & Cleanup**:
+   * `CopyTo` / `TryCopyTo` copies the payload to another descriptor; `ChangeValueByAny*` / `TryChangeValueByAny*` updates stored values.
+   * `Reset` resets metadata fields to defaults without freeing memory.
+   * `Release` frees owned dynamically allocated memory when `IsMemoryOwner` is `TRUE` (calling `FB_exit` via `Object` when appropriate) and then calls `Reset`.
+5. **Failure & Terminal OOM Contract**:
+   * Methods not starting with `Try` may throw exceptions (`GenericConversionNotSupportedException`, `ArgumentOutOfRangeException`, etc.) and should be called inside `__TRY -> __CATCH` when recovery is intended.
+   * `Try*` methods contain exceptions and observe the terminal allocation latch (`HasAllocationFailed`) without clearing it or raising inside `Try`.
 
-3. Typed access methods attempt type conversion when possible. For example, if you store a value of type `INT`, the `AsDint` method will return the original value cast to `DINT`.
-
-4. Provides the `AsAnyType` method, which converts `GENERIC_VALUE` to the standard `__SYSTEM.AnyType`.
-
-5. Provides the `CopyTo` method, which allows copying the value to another memory location.
-
-6. Provides the `Reset` method, which resets metadata to default values. No operations are performed on the memory allocated for the data.
-
-7. Provides the `Release` method, which frees dynamically allocated memory according to the memory management rules and then calls `Reset`.
-
-8. Provides a set of methods for changing the value: `ChangeValueByAny`, `ChangeValueByAnyType`, `TryChangeValueByAny`, `TryChangeValueByAnyType`.
-
-9. Use the static class `GenericValueFactory` to create an instance of `GENERIC_VALUE`.
-
-10. Methods whose names do not start with `Try` may throw exceptions, so they should be called within `__TRY -> __CATCH`.
-
-11. Methods whose names start with `Try` never throw exceptions.
+---
 
 ## 3. `GenericValueFactory`
 
-1. This is a static class (program) intended for creating `GENERIC_VALUE` instances from values of specific types.
+`GenericValueFactory` is a static `PROGRAM` for constructing `GENERIC_VALUE` descriptors according to `GENERIC_MEMORY_MANAGEMENT_BEHAVIOR` (borrow, clone, or adopt):
 
-2. `FromXxxValue` methods always clone the original value and make `GENERIC_VALUE` responsible for freeing the memory.
+1. **`FromXxxValue` methods**: Clone the original value onto managed storage and return a descriptor with `IsMemoryOwner := TRUE`. Cloning `OBJECT` values requires `ICloneable`; other types are copied as bytes. (Auto-disposed exception objects are unsupported in user-managed collections.)
+2. **`FromXxxReference` methods**: Store a borrowed reference (`Address`) to caller storage with `IsMemoryOwner := FALSE`.
+3. **`FromAny` and `FromAnyType`**: Build a `GENERIC_VALUE` from `ANY` or `__SYSTEM.AnyType` and a chosen `GENERIC_MEMORY_MANAGEMENT_BEHAVIOR`. `TYPE_ENUM` and `TYPE_SUBRANGE` map to unsigned integers of matching byte width.
+4. **`FromParts`**: Explicitly constructs a `GENERIC_VALUE` from `TypeClass`, `Address`, `Size`, and `memoryManagementBehavior`.
 
-3. `FromXxxReference` methods always store a reference (address) to the original value and do not make `GENERIC_VALUE` responsible for memory deallocation.
-
-4. `FromAny` and `FromAnyType` methods create `GENERIC_VALUE` from `ANY` and `__SYSTEM.AnyType`.
-
-5. The `FromParts` method allows you to manually construct any `GENERIC_VALUE`.
+---
 
 ## 4. Usage
 
-Designed for use in classes that operate on multiple data types. A typical example of such classes is collections.
+Designed for generic containers (`TwinCAT.OpenFramework.Collections`), value comparers (`TwinCAT.OpenFramework.Comparison`), and dynamic variable/condition scopes (`TwinCAT.OpenFramework.Workflow`).

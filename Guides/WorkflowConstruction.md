@@ -91,6 +91,24 @@ error. Elementary numeric, bit-string, date/time and string variables are suppor
 for declarations, including `BOOL`. String storage retains the initial variable's
 declared capacity.
 
+## When to Use `Workflow` vs. `AutomationController`
+
+Use `TOF_Automation.AutomationController` (with typed `ENUM` state machines and `TOF_Tasks.Task`) for fixed physical machine hardware and deterministic cyclic control. Use `TOF_Workflow.Workflow` when orchestrating dynamic, multi-step recipes or variable sequences configured at runtime (including scenarios loaded from JSON).
+
+Built-in workflow elements in `TOF_Workflow`:
+* **Activities**: `SequenceActivity`, `WhileActivity` (single `Body : IActivity`), `IfElseActivity`, `WaitAndPickActivity`, `ParallelActivity`, `TryCatchActivity` + `CatchActivity`, `DelayActivity`, `WaitConditionActivity`, `WaitVariableValueActivity`, `AssignVariableActivity`, `InvokeTaskActivity` (supports `ConfigureEmbeddedTask` for workflow-owned tasks and `ConfigureExternalTask` for key-resolved application tasks).
+* **Conditions**: `TrueCondition`, `NotCondition`, `CompositeCondition`, `VariableHasValueCondition`, `CompareVariableCondition` (supports `ConfigureEmbeddedComparer` / `ConfigureExternalComparer`, or built-in `GENERIC_VALUE.CompareTo` ordering when no custom comparer is configured).
+
+## Loading and Saving Workflow Configurations (JSON)
+
+`TOF_Workflow` implements `TOF_Core.IConfigurationSerializable` independently of any serialization format, and `TOF_JSON` supplies JSON adapters (`JsonConfigurationReader` and `JsonConfigurationWriter`):
+
+* **Saving**: pass a `TOF_Workflow.Workflow` and a `TOF_Core.JSON_DOCUMENT` to `JsonConfigurationWriter.Serialize(source := workflow, document := jsonDocument)`. Declared variables write their `initialValue` rather than transient runtime values.
+* **Loading**: parse the document with `JsonConfigurationReader.Parse(document := jsonDocument)` to obtain a root `TOF_Core.CONFIGURATION_NODE`, then call `TOF_Workflow.WorkflowLoader.Load(reader := reader, root := rootNode, factory := ..., dependencyFactory := ..., resolver := ..., binder := ...)`.
+  * `Load` constructs a separate dynamic `Workflow` instance owned by the caller (remember to release it via `TOF_Core.Memory.TryReleaseDynamicObject` when no longer needed).
+  * Optional interfaces (`IWorkflowElementFactory`, `IWorkflowDependencyFactory`, `IWorkflowDependencyResolver`, `IWorkflowVariableBinder`) supply custom activity/condition types, embedded task/comparer types, key-resolved external dependencies, and external PLC variable bindings.
+  * Required PLC variable bindings and embedded dependencies are validated before returning; on any failure, `Load` rolls back and disposes the partial graph automatically.
+
 ## Declaring and inspecting an array
 
 `DeclareArray` takes a pointer to a contiguous sequence of IEC element descriptors

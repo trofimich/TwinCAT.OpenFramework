@@ -10,12 +10,18 @@ License: https://opensource.org/license/mit
 (*!
 <summary>Analog input automation component providing scaling, status decoding and hardware binding.</summary>
 <description>
-Performs cyclic conversion of raw process data into engineering units. Supports optional channel status
-tracking: functions normally when status is unbound, and reports channel errors when bound.
+Performs cyclic conversion of raw process data into engineering units. Successful initialization requires
+a parent automation component and a converter. ProcessInput() samples optional channel status before
+conversion. A sampled bit 6 reports a channel error until a later sample clears it or input processing
+finds no status binding. This diagnostic leaves the leaf in its current operational state.
+A stored execution error takes precedence over the channel diagnostic. Failed conversion preserves the last
+successful engineering value. Execute() clears a recoverable execution error only after successful input
+conversion. Critical errors require Reset() for recovery. Use one owner task per instance.
 </description>
 *)
 
-FUNCTION_BLOCK AnalogInput EXTENDS TOF_Automation.InputLeafAutomationComponent IMPLEMENTS IAnalogInput
+FUNCTION_BLOCK AnalogInput EXTENDS TOF_Automation.InputLeafAutomationComponent
+	IMPLEMENTS IAnalogInput, IAnalogInputStatusProvider
 VAR_STAT
 	{attribute 'hide'} 
 	_ClassName : STRING := __POUNAME();
@@ -37,6 +43,10 @@ VAR
 	_RawReal32Value : REFERENCE TO REAL; 
 	
 	_RawStatus : REFERENCE TO WORD;
+
+	_SampledStatusWord : WORD;
+	_ChannelError : TOF_Core.ERROR;
+	_LastConversionSucceeded : BOOL;
 END_VAR]]></Declaration>
     <Implementation>
       <ST><![CDATA[]]></ST>
@@ -213,6 +223,19 @@ END_CASE]]></ST>
         </Implementation>
       </Get>
     </Property>
+    <Method Name="CanRecoverExecutionError" Id="{f22ecbbe-11cc-45ad-bad3-095d68c920ba}" FolderPath="Overriden members\">
+      <Declaration><![CDATA[(*!
+<summary>Allows automatic execution error recovery after a successful input conversion.</summary>
+<description>
+A failed input conversion defers recovery until a later ProcessInput() completes conversion successfully.
+The channel diagnostic has its own lifetime controlled by sampled bit 6.
+</description>
+*)
+METHOD PROTECTED CanRecoverExecutionError : BOOL]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[CanRecoverExecutionError := _LastConversionSucceeded;]]></ST>
+      </Implementation>
+    </Method>
     <Property Name="ClassName" Id="{e2a4d305-0531-4dc9-9542-3658a5b19872}">
       <Declaration><![CDATA[(*!
 <summary>Gets the class name of the component.</summary>
@@ -245,7 +268,7 @@ PROPERTY FINAL Converter : IAnalogValueConverter]]></Declaration>
 <param name="bInitRetains">TRUE: retain variables are initialized.</param>
 <param name="bInCopyCode">TRUE: instance copied to copy code (online change).</param>
 <param name="name">Component instance name.</param>
-<param name="parent">Parent automation component, or zero if root node.</param>
+<param name="parent">Nonzero parent automation component required for successful Initialize().</param>
 <param name="converter">Mandatory analog value converter dependency.</param>
 *)
 METHOD FB_init : BOOL
@@ -259,6 +282,23 @@ END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[IF NOT bInCopyCode THEN
 	_Converter := converter;
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="GetReportedError" Id="{a4e42448-a9c5-4c1a-b9ea-dc1fa0609ff3}" FolderPath="Overriden members\">
+      <Declaration><![CDATA[(*!
+<summary>Selects the execution error in preference to the channel error.</summary>
+<description>
+Returns the active channel record when the execution record is empty. With neither error active, returns
+the empty execution record. The reference remains instance-owned; read Error again after input or execution.
+</description>
+*)
+METHOD PROTECTED GetReportedError : REFERENCE TO TOF_Core.ERROR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF _Error.HasError OR_ELSE NOT _ChannelError.HasError THEN
+	GetReportedError REF= _Error;
+ELSE
+	GetReportedError REF= _ChannelError;
 END_IF]]></ST>
       </Implementation>
     </Method>
@@ -319,40 +359,46 @@ OnInitializing := TRUE;]]></ST>
     </Method>
     <Method Name="OnProcessInput" Id="{d00fb5f9-23cb-41c5-931f-ed22dd46f4e9}" FolderPath="Overriden members\">
       <Declaration><![CDATA[(*!
-<summary>Reads raw ADC data, updates status if bound, and scales into engineering units.</summary>
+<summary>Samples the channel, updates its diagnostic and converts the input into engineering units.</summary>
+<description>
+Updates the sampled word and legacy decoded view first. Bit 6 controls only the channel record, and
+a missing status binding supplies zero. A converter exception leaves Value unchanged and propagates to
+ProcessInput() for policy handling. An override must call this implementation to preserve these updates.
+</description>
 *)
 METHOD PROTECTED OnProcessInput]]></Declaration>
       <Implementation>
-        <ST><![CDATA[_PreviousValue := _CurrentValue;
+        <ST><![CDATA[_LastConversionSucceeded := FALSE;
+_PreviousValue := _CurrentValue;
 
 IF __ISVALIDREF(_RawStatus) THEN
-	_CurrentStatus.SetStatus(status := _RawStatus);
-
-	IF _CurrentStatus.Error THEN
-		IF NOT HasError THEN
-			_Error.SetSource(
-				sourceNamespaceName := NamespaceName,
-				sourceClassName := ClassName,
-				sourcePOUName := __POUNAME()
-			);
-			_Error.SetSeverity(severity := TOF_Core.ERROR_SEVERITY.ERROR);
-			_Error.SetMessage(message := "Analog input channel reports error");
-		END_IF
-	ELSIF HasError AND_THEN _Error.Severity = TOF_Core.ERROR_SEVERITY.ERROR THEN
-		_Error.Clear();
-	END_IF
+	_SampledStatusWord := _RawStatus;
 ELSE
-	_CurrentStatus.SetStatus(status := 0);
+	_SampledStatusWord := WORD#0;
+END_IF
 
-	IF HasError AND_THEN _Error.Severity = TOF_Core.ERROR_SEVERITY.ERROR THEN
-		_Error.Clear();
+_CurrentStatus.SetStatus(status := _SampledStatusWord);
+
+// Bit 6 is the channel's general measurement or hardware error flag.
+IF _SampledStatusWord.6 THEN
+	IF _ChannelError.Empty THEN
+		_ChannelError.SetSource(
+			sourceNamespaceName := NamespaceName,
+			sourceClassName := ClassName,
+			sourcePOUName := __POUNAME()
+		);
+		_ChannelError.SetSeverity(severity := TOF_Core.ERROR_SEVERITY.ERROR);
+		_ChannelError.SetMessage(message := "Analog input channel reports error");
 	END_IF
+ELSIF _ChannelError.HasError THEN
+	_ChannelError.Clear();
 END_IF
 
 _CurrentValue := _Converter.ConvertRawValueToAnalogValue(
 	rawValue := getRawValueUnion(),
 	rawValueType := _RawValueType
-);]]></ST>
+);
+_LastConversionSucceeded := TRUE;]]></ST>
       </Implementation>
     </Method>
     <Property Name="RawValue" Id="{f2f3b0ca-2065-4d92-b7dc-f0ed49f1a81e}">
@@ -405,7 +451,11 @@ PROPERTY SelfSize : ULINT]]></Declaration>
     </Property>
     <Property Name="Status" Id="{8dee4244-1695-4a0e-80f3-405b88b016b6}">
       <Declaration><![CDATA[(*!
-<summary>Gets reference to the decoded channel status object.</summary>
+<summary>Gets a borrowed reference to the legacy decoded channel status.</summary>
+<description>
+The reference requires a live input. Writes through it affect only the decoded view until the next
+ProcessInput() refreshes it. Use IAnalogInputStatusProvider.StatusWord for the sampled status by value.
+</description>
 *)
 {attribute 'monitoring' := 'call'}
 PROPERTY FINAL Status : REFERENCE TO ANALOG_INPUT_STATUS]]></Declaration>
@@ -416,9 +466,27 @@ PROPERTY FINAL Status : REFERENCE TO ANALOG_INPUT_STATUS]]></Declaration>
         </Implementation>
       </Get>
     </Property>
+    <Property Name="StatusWord" Id="{efad18a6-396c-4f31-b755-9114925b6c0b}">
+      <Declaration><![CDATA[(*!
+<summary>Gets a copy of the channel status word sampled by ProcessInput().</summary>
+<description>
+Returns zero before the first sample and after processing input without a status binding. Read this value
+from the input's owner task. Mutations through the legacy decoded Status reference affect only that view.
+</description>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY StatusWord : WORD]]></Declaration>
+      <Get Name="Get" Id="{d33d98d1-50b7-43b5-bb52-39a9c813a050}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[StatusWord := _SampledStatusWord;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
     <Property Name="Value" Id="{bff835a2-8bf3-4c77-a0ff-361609610603}">
       <Declaration><![CDATA[(*!
-<summary>Gets current scaled engineering unit value.</summary>
+<summary>Gets the last successfully converted engineering value.</summary>
+<description>Returns zero before the first successful conversion and retains the value if conversion fails.</description>
 *)
 {attribute 'monitoring' := 'call'}
 PROPERTY FINAL Value : LREAL]]></Declaration>

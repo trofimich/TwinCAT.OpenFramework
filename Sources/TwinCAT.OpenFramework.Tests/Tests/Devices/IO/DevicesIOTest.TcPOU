@@ -12,6 +12,7 @@ License: https://opensource.org/license/mit
 <description>
 Verifies digital inputs/outputs, contact inversion, analog scaling, status decoding,
 online change preservation, and division-by-zero defense.
+Also verifies analog input diagnostics through both cyclic phases and analog output processing with equal raw limits.
 IO fixtures borrow the suite-owned automation root so required-parent initialization is valid.
 </description>
 *)
@@ -24,6 +25,12 @@ END_VAR
 VAR
 	//! <summary>Live parent borrowed by the IO fixtures for the suite lifetime.</summary>
 	_AutomationRoot : MockAutomationController(name := "DevicesIORoot");
+END_VAR
+VAR CONSTANT
+	//! <summary>Bit 6 of the simulated process word indicates a channel measurement or hardware error.</summary>
+	_ChannelErrorStatus : WORD := WORD#16#0040;
+	_ChannelErrorMessage : WSTRING := "Analog input channel reports error";
+	_ConversionErrorMessage : WSTRING := "Injected analog input conversion failure.";
 END_VAR]]></Declaration>
     <Implementation>
       <ST><![CDATA[TestDigitalInputNormallyOpen();
@@ -34,8 +41,12 @@ TestDigitalOutputNormallyClosed();
 TestDirectAnalogValueConverter();
 TestAnalogInputScalingAndScalarBinding();
 TestAnalogInputChannelStatusAndErrorReporting();
+TestAnalogInputConverterRecovery();
+TestAnalogInputCriticalConversionError();
+TestAnalogInputStatusWordIsolation();
 TestAnalogInputStatusBitDecoding();
 TestAnalogOutputScaling();
+TestAnalogOutputEqualRawLimits();
 TestDynamicRangeAnalogValueConverter();
 TestStaticConverterCopiesLimits();
 TestRangeConverterBoundaryClampingAndZeroDivision();]]></ST>
@@ -63,22 +74,24 @@ PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
     </Property>
     <Method Name="TestAnalogInputChannelStatusAndErrorReporting" Id="{5a961e5a-271f-46e9-928d-54f0f50a72df}" FolderPath="Tests\">
       <Declaration><![CDATA[(*!
-<summary>Checks borrowed 16-bit channel binding, live status changes, recovery and unbinding.</summary>
+<summary>Checks channel error lifetime across complete cycles, recovery, and unbinding.</summary>
 <description>
 Uses two ordinary words as the Status/Value process image and a typed channel view; no located inputs are written.
-The component and simulated channel live in the same call. Assertions also check that binding leaves source data
-unchanged and that an invalid reference clears the binding before a subsequent valid rebind.
+The component and simulated channel live in the same call. The fault and recovery cycles run ProcessInput()
+and Execute(). Binding must leave source data intact, and an invalid reference must clear the binding
+before a subsequent valid rebind.
 The IO fixture borrows the suite-owned automation root for valid initialization.
 </description>
 *)
 METHOD PRIVATE TestAnalogInputChannelStatusAndErrorReporting
 VAR
 	converter : TOF_Devices_IO.DirectAnalogValueConverter;
-	ai : TOF_Devices_IO.AnalogInput(name := "AI_Chan", parent := _AutomationRoot, converter := converter);
+	ai : AnalogInputRecoveryProbe(name := "AI_Chan", parent := _AutomationRoot, converter := converter);
 	//! <summary>Status word at offset 0 and signed 16-bit value bits at offset 1.</summary>
 	channelData : ARRAY [0..1] OF WORD;
 	channel : POINTER TO TOF_IOModels.ANALOG_INPUT_INT_CHANNEL;
 	unboundChannel : REFERENCE TO TOF_IOModels.ANALOG_INPUT_INT_CHANNEL;
+	i : INT;
 END_VAR
 VAR_INST
 	testFinished : BOOL;
@@ -90,7 +103,7 @@ END_IF
 
 TEST(TestName := 'TestAnalogInputChannelStatusAndErrorReporting');
 
-ai.Initialize();
+AssertTrue(Condition := ai.Initialize(), Message := 'The analog input must initialize');
 channel := ADR(channelData);
 channelData[0] := WORD#16#0000;
 channelData[1] := WORD#1000;
@@ -101,10 +114,11 @@ AssertTrue(
 	Message := 'Binding must leave both source words unchanged'
 );
 ai.ProcessInput();
+ai.Execute();
 
 AssertFalse(
 	Condition := ai.HasError,
-	Message := 'AnalogInput should not have error when Status is 0'
+	Message := 'A healthy channel must have no error after the full cycle'
 );
 
 AssertEquals_LREAL(
@@ -114,40 +128,79 @@ AssertEquals_LREAL(
 	Message := 'The bound component must read the simulated raw value'
 );
 
-// Simulate hardware channel error (bit 6 = 1)
-channelData[0] := WORD#16#0040;
+// Hold bit 6 across two complete input and execution phases.
+channelData[0] := _ChannelErrorStatus;
+
+FOR i := 1 TO 2 DO
+	ai.ProcessInput();
+
+	AssertTrue(
+		Condition := ai.Status.Error
+			AND_THEN ai.StatusWord = _ChannelErrorStatus
+			AND_THEN ai.HasError
+			AND_THEN ai.Error.Severity = TOF_Core.ERROR_SEVERITY.ERROR
+			AND_THEN ai.Error.TopMessage = _ChannelErrorMessage,
+		Message := 'A sampled bit 6 must report the channel error after ProcessInput'
+	);
+
+	ai.Execute();
+
+	AssertTrue(
+		Condition := ai.StatusWord = _ChannelErrorStatus
+			AND_THEN ai.HasError
+			AND_THEN ai.Error.Severity = TOF_Core.ERROR_SEVERITY.ERROR
+			AND_THEN ai.Error.TopMessage = _ChannelErrorMessage
+			AND_THEN ai.OperationalState = TOF_Automation.OPERATIONAL_STATE.WORKING
+			AND_THEN ai.RecoveryCalls = UDINT#0,
+		Message := 'A persistent channel error must survive Execute without stopping or recovering the leaf'
+	);
+END_FOR
+
+channelData[0] := WORD#0;
 ai.ProcessInput();
 
 AssertTrue(
-	Condition := ai.Status.Error,
-	Message := 'Status.Error should be TRUE on bit 6'
+	Condition := NOT ai.Status.Error AND_THEN ai.StatusWord = WORD#0 AND_THEN NOT ai.HasError,
+	Message := 'Sampling a clear bit 6 must clear the channel diagnostic in the input phase'
 );
+
+ai.Execute();
 
 AssertTrue(
-	Condition := ai.HasError,
-	Message := 'AnalogInput.HasError should be TRUE when Status.Error is set'
+	Condition := ai.StatusWord = WORD#0
+		AND_THEN NOT ai.HasError
+		AND_THEN ai.Error.Empty
+		AND_THEN ai.RecoveryCalls = UDINT#0,
+	Message := 'The recovered channel must remain clear after Execute without a recovery callback'
 );
 
-// Simulate hardware recovery (bit 6 = 0)
-channelData[0] := WORD#16#0000;
-ai.ProcessInput();
-
-AssertFalse(
-	Condition := ai.Status.Error,
-	Message := 'Status.Error should be FALSE after recovery'
-);
-
-AssertFalse(
-	Condition := ai.HasError,
-	Message := 'AnalogInput.HasError should clear automatically'
-);
-
-channelData[0] := WORD#16#0040;
+channelData[0] := _ChannelErrorStatus;
 channelData[1] := WORD#2000;
-ai.BindToInt16IO(rawValues := unboundChannel);
-AssertFalse(Condition := ai.BoundToIO, Message := 'An invalid reference must clear the value binding');
 ai.ProcessInput();
-AssertFalse(Condition := ai.Status.Error, Message := 'An invalid reference must also clear the status binding');
+ai.Execute();
+ai.BindToInt16IO(rawValues := unboundChannel);
+
+AssertTrue(
+	Condition := NOT ai.BoundToIO AND_THEN ai.StatusWord = _ChannelErrorStatus AND_THEN ai.HasError,
+	Message := 'Unbinding clears the value link while keeping the last sample until input processing'
+);
+
+ai.ProcessInput();
+
+AssertTrue(
+	Condition := NOT ai.Status.Error AND_THEN ai.StatusWord = WORD#0 AND_THEN NOT ai.HasError,
+	Message := 'Input processing without a status binding must clear the sampled status and channel error'
+);
+
+ai.Execute();
+
+AssertTrue(
+	Condition := ai.StatusWord = WORD#0
+		AND_THEN NOT ai.HasError
+		AND_THEN ai.Error.Empty
+		AND_THEN ai.RecoveryCalls = UDINT#0,
+	Message := 'The unbound input must remain clear after Execute'
+);
 AssertTrue(
 	Condition := channelData[0] = WORD#16#0040 AND_THEN channelData[1] = WORD#2000,
 	Message := 'Unbinding must leave source data unchanged'
@@ -165,6 +218,215 @@ AssertEquals_LREAL(
 AssertTrue(
 	Condition := channelData[0] = WORD#16#0000 AND_THEN channelData[1] = WORD#2000,
 	Message := 'Input processing and rebinding must leave source data unchanged'
+);
+
+testFinished := TRUE;
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="TestAnalogInputConverterRecovery" Id="{28128c83-149a-4993-b57e-12d154202bf6}" FolderPath="Tests\">
+      <Declaration><![CDATA[(*!
+<summary>Checks non-critical conversion recovery with an independent channel diagnostic.</summary>
+<description>
+Executes both input and working phases. Exercises channel recovery first and then converter recovery first.
+</description>
+*)
+METHOD PRIVATE TestAnalogInputConverterRecovery
+VAR
+	converter : AnalogInputConverterProbe;
+	analogInput : AnalogInputRecoveryProbe(
+		name := "AI_ConversionRecovery",
+		parent := _AutomationRoot,
+		converter := converter
+	);
+	//! <summary>Simulated status word at offset 0 and signed INT value bits at offset 1.</summary>
+	channelData : ARRAY [0..1] OF WORD;
+	channel : POINTER TO TOF_IOModels.ANALOG_INPUT_INT_CHANNEL;
+END_VAR
+VAR_INST
+	testFinished : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN
+	RETURN;
+END_IF
+
+TEST(TestName := 'TestAnalogInputConverterRecovery');
+
+AssertTrue(Condition := analogInput.Initialize(), Message := 'The analog input must initialize');
+analogInput.ExceptionHandlingPolicy := TOF_Core.ExceptionHandlingPolicies.SetErrorAndContinue;
+channel := ADR(channelData);
+channelData[0] := WORD#0;
+channelData[1] := WORD#100;
+analogInput.BindToInt16IO(rawValues := channel^);
+analogInput.ProcessInput();
+analogInput.Execute();
+AssertTrue(Condition := analogInput.Value = LREAL#100.0, Message := 'The initial conversion must succeed');
+
+converter.failureMessage := _ConversionErrorMessage;
+channelData[1] := WORD#200;
+analogInput.ProcessInput();
+analogInput.Execute();
+
+AssertTrue(
+	Condition := analogInput.HasError
+		AND_THEN analogInput.Error.Severity = TOF_Core.ERROR_SEVERITY.ERROR
+		AND_THEN analogInput.Error.TopMessage = _ConversionErrorMessage,
+	Message := 'Converter failure on a healthy channel must survive Execute'
+);
+AssertTrue(
+	Condition := analogInput.Value = LREAL#100.0 AND_THEN analogInput.RecoveryCalls = UDINT#0,
+	Message := 'A failed conversion must preserve the last value and defer recovery'
+);
+
+// Use different exception text to distinguish retaining the original error from copying a later one.
+converter.failureMessage := "Repeated analog input conversion failure.";
+channelData[0] := _ChannelErrorStatus;
+analogInput.ProcessInput();
+analogInput.Execute();
+
+AssertTrue(
+	Condition := analogInput.StatusWord = _ChannelErrorStatus
+		AND_THEN analogInput.Error.TopMessage = _ConversionErrorMessage,
+	Message := 'The converter diagnostic must take precedence while both errors are active'
+);
+
+channelData[0] := WORD#0;
+analogInput.ProcessInput();
+analogInput.Execute();
+
+AssertTrue(
+	Condition := analogInput.StatusWord = WORD#0
+		AND_THEN analogInput.HasError
+		AND_THEN analogInput.Error.Severity = TOF_Core.ERROR_SEVERITY.ERROR
+		AND_THEN analogInput.Error.TopMessage = _ConversionErrorMessage
+		AND_THEN analogInput.RecoveryCalls = UDINT#0,
+	Message := 'Channel recovery must preserve the failing converter diagnostic'
+);
+
+converter.failureMessage := "";
+analogInput.ProcessInput();
+
+AssertTrue(
+	Condition := analogInput.Value = LREAL#200.0
+		AND_THEN analogInput.Error.TopMessage = _ConversionErrorMessage,
+	Message := 'A successful input phase must update Value and leave recovery to Execute'
+);
+
+analogInput.Execute();
+
+AssertTrue(
+	Condition := NOT analogInput.HasError AND_THEN analogInput.RecoveryCalls = UDINT#1,
+	Message := 'Execute must clear the recovered conversion error and call OnRecover once'
+);
+
+// A new conversion failure must be reported even when the channel fails in the same phase.
+channelData[0] := _ChannelErrorStatus;
+channelData[1] := WORD#300;
+converter.failureMessage := _ConversionErrorMessage;
+analogInput.ProcessInput();
+analogInput.Execute();
+
+AssertTrue(
+	Condition := analogInput.StatusWord = _ChannelErrorStatus
+		AND_THEN analogInput.Error.Severity = TOF_Core.ERROR_SEVERITY.ERROR
+		AND_THEN analogInput.Error.TopMessage = _ConversionErrorMessage,
+	Message := 'An active channel error must not block capture of a new conversion failure'
+);
+
+// Recover the converter first, with the channel fault still active.
+converter.failureMessage := "";
+analogInput.ProcessInput();
+analogInput.Execute();
+
+AssertTrue(
+	Condition := analogInput.HasError
+		AND_THEN analogInput.Error.TopMessage = _ChannelErrorMessage
+		AND_THEN analogInput.Value = LREAL#300.0
+		AND_THEN analogInput.RecoveryCalls = UDINT#2,
+	Message := 'Converter recovery must expose the still-active channel error'
+);
+
+channelData[0] := WORD#0;
+analogInput.ProcessInput();
+analogInput.Execute();
+
+AssertTrue(
+	Condition := NOT analogInput.HasError AND_THEN analogInput.RecoveryCalls = UDINT#2,
+	Message := 'Channel recovery must clear its diagnostic without another recovery callback'
+);
+
+testFinished := TRUE;
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="TestAnalogInputCriticalConversionError" Id="{8c0f7ac8-52ab-4f38-bd54-211e21ff74a7}" FolderPath="Tests\">
+      <Declaration><![CDATA[(*!
+<summary>Checks that successful input and channel recovery preserve a critical conversion error until Reset().</summary>
+*)
+METHOD PRIVATE TestAnalogInputCriticalConversionError
+VAR
+	converter : AnalogInputConverterProbe;
+	analogInput : AnalogInputRecoveryProbe(
+		name := "AI_CriticalConversion",
+		parent := _AutomationRoot,
+		converter := converter
+	);
+	//! <summary>Simulated status word at offset 0 and signed INT value bits at offset 1.</summary>
+	channelData : ARRAY [0..1] OF WORD;
+	channel : POINTER TO TOF_IOModels.ANALOG_INPUT_INT_CHANNEL;
+END_VAR
+VAR_INST
+	testFinished : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN
+	RETURN;
+END_IF
+
+TEST(TestName := 'TestAnalogInputCriticalConversionError');
+
+AssertTrue(Condition := analogInput.Initialize(), Message := 'The analog input must initialize');
+analogInput.ExceptionHandlingPolicy := TOF_Core.ExceptionHandlingPolicies.SetErrorAndStop;
+channel := ADR(channelData);
+channelData[0] := _ChannelErrorStatus;
+channelData[1] := WORD#100;
+analogInput.BindToInt16IO(rawValues := channel^);
+converter.failureMessage := _ConversionErrorMessage;
+analogInput.ProcessInput();
+analogInput.Execute();
+
+AssertTrue(
+	Condition := analogInput.OperationalState = TOF_Automation.OPERATIONAL_STATE.STOPPED
+		AND_THEN analogInput.HasError
+		AND_THEN analogInput.Error.Severity = TOF_Core.ERROR_SEVERITY.CRITICAL
+		AND_THEN analogInput.Error.TopMessage = _ConversionErrorMessage,
+	Message := 'The critical conversion error must stop the leaf and take precedence over the channel error'
+);
+
+converter.failureMessage := "";
+channelData[0] := WORD#0;
+analogInput.ProcessInput();
+analogInput.Execute();
+
+AssertTrue(
+	Condition := analogInput.OperationalState = TOF_Automation.OPERATIONAL_STATE.STOPPED
+		AND_THEN analogInput.StatusWord = WORD#0
+		AND_THEN analogInput.Value = LREAL#100.0
+		AND_THEN analogInput.HasError
+		AND_THEN analogInput.Error.Severity = TOF_Core.ERROR_SEVERITY.CRITICAL
+		AND_THEN analogInput.Error.TopMessage = _ConversionErrorMessage,
+	Message := 'Successful input with a healthy channel must preserve the critical diagnostic while stopped'
+);
+
+analogInput.Reset();
+analogInput.Execute();
+
+AssertTrue(
+	Condition := analogInput.OperationalState = TOF_Automation.OPERATIONAL_STATE.WORKING
+		AND_THEN NOT analogInput.HasError
+		AND_THEN analogInput.RecoveryCalls = UDINT#0,
+	Message := 'Reset must clear the critical diagnostic and restore WORKING'
 );
 
 testFinished := TRUE;
@@ -261,6 +523,176 @@ AssertFalse(Condition := statusFB.Error, Message := 'Bit 14 must NOT be Error');
 
 statusFB.SetStatus(status := 16#8000);
 AssertTrue(Condition := statusFB.TxPDOToggle, Message := 'Bit 15 must be TxPDOToggle');
+
+testFinished := TRUE;
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="TestAnalogInputStatusWordIsolation" Id="{335fbac9-5b8b-4096-832f-b6f95332a5d8}" FolderPath="Tests\">
+      <Declaration><![CDATA[(*!
+<summary>Checks optional sampled status access through an existing read-only analog input interface.</summary>
+<description>
+Writes through the legacy decoded status reference and modifies a local copy of StatusWord. Only a
+subsequent ProcessInput() updates the authoritative sample and channel diagnostic.
+</description>
+*)
+METHOD PRIVATE TestAnalogInputStatusWordIsolation
+VAR
+	converter : TOF_Devices_IO.DirectAnalogValueConverter;
+	analogInput : TOF_Devices_IO.AnalogInput(name := "AI_StatusWord", parent := _AutomationRoot, converter := converter);
+	inputView : TOF_Devices_IO.IReadOnlyAnalogInput;
+	statusProvider : TOF_Devices_IO.IAnalogInputStatusProvider;
+	legacyStatus : REFERENCE TO TOF_Devices_IO.ANALOG_INPUT_STATUS;
+	statusCopy : WORD;
+	//! <summary>Simulated status word at offset 0 and signed INT value bits at offset 1.</summary>
+	channelData : ARRAY [0..1] OF WORD;
+	channel : POINTER TO TOF_IOModels.ANALOG_INPUT_INT_CHANNEL;
+END_VAR
+VAR_INST
+	testFinished : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN
+	RETURN;
+END_IF
+
+TEST(TestName := 'TestAnalogInputStatusWordIsolation');
+
+AssertTrue(Condition := analogInput.Initialize(), Message := 'The analog input must initialize');
+inputView := analogInput;
+
+IF NOT __QUERYINTERFACE(inputView, statusProvider) OR_ELSE statusProvider = 0 THEN
+	AssertTrue(Condition := FALSE, Message := 'IReadOnlyAnalogInput must support querying IAnalogInputStatusProvider');
+	testFinished := TRUE;
+	TEST_FINISHED();
+
+	RETURN;
+END_IF
+
+AssertTrue(Condition := statusProvider.StatusWord = WORD#0, Message := 'StatusWord must start at zero');
+
+channel := ADR(channelData);
+channelData[0] := _ChannelErrorStatus;
+channelData[1] := WORD#0;
+analogInput.BindToInt16IO(rawValues := channel^);
+inputView.ProcessInput();
+
+legacyStatus REF= inputView.Status;
+legacyStatus.SetStatus(status := WORD#0);
+statusCopy := statusProvider.StatusWord;
+statusCopy.6 := FALSE;
+inputView.Execute();
+
+AssertTrue(
+	Condition := statusCopy = WORD#0
+		AND_THEN NOT inputView.Status.Error
+		AND_THEN statusProvider.StatusWord = _ChannelErrorStatus
+		AND_THEN inputView.HasError
+		AND_THEN inputView.Error.TopMessage = _ChannelErrorMessage,
+	Message := 'Mutating the legacy view or local copy must leave the sampled word and diagnostic intact'
+);
+
+inputView.ProcessInput();
+inputView.Execute();
+
+AssertTrue(
+	Condition := inputView.Status.Error AND_THEN statusProvider.StatusWord = _ChannelErrorStatus,
+	Message := 'Input processing must refresh the legacy view from the sampled word'
+);
+
+testFinished := TRUE;
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="TestAnalogOutputEqualRawLimits" Id="{d5cdac20-868a-4137-92ea-1695e7840988}" FolderPath="Tests\">
+      <Declaration><![CDATA[(*!
+<summary>Checks that analog output processing writes the shared raw limit in each bound output type.</summary>
+<description>
+Uses distinct engineering limits and equal raw limits with ordinary output variables. The INT16 case also
+checks that the converter clears the union's upper bytes even when the source limits contain nonzero upper bytes.
+</description>
+*)
+METHOD PRIVATE TestAnalogOutputEqualRawLimits
+VAR
+	minEngineeringValue : LREAL := 0.0;
+	maxEngineeringValue : LREAL := 100.0;
+	minRawValue : TOF_Devices_IO.RAW_ANALOG_VALUE;
+	maxRawValue : TOF_Devices_IO.RAW_ANALOG_VALUE;
+	converter : TOF_Devices_IO.DynamicRangeAnalogValueConverter(
+		minAnalogValue := minEngineeringValue,
+		maxAnalogValue := maxEngineeringValue,
+		minRawValue := minRawValue,
+		maxRawValue := maxRawValue
+	);
+	analogOutput : TOF_Devices_IO.AnalogOutput(name := "AO_EqualRawLimits", parent := _AutomationRoot, converter := converter);
+
+	rawInt16Output : INT;
+	rawInt32Output : DINT;
+	rawReal32Output : REAL;
+	convertedValue : TOF_Devices_IO.RAW_ANALOG_VALUE;
+END_VAR
+VAR_INST
+	testFinished : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN
+	RETURN;
+END_IF
+
+TEST(TestName := 'TestAnalogOutputEqualRawLimits');
+
+analogOutput.Initialize();
+analogOutput.Value := 50.0;
+
+// Fill the upper two bytes of the INT16 limit to verify that they are cleared in the result.
+minRawValue.Int32 := DINT#16#12340000;
+minRawValue.Int16 := INT#-1;
+maxRawValue := minRawValue;
+
+analogOutput.BindToInt16IO(rawVariable := rawInt16Output);
+analogOutput.ProcessOutput();
+
+AssertEquals_INT(
+	Expected := INT#-1,
+	Actual := rawInt16Output,
+	Message := 'Equal INT16 limits must be written to the bound INT output'
+);
+
+convertedValue := converter.ConvertAnalogValueToRawValue(
+	analogValue := analogOutput.Value,
+	rawValueType := TOF_Devices_IO.RAW_ANALOG_VALUE_TYPE.INT16
+);
+
+AssertEquals_DINT(
+	Expected := DINT#16#0000FFFF,
+	Actual := convertedValue.Int32,
+	Message := 'The INT16 result must have zero upper bytes'
+);
+
+minRawValue.Int32 := DINT#-1;
+maxRawValue := minRawValue;
+
+analogOutput.BindToInt32IO(rawVariable := rawInt32Output);
+analogOutput.ProcessOutput();
+
+AssertEquals_DINT(
+	Expected := DINT#-1,
+	Actual := rawInt32Output,
+	Message := 'Equal INT32 limits must be written to the bound DINT output'
+);
+
+minRawValue.Real32 := REAL#1.0;
+maxRawValue := minRawValue;
+
+analogOutput.BindToReal32IO(rawVariable := rawReal32Output);
+analogOutput.ProcessOutput();
+
+AssertEquals_REAL(
+	Expected := REAL#1.0,
+	Actual := rawReal32Output,
+	Delta := REAL#0.0,
+	Message := 'Equal REAL32 limits must be written to the bound REAL output'
+);
 
 testFinished := TRUE;
 TEST_FINISHED();]]></ST>
