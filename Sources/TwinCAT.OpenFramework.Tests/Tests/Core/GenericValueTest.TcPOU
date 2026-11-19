@@ -10,7 +10,7 @@ License: https://opensource.org/license/mit
 (*!
 <summary>Exercises generic ordering and representation conversion queries.</summary>
 <description>
-Covers runtime type names and their use in diagnostics. Uses borrowed descriptors over method-local passive
+Covers checked writes to existing storage, runtime type names and their use in diagnostics. Uses borrowed descriptors over method-local passive
 values. No test transfers ownership or allocates payload
 storage. Scenarios run once through the existing TcUnit execution path.
 </description>
@@ -23,8 +23,95 @@ NaNOrdering();
 MixedNumericPrecision();
 SupportedConversionPairs();
 SystemTypeClassFormatting();
-TypeClassDiagnostics();]]></ST>
+TypeClassDiagnostics();
+ChangesCompatibleValues();]]></ST>
     </Implementation>
+    <Method Name="ChangesCompatibleValues" Id="{b1430ce2-d077-45ea-9ecb-9f1676661f1f}">
+      <Declaration><![CDATA[(*!
+<summary>Checks successful writes and direct rejection of type and capacity mismatches through both Try entry points.</summary>
+<description>
+Uses borrowed descriptors with the declared string capacities and verifies that ordinary rejection preserves the task's current exception payload.
+</description>
+*)
+METHOD ChangesCompatibleValues
+VAR
+	destination : TOF_Core.GENERIC_VALUE;
+	stored : REAL := 3.0;
+	integerInput : DINT := 5;
+	realInput : REAL := 5.0;
+	shortDestination : TOF_Core.GENERIC_VALUE;
+	shortText : STRING(1) := 'x';
+	longText : STRING(8) := 'longer';
+	source : TOF_Core.GENERIC_VALUE;
+	accepted : BOOL;
+	beforeFailure : TOF_Core.IException;
+	afterFailure : TOF_Core.IException;
+END_VAR
+VAR_INST
+	testFinished : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF testFinished THEN
+	RETURN;
+END_IF
+
+TEST(TestName := __POUNAME());
+destination := TOF_Core.GenericValueFactory.FromParts(
+	genericTypeClass := TOF_Core.GENERIC_TYPE_CLASS.REAL_32,
+	address := ADR(stored),
+	size := XSIZEOF(stored),
+	memoryManagementBehavior :=
+		TOF_Core.GENERIC_MEMORY_MANAGEMENT_BEHAVIOR.STORE_ORIGINAL_REFERENCE_AND_NOT_OWNS_MEMORY
+);
+
+beforeFailure := TOF_Core.ExceptionManager.GetLastException(
+	exceptionCode := __SYSTEM.ExceptionCode.RTSEXCPT_USER_EXCEPTION_BASE,
+	catchPointNamespaceName := CurrentNamespace.Name,
+	catchPointPOUName := __POUNAME(),
+	catchPointPosition := __POSITION()
+);
+accepted := destination.TryChangeValueByAny(value := integerInput);
+afterFailure := TOF_Core.ExceptionManager.GetLastException(
+	exceptionCode := __SYSTEM.ExceptionCode.RTSEXCPT_USER_EXCEPTION_BASE,
+	catchPointNamespaceName := CurrentNamespace.Name,
+	catchPointPOUName := __POUNAME(),
+	catchPointPosition := __POSITION()
+);
+AssertFalse(Condition := accepted, Message := 'DINT cannot replace REAL storage');
+AssertTrue(Condition := beforeFailure = afterFailure, Message := 'Type rejection must preserve the exception payload');
+AssertEquals_REAL(Expected := 3.0, Actual := stored, Delta := 0.0, Message := 'Rejected type changed storage');
+
+shortDestination := TOF_Core.GenericValueFactory.FromAny(
+	value := shortText,
+	isObject := FALSE,
+	memoryManagementBehavior :=
+		TOF_Core.GENERIC_MEMORY_MANAGEMENT_BEHAVIOR.STORE_ORIGINAL_REFERENCE_AND_NOT_OWNS_MEMORY
+);
+source := TOF_Core.GenericValueFactory.FromAny(
+	value := longText,
+	isObject := FALSE,
+	memoryManagementBehavior :=
+		TOF_Core.GENERIC_MEMORY_MANAGEMENT_BEHAVIOR.STORE_ORIGINAL_REFERENCE_AND_NOT_OWNS_MEMORY
+);
+accepted := shortDestination.TryChangeValueByAnyType(value := source.AsAnyType());
+afterFailure := TOF_Core.ExceptionManager.GetLastException(
+	exceptionCode := __SYSTEM.ExceptionCode.RTSEXCPT_USER_EXCEPTION_BASE,
+	catchPointNamespaceName := CurrentNamespace.Name,
+	catchPointPOUName := __POUNAME(),
+	catchPointPosition := __POSITION()
+);
+AssertFalse(Condition := accepted, Message := 'Undersized storage must reject the copy');
+AssertTrue(Condition := beforeFailure = afterFailure, Message := 'Capacity rejection must preserve the exception payload');
+AssertEquals_STRING(Expected := 'x', Actual := shortText, Message := 'Rejected size changed storage');
+
+accepted := destination.TryChangeValueByAny(value := realInput);
+AssertTrue(Condition := accepted, Message := 'Compatible REAL storage must accept a copy');
+AssertEquals_REAL(Expected := realInput, Actual := stored, Delta := 0.0, Message := 'Compatible copy lost the value');
+
+testFinished := TRUE;
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
     <Method Name="LongStringOrdering" Id="{a560cdae-6aec-43cf-b96d-7cd3a3100237}">
       <Declaration><![CDATA[(*!
 <summary>Checks ordering after a 299-character common prefix in both string encodings.</summary>

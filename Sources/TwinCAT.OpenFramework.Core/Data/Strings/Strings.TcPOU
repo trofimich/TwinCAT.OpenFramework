@@ -1071,13 +1071,12 @@ InternalAppend := TRUE;]]></ST>
     </Method>
     <Method Name="InternalAppendFit" Id="{64a20005-3f77-4b1a-908f-282a178d2bc7}" FolderPath="Service members\">
       <Declaration><![CDATA[(*!
-<summary>
-Appends a null-terminated STRING to a target descriptor, fitting available capacity with an ellipsis ('...')
-if exceeded.
-</summary>
+<summary>Appends text to a STRING buffer, marking truncation when capacity permits.</summary>
 <description>
-Validates target type and capacity. If the text does not fit, copies as many characters as can fit before
-'...' and appends null terminator. Returns FALSE on type mismatch or invalid target.
+Requires live, terminated input and writable target storage of the matching encoding.
+On overflow, capacities of at least three characters use three dots. Capacities of one or two use one dot.
+A buffer with room only for its terminator stays empty and succeeds. Missing terminator space or an invalid
+target returns FALSE. The caller handles native exceptions.
 </description>
 *)
 METHOD INTERNAL InternalAppendFit : BOOL
@@ -1124,12 +1123,14 @@ END_IF
 targetBytes := targetString.pValue;
 
 IF currentLength + sourceLength <= maxCapacity THEN
-	Tc2_Utilities.CONCAT2(
+	InternalAppendFit := Tc2_Utilities.CONCAT2(
 		pSrcString1 := targetString.pValue,
 		pSrcString2 := sourceString,
 		pDstString := targetString.pValue,
 		nDstSize := TO_UDINT(targetString.diSize)
 	);
+
+	RETURN;
 ELSE
 	IF maxCapacity >= 3 THEN
 		IF currentLength >= maxCapacity - 3 THEN
@@ -1224,7 +1225,7 @@ Clears the target before joining and consumes the enumerator from its current po
 encoding use a borrowed reference regardless of their byte size. Other types use AsString255 and a matching
 255-character local buffer, with that conversion method's truncation and exception behavior. Returns FALSE on
 an incompatible target or append failure; partial text is not rolled back. Referenced data must remain valid
-during each append.
+during each append. A latched allocation failure stops enumeration and returns FALSE.
 </description>
 *)
 METHOD INTERNAL InternalJoin : BOOL
@@ -1243,7 +1244,11 @@ VAR
 	currentIndex : UDINT;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[IF targetString.TypeClass <> __SYSTEM.TYPE_CLASS.TYPE_STRING THEN
+        <ST><![CDATA[IF DynamicMemoryManager.HasAllocationFailed THEN
+	RETURN;
+END_IF
+
+IF targetString.TypeClass <> __SYSTEM.TYPE_CLASS.TYPE_STRING THEN
 	RETURN;
 END_IF
 
@@ -1251,8 +1256,16 @@ Tc2_System.MEMSET(destAddr := targetString.pValue, fillByte := 0, n := TO_UDINT(
 
 InternalJoin := TRUE;
 
-WHILE sourceEnumerator.MoveNext() DO
+WHILE NOT DynamicMemoryManager.HasAllocationFailed AND_THEN sourceEnumerator.MoveNext() DO
+	IF DynamicMemoryManager.HasAllocationFailed THEN
+		EXIT;
+	END_IF
+
 	currentValue REF= sourceEnumerator.Current;
+
+	IF DynamicMemoryManager.HasAllocationFailed THEN
+		EXIT;
+	END_IF
 	
 	IF NOT __ISVALIDREF(currentValue) OR_ELSE currentIndex < startIndex THEN
 		currentIndex := currentIndex + 1;
@@ -1300,9 +1313,11 @@ WHILE sourceEnumerator.MoveNext() DO
 	currentIndex := currentIndex + 1;
 	
 	IF count > 0 AND_THEN currentCount >= count THEN
-		RETURN;
+		EXIT;
 	END_IF	
-END_WHILE]]></ST>
+END_WHILE
+
+InternalJoin := InternalJoin AND NOT DynamicMemoryManager.HasAllocationFailed;]]></ST>
       </Implementation>
     </Method>
     <Method Name="InternalReplaceInSource" Id="{0ac24766-5e3a-42f7-a2a0-58aa460f844f}" FolderPath="Service members\">
@@ -1674,7 +1689,8 @@ from its current position without resetting it. Invalid Current references are s
 between included values, including empty text values. Does not dispose or retain the enumerator; its lifetime
 remains the caller's responsibility. Raises NotSupportedException for the wrong target type,
 ArgumentNotSpecifiedException for a null enumerator and TargetVariableMemoryOverflowException on append
-failure. Enumerator and conversion exceptions propagate. Partial text and the advanced enumerator position are
+failure. A latched allocation failure is raised before reporting append failure.
+Enumerator and conversion exceptions propagate. Partial text and the advanced enumerator position are
 not rolled back. The caller supplies live writable target storage and source data that remain valid during the
 operation. Strings of the target encoding are joined through a borrowed reference without a 255-character
 intermediate limit. Other values use AsString255 with its default conversion policy and 255-character
@@ -1739,6 +1755,8 @@ IF NOT InternalJoin(
 	startIndex := startIndex,
 	count := count
 ) THEN
+	DynamicMemoryManager.RaiseIfAllocationFailed();
+
 	Exceptions.ThrowTargetVariableMemoryOverflow(
 		sourceNamespaceName := NamespaceName,
 		sourceClassName := ClassName,
@@ -2179,15 +2197,12 @@ __ENDTRY]]></ST>
     </Method>
     <Method Name="TryAppendFit" Id="{64a20002-3f77-4b1a-908f-282a178d2bc7}" FolderPath="Append\">
       <Declaration><![CDATA[(*!
-<summary>
-Appends one STRING to a caller-owned STRING buffer, fitting available capacity with an ellipsis ('...') if
-exceeded.
-</summary>
+<summary>Appends text to a STRING buffer, marking truncation when capacity permits.</summary>
 <description>
-Requires a writable STRING target with valid capacity metadata. If the appended text exceeds target capacity,
-it is truncated so the final characters are '...' followed by a null-terminator. Returns TRUE if the text was
-appended (including when truncated); returns FALSE if target is not a valid STRING or has zero capacity.
-Catches exceptions and returns FALSE.
+Requires live, terminated input and writable target storage of the matching encoding.
+On overflow, capacities of at least three characters use three dots. Capacities of one or two use one dot.
+A buffer with room only for its terminator stays empty and succeeds. Missing terminator space or an invalid
+target returns FALSE. Exceptions are contained.
 </description>
 <param name="targetString">Writable STRING buffer to append to.</param>
 <param name="sourceString">Text to append; empty leaves the target unchanged.</param>
@@ -2209,15 +2224,13 @@ __ENDTRY]]></ST>
     </Method>
     <Method Name="TryAppendFit255" Id="{f69b240f-5523-4365-b6d7-898cb6a46d47}" FolderPath="Append\">
       <Declaration><![CDATA[(*!
-<summary>
-Appends up to ten STRING fragments in argument order, fitting available capacity with an ellipsis ('...') if
-exceeded.
-</summary>
+<summary>Appends ordered fragments to a STRING buffer, marking truncation when capacity permits.</summary>
 <description>
-Requires a writable STRING target with valid capacity metadata. Fragments are appended in order, skipping
-empty fragments. If the combined text exceeds target capacity, it is truncated so the final characters are
-'...' followed by a null-terminator. Returns TRUE if text was appended (including when truncated); returns
-FALSE if target is not a valid STRING or has zero capacity. Catches exceptions and returns FALSE.
+Requires live, terminated input and writable target storage of the matching encoding.
+Processes fragments in order. Completed appends remain visible on failure.
+On overflow, capacities of at least three characters use three dots. Capacities of one or two use one dot.
+A buffer with room only for its terminator stays empty and succeeds. Missing terminator space or an invalid
+target returns FALSE. Exceptions are contained.
 </description>
 <param name="targetString">Writable STRING buffer to append to.</param>
 <param name="sourceString1">First text fragment to append.</param>
@@ -2368,6 +2381,7 @@ __ENDTRY]]></ST>
       <Declaration><![CDATA[(*!
 <summary>Joins enumerated values into a caller-owned STRING buffer.</summary>
 <description>
+Returns FALSE on terminal allocation failure, including when an enumerator catches the original exception.
 Borrows and advances the enumerator from its current position. Clears the target before joining; previous
 target contents and enumerator position are not restored on failure. Catches exceptions and returns FALSE;
 terminal allocation state is preserved for the task boundary. Partial writes are not rolled back. Valid buffer

@@ -2382,6 +2382,40 @@ END_VAR]]></Declaration>
         <ST><![CDATA[ChangeValueByAnyType(value := value, isObject := isObject);]]></ST>
       </Implementation>
     </Method>
+    <Method Name="copyMappedValue" Id="{1314e191-897c-4c5d-8cd0-6938238073f2}">
+      <Declaration><![CDATA[(*!
+<summary>Copies a compatible source into existing storage and reports validation or native copy failure.</summary>
+<description>
+Both descriptors must refer to live storage. Type and capacity are checked before writing. No allocation,
+ownership transfer or descriptor mutation occurs. The caller handles native exceptions and partial writes.
+</description>
+<param name="value">Borrowed source descriptor.</param>
+<param name="sourceType">Generic category already resolved for the source.</param>
+*)
+METHOD PRIVATE copyMappedValue : GENERIC_VALUE_COPY_RESULT
+VAR_INPUT
+	value : __SYSTEM.AnyType;
+	sourceType : GENERIC_TYPE_CLASS;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF sourceType <> TypeClass THEN
+	copyMappedValue := GENERIC_VALUE_COPY_RESULT.INCOMPATIBLE_TYPE;
+	RETURN;
+END_IF
+
+IF Size < TO_ULINT(value.diSize) THEN
+	copyMappedValue := GENERIC_VALUE_COPY_RESULT.INSUFFICIENT_CAPACITY;
+	RETURN;
+END_IF
+
+IF Tc2_System.MEMCPY(destAddr := Address, srcAddr := value.pValue, n := TO_UDINT(value.diSize)) = 0 THEN
+	copyMappedValue := GENERIC_VALUE_COPY_RESULT.COPY_FAILED;
+	RETURN;
+END_IF
+
+copyMappedValue := GENERIC_VALUE_COPY_RESULT.COPIED;]]></ST>
+      </Implementation>
+    </Method>
     <Method Name="ChangeValueByAnyType" Id="{1e16a561-f4aa-4df6-80a7-92686d04f493}" FolderPath="ChangeValue\">
       <Declaration><![CDATA[(*!
 <summary>Copies bytes from an AnyType value into the existing generic storage.</summary>
@@ -2389,7 +2423,7 @@ END_VAR]]></Declaration>
 Maps the source type using isObject, then rejects a mismatched generic type through
 IncompatibleGenericValueTypeException or insufficient destination capacity through
 TargetVariableMemoryOverflowException. Copies value.diSize bytes with MEMCPY; a zero return raises
-StandardException. Source type mapping exceptions propagate. Does not allocate, clone objects, change
+StandardException. Source type mapping exceptions propagate. Successful copying does not allocate, clone objects, change
 descriptor fields or transfer ownership; bytes beyond the copied region remain unchanged. The caller supplies
 valid descriptors and live storage; this method does not validate memory lifetime or guarantee
 overlapping-copy behavior. Descendants cannot override this descriptor operation; customize value equality
@@ -2410,38 +2444,37 @@ END_VAR]]></Declaration>
 	isObject := isObject
 );
 
-IF argumentDataType <> TypeClass THEN
-	Exceptions.ThrowIncompatibleGenericValueType(
-		sourceNamespaceName := NamespaceName,
-		sourceClassName := ClassName,
-		sourcePOUName := __POUNAME(),
-		sourcePosition := __POSITION(),
-		validatedObjectName := "value",
-		actualTypeClass := argumentDataType,
-		expectedTypeClass := TypeClass
-	);
-END_IF
+CASE copyMappedValue(value := value, sourceType := argumentDataType) OF
+	GENERIC_VALUE_COPY_RESULT.INCOMPATIBLE_TYPE:
+		Exceptions.ThrowIncompatibleGenericValueType(
+			sourceNamespaceName := NamespaceName,
+			sourceClassName := ClassName,
+			sourcePOUName := __POUNAME(),
+			sourcePosition := __POSITION(),
+			validatedObjectName := "value",
+			actualTypeClass := argumentDataType,
+			expectedTypeClass := TypeClass
+		);
 
-IF Size < TO_ULINT(value.diSize) THEN
-	Exceptions.ThrowTargetVariableMemoryOverflow(
-		sourceNamespaceName := NamespaceName,
-		sourceClassName := ClassName,
-		sourcePOUName := __POUNAME(),
-		sourcePosition := __POSITION(),
-		targetVariableName := 'Size',
-		targetVariableSize := Size
-	);
-END_IF
+	GENERIC_VALUE_COPY_RESULT.INSUFFICIENT_CAPACITY:
+		Exceptions.ThrowTargetVariableMemoryOverflow(
+			sourceNamespaceName := NamespaceName,
+			sourceClassName := ClassName,
+			sourcePOUName := __POUNAME(),
+			sourcePosition := __POSITION(),
+			targetVariableName := 'Size',
+			targetVariableSize := Size
+		);
 
-IF Tc2_System.MEMCPY(destAddr := Address, srcAddr := value.pValue, n := TO_UDINT(value.diSize)) = 0 THEN
-	Exceptions.ThrowStandard(
-		sourceNamespaceName := NamespaceName,
-		sourceClassName := ClassName,
-		sourcePOUName := __POUNAME(),
-		sourcePosition := __POSITION(),
-		message := "Tc2_System.MEMCPY returned error (value 0)"
-	); 		
-END_IF]]></ST>
+	GENERIC_VALUE_COPY_RESULT.COPY_FAILED:
+		Exceptions.ThrowStandard(
+			sourceNamespaceName := NamespaceName,
+			sourceClassName := ClassName,
+			sourcePOUName := __POUNAME(),
+			sourcePosition := __POSITION(),
+			message := "Tc2_System.MEMCPY returned error (value 0)"
+		);
+END_CASE]]></ST>
       </Implementation>
     </Method>
     <Property Name="ClassName" Id="{a1f78ed3-d25a-4e81-8b88-934a58828338}">
@@ -3448,7 +3481,9 @@ IsMemoryOwner := FALSE;]]></ST>
       <Declaration><![CDATA[(*!
 <summary>Attempts to copy a compatible value into the existing generic storage.</summary>
 <description>
-Returns FALSE on type, capacity or copy exceptions. Does not change descriptor fields or transfer ownership.
+Unsupported types, incompatible storage and copy failure return FALSE without creating a diagnostic exception.
+Native exceptions are contained. A latched allocation failure returns FALSE.
+Does not change descriptor fields or transfer ownership.
 Requires live source and destination storage; copied bytes are not rolled back on failure. Preserves terminal
 allocation state for the task boundary. Descendants cannot override this descriptor operation; customize value
 equality through IEqualityComparer or the stored object equality contract.
@@ -3461,19 +3496,16 @@ VAR_INPUT
 END_VAR
 ]]></Declaration>
       <Implementation>
-        <ST><![CDATA[__TRY
-	ChangeValueByAnyType(value := value, isObject := isObject);
-	TryChangeValueByAny := TRUE;
-__CATCH
-	TryChangeValueByAny := FALSE;
-__ENDTRY]]></ST>
+        <ST><![CDATA[TryChangeValueByAny := TryChangeValueByAnyType(value := value, isObject := isObject);]]></ST>
       </Implementation>
     </Method>
     <Method Name="TryChangeValueByAnyType" Id="{4ed65d07-87f2-4259-80eb-13281b15e53c}" FolderPath="ChangeValue\">
       <Declaration><![CDATA[(*!
 <summary>Attempts to copy a compatible value into the existing generic storage.</summary>
 <description>
-Returns FALSE on type, capacity or copy exceptions. Does not change descriptor fields or transfer ownership.
+Unsupported types, incompatible storage and copy failure return FALSE without creating a diagnostic exception.
+Native exceptions are contained. A latched allocation failure returns FALSE.
+Does not change descriptor fields or transfer ownership.
 Requires live source and destination storage; copied bytes are not rolled back on failure. Preserves terminal
 allocation state for the task boundary. Descendants cannot override this descriptor operation; customize value
 equality through IEqualityComparer or the stored object equality contract.
@@ -3484,14 +3516,32 @@ VAR_INPUT
 	value : __SYSTEM.AnyType;
 	isObject : BOOL := FALSE;
 END_VAR
+VAR
+	sourceType : GENERIC_TYPE_CLASS;
+END_VAR
 ]]></Declaration>
       <Implementation>
-        <ST><![CDATA[__TRY
-	ChangeValueByAnyType(value := value, isObject := isObject);
-	TryChangeValueByAnyType := TRUE;
+        <ST><![CDATA[IF DynamicMemoryManager.HasAllocationFailed THEN
+	RETURN;
+END_IF
+
+__TRY
+	IF GenericTypeClassConvertor.TryGetGenericTypeClassBySystemAnyType(
+		systemAnyType := value,
+		isObject := isObject,
+		genericTypeClass => sourceType
+	)
+	THEN
+		TryChangeValueByAnyType := copyMappedValue(value := value, sourceType := sourceType)
+			= GENERIC_VALUE_COPY_RESULT.COPIED;
+	END_IF
 __CATCH
 	TryChangeValueByAnyType := FALSE;
-__ENDTRY]]></ST>
+__ENDTRY
+
+IF DynamicMemoryManager.HasAllocationFailed THEN
+	TryChangeValueByAnyType := FALSE;
+END_IF]]></ST>
       </Implementation>
     </Method>
     <Method Name="TryCopyTo" Id="{ce4998f1-fc8d-443b-ab31-7fcdb66ae168}">

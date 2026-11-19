@@ -1063,13 +1063,12 @@ InternalAppend := TRUE;]]></ST>
     </Method>
     <Method Name="InternalAppendFit" Id="{64a10005-58ac-448f-9daf-cbacb656ba72}" FolderPath="Service members\">
       <Declaration><![CDATA[(*!
-<summary>
-Appends a null-terminated WSTRING to a target descriptor, fitting available capacity with an ellipsis ('…') if
-exceeded.
-</summary>
+<summary>Appends text to a WSTRING buffer, marking truncation when capacity permits.</summary>
 <description>
-Validates target type and capacity. If the text does not fit, copies as many characters as can fit before
-U+2026 ('…') and appends null terminator. Returns FALSE on type mismatch or invalid target.
+Requires live, terminated input and writable target storage of the matching encoding.
+On overflow, a target with character capacity uses U+2026 to mark truncation.
+A buffer with room only for its terminator stays empty and succeeds. Missing terminator space or an invalid
+target returns FALSE. The caller handles native exceptions.
 </description>
 *)
 METHOD INTERNAL InternalAppendFit : BOOL
@@ -1116,12 +1115,14 @@ END_IF
 targetWords := targetString.pValue;
 
 IF currentLength + sourceLength <= maxCapacity THEN
-	Tc2_Utilities.WCONCAT2(
+	InternalAppendFit := Tc2_Utilities.WCONCAT2(
 		pSrcWString1 := targetString.pValue,
 		pSrcWString2 := sourceString,
 		pDstWString := targetString.pValue,
 		nDstSize := TO_UDINT(targetString.diSize)
 	);
+
+	RETURN;
 ELSE
 	IF maxCapacity > 0 THEN
 		IF currentLength >= maxCapacity - 1 THEN
@@ -1211,6 +1212,7 @@ END_VAR
       <Declaration><![CDATA[(*!
 <summary>Builds joined text from the selected enumerated values in the supplied buffer.</summary>
 <description>
+A latched allocation failure stops enumeration and reports FALSE.
 Clears the target before joining and consumes the enumerator from its current position. Strings of the target
 encoding use a borrowed reference regardless of their byte size. Other types use AsWString255 and a matching
 255-character local buffer, with that conversion method's truncation and exception behavior. Returns FALSE on
@@ -1234,7 +1236,11 @@ VAR
 	currentIndex : UDINT;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[IF targetString.TypeClass <> __SYSTEM.TYPE_CLASS.TYPE_WSTRING THEN
+        <ST><![CDATA[IF DynamicMemoryManager.HasAllocationFailed THEN
+	RETURN;
+END_IF
+
+IF targetString.TypeClass <> __SYSTEM.TYPE_CLASS.TYPE_WSTRING THEN
 	RETURN;
 END_IF
 
@@ -1242,8 +1248,16 @@ Tc2_System.MEMSET(destAddr := targetString.pValue, fillByte := 0, n := TO_UDINT(
 
 InternalJoin := TRUE;
 
-WHILE sourceEnumerator.MoveNext() DO
+WHILE NOT DynamicMemoryManager.HasAllocationFailed AND_THEN sourceEnumerator.MoveNext() DO
+	IF DynamicMemoryManager.HasAllocationFailed THEN
+		EXIT;
+	END_IF
+
 	currentValue REF= sourceEnumerator.Current;
+
+	IF DynamicMemoryManager.HasAllocationFailed THEN
+		EXIT;
+	END_IF
 	
 	IF NOT __ISVALIDREF(currentValue) OR_ELSE currentIndex < startIndex THEN
 		currentIndex := currentIndex + 1;
@@ -1291,9 +1305,11 @@ WHILE sourceEnumerator.MoveNext() DO
 	currentIndex := currentIndex + 1;
 	
 	IF count > 0 AND_THEN currentCount >= count THEN
-		RETURN;
+		EXIT;
 	END_IF	
-END_WHILE]]></ST>
+END_WHILE
+
+InternalJoin := InternalJoin AND NOT DynamicMemoryManager.HasAllocationFailed;]]></ST>
       </Implementation>
     </Method>
     <Method Name="InternalReplaceInSource" Id="{ba1ad49c-b07c-4f21-b23e-4e0400c679ac}" FolderPath="Service members\">
@@ -1661,6 +1677,7 @@ IsUnsignedInteger := digitFound;]]></ST>
       <Declaration><![CDATA[(*!
 <summary>Joins selected enumerated values into the supplied WSTRING buffer with a separator.</summary>
 <description>
+A latched allocation failure is raised before reporting append failure.
 Validates the target string type and a non-null enumerator, then clears the target and advances the enumerator
 from its current position without resetting it. Invalid Current references are skipped. Inserts separators
 between included values, including empty text values. Does not dispose or retain the enumerator; its lifetime
@@ -1731,6 +1748,8 @@ IF NOT InternalJoin(
 	startIndex := startIndex,
 	count := count
 ) THEN
+	DynamicMemoryManager.RaiseIfAllocationFailed();
+
 	Exceptions.ThrowTargetVariableMemoryOverflow(
 		sourceNamespaceName := NamespaceName,
 		sourceClassName := ClassName,
@@ -2153,15 +2172,12 @@ __ENDTRY]]></ST>
     </Method>
     <Method Name="TryAppendFit" Id="{64a10002-58ac-448f-9daf-cbacb656ba72}" FolderPath="Append\">
       <Declaration><![CDATA[(*!
-<summary>
-Appends one WSTRING to a caller-owned WSTRING buffer, fitting available capacity with an ellipsis ('…') if
-exceeded.
-</summary>
+<summary>Appends text to a WSTRING buffer, marking truncation when capacity permits.</summary>
 <description>
-Requires a writable WSTRING target with valid capacity metadata. If the appended text exceeds target capacity,
-it is truncated so the final character is U+2026 ('…') followed by a null-terminator. Returns TRUE if the text
-was appended (including when truncated); returns FALSE if target is not a valid WSTRING or has zero capacity.
-Catches exceptions and returns FALSE.
+Requires live, terminated input and writable target storage of the matching encoding.
+On overflow, a target with character capacity uses U+2026 to mark truncation.
+A buffer with room only for its terminator stays empty and succeeds. Missing terminator space or an invalid
+target returns FALSE. Exceptions are contained.
 </description>
 <param name="targetString">Writable WSTRING buffer to append to.</param>
 <param name="sourceString">Text to append; empty leaves the target unchanged.</param>
@@ -2183,15 +2199,13 @@ __ENDTRY]]></ST>
     </Method>
     <Method Name="TryAppendFit255" Id="{f9317c69-e546-44a4-884f-7c9d6408b329}" FolderPath="Append\">
       <Declaration><![CDATA[(*!
-<summary>
-Appends up to ten WSTRING fragments in argument order, fitting available capacity with an ellipsis ('…') if
-exceeded.
-</summary>
+<summary>Appends ordered fragments to a WSTRING buffer, marking truncation when capacity permits.</summary>
 <description>
-Requires a writable WSTRING target with valid capacity metadata. Fragments are appended in order, skipping
-empty fragments. If the combined text exceeds target capacity, it is truncated so the final character is
-U+2026 ('…') followed by a null-terminator. Returns TRUE if text was appended (including when truncated);
-returns FALSE if target is not a valid WSTRING or has zero capacity. Catches exceptions and returns FALSE.
+Requires live, terminated input and writable target storage of the matching encoding.
+Processes fragments in order. Completed appends remain visible on failure.
+On overflow, a target with character capacity uses U+2026 to mark truncation.
+A buffer with room only for its terminator stays empty and succeeds. Missing terminator space or an invalid
+target returns FALSE. Exceptions are contained.
 </description>
 <param name="targetString">Writable WSTRING buffer to append to.</param>
 <param name="sourceString1">First text fragment to append.</param>
@@ -2340,6 +2354,7 @@ __ENDTRY]]></ST>
       <Declaration><![CDATA[(*!
 <summary>Joins enumerated values into a WSTRING buffer using a WSTRING separator.</summary>
 <description>
+A latched allocation failure stops enumeration and reports FALSE.
 Borrows the target and enumerator during the call. Returns the internal join result, or FALSE if an exception
 is caught. Earlier target modifications are not rolled back on failure. Catches exceptions and returns FALSE;
 terminal allocation state is preserved for the task boundary. Partial writes are not rolled back. Valid buffer
