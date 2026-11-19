@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <TcPlcObject Version="1.1.0.1">
   <POU Name="LeafAutomationComponent" Id="{7c21300f-1ad4-4217-9d49-d0f060249ecb}" SpecialFunc="None">
     <Declaration><![CDATA[(*
@@ -91,6 +91,10 @@ __ENDTRY]]></ST>
     <Method Name="Enable" Id="{f7b45f9a-e580-4c1c-b27c-81b9ee1ab687}">
       <Declaration><![CDATA[(*!
 <summary>Enables the leaf component and invokes OnEnable.</summary>
+<description>
+Enabling does not automatically reset a STOPPED leaf; a disabled stopped leaf remains STOPPED after Enable
+until explicitly Reset. If the parent is disabled, enables the parent with includeChildren := FALSE.
+</description>
 <param name="includeChildren">Ignored for leaf components as they have no children.</param>
 *)
 METHOD FINAL Enable
@@ -134,7 +138,12 @@ __ENDTRY]]></ST>
     </Method>
     <Method Name="Execute" Id="{54d74276-cad2-4fd8-8917-0010f6191e07}">
       <Declaration><![CDATA[(*!
-<summary>Advances leaf cyclic execution in the WORKING state by invoking OnWorking.</summary>
+<summary>Advances cyclic execution for an enabled WORKING or STOPPED leaf.</summary>
+<description>
+In WORKING, clears any existing non-critical error and invokes OnRecover before OnWorking; an exception in
+OnRecover always records a copied CRITICAL error, stops the leaf without consulting ExceptionHandlingPolicy,
+and skips OnWorking. In STOPPED, invokes OnStopped on each Execute call and logs failures.
+</description>
 *)
 {attribute 'estimated-stack-usage' := '99'}
 METHOD FINAL Execute
@@ -155,9 +164,9 @@ CASE _OperationalState OF
 	OPERATIONAL_STATE.WORKING:
 		// automatic non-critical error recovering
 		IF _OperationalState = OPERATIONAL_STATE.WORKING
-	AND_THEN HasError
-	AND_THEN _Error.Severity <> TOF_Core.ERROR_SEVERITY.CRITICAL
-THEN
+			AND_THEN HasError
+			AND_THEN _Error.Severity <> TOF_Core.ERROR_SEVERITY.CRITICAL
+		THEN
 			_Error.Clear();
 			
 			__TRY
@@ -169,18 +178,15 @@ THEN
 					catchPointPOUName := __POUNAME(),
 					catchPointPosition := __POSITION()
 				);
-								
-				exceptionReaction := OnHandleException(exception := exception, failedMethodName := 'OnRecover');
-			
+
+				// An OnRecover failure always stops the leaf with a critical error without consulting the policy.
 				ProcessException(
 					exception := exception,
-					exceptionReaction := exceptionReaction,
+					exceptionReaction := TOF_Core.EXCEPTION_REACTION.SET_ERROR_AND_STOP,
 					exceptionSourceHint := "OnRecover error"
 				);
-			
-				IF exceptionReaction = TOF_Core.EXCEPTION_REACTION.SET_ERROR_AND_STOP THEN
-					RETURN;
-				END_IF		
+
+				RETURN;
 			__ENDTRY
 		END_IF
 		
@@ -397,12 +403,16 @@ PROPERTY FINAL Parent : IParentAutomationComponent]]></Declaration>
     <Method Name="Reset" Id="{39108ecc-e8fc-41d2-84a8-8d829dba9e49}">
       <Declaration><![CDATA[(*!
 <summary>Resets the leaf component from an error state and transitions back to WORKING.</summary>
+<description>
+Served only while Enabled and STOPPED. Clears the previous error before invoking OnReset. If OnReset raises
+an exception, the leaf remains STOPPED with a copied CRITICAL error without consulting ExceptionHandlingPolicy.
+Completed hook effects are not rolled back.
+</description>
 *)
 METHOD FINAL Reset
 VAR
 	exceptionCode : __SYSTEM.ExceptionCode;
 	exception : TOF_Core.IException;	
-	exceptionReaction : TOF_Core.EXCEPTION_REACTION;
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[IF NOT Enabled OR_ELSE _OperationalState <> OPERATIONAL_STATE.STOPPED THEN
@@ -422,24 +432,22 @@ __CATCH(exceptionCode)
 		catchPointPOUName := __POUNAME(),
 		catchPointPosition := __POSITION()
 	);
-					
-	exceptionReaction := OnHandleException(exception := exception, failedMethodName := 'OnReset');
 
+	// A failed reset always keeps the leaf STOPPED with a critical error; the exception policy is not consulted.
 	ProcessException(
 		exception := exception,
-		exceptionReaction := exceptionReaction,
+		exceptionReaction := TOF_Core.EXCEPTION_REACTION.SET_ERROR_AND_STOP,
 		exceptionSourceHint := "OnReset error"
 	);
-
-	IF exceptionReaction = TOF_Core.EXCEPTION_REACTION.SET_ERROR_AND_STOP THEN
-		RETURN;
-	END_IF
 __ENDTRY]]></ST>
       </Implementation>
     </Method>
     <Method Name="Stop" Id="{73828ae5-99ee-4c51-a656-702f6c6b2044}">
       <Declaration><![CDATA[(*!
 <summary>Stops the leaf component and transitions to the STOPPED state.</summary>
+<description>
+Transitions a WORKING leaf to OPERATIONAL_STATE.STOPPED regardless of Enabled.
+</description>
 <param name="reason">Descriptive reason for stopping.</param>
 *)
 METHOD FINAL Stop
@@ -447,7 +455,7 @@ VAR_INPUT
 	reason : WSTRING(255) := "External stop";
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[IF NOT _Enabled OR_ELSE _OperationalState <> OPERATIONAL_STATE.WORKING THEN
+        <ST><![CDATA[IF _OperationalState <> OPERATIONAL_STATE.WORKING THEN
 	RETURN;
 END_IF
 

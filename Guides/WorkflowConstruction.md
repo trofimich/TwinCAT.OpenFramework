@@ -107,8 +107,8 @@ END_VAR
 ```
 
 ```iecst
-elements[0] := TOF_Workflow.Workflows.DescribeElement(value := firstLimit);
-elements[1] := TOF_Workflow.Workflows.DescribeElement(value := secondLimit);
+elements[0] := TOF_Workflow.Workflows.GetValueDescriptor(value := firstLimit);
+elements[1] := TOF_Workflow.Workflows.GetValueDescriptor(value := secondLimit);
 sequence^.DeclareArray(name := 'RetryLimits', initialValues := ADR(elements[0]), elementCount := 2);
 ```
 
@@ -122,5 +122,5 @@ until it returns FALSE. It skips borrowed PLC bindings. `ElementType` preserves 
 exact IEC category (for example, BYTE or USINT), `ElementSize` gives its byte width
 and `IsArray` distinguishes a scalar from a singleton. For each index from zero
 through `ElementCount - 1`, use `CopyInitialElement` with a descriptor for matching
-writable storage. For a PLC variable, supply `Workflows.DescribeElement(value := destination)`.
+writable storage. For a PLC variable, supply `Workflows.GetValueDescriptor(value := destination)`.
 A format writer can also provide a descriptor for its own runtime-sized buffer.

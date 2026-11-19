@@ -93,24 +93,48 @@ checkResult(result := _Writer.StartObject());]]></ST>
     <Method Name="checkResult" Id="{d79406aa-8c8c-476b-8e9c-bf842fb09c28}" FolderPath="Service methods\">
       <Declaration><![CDATA[(*!
 <summary>Propagates a native writer failure.</summary>
-<description>The caller discards an incomplete document.</description>
-<param name="result">HRESULT returned by native writer operation.</param>
+<description>
+A nonzero result raises StandardException with the original HRESULT. For value conversion failures the
+diagnostic includes the field name and native datatype. The caller discards an incomplete document.
+</description>
+<param name="result">HRESULT returned by the native writer operation.</param>
+<param name="name">Value property name, or empty for array items.</param>
+<param name="typeName">Native datatype name for value conversion, or empty for other operations.</param>
 *)
 METHOD PRIVATE checkResult
 VAR_INPUT
 	result : HRESULT;
+	name : STRING := '';
+	typeName : STRING := '';
+END_VAR
+VAR
+	message : TOF_Core.ERROR_MESSAGE;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[IF result <> 0 THEN
-	TOF_Core.Exceptions.ThrowStandard(
-		sourceNamespaceName := NamespaceName,
-		sourceClassName := ClassName,
-		sourcePOUName := __POUNAME(),
-		sourcePosition := __POSITION(),
-		message := "Cannot write configuration document",
-		errorCode := TO_UDINT(result)
+        <ST><![CDATA[IF result = 0 THEN
+	RETURN;
+END_IF
+
+message := "Cannot write configuration document";
+
+IF typeName <> '' THEN
+	message := TOF_Core.WideStrings.Concat255(
+		"Cannot write configuration value '",
+		TO_WSTRING(name),
+		"' using native datatype '",
+		TO_WSTRING(typeName),
+		"'"
 	);
-END_IF]]></ST>
+END_IF
+
+TOF_Core.Exceptions.ThrowStandard(
+	sourceNamespaceName := NamespaceName,
+	sourceClassName := ClassName,
+	sourcePOUName := __POUNAME(),
+	sourcePosition := __POSITION(),
+	message := message,
+	errorCode := TO_UDINT(result)
+);]]></ST>
       </Implementation>
     </Method>
     <Property Name="ClassName" Id="{91e1529d-4885-4730-975b-71579ddf2c58}">
@@ -235,7 +259,8 @@ EndDocument(document := document);]]></ST>
 <summary>Copies one elementary IEC value.</summary>
 <description>
 Writes a property key when name is nonempty, then writes the symbol value. Property names within an enclosing
-object must be unique. Propagates native writer errors to the active serialization call.
+object must be unique. Propagates native writer errors to the active serialization call. A native value conversion
+failure reports the field name and requested native datatype.
 </description>
 <param name="name">Value property name, or empty for array items.</param>
 <param name="valueType">Elementary IEC type class.</param>
@@ -251,6 +276,7 @@ VAR_INPUT
 END_VAR
 VAR
 	typeName : STRING;
+	written : BOOL;
 	result : HRESULT;
 END_VAR]]></Declaration>
       <Implementation>
@@ -269,17 +295,19 @@ IF typeName = '' THEN
 	checkResult(result := _InvalidArgument);
 END_IF
 
-IF NOT _Converter.AddJsonValueFromSymbol(
+written := _Converter.AddJsonValueFromSymbol(
 	fbWriter := _Writer,
 	sDatatype := typeName,
 	nData := size,
 	pData := data,
-	hrErrorCode => result) 
-THEN
-	checkResult(result := SEL(result = 0, result, _UnspecifiedFailure));
+	hrErrorCode => result
+);
+
+IF NOT written AND_THEN result = 0 THEN
+	result := _UnspecifiedFailure;
 END_IF
 
-checkResult(result := result);]]></ST>
+checkResult(result := result, name := name, typeName := typeName);]]></ST>
       </Implementation>
     </Method>
   </POU>

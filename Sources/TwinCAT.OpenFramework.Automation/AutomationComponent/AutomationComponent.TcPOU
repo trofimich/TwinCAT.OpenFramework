@@ -19,7 +19,8 @@ abort delivery and propagate to the caller; effects of handlers already invoked 
 Initialization validates required dependencies before hooks. Child types require a live borrowed parent.
 FALSE reports pending initialization or failure; INVALID must never report successful initialization.
 Required error snapshots precede logging callbacks so they preserve the primary diagnostic.
-A runtime stop reaction also marks a disabled working component STOPPED, preserving its Reset requirement.
+Stop transitions a WORKING component (and, for branches, all WORKING children) to STOPPED regardless of
+Enabled, so a runtime stop reaction also stops a disabled working component and preserves its Reset requirement.
 </description>
 *)
 
@@ -94,13 +95,28 @@ END_VAR]]></Declaration>
       </Implementation>
     </Method>
     <Method Name="Disable" Id="{0d1971e1-5f59-4975-85f2-7a8ffd650e1f}">
-      <Declaration><![CDATA[METHOD ABSTRACT Disable]]></Declaration>
+      <Declaration><![CDATA[(*!
+<summary>Disables cyclic execution and invokes disable hooks.</summary>
+<description>
+Branches also disable their children. Hook exceptions propagate to the caller without rolling back prior
+effects.
+</description>
+*)
+METHOD ABSTRACT Disable]]></Declaration>
       <Implementation>
         <ST><![CDATA[]]></ST>
       </Implementation>
     </Method>
     <Method Name="Enable" Id="{8c41e56c-f727-473a-87e6-57596090402c}">
-      <Declaration><![CDATA[METHOD ABSTRACT Enable
+      <Declaration><![CDATA[(*!
+<summary>Enables cyclic execution and invokes enable hooks.</summary>
+<description>
+Enabling does not automatically reset a STOPPED component; components stopped while disabled or disabled
+while stopped remain STOPPED after Enable until explicitly Reset.
+</description>
+<param name="includeChildren">When TRUE on a branch, recursively enables child components.</param>
+*)
+METHOD ABSTRACT Enable
 VAR_INPUT
 	includeChildren : BOOL := TRUE;
 END_VAR]]></Declaration>
@@ -238,8 +254,9 @@ PROPERTY FINAL HasError : BOOL]]></Declaration>
       <Declaration><![CDATA[(*!
 <summary>Sets the maximum wait for pending initialization.</summary>
 <description>
-T#0S selects Parameters.InitializationTimeout. The first pending initialization call replaces T#0S
-with that duration before evaluating the timer.
+T#0S selects Parameters.InitializationTimeout immediately upon assignment, so the getter always returns the
+active non-zero duration. Branches expand this duration to at least the maximum InitializationTimeout of their
+children during initialization.
 </description>
 *)
 {attribute 'monitoring' := 'call'}
@@ -253,7 +270,11 @@ PROPERTY FINAL InitializationTimeout : TIME]]></Declaration>
       <Set Name="Set" Id="{496bac58-2886-40a5-a9c9-db583b496ce0}">
         <Declaration><![CDATA[]]></Declaration>
         <Implementation>
-          <ST><![CDATA[_InitializationTimer.PT := InitializationTimeout;]]></ST>
+          <ST><![CDATA[_InitializationTimer.PT := SEL(
+	InitializationTimeout = T#0S,
+	InitializationTimeout,
+	Parameters.InitializationTimeout
+);]]></ST>
         </Implementation>
       </Set>
     </Property>
@@ -339,7 +360,14 @@ END_VAR]]></Declaration>
       </Implementation>
     </Method>
     <Method Name="OnRecover" Id="{4fd00d17-dbcf-4903-91de-2486b0cb165f}" FolderPath="Methods to override\">
-      <Declaration><![CDATA[METHOD PROTECTED OnRecover]]></Declaration>
+      <Declaration><![CDATA[(*!
+<summary>Runs at the start of cyclic working execution when clearing a non-critical error.</summary>
+<description>
+The base implementation does nothing. An exception raised by OnRecover always records a copied CRITICAL
+error and stops the component without consulting ExceptionHandlingPolicy.
+</description>
+*)
+METHOD PROTECTED OnRecover]]></Declaration>
       <Implementation>
         <ST><![CDATA[]]></ST>
       </Implementation>
@@ -410,11 +438,11 @@ END_IF]]></ST>
 <summary>Applies an exception reaction to copied diagnostics and operational state.</summary>
 <description>
 Initialization failures enter INVALID with a critical error. At runtime a stop reaction records a
-critical error and stops a working component, including when disabled. Disabled components need the
-direct state transition because their public Stop method does no work. Only the own state changes while
-disabled; child stopping, where applicable, is deferred to enabled stopped traversal. This preserves the Reset
-requirement after a failed disabled service callback. When the reaction requires an error copy, it is completed before logging callbacks can
-reuse a task-local exception. Conversion failures may propagate before logging and state transitions.
+critical error and calls Stop on a working component, including when disabled (since Stop transitions
+WORKING components and WORKING children to STOPPED regardless of Enabled). This preserves the Reset
+requirement after a failed disabled service callback. When the reaction requires an error copy, it is
+completed before logging callbacks can reuse a task-local exception. Conversion failures may propagate before
+logging and state transitions.
 </description>
 *)
 METHOD PROTECTED ProcessException
@@ -456,16 +484,20 @@ TOF_Core.LogManager.TryLogException(
 IF exceptionReaction = TOF_Core.EXCEPTION_REACTION.SET_ERROR_AND_STOP
 	AND_THEN OperationalState = OPERATIONAL_STATE.WORKING
 THEN
-	IF Enabled THEN
-		Stop(reason := exceptionSourceHint);
-	ELSE
-		SetOperationalState(state := OPERATIONAL_STATE.STOPPED, reason := exceptionSourceHint);
-	END_IF
+	Stop(reason := exceptionSourceHint);
 END_IF]]></ST>
       </Implementation>
     </Method>
     <Method Name="Reset" Id="{d9e3b1b6-5f1c-4e0c-b7fb-2f75b7f46fbb}">
-      <Declaration><![CDATA[METHOD ABSTRACT Reset]]></Declaration>
+      <Declaration><![CDATA[(*!
+<summary>Attempts to recover an enabled stopped component to WORKING.</summary>
+<description>
+Served only while Enabled and STOPPED. Clears the previous error before reset hooks. A failure in the
+component's own reset hook always leaves the component STOPPED with a copied CRITICAL error without
+consulting ExceptionHandlingPolicy.
+</description>
+*)
+METHOD ABSTRACT Reset]]></Declaration>
       <Implementation>
         <ST><![CDATA[]]></ST>
       </Implementation>
@@ -520,7 +552,15 @@ __ENDTRY]]></ST>
       </Implementation>
     </Method>
     <Method Name="Stop" Id="{7d81c2ed-cf1e-4941-91df-b5092c404637}">
-      <Declaration><![CDATA[METHOD ABSTRACT Stop
+      <Declaration><![CDATA[(*!
+<summary>Transitions a WORKING component to OPERATIONAL_STATE.STOPPED.</summary>
+<description>
+Transitions a WORKING component (and, for branches, all WORKING children) to OPERATIONAL_STATE.STOPPED
+regardless of Enabled.
+</description>
+<param name="reason">Descriptive reason stored in OperationalStateReason.</param>
+*)
+METHOD ABSTRACT Stop
 VAR_INPUT
 	reason : WSTRING(255) := "External stop";
 END_VAR]]></Declaration>
