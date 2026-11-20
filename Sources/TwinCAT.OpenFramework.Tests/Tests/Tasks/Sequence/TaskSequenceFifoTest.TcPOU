@@ -1,0 +1,258 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="TaskSequenceFifoTest" Id="{e8130079-4ca9-4b0c-ac75-b3e389b77899}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+SPDX-FileCopyrightText: © 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+SPDX-License-Identifier: MIT
+License: https://opensource.org/license/mit
+*)
+
+(*!
+<summary>Checks FIFO dispatch and one child step per PLC cycle.</summary>
+<description>
+Owns a reusable queue that borrows three counters with no external resources. Use in one task.
+Copying would invalidate internal references and queue ownership.
+</description>
+*)
+
+{attribute 'no_assign'}
+{attribute 'no_explicit_call' := 'do not call this function block directly'}
+FUNCTION_BLOCK TaskSequenceFifoTest EXTENDS TOF_Testing.MultiCycleTest
+VAR_STAT
+	{attribute 'hide'}
+	_ClassName : STRING := __POUNAME();
+END_VAR
+VAR CONSTANT
+	//! <summary>Step counts for the three resource-free children.</summary>
+	_FirstTarget : INT := 2;
+	_SecondTarget : INT := 3;
+	_ThirdTarget : INT := 4;
+
+	//! <summary>Each start uses one call, then each work step uses a separate call.</summary>
+	_FirstStartCycle : INT := 1;
+	_FirstFinishCycle : INT := _FirstStartCycle + _FirstTarget;
+	_SecondStartCycle : INT := _FirstFinishCycle + 1;
+	_SecondFinishCycle : INT := _SecondStartCycle + _SecondTarget;
+	_ThirdStartCycle : INT := _SecondFinishCycle + 1;
+	_ThirdFinishCycle : INT := _ThirdStartCycle + _ThirdTarget;
+END_VAR
+VAR
+	_Queue : TOF_Tasks.StandardTaskQueue(name := "FIFO test queue");
+	_First : CounterTask(name := "First child");
+	_Second : CounterTask(name := "Second child");
+	_Third : CounterTask(name := "Third child");
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[]]></ST>
+    </Implementation>
+    <Method Name="BeforeTest" Id="{bd8a6d27-33d1-4b9b-870a-f2f1c7e8891e}">
+      <Declaration><![CDATA[(*!
+<summary>Enqueues three READY children and starts the queue without executing any child.</summary>
+*)
+METHOD PROTECTED BeforeTest]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF NOT _Queue.State.Ready
+	OR_ELSE _Queue.PendingTaskCount <> 0
+	OR_ELSE NOT _First.State.Ready
+	OR_ELSE NOT _Second.State.Ready
+	OR_ELSE NOT _Third.State.Ready
+THEN
+	RecordFailure(message := "FIFO test requires an empty READY queue and three READY children");
+	RETURN;
+END_IF
+
+Assert.ThatBool(
+	actual := _Queue.StopWhenNoPendingTasks,
+	message := "The queue must default to waiting when empty"
+).IsFalse();
+
+_First.TargetValue := _FirstTarget;
+_Second.TargetValue := _SecondTarget;
+_Third.TargetValue := _ThirdTarget;
+
+_Queue.Enqueue(task := _First);
+_Queue.Enqueue(task := _Second);
+_Queue.Enqueue(task := _Third);
+
+Assert.ThatDInt(
+	actual := _Queue.PendingTaskCount,
+	message := "Queue must retain all three entries"
+).ToBe(expected := 3);
+Assert.ThatBool(actual := _Queue.Start(), message := "Prepared FIFO queue must accept Start").IsTrue();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="ExecuteTest" Id="{ab32d88b-58e6-49d6-8b80-1b0d3757ae08}">
+      <Declaration><![CDATA[(*!
+<summary>Checks one queue call per PLC cycle against the expected order and progress.</summary>
+<description>
+Requests cancellation after the last removal and observes the stopped queue in the following cycle.
+</description>
+*)
+METHOD PROTECTED ExecuteTest : TOF_Testing.TEST_CYCLE_RESULT
+VAR
+	cycle : INT;
+	expectedPending : DINT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[ExecuteTest := TOF_Testing.TEST_CYCLE_RESULT.DONE;
+cycle := TO_INT(CycleCount);
+_Queue.Execute();
+
+IF cycle > _ThirdFinishCycle THEN
+	Assert.ThatBool(actual := _Queue.State.Stopped, message := "Empty queue must stop after Cancel").IsTrue();
+	Assert.ThatBool(
+		actual := _Queue.FinalStopReason.ExternalCancel,
+		message := "The completed FIFO run must end with external cancellation"
+	).IsTrue();
+
+	RETURN;
+END_IF
+
+checkChild(child := _First, startCycle := _FirstStartCycle, target := _FirstTarget, cycle := cycle);
+checkChild(child := _Second, startCycle := _SecondStartCycle, target := _SecondTarget, cycle := cycle);
+checkChild(child := _Third, startCycle := _ThirdStartCycle, target := _ThirdTarget, cycle := cycle);
+
+IF cycle >= _ThirdFinishCycle THEN
+	expectedPending := 0;
+ELSIF cycle >= _SecondFinishCycle THEN
+	expectedPending := 1;
+ELSIF cycle >= _FirstFinishCycle THEN
+	expectedPending := 2;
+ELSE
+	expectedPending := 3;
+END_IF
+
+Assert.ThatDInt(
+	actual := _Queue.PendingTaskCount,
+	message := "Pending count must include the current child until successful completion"
+).ToBe(expected := expectedPending);
+Assert.ThatBool(actual := _Queue.State.Running, message := "FIFO queue must keep running until Cancel").IsTrue();
+
+IF cycle = _ThirdFinishCycle THEN
+	Assert.ThatBool(actual := _Queue.Cancel(), message := "Drained FIFO queue must accept Cancel").IsTrue();
+END_IF
+
+ExecuteTest := TOF_Testing.TEST_CYCLE_RESULT.BUSY;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="checkChild" Id="{4b24f19e-6de9-452e-8cde-940f159ef851}">
+      <Declaration><![CDATA[(*!
+<summary>Checks a child's position and progress on the expected schedule.</summary>
+<description>
+Observes the borrowed child without driving it. The start call performs zero work steps.
+</description>
+<param name="child">Live counter to observe.</param>
+<param name="startCycle">First queue call allowed to start this child.</param>
+<param name="target">Number of work steps required to complete the child.</param>
+<param name="cycle">Current test cycle.</param>
+*)
+METHOD PRIVATE checkChild
+VAR_INPUT
+	child : REFERENCE TO CounterTask;
+	startCycle : INT;
+	target : INT;
+	cycle : INT;
+END_VAR
+VAR
+	elapsedSteps : INT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[elapsedSteps := cycle - startCycle;
+Assert.ThatInt(
+	actual := child.Counter,
+	message := TOF_Core.WideStrings.ConcatFit255(child.Name, " must advance one step per work call")
+).ToBe(expected := LIMIT(TOF_Core.SignedInt16.ZERO, elapsedSteps, target));
+
+IF cycle < startCycle THEN
+	Assert.ThatBool(
+		actual := child.State.Ready,
+		message := TOF_Core.WideStrings.ConcatFit255(child.Name, " must wait in READY until its turn")
+	).IsTrue();
+ELSIF elapsedSteps < target THEN
+	Assert.ThatBool(
+		actual := child.State.Running,
+		message := TOF_Core.WideStrings.ConcatFit255(child.Name, " must be RUNNING during its turn")
+	).IsTrue();
+ELSE
+	Assert.ThatBool(
+		actual := child.State.Stopped AND_THEN child.FinalStopReason.WorkDone,
+		message := TOF_Core.WideStrings.ConcatFit255(child.Name, " must be STOPPED with WorkDone after its last step")
+	).IsTrue();
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="AfterTest" Id="{dd18fb58-76cb-45c5-9d80-eaa404d627f3}">
+      <Declaration><![CDATA[(*!
+<summary>Stops and empties the queue before resetting its former children.</summary>
+<description>
+Checks that the resource-free fixture can finish cancellation in one call. If the queue is still running,
+reports cleanup failure and leaves its children under queue control.
+</description>
+*)
+METHOD PROTECTED AfterTest]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF _Queue.State.Running THEN
+	IF _Queue.OriginalStopReason.ExternalCancel OR_ELSE _Queue.Cancel() THEN
+		_Queue.Execute();
+	END_IF
+END_IF
+
+IF _Queue.State.Running THEN
+	RecordFailure(message := "Cleanup could not stop the queue");
+	RETURN;
+END_IF
+
+IF _Queue.State.Stopped THEN
+	IF NOT _Queue.Reset() THEN
+		RecordFailure(message := "Stopped queue refused Reset during cleanup");
+		RETURN;
+	END_IF
+ELSE
+	_Queue.ClearWaitingTasks();
+END_IF
+
+IF NOT _Queue.State.Ready OR_ELSE _Queue.PendingTaskCount <> 0 THEN
+	RecordFailure(message := "Queue must be READY and empty before resetting its former children");
+	RETURN;
+END_IF
+
+Assert.ThatBool(actual := _First.Reset(), message := "First child must accept cleanup Reset").IsTrue();
+Assert.ThatBool(actual := _Second.Reset(), message := "Second child must accept cleanup Reset").IsTrue();
+Assert.ThatBool(actual := _Third.Reset(), message := "Third child must accept cleanup Reset").IsTrue();]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="ClassName" Id="{bdaa7d05-fd27-4fa1-ace2-381eeae1f061}">
+      <Declaration><![CDATA[//! <summary>Borrows the concrete class name. Callers must not modify the returned storage.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{ac40eea8-ad40-41ba-bbec-9d3d67ec144b}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ClassName REF= _ClassName;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="NamespaceName" Id="{e70051e8-b9b6-45b3-bfd3-cf7e2652437d}">
+      <Declaration><![CDATA[//! <summary>Borrows the compiler-initialized namespace name. Callers must not modify it.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{9dd73336-5898-4fb5-9e58-3a9581ce2303}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[NamespaceName REF= CurrentNamespace.Name;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="SelfSize" Id="{0335cba2-c95a-4e09-a9e5-98a2a9641e48}">
+      <Declaration><![CDATA[//! <summary>Reports the complete concrete instance size in bytes.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY SelfSize : ULINT]]></Declaration>
+      <Get Name="Get" Id="{96bbf09d-8276-4c32-aed5-5af40560bd28}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[SelfSize := XSIZEOF(THIS^);]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+  </POU>
+</TcPlcObject>

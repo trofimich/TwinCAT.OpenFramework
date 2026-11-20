@@ -1,0 +1,126 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="QueuedEventLoggerTest" Id="{0a63916b-15c9-4289-8dec-3ab437e14e6d}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+SPDX-FileCopyrightText: c 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+SPDX-License-Identifier: MIT
+License: https://opensource.org/license/mit
+*)
+
+(*!
+<summary>Checks queued delivery to the native EventLogger.</summary>
+<description>
+The runner task owns the configured queue and backend for every run.
+</description>
+*)
+
+{attribute 'no_assign'}
+{attribute 'no_explicit_call' := 'do not call this function block directly'}
+FUNCTION_BLOCK QueuedEventLoggerTest EXTENDS TOF_Testing.SingleCycleTest
+VAR_STAT
+	{attribute 'hide'}
+	_ClassName : STRING := __POUNAME();
+END_VAR
+VAR
+	_EventLogger : TOF_Loggers.EventLogger(
+		debugEventType := TC_EVENTS.OpenFrameworkLoggerEventClass.DebugEvent,
+		informationEventType := TC_EVENTS.OpenFrameworkLoggerEventClass.InformationEvent,
+		warningEventType := TC_EVENTS.OpenFrameworkLoggerEventClass.WarningEvent,
+		errorEventType := TC_EVENTS.OpenFrameworkLoggerEventClass.ErrorEvent,
+		criticalErrorEventType := TC_EVENTS.OpenFrameworkLoggerEventClass.CriticalErrorEvent
+	);
+	_Queue : TOF_Loggers.QueuedLogger;
+	_Configured : BOOL;
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[]]></ST>
+    </Implementation>
+    <Method Name="ExecuteTest" Id="{cd3b44ee-a2c4-488d-8593-c964d71e46bf}">
+      <Declaration><![CDATA[(*!
+<summary>Submits two messages and a copied error to the queue and checks delivery to EventLogger.</summary>
+*)
+METHOD PROTECTED ExecuteTest
+VAR
+	number : ULINT := 1;
+	error : TOF_Core.ERROR;
+	failuresBefore : ULINT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[failuresBefore := _Queue.FailedDeliveryCount;
+
+IF NOT _Configured THEN
+	Assert.ThatULInt(actual := failuresBefore, message := "A fresh queue must have zero delivery failures").ToBe(
+		expected := 0
+	);
+	_Configured := _Queue.Configure(backend := _EventLogger);
+END_IF
+
+IF NOT _Configured THEN
+	RecordFailure(message := "Queue refused the EventLogger backend");
+	RETURN;
+END_IF
+
+Assert.ThatDInt(actual := _Queue.PendingMessageCount, message := "Queue must start empty").ToBe(expected := 0);
+Assert.ThatBool(
+	actual := _Queue.TryLogMessage(category := TOF_Core.LOG_CATEGORY.DEBUG, message := "Queued debug message"),
+	message := "Queue refused the unnumbered debug message"
+).IsTrue();
+Assert.ThatDInt(actual := _Queue.PendingMessageCount, message := "Debug message must be pending").ToBe(expected := 1);
+Assert.ThatBool(
+	actual := _Queue.TryLogMessage(
+		category := TOF_Core.LOG_CATEGORY.INFORMATION,
+		message := "Queued information message",
+		messageNumber := number
+	),
+	message := "Queue refused the numbered information message"
+).IsTrue();
+Assert.ThatDInt(actual := _Queue.PendingMessageCount, message := "Both messages must be pending").ToBe(expected := 2);
+error.SetMessage(message := "Queued error");
+error.SetSeverity(severity := TOF_Core.ERROR_SEVERITY.ERROR);
+Assert.ThatBool(
+	actual := _Queue.TryLogError(error := error, messageNumber := number),
+	message := "Queue refused the error record"
+).IsTrue();
+Assert.ThatDInt(actual := _Queue.PendingMessageCount, message := "Three records must be pending").ToBe(expected := 3);
+_Queue.Execute();
+Assert.ThatDInt(actual := _Queue.PendingMessageCount, message := "Native batch must drain").ToBe(expected := 0);
+Assert.ThatULInt(actual := _Queue.FailedDeliveryCount, message := "EventLogger must accept every queued record").ToBe(
+	expected := failuresBefore
+);]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="ClassName" Id="{ecc30ce6-10a7-4fdd-b4cc-d4ab79f4fe0d}">
+      <Declaration><![CDATA[//! <summary>Borrows the concrete class name for the instance lifetime. Callers must not modify it.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{a812a395-be3b-41fe-bad4-57045ff6458c}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ClassName REF= _ClassName;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="NamespaceName" Id="{9c49ddfb-264e-4a6f-8b37-58bcdbea5025}">
+      <Declaration><![CDATA[//! <summary>Borrows the compiler-initialized namespace. Callers must not modify it.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{e7eb02dd-d25b-4cd3-a47b-5b1f0726d9a6}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[NamespaceName REF= CurrentNamespace.Name;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="SelfSize" Id="{d694f920-f3bd-4910-9c75-d0a2e91436f7}">
+      <Declaration><![CDATA[//! <summary>Reports the complete instance size in bytes, excluding separately allocated storage.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY SelfSize : ULINT]]></Declaration>
+      <Get Name="Get" Id="{89a131f1-f45a-4b9b-b8ac-dde9e50223f1}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[SelfSize := XSIZEOF(THIS^);]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+  </POU>
+</TcPlcObject>

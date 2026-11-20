@@ -1,0 +1,254 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="SystemExceptionRethrowTest" Id="{4dbda1f5-9c97-4611-8959-9d5a56019bd5}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+SPDX-FileCopyrightText: c 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+SPDX-License-Identifier: MIT
+License: https://opensource.org/license/mit
+*)
+
+(*!
+<summary>Checks native wrapper propagation through both framework rethrow APIs.</summary>
+<description>
+Uses one task and stays at a stable address while assertions are bound to this instance.
+</description>
+*)
+
+{attribute 'no_assign'}
+{attribute 'no_explicit_call' := 'do not call this function block directly'}
+FUNCTION_BLOCK SystemExceptionRethrowTest EXTENDS TOF_Testing.SingleCycleTest
+VAR_STAT
+	{attribute 'hide'}
+	_ClassName : STRING := __POUNAME();
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[]]></ST>
+    </Implementation>
+    <Method Name="ExecuteTest" Id="{69d5dfc3-df81-4e22-8a06-2834ff3a1cc5}">
+      <Declaration><![CDATA[(*!
+<summary>Checks native wrapper propagation through both framework rethrow APIs.</summary>
+<description>
+Models captured native codes. A second native catch overwrites the shared wrapper while the propagated
+snapshot retains its identity and payload until task cleanup.
+</description>
+*)
+METHOD PROTECTED ExecuteTest
+VAR
+	exceptionCode : __SYSTEM.ExceptionCode;
+	frameworkException : TOF_Core.IException;
+	original : TOF_Core.IException;
+	received : TOF_Core.IException;
+	repeated : TOF_Core.IException;
+	other : TOF_Core.IException;
+	otherWrapper : TOF_Core.ISystemException;
+	firstWrapper : TOF_Core.ISystemException;
+	codeOnlyWrapper : TOF_Core.ISystemException;
+	originalMessage : TOF_Core.ERROR_MESSAGE;
+	message : TOF_Core.ERROR_MESSAGE;
+	localTimestamp : LDATE_AND_TIME;
+	utcTimestamp : LDATE_AND_TIME;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[// Establish a framework payload before supplying an already received native code.
+__TRY
+	TOF_Core.Exceptions.ThrowStandard(
+		sourceNamespaceName := NamespaceName,
+		sourceClassName := ClassName,
+		sourcePOUName := __POUNAME(),
+		sourcePosition := __POSITION(),
+		message := "Earlier framework payload"
+	);
+__CATCH(exceptionCode)
+	frameworkException := TOF_Core.ExceptionManager.GetLastException(
+		exceptionCode := exceptionCode,
+		catchPointNamespaceName := NamespaceName,
+		catchPointPOUName := __POUNAME(),
+		catchPointPosition := __POSITION()
+	);
+__ENDTRY
+
+IF frameworkException = 0 THEN
+	RecordFailure(message := "The earlier framework throw must reach its handler");
+	RETURN;
+END_IF
+
+original := TOF_Core.ExceptionManager.GetLastException(
+	exceptionCode := __SYSTEM.ExceptionCode.RTSEXCPT_ARRAYBOUNDS,
+	catchPointNamespaceName := 'Tests',
+	catchPointPOUName := 'OriginalCatch',
+	catchPointPosition := 'P1'
+);
+
+IF original = 0 THEN
+	RecordFailure(message := "The captured native code must provide a wrapper");
+	RETURN;
+END_IF
+
+originalMessage := original.GetMessage();
+localTimestamp := original.LocalTimestamp;
+utcTimestamp := original.UtcTimestamp;
+
+// Transport the static native wrapper as a task-managed framework payload.
+__TRY
+	TOF_Core.ExceptionManager.Throw(exception := original);
+__CATCH(exceptionCode)
+	received := TOF_Core.ExceptionManager.GetLastException(
+		exceptionCode := exceptionCode,
+		catchPointNamespaceName := NamespaceName,
+		catchPointPOUName := __POUNAME(),
+		catchPointPosition := __POSITION()
+	);
+__ENDTRY
+
+IF NOT __QUERYINTERFACE(received, firstWrapper) THEN
+	RecordFailure(message := "Throw must preserve ISystemException after an earlier framework exception");
+	RETURN;
+END_IF
+
+Assert.ThatBool(
+	actual := firstWrapper.IsDynamicInstance AND_THEN received <> original,
+	message := "Native propagation must clone the shared static wrapper"
+).IsTrue();
+Assert.ThatBool(
+	actual := firstWrapper.ExceptionCode = __SYSTEM.ExceptionCode.RTSEXCPT_ARRAYBOUNDS,
+	message := "The propagated wrapper must retain its captured native code"
+).IsTrue();
+Assert.ThatBool(
+	actual := firstWrapper.LocalTimestamp = localTimestamp AND_THEN firstWrapper.UtcTimestamp = utcTimestamp,
+	message := "Propagation must preserve both original timestamps"
+).IsTrue();
+
+other := TOF_Core.ExceptionManager.GetLastException(
+	exceptionCode := __SYSTEM.ExceptionCode.RTSEXCPT_ACCESS_VIOLATION,
+	catchPointNamespaceName := 'Tests',
+	catchPointPOUName := 'OtherCatch',
+	catchPointPosition := 'P2'
+);
+Assert.ThatBool(
+	actual := other = original,
+	message := "Another native catch must reuse the task wrapper"
+).IsTrue();
+Assert.ThatBool(
+	actual := __QUERYINTERFACE(other, otherWrapper)
+		AND_THEN otherWrapper.ExceptionCode = __SYSTEM.ExceptionCode.RTSEXCPT_ACCESS_VIOLATION,
+	message := "The shared wrapper must actually observe the later native code"
+).IsTrue();
+
+message := firstWrapper.GetMessage();
+Assert.ThatBool(
+	actual := message = originalMessage
+		AND_THEN Tc2_Standard.WFIND(STR1 := message, STR2 := "Tests.OriginalCatch at P1") > 0,
+	message := "The propagated wrapper must keep its original diagnostic after the shared wrapper is overwritten"
+).IsTrue();
+
+// Replace the manager payload before rethrowing the saved dynamic wrapper.
+frameworkException := 0;
+
+__TRY
+	TOF_Core.Exceptions.ThrowStandard(
+		sourceNamespaceName := NamespaceName,
+		sourceClassName := ClassName,
+		sourcePOUName := __POUNAME(),
+		sourcePosition := __POSITION(),
+		message := "Intervening framework payload"
+	);
+__CATCH(exceptionCode)
+	frameworkException := TOF_Core.ExceptionManager.GetLastException(
+		exceptionCode := exceptionCode,
+		catchPointNamespaceName := NamespaceName,
+		catchPointPOUName := __POUNAME(),
+		catchPointPosition := __POSITION()
+	);
+__ENDTRY
+
+Assert.ThatBool(
+	actual := frameworkException <> 0 AND_THEN frameworkException <> received,
+	message := "An intervening framework throw must install a different payload"
+).IsTrue();
+
+__TRY
+	TOF_Core.ExceptionManager.Throw(exception := received);
+__CATCH(exceptionCode)
+	repeated := TOF_Core.ExceptionManager.GetLastException(
+		exceptionCode := exceptionCode,
+		catchPointNamespaceName := NamespaceName,
+		catchPointPOUName := __POUNAME(),
+		catchPointPosition := __POSITION()
+	);
+__ENDTRY
+
+Assert.ThatBool(
+	actual := repeated = received,
+	message := "Rethrowing the dynamic wrapper must preserve its identity"
+).IsTrue();
+
+// Exercise callers that pass a native code and catch point instead of keeping a payload.
+repeated := 0;
+
+__TRY
+	TOF_Core.ExceptionManager.ReThrowLastException(
+		exceptionCode := __SYSTEM.ExceptionCode.RTSEXCPT_ARRAYBOUNDS,
+		catchPointNamespaceName := 'Tests',
+		catchPointPOUName := 'OriginalCatch',
+		catchPointPosition := 'P1'
+	);
+__CATCH(exceptionCode)
+	repeated := TOF_Core.ExceptionManager.GetLastException(
+		exceptionCode := exceptionCode,
+		catchPointNamespaceName := NamespaceName,
+		catchPointPOUName := __POUNAME(),
+		catchPointPosition := __POSITION()
+	);
+__ENDTRY
+
+IF NOT __QUERYINTERFACE(repeated, codeOnlyWrapper) THEN
+	RecordFailure(message := "Code-only rethrow must provide an ISystemException payload");
+	RETURN;
+END_IF
+
+message := codeOnlyWrapper.GetMessage();
+Assert.ThatBool(
+	actual := message = originalMessage,
+	message := "Code-only rethrow must retain the supplied native diagnostic and location"
+).IsTrue();
+Assert.ThatBool(
+	actual := codeOnlyWrapper.ExceptionCode = __SYSTEM.ExceptionCode.RTSEXCPT_ARRAYBOUNDS,
+	message := "Code-only rethrow must preserve the native code"
+).IsTrue();]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="ClassName" Id="{fe984131-e861-42bc-a82f-bffce8be3f1d}">
+      <Declaration><![CDATA[//! <summary>Borrows the concrete class name. Callers must not modify it.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{05f566ed-8090-460f-acfe-8bd500dab005}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ClassName REF= _ClassName;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="NamespaceName" Id="{5d67337f-3721-4528-8ec7-6f0c013eafdb}">
+      <Declaration><![CDATA[//! <summary>Borrows the compiler-initialized namespace name. Callers must not modify it.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{735f4180-9fb4-471c-bc10-7081c0357b27}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[NamespaceName REF= CurrentNamespace.Name;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="SelfSize" Id="{d48c41db-7914-4f60-bf62-9771ab9b7588}">
+      <Declaration><![CDATA[//! <summary>Reports the concrete instance size in bytes.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY SelfSize : ULINT]]></Declaration>
+      <Get Name="Get" Id="{14e908d8-c488-4b38-a0e6-8cbd7bf4640c}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[SelfSize := XSIZEOF(THIS^);]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+  </POU>
+</TcPlcObject>

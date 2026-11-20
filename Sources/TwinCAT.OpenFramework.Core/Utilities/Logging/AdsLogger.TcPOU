@@ -255,11 +255,11 @@ __ENDTRY]]></ST>
       <Declaration><![CDATA[(*!
 <summary>Attempts to write message text and an optional message number to the ADS log.</summary>
 <description>
-Uses the fixed ADS format %s and passes the converted text as its string argument. Format tokens within the
-message are not interpreted. Emits one record and allows trailing text to be truncated by conversion or ADS
-output limits; no continuation records are generated. A number prefix reduces the space available for message
-text. Borrows arguments only for the call. Returns TRUE when ADSLOGSTR returns success; this does not
-guarantee that the entire original ERROR_MESSAGE fits in the ADS output. Does not propagate exceptions,
+Requests log output for every severity (hint, warning or error). Uses the fixed ADS format %s and passes the
+converted text as its string argument. Format tokens within the message remain literal. Bounds the converted
+text, including any number prefix, to 253 bytes before calling ADSLOGSTR. Emits one record with no continuation records. Borrows arguments only for the call.
+Returns TRUE when ADSLOGSTR returns success; the entire original ERROR_MESSAGE may not fit in the ADS output.
+Does not propagate exceptions,
 including failures while reading or formatting diagnostics and calling the backend; returns FALSE instead.
 Already emitted entries are not rolled back, so FALSE may follow partial output. Caught exceptions are not
 logged again. The fatal allocation latch is preserved for RaiseIfAllocationFailed at the task boundary outside
@@ -284,6 +284,7 @@ VAR_INPUT
 END_VAR
 VAR
 	messageControlMask : DWORD;
+	adsText : STRING(253); // ADSLOGSTR limits the formatted message to 253 bytes.
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[__TRY
@@ -293,27 +294,35 @@ END_VAR]]></Declaration>
 
 	CASE category OF
 		LOG_CATEGORY.DEBUG, LOG_CATEGORY.INFORMATION:
-			messageControlMask := Tc2_System.Global_Variables.ADSLOG_MSGTYPE_LOG;
+			messageControlMask := Tc2_System.Global_Variables.ADSLOG_MSGTYPE_HINT
+				OR Tc2_System.Global_Variables.ADSLOG_MSGTYPE_LOG;
 
 		LOG_CATEGORY.WARNING:
-			messageControlMask := Tc2_System.Global_Variables.ADSLOG_MSGTYPE_WARN;
+			messageControlMask := Tc2_System.Global_Variables.ADSLOG_MSGTYPE_WARN
+				OR Tc2_System.Global_Variables.ADSLOG_MSGTYPE_LOG;
 
 		LOG_CATEGORY.ERROR, LOG_CATEGORY.CRITICAL_ERROR:
-			messageControlMask := Tc2_System.Global_Variables.ADSLOG_MSGTYPE_ERROR;
+			messageControlMask := Tc2_System.Global_Variables.ADSLOG_MSGTYPE_ERROR
+				OR Tc2_System.Global_Variables.ADSLOG_MSGTYPE_LOG;
 	END_CASE
 
 	IF __ISVALIDREF(messageNumber) THEN
-		TryLogMessage := Tc2_System.ADSLOGSTR(
-			msgCtrlMask := messageControlMask,
-			msgFmtStr := '%s',
-			strArg := Strings.Concat255(TO_STRING(Exceptions.MESSAGE_NUMBER_PREFIX), Exceptions.LOG_CATEGORY_PREFIXES[category], TO_STRING(messageNumber), TO_STRING(Exceptions.MESSAGE_NUMBER_SUFFIX),	TO_STRING(message))
-		) = 0;
+		adsText := Strings.Concat255(
+			TO_STRING(Exceptions.MESSAGE_NUMBER_PREFIX),
+			Exceptions.LOG_CATEGORY_PREFIXES[category],
+			TO_STRING(messageNumber),
+			TO_STRING(Exceptions.MESSAGE_NUMBER_SUFFIX),
+			TO_STRING(message)
+		);
 	ELSE
-		TryLogMessage := Tc2_System.ADSLOGSTR(
-			msgCtrlMask := messageControlMask,
-			msgFmtStr := '%s',
-			strArg := TO_STRING(message)) = 0;
+		adsText := TO_STRING(message);
 	END_IF
+
+	TryLogMessage := Tc2_System.ADSLOGSTR(
+		msgCtrlMask := messageControlMask,
+		msgFmtStr := '%s',
+		strArg := adsText
+	) = 0;
 
 	IF DynamicMemoryManager.HasAllocationFailed THEN
 		TryLogMessage := FALSE;

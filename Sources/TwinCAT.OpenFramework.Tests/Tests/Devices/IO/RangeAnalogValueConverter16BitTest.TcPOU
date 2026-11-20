@@ -1,0 +1,178 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1" ProductVersion="3.1.4026.21">
+  <POU Name="RangeAnalogValueConverter16BitTest" Id="{95ccba4d-61cb-4e56-b8a0-345cdcf23a0f}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+SPDX-FileCopyrightText: © 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+SPDX-License-Identifier: MIT
+License: https://opensource.org/license/mit
+*)
+
+(*!
+<summary>Checks 16-bit integer conversion on ascending and descending engineering scales.</summary>
+<description>Verifies interpolation, saturation and the zeroed upper bytes of the raw result.</description>
+*)
+
+{attribute 'no_assign'}
+{attribute 'no_explicit_call' := 'do not call this function block directly'}
+FUNCTION_BLOCK RangeAnalogValueConverter16BitTest EXTENDS TOF_Testing.SingleCycleTest
+VAR_STAT
+	{attribute 'hide'}
+	_ClassName : STRING := __POUNAME();
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[]]></ST>
+    </Implementation>
+    <Property Name="ClassName" Id="{a53f4af6-b9a4-4c9f-b861-bc2232dc7c6c}">
+      <Declaration><![CDATA[(*!
+<summary>Borrows the concrete class name for the lifetime of this instance.</summary>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{113cf103-e898-47e5-a53f-722fa68e6f9a}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ClassName REF= _ClassName;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="ExecuteTest" Id="{9b7fd5da-4ba1-4491-b7e5-2cf9c9211212}">
+      <Declaration><![CDATA[(*!
+<summary>Checks five ascending points in each direction and clamping and interpolation on the descending scale.</summary>
+*)
+METHOD PROTECTED ExecuteTest
+VAR CONSTANT
+	analogPoints : ARRAY [0..4] OF LREAL := [0, 2.5, 5, 7.5, 10];
+	expectedRaw : ARRAY [0..4] OF INT := [TOF_Core.SignedInt16.MIN_VALUE, -16384, -1, 16383, TOF_Core.SignedInt16.MAX_VALUE];
+	rawInputs : ARRAY [0..4] OF INT := [TOF_Core.SignedInt16.MIN_VALUE, -16384, 0, 16383, TOF_Core.SignedInt16.MAX_VALUE];
+END_VAR
+VAR
+	i : DINT;
+	zeroToTen : TOF_Devices_IO.StaticRangeAnalogValueConverter(
+		minAnalogValue := 0,
+		maxAnalogValue := 10,
+		minRawValue := TOF_Devices_IO.RawAnalogValues.FromInt16(value := TOF_Core.SignedInt16.MIN_VALUE),
+		maxRawValue := TOF_Devices_IO.RawAnalogValues.FromInt16(value := TOF_Core.SignedInt16.MAX_VALUE)
+	);
+	descendingEngineering : TOF_Devices_IO.StaticRangeAnalogValueConverter(
+		minAnalogValue := 30,
+		maxAnalogValue := -10,
+		minRawValue := TOF_Devices_IO.RawAnalogValues.FromInt16(value := -200),
+		maxRawValue := TOF_Devices_IO.RawAnalogValues.FromInt16(value := 600)
+	);
+
+	rawValue : TOF_Devices_IO.RAW_ANALOG_VALUE;
+	analogValue : LREAL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[FOR i := LOWER_BOUND(analogPoints, 1) TO UPPER_BOUND(analogPoints, 1) DO
+	rawValue := zeroToTen.ConvertAnalogValueToRawValue(
+		analogValue := analogPoints[i],
+		rawValueType := TOF_Devices_IO.RAW_ANALOG_VALUE_TYPE.INT16
+	);
+	Assert.ThatInt(
+		actual := rawValue.Int16,
+		message := TOF_Core.WideStrings.Concat255("Analog to raw at ", TO_WSTRING(analogPoints[i]))
+	).ToBe(expected := expectedRaw[i]);
+
+	analogValue := zeroToTen.ConvertRawValueToAnalogValue(
+		rawValue := TOF_Devices_IO.RawAnalogValues.FromInt16(value := rawInputs[i]),
+		rawValueType := TOF_Devices_IO.RAW_ANALOG_VALUE_TYPE.INT16
+	);
+	Assert.ThatLongReal(
+		actual := analogValue,
+		message := TOF_Core.WideStrings.Concat255("Raw to analog at ", TO_WSTRING(rawInputs[i]))
+	).ToBe(expected := analogPoints[i], tolerance := 0.01);
+END_FOR
+
+rawValue := zeroToTen.ConvertAnalogValueToRawValue(
+	analogValue := 2.5,
+	rawValueType := TOF_Devices_IO.RAW_ANALOG_VALUE_TYPE.INT16
+);
+Assert.ThatDInt(actual := rawValue.Int32, message := "Negative INT16 results must have zero upper bytes").ToBe(
+	expected := DINT#16#0000C000
+);
+
+// Check the descending scale independently of the ascending fixture.
+rawValue := descendingEngineering.ConvertAnalogValueToRawValue(
+	analogValue := 40,
+	rawValueType := TOF_Devices_IO.RAW_ANALOG_VALUE_TYPE.INT16
+);
+Assert.ThatInt(
+	actual := rawValue.Int16,
+	message := "Analog to raw clamps above its first endpoint"
+).ToBe(expected := -200);
+
+rawValue := descendingEngineering.ConvertAnalogValueToRawValue(
+	analogValue := 20,
+	rawValueType := TOF_Devices_IO.RAW_ANALOG_VALUE_TYPE.INT16
+);
+Assert.ThatInt(
+	actual := rawValue.Int16,
+	message := "Analog to raw interpolates an interior value"
+).ToBe(expected := 0);
+
+rawValue := descendingEngineering.ConvertAnalogValueToRawValue(
+	analogValue := -20,
+	rawValueType := TOF_Devices_IO.RAW_ANALOG_VALUE_TYPE.INT16
+);
+Assert.ThatInt(
+	actual := rawValue.Int16,
+	message := "Analog to raw clamps below its last endpoint"
+).ToBe(expected := 600);
+
+analogValue := descendingEngineering.ConvertRawValueToAnalogValue(
+	rawValue := TOF_Devices_IO.RawAnalogValues.FromInt16(value := -300),
+	rawValueType := TOF_Devices_IO.RAW_ANALOG_VALUE_TYPE.INT16
+);
+Assert.ThatLongReal(
+	actual := analogValue,
+	message := "Raw to analog clamps below the raw minimum"
+).ToBe(expected := 30);
+
+analogValue := descendingEngineering.ConvertRawValueToAnalogValue(
+	rawValue := TOF_Devices_IO.RawAnalogValues.FromInt16(value := 200),
+	rawValueType := TOF_Devices_IO.RAW_ANALOG_VALUE_TYPE.INT16
+);
+Assert.ThatLongReal(
+	actual := analogValue,
+	message := "Raw to analog interpolates a descending engineering value"
+).ToBe(expected := 10);
+
+analogValue := descendingEngineering.ConvertRawValueToAnalogValue(
+	rawValue := TOF_Devices_IO.RawAnalogValues.FromInt16(value := 700),
+	rawValueType := TOF_Devices_IO.RAW_ANALOG_VALUE_TYPE.INT16
+);
+Assert.ThatLongReal(
+	actual := analogValue,
+	message := "Raw to analog clamps above the raw maximum"
+).ToBe(expected := -10);]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="NamespaceName" Id="{d5d9e8cb-2e74-42a6-be62-458f24a1ad74}">
+      <Declaration><![CDATA[(*!
+<summary>Borrows the compiler-initialized namespace for the lifetime of this instance.</summary>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{441f6a35-a9e3-4295-9878-702ce4ae27dd}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[NamespaceName REF= CurrentNamespace.Name;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="SelfSize" Id="{e27a6be7-d8f3-4789-acd9-c82b64448d51}">
+      <Declaration><![CDATA[(*!
+<summary>Reports the complete concrete instance size in bytes.</summary>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY SelfSize : ULINT]]></Declaration>
+      <Get Name="Get" Id="{fb66f8f7-7262-476a-b9fd-c8d7f8e0926b}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[SelfSize := XSIZEOF(THIS^);]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+  </POU>
+</TcPlcObject>

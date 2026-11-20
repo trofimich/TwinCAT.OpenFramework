@@ -92,7 +92,7 @@ directly to that task) and inspect `InputValid`, `InputUpdated`, and `Voltage`. 
 `HowTo` `MAIN` runs the testing example by default; switch to the IO example manually
 when testing.)*
 
-`IOModelsTest` runs automatically via `TcUnit` and checks PLC field types and byte widths (including the 16-channel EP models, `EL3078` `Real32`, and compound `DINT`/`REAL` inputs). Unit tests do not verify physical EtherCAT wiring or TwinCAT XAE links, so check those during commissioning:
+`IOModelsTest` runs automatically via `TOF_Testing` and checks PLC field types and byte widths (including the 16-channel EP models, `EL3078` `Real32`, and compound `DINT`/`REAL` inputs). Unit tests do not verify physical EtherCAT wiring or TwinCAT XAE links, so check those during commissioning:
 
 * Confirm that the eight simple EP `_EX` models have no `AdsAddr`, while analog and serial EP `_EX` models keep theirs.
 * For `EL3356`, link Status PDO `0x1A00` and integer Value PDO `0x1A01` separately.

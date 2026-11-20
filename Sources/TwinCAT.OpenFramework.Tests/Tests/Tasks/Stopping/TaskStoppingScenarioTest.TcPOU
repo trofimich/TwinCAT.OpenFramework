@@ -1,0 +1,671 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="TaskStoppingScenarioTest" Id="{8c3e43e8-9e92-4119-b542-0982ecbe4ab2}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+SPDX-FileCopyrightText: © 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+SPDX-License-Identifier: MIT
+License: https://opensource.org/license/mit
+*)
+
+(*!
+<summary>Checks one cooperative stopping configuration of the production Task.</summary>
+<description>
+Owns persistent synthetic fixtures that perform no hardware work. One task drives the scenario using at most
+one Execute per cycle. AfterTest drains remaining simulated work before preparing the fixtures for runner Reset.
+</description>
+*)
+
+{attribute 'no_assign'}
+{attribute 'no_explicit_call' := 'do not call this function block directly'}
+FUNCTION_BLOCK TaskStoppingScenarioTest EXTENDS TOF_Testing.MultiCycleTest
+VAR_STAT
+	{attribute 'hide'}
+	_ClassName : STRING := __POUNAME();
+END_VAR
+VAR CONSTANT
+	//! <summary>Nominal call budget allowing acquisition, injected exceptions, cleanup and release.</summary>
+	_MaxScenarioCalls : UDINT := 32;
+	//! <summary>First observed acquisition step, before synthetic ownership can be acquired.</summary>
+	_FirstAcquireStep : UINT := 1;
+	//! <summary>Interrupt this many stopping calls before resuming in the repeated-fault case.</summary>
+	_RepeatedStoppingFailures : UINT := 3;
+	//! <summary>The probe must complete both successful cleanup steps before release or termination.</summary>
+	_RequiredCleanupSteps : UINT := 2;
+END_VAR
+VAR
+	_Scenario : TASK_STOPPING_TEST_SCENARIO;
+	_Task : TaskStoppingProbe(name := "TaskStoppingProbe");
+	_Resource : TaskStoppingResource;
+
+	_ExpectedReason : TOF_Tasks.TASK_STOP_REASON;
+	_ExpectedMessage : WSTRING(255);
+	_ExpectedAcquireCalls : UINT;
+	_ExpectedWorkCalls : UINT;
+	_ExpectedReleaseCalls : UINT;
+	_ExpectedStoppingCalls : UINT;
+	_ExpectedCancelNotifications : UINT;
+
+	_ObservedStopping : BOOL;
+	_ObservedPendingRelease : BOOL;
+	_CancelRequested : BOOL;
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[]]></ST>
+    </Implementation>
+    <Method Name="FB_init" Id="{48ac1e2c-3eb9-498f-99e4-7c4ac998e52a}">
+      <Declaration><![CDATA[(*!
+<summary>Stores the case and uses a cycle budget instead of a nominal duration.</summary>
+<param name="name">Display name of the case.</param>
+<param name="parent">Group that owns this case.</param>
+<param name="scenario">Fault and observation configuration.</param>
+*)
+METHOD FB_init : BOOL
+VAR_INPUT
+	bInitRetains: BOOL; // TRUE: the retain variables are initialized (reset warm / reset cold)
+	bInCopyCode: BOOL; // TRUE: the instance will be copied to the copy code afterward (online change)
+	name : WSTRING;
+	parent : TOF_Testing.ITestElement;
+	scenario : TASK_STOPPING_TEST_SCENARIO;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_Scenario := scenario;
+_Timeout := TOF_Core.Times.MIN_VALUE;
+FB_init := TRUE;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="BeforeTest" Id="{f7e723cb-90f0-4aea-98fe-6a36c34d0aaf}">
+      <Declaration><![CDATA[(*!
+<summary>Prepares the chosen fixture before starting its observed run.</summary>
+*)
+METHOD PROTECTED BeforeTest]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF NOT _Task.State.Ready OR_ELSE _Resource.ResourceAcquired THEN
+	RecordFailure(message := "The stopping fixture must begin READY without an acquired resource");
+	RETURN;
+END_IF
+
+_Task.ClearObservations();
+_ObservedStopping := FALSE;
+_ObservedPendingRelease := FALSE;
+_CancelRequested := FALSE;
+
+configureScenario();
+
+IF _Scenario = TASK_STOPPING_TEST_SCENARIO.START_FORMATTER_EXCEPTION THEN
+	checkStartRefusal();
+
+	IF Outcome = TOF_Testing.TEST_OUTCOME.FAILED THEN
+		RETURN;
+	END_IF
+END_IF
+
+IF NOT _Task.Start() THEN
+	RecordFailure(message := "The prepared task must accept Start");
+	RETURN;
+END_IF
+
+IF _Scenario = TASK_STOPPING_TEST_SCENARIO.CANCEL_BEFORE_ACQUIRE
+	OR_ELSE _Scenario = TASK_STOPPING_TEST_SCENARIO.START_FORMATTER_EXCEPTION
+THEN
+	Assert.ThatBool(
+		actual := _Task.Cancel(),
+		message := "Cancellation before the first Execute must be accepted"
+	).IsTrue();
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="configureScenario" Id="{7fb66756-61d7-4a95-b03e-4ead397fe113}">
+      <Declaration><![CDATA[(*!
+<summary>Sets independent expected observations and applies the selected injections.</summary>
+*)
+METHOD PRIVATE configureScenario]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_ExpectedReason := TOF_Tasks.TASK_STOP_REASON.WORK_DONE;
+_ExpectedMessage := "";
+_ExpectedAcquireCalls := 1;
+_ExpectedWorkCalls := 1;
+_ExpectedReleaseCalls := 1;
+_ExpectedStoppingCalls := _RequiredCleanupSteps;
+_ExpectedCancelNotifications := 0;
+
+IF _Scenario <> TASK_STOPPING_TEST_SCENARIO.EMPTY_WORK_EXCEPTION_MESSAGE THEN
+	_Task.SetResource(resource := _Resource);
+END_IF
+
+CASE _Scenario OF
+	TASK_STOPPING_TEST_SCENARIO.WORK_ERROR:
+		_Task.ProcessingResult := TOF_Tasks.TASK_PROCESSING_STATE.ERROR;
+		_ExpectedReason := TOF_Tasks.TASK_STOP_REASON.FAILURE;
+		_ExpectedMessage := "Work result";
+
+	TASK_STOPPING_TEST_SCENARIO.WORK_ABORT:
+		_Task.ProcessingResult := TOF_Tasks.TASK_PROCESSING_STATE.ABORTED;
+		_ExpectedReason := TOF_Tasks.TASK_STOP_REASON.INTERNAL_ABORT;
+		_ExpectedMessage := "Work result";
+
+	TASK_STOPPING_TEST_SCENARIO.WORK_EXCEPTION,
+	TASK_STOPPING_TEST_SCENARIO.WORK_FORMATTER_EXCEPTION,
+	TASK_STOPPING_TEST_SCENARIO.FIRST_STOPPING_EXCEPTION,
+	TASK_STOPPING_TEST_SCENARIO.EMPTY_WORK_EXCEPTION_MESSAGE:
+		_Task.ThrowOnRunning := TRUE;
+		_ExpectedReason := TOF_Tasks.TASK_STOP_REASON.FAILURE;
+		_ExpectedMessage := "Work failure";
+
+		CASE _Scenario OF
+			TASK_STOPPING_TEST_SCENARIO.WORK_FORMATTER_EXCEPTION:
+				_Task.ThrowOnGetMessage := TRUE;
+				_ExpectedMessage := "Task 'TaskStoppingProbe' processing failed";
+
+			TASK_STOPPING_TEST_SCENARIO.FIRST_STOPPING_EXCEPTION:
+				_Task.ThrowOnFirstStopping := TRUE;
+				_ExpectedStoppingCalls := _RequiredCleanupSteps + 1;
+
+			TASK_STOPPING_TEST_SCENARIO.EMPTY_WORK_EXCEPTION_MESSAGE:
+				_Task.ThrowWithEmptyMessage := TRUE;
+				_ExpectedMessage := "Task 'TaskStoppingProbe' processing failed";
+				_ExpectedAcquireCalls := 0;
+				_ExpectedReleaseCalls := 0;
+		END_CASE
+
+	TASK_STOPPING_TEST_SCENARIO.REPEATED_STOPPING_EXCEPTIONS:
+		_Task.ThrowOnEveryStopping := TRUE;
+		_ExpectedStoppingCalls := _RequiredCleanupSteps + _RepeatedStoppingFailures;
+
+	TASK_STOPPING_TEST_SCENARIO.CANCEL_DURING_ACQUIRE,
+	TASK_STOPPING_TEST_SCENARIO.CANCEL_BEFORE_ACQUIRE,
+	TASK_STOPPING_TEST_SCENARIO.START_FORMATTER_EXCEPTION:
+		_ExpectedReason := TOF_Tasks.TASK_STOP_REASON.EXTERNAL_CANCEL;
+		_ExpectedMessage := "Cancelled by external logic";
+		_ExpectedWorkCalls := 0;
+		_ExpectedCancelNotifications := 1;
+
+		IF _Scenario = TASK_STOPPING_TEST_SCENARIO.CANCEL_DURING_ACQUIRE THEN
+			_ExpectedStoppingCalls := _RequiredCleanupSteps + 1;
+		ELSE
+			_ExpectedAcquireCalls := 0;
+			_ExpectedReleaseCalls := 0;
+		END_IF
+
+	TASK_STOPPING_TEST_SCENARIO.ACQUIRE_EXCEPTION_AFTER_OWNERSHIP:
+		_Resource.ThrowAfterAcquire := TRUE;
+		_Resource.ThrowOnGetMessage := TRUE;
+		_ExpectedReason := TOF_Tasks.TASK_STOP_REASON.FAILURE;
+		_ExpectedMessage := "Task 'TaskStoppingProbe' resource acquisition failed";
+		_ExpectedWorkCalls := 0;
+
+	TASK_STOPPING_TEST_SCENARIO.ACQUIRE_EXCEPTION_BEFORE_OWNERSHIP:
+		_Resource.ThrowOnStartAcquire := TRUE;
+		_ExpectedReason := TOF_Tasks.TASK_STOP_REASON.FAILURE;
+		_ExpectedMessage := "Acquire failure";
+		_ExpectedWorkCalls := 0;
+		_ExpectedReleaseCalls := 0;
+
+	TASK_STOPPING_TEST_SCENARIO.RELEASE_EXCEPTION:
+		_Resource.ThrowOnStartRelease := TRUE;
+		_Resource.ThrowOnGetMessage := TRUE;
+
+	TASK_STOPPING_TEST_SCENARIO.RESET_IN_NOTIFICATION:
+		_Task.ResetOnAfterStop := TRUE;
+END_CASE]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="checkStartRefusal" Id="{ca2bb36b-b50b-496a-b1a8-ef5733c7586b}">
+      <Declaration><![CDATA[(*!
+<summary>Observes contained Start refusal before clearing the injection and retrying.</summary>
+*)
+METHOD PRIVATE checkStartRefusal
+VAR
+	refuseReason : TOF_Core.ERROR_MESSAGE;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_Task.ThrowOnBeforeStart := TRUE;
+_Task.ThrowOnGetMessage := TRUE;
+
+Assert.ThatBool(
+	actual := _Task.Start(refuseReason => refuseReason),
+	message := "The Start hook exception must refuse Start"
+).IsFalse();
+Assert.ThatBool(
+	actual := _Task.State.Ready,
+	message := "Refused Start must leave the task READY"
+).IsTrue();
+Assert.ThatUInt(
+	actual := _Resource.AcquireCalls,
+	message := "Refused Start must make no acquisition request"
+).ToBe(expected := 0);
+Assert.ThatWideString(
+	actual := refuseReason,
+	message := "Start must use the fixed formatter fallback"
+).ToBe(expected := "Task start preparation failed");
+
+_Task.ThrowOnBeforeStart := FALSE;
+_Task.ThrowOnGetMessage := FALSE;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="ExecuteTest" Id="{c94db4a5-3db5-4e16-bc80-9955e8e455b2}">
+      <Declaration><![CDATA[(*!
+<summary>Advances the observed task and reports its terminal observations.</summary>
+<description>
+After an injected terminal release failure, schedules an extra idle Execute to detect an unsolicited retry.
+</description>
+*)
+METHOD PROTECTED ExecuteTest : TOF_Testing.TEST_CYCLE_RESULT]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[ExecuteTest := TOF_Testing.TEST_CYCLE_RESULT.DONE;
+
+IF CycleCount > _MaxScenarioCalls THEN
+	RecordFailure(message := "Task stopping exceeded its call budget");
+	RETURN;
+END_IF
+
+IF _Task.State.Stopped AND_THEN _Scenario = TASK_STOPPING_TEST_SCENARIO.RELEASE_EXCEPTION THEN
+	_Task.Execute();
+	checkFinalObservations();
+	checkFailedRelease();
+	RETURN;
+END_IF
+
+_Task.Execute();
+
+IF _Scenario = TASK_STOPPING_TEST_SCENARIO.CANCEL_DURING_ACQUIRE
+	AND_THEN NOT _CancelRequested
+	AND_THEN _Resource.AcquireProgress = _FirstAcquireStep
+THEN
+	_CancelRequested := _Task.Cancel();
+	Assert.ThatBool(
+		actual := _CancelRequested,
+		message := "Cancelling pending acquisition must succeed"
+	).IsTrue();
+	Assert.ThatBool(
+		actual := _Resource.ResourceAcquired,
+		message := "Cancellation must precede the late acquire response"
+	).IsFalse();
+END_IF
+
+IF _Task.State.Running THEN
+	observeRunning();
+	ExecuteTest := TOF_Testing.TEST_CYCLE_RESULT.BUSY;
+	RETURN;
+END_IF
+
+checkFinalObservations();
+
+CASE _Scenario OF
+	TASK_STOPPING_TEST_SCENARIO.RELEASE_EXCEPTION:
+		checkFailedRelease();
+		ExecuteTest := TOF_Testing.TEST_CYCLE_RESULT.BUSY;
+
+	TASK_STOPPING_TEST_SCENARIO.RESET_FORMATTER_EXCEPTION:
+		IF Outcome <> TOF_Testing.TEST_OUTCOME.FAILED THEN
+			checkResetRefusal();
+		END_IF
+END_CASE]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="observeRunning" Id="{d6e07f93-6db5-4b25-a9dd-78291fa91119}">
+      <Declaration><![CDATA[(*!
+<summary>Checks the stopping transition and asynchronous release across calls.</summary>
+*)
+METHOD PRIVATE observeRunning]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF _Task.RunningSubstate.Stopping THEN
+	Assert.ThatUInt(
+		actual := _Resource.ReleaseCalls,
+		message := "Release cannot start while stopping is incomplete"
+	).ToBe(expected := 0);
+	Assert.ThatBool(
+		actual := _Task.OriginalStopReason.Value = _ExpectedReason,
+		message := "Stopping must preserve the original reason"
+	).IsTrue();
+
+	IF NOT _ObservedStopping THEN
+		_ObservedStopping := TRUE;
+		checkFirstStoppingObservation();
+	END_IF
+
+	IF _Task.ThrowOnEveryStopping THEN
+		Assert.ThatUInt(
+			actual := _Task.CompletedCleanupSteps,
+			message := "Interrupted stopping calls must not advance cleanup"
+		).ToBe(expected := 0);
+
+		IF _Task.StoppingCalls >= _RepeatedStoppingFailures THEN
+			_Task.ThrowOnEveryStopping := FALSE;
+		END_IF
+	END_IF
+ELSIF _Task.RunningSubstate.ResourceReleasing THEN
+	Assert.ThatUInt(
+		actual := _Task.CompletedCleanupSteps,
+		message := "All cleanup steps must complete before release"
+	).ToBe(expected := _RequiredCleanupSteps);
+	Assert.ThatBool(
+		actual := _Resource.ResourceAcquired,
+		message := "Resource ownership must remain until release completes"
+	).IsTrue();
+
+	IF _Resource.ReleaseCalls = 1 THEN
+		_ObservedPendingRelease := TRUE;
+	END_IF
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="checkFirstStoppingObservation" Id="{fb6ce1d0-b63e-44d6-9555-1107d56ae11b}">
+      <Declaration><![CDATA[(*!
+<summary>Distinguishes immediate normal stopping from stopping deferred by exceptions.</summary>
+*)
+METHOD PRIVATE checkFirstStoppingObservation]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[CASE _Scenario OF
+	TASK_STOPPING_TEST_SCENARIO.WORK_EXCEPTION,
+	TASK_STOPPING_TEST_SCENARIO.WORK_FORMATTER_EXCEPTION,
+	TASK_STOPPING_TEST_SCENARIO.FIRST_STOPPING_EXCEPTION,
+	TASK_STOPPING_TEST_SCENARIO.EMPTY_WORK_EXCEPTION_MESSAGE,
+	TASK_STOPPING_TEST_SCENARIO.ACQUIRE_EXCEPTION_AFTER_OWNERSHIP,
+	TASK_STOPPING_TEST_SCENARIO.ACQUIRE_EXCEPTION_BEFORE_OWNERSHIP,
+	TASK_STOPPING_TEST_SCENARIO.CANCEL_DURING_ACQUIRE:
+		Assert.ThatUInt(
+			actual := _Task.StoppingCalls,
+			message := "Stopping must wait for the next Execute"
+		).ToBe(expected := 0);
+
+	ELSE
+		Assert.ThatUInt(
+			actual := _Task.StoppingCalls,
+			message := "The first stopping step must run in this Execute"
+		).ToBe(expected := 1);
+END_CASE]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="checkFinalObservations" Id="{1b6ea751-8e8c-40f1-b034-85bf0dfce9b7}">
+      <Declaration><![CDATA[(*!
+<summary>Checks the finalization count, call counts and retained original and final results.</summary>
+*)
+METHOD PRIVATE checkFinalObservations]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[Assert.ThatBool(
+	actual := _ObservedStopping,
+	message := "The scenario must observe an active STOPPING phase"
+).IsTrue();
+Assert.ThatUInt(
+	actual := _Task.RunningCalls,
+	message := "Ordinary work must run only when expected"
+).ToBe(expected := _ExpectedWorkCalls);
+Assert.ThatUInt(
+	actual := _Task.StoppingCalls,
+	message := "Stopping calls must match the configured faults and cleanup"
+).ToBe(expected := _ExpectedStoppingCalls);
+Assert.ThatUInt(
+	actual := _Task.AfterStopCalls,
+	message := "Final notification must occur exactly once"
+).ToBe(expected := 1);
+Assert.ThatUInt(
+	actual := _Task.CancelNotifications,
+	message := "Accepted owner cancellation must notify exactly once"
+).ToBe(expected := _ExpectedCancelNotifications);
+Assert.ThatUInt(
+	actual := _Resource.AcquireCalls,
+	message := "Acquisition must be requested only when required"
+).ToBe(expected := _ExpectedAcquireCalls);
+Assert.ThatUInt(
+	actual := _Resource.ReleaseCalls,
+	message := "Release must be requested only when required"
+).ToBe(expected := _ExpectedReleaseCalls);
+
+IF _Scenario = TASK_STOPPING_TEST_SCENARIO.CANCEL_DURING_ACQUIRE THEN
+	Assert.ThatUInt(
+		actual := _Resource.AcquireProgress,
+		message := "Cancelled acquisition must drain all three synthetic steps before releasing"
+	).ToBe(expected := 3);
+END_IF
+
+IF _Scenario = TASK_STOPPING_TEST_SCENARIO.RESET_IN_NOTIFICATION THEN
+	Assert.ThatBool(
+		actual := _Task.State.Ready,
+		message := "OnAfterStop Reset must leave the task READY without reentering work"
+	).IsTrue();
+	Assert.ThatUInt(
+		actual := _Task.CompletedCleanupSteps,
+		message := "Callback Reset must clear the stopping progress"
+	).ToBe(expected := 0);
+	Assert.ThatBool(
+		actual := _Resource.ResourceAcquired,
+		message := "Callback Reset must follow completed release"
+	).IsFalse();
+	Assert.ThatBool(
+		actual := _ObservedPendingRelease,
+		message := "Asynchronous release must be observable before the callback"
+	).IsTrue();
+
+	RETURN;
+END_IF
+
+Assert.ThatBool(actual := _Task.State.Stopped, message := "The task must have reached STOPPED").IsTrue();
+Assert.ThatUInt(
+	actual := _Task.CompletedCleanupSteps,
+	message := "Both cleanup steps must complete before termination"
+).ToBe(expected := _RequiredCleanupSteps);
+Assert.ThatBool(
+	actual := _Task.OriginalStopReason.Value = _ExpectedReason,
+	message := "Cleanup must preserve the original reason"
+).IsTrue();
+Assert.ThatWideString(
+	actual := _Task.OriginalStopReason.Message,
+	message := "Cleanup must preserve the original diagnostic"
+).ToBe(expected := _ExpectedMessage);
+
+IF _Scenario = TASK_STOPPING_TEST_SCENARIO.RELEASE_EXCEPTION THEN
+	RETURN;
+END_IF
+
+Assert.ThatBool(
+	actual := _Task.FinalStopReason.Value = _ExpectedReason,
+	message := "After successful cleanup the final reason must match"
+).IsTrue();
+Assert.ThatBool(
+	actual := _Resource.ResourceAcquired,
+	message := "Successful cleanup must leave the resource released"
+).IsFalse();
+Assert.ThatBool(
+	actual := _ObservedPendingRelease = (_ExpectedReleaseCalls = 1),
+	message := "Only a requested asynchronous release must remain pending"
+).IsTrue();
+
+IF _ExpectedMessage <> "" THEN
+	Assert.ThatWideString(
+		actual := _Task.FinalStopReason.Message,
+		message := "Final diagnostic must retain the original text"
+	).ToBe(expected := _ExpectedMessage);
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="checkFailedRelease" Id="{9098859d-6a39-4823-8479-0c03edfaeed2}">
+      <Declaration><![CDATA[(*!
+<summary>Checks terminal release failure and preserves the work result.</summary>
+*)
+METHOD PRIVATE checkFailedRelease]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[Assert.ThatBool(
+	actual := _Task.State.Stopped AND_THEN _Task.FinalStopReason.Failure,
+	message := "Terminal release failure must leave STOPPED with FAILURE"
+).IsTrue();
+Assert.ThatBool(
+	actual := _Task.OriginalStopReason.WorkDone,
+	message := "Failed release must preserve the original successful work result"
+).IsTrue();
+Assert.ThatWideString(
+	actual := _Task.FinalStopReason.Message,
+	message := "Failed release formatter must use the named fallback"
+).ToBe(expected := "Task 'TaskStoppingProbe' release failed");
+Assert.ThatBool(
+	actual := _Resource.ResourceAcquired,
+	message := "Failed release must leave the synthetic resource held"
+).IsTrue();
+Assert.ThatUInt(
+	actual := _Resource.ReleaseCalls,
+	message := "Failed release must not be retried"
+).ToBe(expected := 1);
+Assert.ThatUInt(
+	actual := _Task.AfterStopCalls,
+	message := "Failed release must not repeat final notification"
+).ToBe(expected := 1);]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="checkResetRefusal" Id="{547a8327-2ba8-406a-80ed-320dc752eae5}">
+      <Declaration><![CDATA[(*!
+<summary>Verifies fixed diagnostics and retries Reset after removing the injected fault.</summary>
+*)
+METHOD PRIVATE checkResetRefusal
+VAR
+	refuseReason : TOF_Core.ERROR_MESSAGE;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_Task.ThrowOnReset := TRUE;
+_Task.ThrowOnGetMessage := TRUE;
+
+Assert.ThatBool(
+	actual := _Task.Reset(refuseReason => refuseReason),
+	message := "A resetting hook exception must refuse Reset"
+).IsFalse();
+Assert.ThatBool(actual := _Task.State.Stopped, message := "Refused Reset must preserve STOPPED").IsTrue();
+Assert.ThatWideString(
+	actual := refuseReason,
+	message := "Reset must use the fixed formatter fallback"
+).ToBe(expected := "Task reset failed");
+
+_Task.ThrowOnReset := FALSE;
+_Task.ThrowOnGetMessage := FALSE;
+Assert.ThatBool(
+	actual := _Task.Reset(),
+	message := "Reset must succeed after removing the injected failure"
+).IsTrue();
+Assert.ThatBool(
+	actual := _Task.State.Ready,
+	message := "Successful Reset must prepare the task for reuse"
+).IsTrue();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="AfterTest" Id="{478a179e-c87e-4620-8ed3-46c82af5eb02}">
+      <Declaration><![CDATA[(*!
+<summary>Clears injections and drains simulated work before publishing the outcome.</summary>
+<description>
+The bounded drain runs only on synchronous synthetic fixtures. If the task remains active or refuses Reset,
+does not clear the simulated resource state. Clears a held test resource after the terminal result was observed.
+</description>
+*)
+METHOD PROTECTED AfterTest
+VAR
+	i : UDINT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_Task.ProcessingResult := TOF_Tasks.TASK_PROCESSING_STATE.DONE;
+_Task.ThrowOnBeforeStart := FALSE;
+_Task.ThrowOnRunning := FALSE;
+_Task.ThrowOnFirstStopping := FALSE;
+_Task.ThrowOnEveryStopping := FALSE;
+_Task.ThrowOnReset := FALSE;
+_Task.ThrowOnGetMessage := FALSE;
+_Task.ThrowWithEmptyMessage := FALSE;
+_Task.ResetOnAfterStop := FALSE;
+_Resource.ThrowOnStartAcquire := FALSE;
+_Resource.ThrowAfterAcquire := FALSE;
+_Resource.ThrowOnStartRelease := FALSE;
+_Resource.ThrowOnGetMessage := FALSE;
+
+__TRY
+	IF _Task.State.Running THEN
+		IF NOT _Task.OriginalStopReason.ExternalCancel AND_THEN NOT _Task.RunningSubstate.ResourceReleasing THEN
+			_Task.Cancel();
+		END_IF
+
+		FOR i := 1 TO _MaxScenarioCalls DO
+			IF NOT _Task.State.Running THEN
+				EXIT;
+			END_IF
+
+			_Task.Execute();
+		END_FOR
+	END_IF
+__CATCH
+	reportCleanupFailure(message := "An exception interrupted synthetic stopping or release");
+__ENDTRY
+
+IF _Task.State.Running THEN
+	reportCleanupFailure(message := "Synthetic cleanup left the task RUNNING");
+	RETURN;
+END_IF
+
+IF _Task.State.Stopped THEN
+	IF NOT _Task.Reset() THEN
+		reportCleanupFailure(message := "Stopped probe refused cleanup Reset");
+		RETURN;
+	END_IF
+END_IF
+
+IF NOT _Task.State.Ready THEN
+	reportCleanupFailure(message := "The probe must return to READY after cleanup");
+	RETURN;
+END_IF
+
+_Resource.ResetFixture();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="reportCleanupFailure" Id="{20b7b4fa-9f12-4ff5-904f-922f35f4b3c7}">
+      <Declaration><![CDATA[(*!
+<summary>Reports cleanup failures without overwriting a recorded outcome.</summary>
+<param name="message">Cleanup diagnostic copied to the test or ADS log.</param>
+*)
+METHOD PRIVATE reportCleanupFailure
+VAR_IN_OUT CONSTANT
+	message : TOF_Core.ERROR_MESSAGE;
+END_VAR
+VAR
+	logText : STRING(255);
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF Outcome = TOF_Testing.TEST_OUTCOME.FAILED THEN
+	logText := TO_STRING(TOF_Core.WideStrings.ConcatFit255(Name, " cleanup: ", TO_WSTRING(message)));
+	Tc2_System.ADSLOGSTR(
+		msgCtrlMask := Tc2_System.Global_Variables.ADSLOG_MSGTYPE_ERROR,
+		msgFmtStr := '%s',
+		strArg := logText
+	);
+ELSE
+	RecordFailure(message := message);
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="ClassName" Id="{fd733564-a591-43e1-82d4-9ce0785af9e9}">
+      <Declaration><![CDATA[//! <summary>Borrows the concrete class name. Callers must not modify it.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{15ab54a4-cdf5-42d5-bb9e-9bf7fd035e10}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ClassName REF= _ClassName;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="NamespaceName" Id="{8d7736d0-c8f1-44a8-9e64-8179a8b8af0d}">
+      <Declaration><![CDATA[//! <summary>Borrows the compiler-initialized namespace name. Callers must not modify it.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{02194d3d-8127-4f1a-af12-2da2434afc86}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[NamespaceName REF= CurrentNamespace.Name;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="SelfSize" Id="{7cfee8f3-cfb6-41e5-b76d-c6a5769cfd4b}">
+      <Declaration><![CDATA[//! <summary>Reports the concrete instance size in bytes.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY SelfSize : ULINT]]></Declaration>
+      <Get Name="Get" Id="{80af3de4-11a1-45f6-9d6d-119e5e64b50b}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[SelfSize := XSIZEOF(THIS^);]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+  </POU>
+</TcPlcObject>

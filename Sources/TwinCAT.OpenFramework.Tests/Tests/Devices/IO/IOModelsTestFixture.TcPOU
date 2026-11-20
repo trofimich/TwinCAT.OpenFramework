@@ -1,0 +1,1041 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="IOModelsTestFixture" Id="{e56a1fef-dd65-4390-b10d-0f7f682e9807}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+SPDX-FileCopyrightText: © 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+SPDX-License-Identifier: MIT
+License: https://opensource.org/license/mit
+*)
+
+(*!
+<summary>Holds the existing I/O symbols and runs the model scenarios for the test group.</summary>
+<description>
+Keep the mapped field names and types at the controller-owned instance path used by the test project.
+PDO cases inspect type and byte width through ANY without reading or writing process-image payloads.
+Binding cases use fresh local consumers and simulated channels with a live fixture-owned automation parent.
+Use from one task. Actual EtherCAT mapping and online change require separate verification.
+</description>
+*)
+
+{attribute 'no_assign'}
+{attribute 'no_explicit_call' := 'do not call this function block directly'}
+FUNCTION_BLOCK IOModelsTestFixture IMPLEMENTS IIOModelsTestFixture
+VAR_STAT
+	{attribute 'hide'}
+	_ClassName : STRING := __POUNAME();
+END_VAR
+VAR CONSTANT
+	//! <summary>Bit 6 flags a measurement or hardware error in the simulated channel status word.</summary>
+	_ChannelErrorStatus : WORD := WORD#16#0040;
+	//! <summary>Initial content outside the simulated fields to expose unintended buffer writes.</summary>
+	_UnusedBufferByte : BYTE := BYTE#16#A5;
+END_VAR
+VAR
+	_PulseTrain : TOF_IOModels.EL2521;
+	_CounterEncoder : TOF_IOModels.EL5152;
+	_LatchedEncoder : TOF_IOModels.EL5151;
+	_PowerMeasurement : TOF_IOModels.EL3413_EX;
+	_GlobalStatusPowerMeasurement : TOF_IOModels.EL3403;
+	_DirectPowerMeasurement : TOF_IOModels.EL3433;
+	_Counter : TOF_IOModels.EL1502;
+	_Load : TOF_IOModels.EL3356;
+	_Pwm : TOF_IOModels.EL2502;
+	_Serial : TOF_IOModels.EL6022;
+	_DiscreteOutput : TOF_IOModels.EP2624_0002_EX;
+	_SixteenChannelInput : TOF_IOModels.EP1809_0021_EX;
+	_SixteenChannelOutput : TOF_IOModels.EP2809_0021_EX;
+	_MultiRangeInput : TOF_IOModels.EL3078;
+	_FieldAnalogInput : TOF_IOModels.EP3174_0002_EX;
+	_FieldAnalogOutput : TOF_IOModels.EP4174_0002_EX;
+	_FieldSerial : TOF_IOModels.EP6001_0002_EX;
+
+	//! <summary>Live parent borrowed by the simulated analog consumers.</summary>
+	_AutomationRoot : MockAutomationController(name := "IOModelsRoot");
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[]]></ST>
+    </Implementation>
+    <Method Name="ExecuteScenario" Id="{a755ca70-cd0c-48e0-90d8-d84d22a621cd}">
+      <Declaration><![CDATA[(*!
+<summary>Runs one IO model scenario and reports to the current case.</summary>
+<description>Use from the owning test task. The fixture never retains assertions.</description>
+<param name="scenario">Scenario assigned to the caller.</param>
+<param name="assertions">Valid assertion context borrowed from the active case.</param>
+*)
+METHOD ExecuteScenario
+VAR_INPUT
+	scenario : IO_MODELS_TEST_SCENARIO;
+	assertions : REFERENCE TO TOF_Testing.Assertions;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[CASE scenario OF
+	IO_MODELS_TEST_SCENARIO.PULSE_TRAIN:
+		testPulseTrain(assertions := assertions);
+
+	IO_MODELS_TEST_SCENARIO.ENCODER_CHANNELS:
+		testEncoderChannels(assertions := assertions);
+
+	IO_MODELS_TEST_SCENARIO.POWER_MEASUREMENT:
+		testPowerMeasurement(assertions := assertions);
+
+	IO_MODELS_TEST_SCENARIO.AUXILIARY:
+		testAuxiliary(assertions := assertions);
+
+	IO_MODELS_TEST_SCENARIO.COUNTER_AND_LOAD:
+		testCounterAndLoad(assertions := assertions);
+
+	IO_MODELS_TEST_SCENARIO.SERIAL_AND_DIAGNOSTICS:
+		testSerialAndDiagnostics(assertions := assertions);
+
+	IO_MODELS_TEST_SCENARIO.DISCRETE_CATALOG:
+		testDiscreteCatalog(assertions := assertions);
+
+	IO_MODELS_TEST_SCENARIO.ANALOG_REPRESENTATIONS:
+		testAnalogRepresentations(assertions := assertions);
+
+	IO_MODELS_TEST_SCENARIO.DINT_BINDING:
+		testDintBinding(assertions := assertions);
+
+	IO_MODELS_TEST_SCENARIO.REAL_BINDING:
+		testRealBinding(assertions := assertions);
+ELSE
+	assertions.ThatBool(actual := FALSE, message := "Unknown IO model scenario").IsTrue();
+END_CASE]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="checkField" Id="{7b303b11-0bd5-4957-8b2d-806b72f7f1c1}">
+      <Declaration><![CDATA[(*!
+<summary>Compares a field descriptor with independent PDO expectations.</summary>
+<description>Does not dereference or retain the payload. Pass a model field variable.</description>
+<param name="assertions">Valid assertion context of the active case.</param>
+<param name="value">Model field whose IEC representation is inspected.</param>
+<param name="expectedType">IEC type class required by the selected PDO.</param>
+<param name="expectedSize">Required field width in bytes, excluding aggregate padding.</param>
+<param name="fieldName">Field identifier used in diagnostic messages.</param>
+*)
+METHOD PRIVATE checkField
+VAR_INPUT
+	assertions : REFERENCE TO TOF_Testing.Assertions;
+	value : ANY;
+	expectedType : __SYSTEM.TYPE_CLASS;
+	expectedSize : DINT;
+	fieldName : WSTRING(255);
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[assertions.ThatUDInt(
+	actual := TO_UDINT(value.TypeClass),
+	message := TOF_Core.WideStrings.Concat255(fieldName, " type")
+).ToBe(expected := TO_UDINT(expectedType));
+assertions.ThatDInt(
+	actual := value.diSize,
+	message := TOF_Core.WideStrings.Concat255(fieldName, " byte width")
+).ToBe(expected := expectedSize);]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="testPulseTrain" Id="{e562aa14-8c06-4be8-aa20-d0383a176e14}">
+      <Declaration><![CDATA[(*!
+<summary>Checks the pulse train command and feedback field representations.</summary>
+<description>Compares compiler descriptors against independent PDO field expectations.</description>
+<param name="assertions">Valid assertion context of the active case.</param>
+*)
+METHOD PRIVATE testPulseTrain
+VAR_INPUT
+	assertions : REFERENCE TO TOF_Testing.Assertions;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[checkField(
+	assertions := assertions,
+	value := _PulseTrain.Ch1.Out.Control,
+	expectedType := __SYSTEM.TYPE_CLASS.TYPE_WORD,
+	expectedSize := 2,
+	fieldName := "_PulseTrain.Ch1.Out.Control"
+);
+checkField(
+	assertions := assertions,
+	value := _PulseTrain.Ch1.Out.Frequency,
+	expectedType := __SYSTEM.TYPE_CLASS.TYPE_UINT,
+	expectedSize := 2,
+	fieldName := "_PulseTrain.Ch1.Out.Frequency"
+);
+checkField(
+	assertions := assertions,
+	value := _PulseTrain.Ch1.Out.TargetCounterValue,
+	expectedType := __SYSTEM.TYPE_CLASS.TYPE_UDINT,
+	expectedSize := 4,
+	fieldName := "_PulseTrain.Ch1.Out.TargetCounterValue"
+);
+checkField(
+	assertions := assertions,
+	value := _PulseTrain.Ch1.Out.CounterControl,
+	expectedType := __SYSTEM.TYPE_CLASS.TYPE_WORD,
+	expectedSize := 2,
+	fieldName := "_PulseTrain.Ch1.Out.CounterControl"
+);
+checkField(
+	assertions := assertions,
+	value := _PulseTrain.Ch1.Out.SetCounterValue,
+	expectedType := __SYSTEM.TYPE_CLASS.TYPE_UDINT,
+	expectedSize := 4,
+	fieldName := "_PulseTrain.Ch1.Out.SetCounterValue"
+);
+checkField(
+	assertions := assertions,
+	value := _PulseTrain.Ch1.In.Status,
+	expectedType := __SYSTEM.TYPE_CLASS.TYPE_WORD,
+	expectedSize := 2,
+	fieldName := "_PulseTrain.Ch1.In.Status"
+);
+checkField(
+	assertions := assertions,
+	value := _PulseTrain.Ch1.In.CounterStatus,
+	expectedType := __SYSTEM.TYPE_CLASS.TYPE_WORD,
+	expectedSize := 2,
+	fieldName := "_PulseTrain.Ch1.In.CounterStatus"
+);
+checkField(
+	assertions := assertions,
+	value := _PulseTrain.Ch1.In.CounterValue,
+	expectedType := __SYSTEM.TYPE_CLASS.TYPE_UDINT,
+	expectedSize := 4,
+	fieldName := "_PulseTrain.Ch1.In.CounterValue"
+);]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="testEncoderChannels" Id="{a7b6b8b7-fda2-43f4-be92-f13957ba5063}">
+      <Declaration><![CDATA[(*!
+<summary>Checks counter and latched encoder command and feedback field representations.</summary>
+<description>Compares compiler descriptors against independent PDO field expectations.</description>
+<param name="assertions">Valid assertion context of the active case.</param>
+*)
+METHOD PRIVATE testEncoderChannels
+VAR_INPUT
+	assertions : REFERENCE TO TOF_Testing.Assertions;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[checkField(
+	assertions := assertions,
+	value := _CounterEncoder.Ch1.In.Status,
+	expectedType := __SYSTEM.TYPE_CLASS.TYPE_WORD,
+	expectedSize := 2,
+	fieldName := "_CounterEncoder.Ch1.In.Status"
+);
+checkField(
+	assertions := assertions,
+	value := _CounterEncoder.Ch1.In.Value,
+	expectedType := __SYSTEM.TYPE_CLASS.TYPE_UDINT,
+	expectedSize := 4,
+	fieldName := "_CounterEncoder.Ch1.In.Value"
+);
+checkField(
+	assertions := assertions,
+	value := _CounterEncoder.Ch2.In.Value,
+	expectedType := __SYSTEM.TYPE_CLASS.TYPE_UDINT,
+	expectedSize := 4,
+	fieldName := "_CounterEncoder.Ch2.In.Value"
+);
+checkField(
+	assertions := assertions,
+	value := _CounterEncoder.Ch1.Out.SetValue,
+	expectedType := __SYSTEM.TYPE_CLASS.TYPE_UDINT,
+	expectedSize := 4,
+	fieldName := "_CounterEncoder.Ch1.Out.SetValue"
+);
+checkField(
+	assertions := assertions,
+	value := _LatchedEncoder.Ch1.In.Latch,
+	expectedType := __SYSTEM.TYPE_CLASS.TYPE_UDINT,
+	expectedSize := 4,
+	fieldName := "_LatchedEncoder.Ch1.In.Latch"
+);
+checkField(
+	assertions := assertions,
+	value := _LatchedEncoder.Ch1.Out.Control,
+	expectedType := __SYSTEM.TYPE_CLASS.TYPE_WORD,
+	expectedSize := 2,
+	fieldName := "_LatchedEncoder.Ch1.Out.Control"
+);]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="testPowerMeasurement" Id="{cc9c49f5-bad9-4440-8cd2-68abc68af3ed}">
+      <Declaration><![CDATA[(*!
+<summary>Checks selected channel fields in the three power measurement models.</summary>
+<description>Compares compiler descriptors against independent PDO field expectations.</description>
+<param name="assertions">Valid assertion context of the active case.</param>
+*)
+METHOD PRIVATE testPowerMeasurement
+VAR_INPUT
+	assertions : REFERENCE TO TOF_Testing.Assertions;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[checkField(
+	assertions := assertions,
+	value := _PowerMeasurement.L1.In.Status,
+	expectedType := __SYSTEM.TYPE_CLASS.TYPE_WORD,
+	expectedSize := 2,
+	fieldName := "_PowerMeasurement.L1.In.Status"
+);
+checkField(
+	assertions := assertions,
+	value := _PowerMeasurement.L1.In.Current,
+	expectedType := __SYSTEM.TYPE_CLASS.TYPE_DINT,
+	expectedSize := 4,
+	fieldName := "_PowerMeasurement.L1.In.Current"
+);
+checkField(
+	assertions := assertions,
+	value := _PowerMeasurement.L1.In.Voltage,
+	expectedType := __SYSTEM.TYPE_CLASS.TYPE_DINT,
+	expectedSize := 4,
+	fieldName := "_PowerMeasurement.L1.In.Voltage"
+);
+checkField(
+	assertions := assertions,
+	value := _PowerMeasurement.L1.In.ActivePower,
+	expectedType := __SYSTEM.TYPE_CLASS.TYPE_DINT,
+	expectedSize := 4,
+	fieldName := "_PowerMeasurement.L1.In.ActivePower"
+);
+checkField(
+	assertions := assertions,
+	value := _PowerMeasurement.L1.In.Index,
+	expectedType := __SYSTEM.TYPE_CLASS.TYPE_USINT,
+	expectedSize := 1,
+	fieldName := "_PowerMeasurement.L1.In.Index"
+);
+checkField(
+	assertions := assertions,
+	value := _PowerMeasurement.L1.In.VariantValue,
+	expectedType := __SYSTEM.TYPE_CLASS.TYPE_DINT,
+	expectedSize := 4,
+	fieldName := "_PowerMeasurement.L1.In.VariantValue"
+);
+checkField(
+	assertions := assertions,
+	value := _GlobalStatusPowerMeasurement.L1.In.Status,
+	expectedType := __SYSTEM.TYPE_CLASS.TYPE_WORD,
+	expectedSize := 2,
+	fieldName := "_GlobalStatusPowerMeasurement.L1.In.Status"
+);
+checkField(
+	assertions := assertions,
+	value := _GlobalStatusPowerMeasurement.L1.In.Current,
+	expectedType := __SYSTEM.TYPE_CLASS.TYPE_DINT,
+	expectedSize := 4,
+	fieldName := "_GlobalStatusPowerMeasurement.L1.In.Current"
+);
+checkField(
+	assertions := assertions,
+	value := _GlobalStatusPowerMeasurement.L1.In.Voltage,
+	expectedType := __SYSTEM.TYPE_CLASS.TYPE_DINT,
+	expectedSize := 4,
+	fieldName := "_GlobalStatusPowerMeasurement.L1.In.Voltage"
+);
+checkField(
+	assertions := assertions,
+	value := _GlobalStatusPowerMeasurement.Status,
+	expectedType := __SYSTEM.TYPE_CLASS.TYPE_WORD,
+	expectedSize := 2,
+	fieldName := "_GlobalStatusPowerMeasurement.Status"
+);]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="testAuxiliary" Id="{dfc2138f-1f90-443f-8f8d-834543e516ae}">
+      <Declaration><![CDATA[(*!
+<summary>Checks auxiliary power measurement and PWM field representations.</summary>
+<description>Compares compiler descriptors against independent PDO field expectations.</description>
+<param name="assertions">Valid assertion context of the active case.</param>
+*)
+METHOD PRIVATE testAuxiliary
+VAR_INPUT
+	assertions : REFERENCE TO TOF_Testing.Assertions;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[checkField(
+	assertions := assertions,
+	value := _PowerMeasurement.Auxiliary.In.Status,
+	expectedType := __SYSTEM.TYPE_CLASS.TYPE_WORD,
+	expectedSize := 2,
+	fieldName := "_PowerMeasurement.Auxiliary.In.Status"
+);
+checkField(
+	assertions := assertions,
+	value := _PowerMeasurement.Auxiliary.In.Index,
+	expectedType := __SYSTEM.TYPE_CLASS.TYPE_USINT,
+	expectedSize := 1,
+	fieldName := "_PowerMeasurement.Auxiliary.In.Index"
+);
+checkField(
+	assertions := assertions,
+	value := _PowerMeasurement.Auxiliary.In.Channel,
+	expectedType := __SYSTEM.TYPE_CLASS.TYPE_USINT,
+	expectedSize := 1,
+	fieldName := "_PowerMeasurement.Auxiliary.In.Channel"
+);
+checkField(
+	assertions := assertions,
+	value := _PowerMeasurement.Auxiliary.In.Value,
+	expectedType := __SYSTEM.TYPE_CLASS.TYPE_DINT,
+	expectedSize := 4,
+	fieldName := "_PowerMeasurement.Auxiliary.In.Value"
+);
+checkField(
+	assertions := assertions,
+	value := _PowerMeasurement.Auxiliary.Out.Index,
+	expectedType := __SYSTEM.TYPE_CLASS.TYPE_USINT,
+	expectedSize := 1,
+	fieldName := "_PowerMeasurement.Auxiliary.Out.Index"
+);
+checkField(
+	assertions := assertions,
+	value := _PowerMeasurement.Auxiliary.Out.Channel,
+	expectedType := __SYSTEM.TYPE_CLASS.TYPE_USINT,
+	expectedSize := 1,
+	fieldName := "_PowerMeasurement.Auxiliary.Out.Channel"
+);
+checkField(
+	assertions := assertions,
+	value := _DirectPowerMeasurement.Auxiliary.In.Value,
+	expectedType := __SYSTEM.TYPE_CLASS.TYPE_DINT,
+	expectedSize := 4,
+	fieldName := "_DirectPowerMeasurement.Auxiliary.In.Value"
+);]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="testCounterAndLoad" Id="{665b1b5a-7fed-4abf-aca0-45b1372f6d05}">
+      <Declaration><![CDATA[(*!
+<summary>Checks counter and load cell field representations.</summary>
+<description>Compares compiler descriptors against independent PDO field expectations.</description>
+<param name="assertions">Valid assertion context of the active case.</param>
+*)
+METHOD PRIVATE testCounterAndLoad
+VAR_INPUT
+	assertions : REFERENCE TO TOF_Testing.Assertions;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[checkField(
+	assertions := assertions,
+	value := _Counter.Ch1.In.Status,
+	expectedType := __SYSTEM.TYPE_CLASS.TYPE_WORD,
+	expectedSize := 2,
+	fieldName := "_Counter.Ch1.In.Status"
+);
+checkField(
+	assertions := assertions,
+	value := _Counter.Ch1.In.CounterValue,
+	expectedType := __SYSTEM.TYPE_CLASS.TYPE_UDINT,
+	expectedSize := 4,
+	fieldName := "_Counter.Ch1.In.CounterValue"
+);
+checkField(
+	assertions := assertions,
+	value := _Counter.Ch1.Out.Control,
+	expectedType := __SYSTEM.TYPE_CLASS.TYPE_WORD,
+	expectedSize := 2,
+	fieldName := "_Counter.Ch1.Out.Control"
+);
+checkField(
+	assertions := assertions,
+	value := _Counter.Ch1.Out.SetCounterValue,
+	expectedType := __SYSTEM.TYPE_CLASS.TYPE_UDINT,
+	expectedSize := 4,
+	fieldName := "_Counter.Ch1.Out.SetCounterValue"
+);
+checkField(
+	assertions := assertions,
+	value := _Load.Ch1.In.Status,
+	expectedType := __SYSTEM.TYPE_CLASS.TYPE_WORD,
+	expectedSize := 2,
+	fieldName := "_Load.Ch1.In.Status"
+);
+checkField(
+	assertions := assertions,
+	value := _Load.Ch1.In.Value,
+	expectedType := __SYSTEM.TYPE_CLASS.TYPE_DINT,
+	expectedSize := 4,
+	fieldName := "_Load.Ch1.In.Value"
+);
+checkField(
+	assertions := assertions,
+	value := _Load.Ch1.Out.Control,
+	expectedType := __SYSTEM.TYPE_CLASS.TYPE_WORD,
+	expectedSize := 2,
+	fieldName := "_Load.Ch1.Out.Control"
+);
+checkField(
+	assertions := assertions,
+	value := _Pwm.Ch1.DutyCycle,
+	expectedType := __SYSTEM.TYPE_CLASS.TYPE_INT,
+	expectedSize := 2,
+	fieldName := "_Pwm.Ch1.DutyCycle"
+);]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="testSerialAndDiagnostics" Id="{77af7278-7768-4894-85c4-64d42ed873cf}">
+      <Declaration><![CDATA[(*!
+<summary>Checks serial payload widths and diagnostics on selected models.</summary>
+<description>Compares compiler descriptors against independent PDO field expectations.</description>
+<param name="assertions">Valid assertion context of the active case.</param>
+*)
+METHOD PRIVATE testSerialAndDiagnostics
+VAR_INPUT
+	assertions : REFERENCE TO TOF_Testing.Assertions;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[checkField(
+	assertions := assertions,
+	value := _Serial.Ch1.InData.Status,
+	expectedType := __SYSTEM.TYPE_CLASS.TYPE_WORD,
+	expectedSize := 2,
+	fieldName := "_Serial.Ch1.InData.Status"
+);
+checkField(
+	assertions := assertions,
+	value := _Serial.Ch1.OutData.Control,
+	expectedType := __SYSTEM.TYPE_CLASS.TYPE_WORD,
+	expectedSize := 2,
+	fieldName := "_Serial.Ch1.OutData.Control"
+);
+checkField(
+	assertions := assertions,
+	value := _PowerMeasurement.WcState,
+	expectedType := __SYSTEM.TYPE_CLASS.TYPE_BOOL,
+	expectedSize := 1,
+	fieldName := "_PowerMeasurement.WcState"
+);
+checkField(
+	assertions := assertions,
+	value := _PowerMeasurement.InputToggle,
+	expectedType := __SYSTEM.TYPE_CLASS.TYPE_BOOL,
+	expectedSize := 1,
+	fieldName := "_PowerMeasurement.InputToggle"
+);
+checkField(
+	assertions := assertions,
+	value := _PowerMeasurement.State,
+	expectedType := __SYSTEM.TYPE_CLASS.TYPE_UINT,
+	expectedSize := 2,
+	fieldName := "_PowerMeasurement.State"
+);
+checkField(
+	assertions := assertions,
+	value := _DiscreteOutput.WcState,
+	expectedType := __SYSTEM.TYPE_CLASS.TYPE_BOOL,
+	expectedSize := 1,
+	fieldName := "_DiscreteOutput.WcState"
+);
+checkField(
+	assertions := assertions,
+	value := _DiscreteOutput.State,
+	expectedType := __SYSTEM.TYPE_CLASS.TYPE_UINT,
+	expectedSize := 2,
+	fieldName := "_DiscreteOutput.State"
+);
+assertions.ThatUDInt(
+	actual := SIZEOF(_Serial.Ch1.InData.Data),
+	message := "Serial receive payload is 22 bytes"
+).ToBe(expected := 22);
+assertions.ThatUDInt(
+	actual := SIZEOF(_Serial.Ch1.OutData.Data),
+	message := "Serial transmit payload is 22 bytes"
+).ToBe(expected := 22);
+assertions.ThatUDInt(
+	actual := SIZEOF(_PowerMeasurement.AdsAddr),
+	message := "ADS address is NetId plus port"
+).ToBe(expected := 8);]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="testDiscreteCatalog" Id="{a370ba6e-c7ca-4241-a607-20a67542b681}">
+      <Declaration><![CDATA[(*!
+<summary>Checks the corrected 16-channel EP product types and their boundary endpoints.</summary>
+<description>Compares compiler descriptors against independent PDO field expectations.</description>
+<param name="assertions">Valid assertion context of the active case.</param>
+*)
+METHOD PRIVATE testDiscreteCatalog
+VAR_INPUT
+	assertions : REFERENCE TO TOF_Testing.Assertions;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[checkField(
+	assertions := assertions,
+	value := _SixteenChannelInput.Ch01,
+	expectedType := __SYSTEM.TYPE_CLASS.TYPE_BOOL,
+	expectedSize := 1,
+	fieldName := "_SixteenChannelInput.Ch01"
+);
+checkField(
+	assertions := assertions,
+	value := _SixteenChannelInput.Ch16,
+	expectedType := __SYSTEM.TYPE_CLASS.TYPE_BOOL,
+	expectedSize := 1,
+	fieldName := "_SixteenChannelInput.Ch16"
+);
+checkField(
+	assertions := assertions,
+	value := _SixteenChannelInput.WcState,
+	expectedType := __SYSTEM.TYPE_CLASS.TYPE_BOOL,
+	expectedSize := 1,
+	fieldName := "_SixteenChannelInput.WcState"
+);
+checkField(
+	assertions := assertions,
+	value := _SixteenChannelInput.InputToggle,
+	expectedType := __SYSTEM.TYPE_CLASS.TYPE_BOOL,
+	expectedSize := 1,
+	fieldName := "_SixteenChannelInput.InputToggle"
+);
+checkField(
+	assertions := assertions,
+	value := _SixteenChannelInput.State,
+	expectedType := __SYSTEM.TYPE_CLASS.TYPE_UINT,
+	expectedSize := 2,
+	fieldName := "_SixteenChannelInput.State"
+);
+checkField(
+	assertions := assertions,
+	value := _SixteenChannelOutput.Ch01,
+	expectedType := __SYSTEM.TYPE_CLASS.TYPE_BOOL,
+	expectedSize := 1,
+	fieldName := "_SixteenChannelOutput.Ch01"
+);
+checkField(
+	assertions := assertions,
+	value := _SixteenChannelOutput.Ch16,
+	expectedType := __SYSTEM.TYPE_CLASS.TYPE_BOOL,
+	expectedSize := 1,
+	fieldName := "_SixteenChannelOutput.Ch16"
+);
+checkField(
+	assertions := assertions,
+	value := _SixteenChannelOutput.WcState,
+	expectedType := __SYSTEM.TYPE_CLASS.TYPE_BOOL,
+	expectedSize := 1,
+	fieldName := "_SixteenChannelOutput.WcState"
+);
+checkField(
+	assertions := assertions,
+	value := _SixteenChannelOutput.State,
+	expectedType := __SYSTEM.TYPE_CLASS.TYPE_UINT,
+	expectedSize := 2,
+	fieldName := "_SixteenChannelOutput.State"
+);
+checkField(
+	assertions := assertions,
+	value := _DiscreteOutput.Ch1,
+	expectedType := __SYSTEM.TYPE_CLASS.TYPE_BOOL,
+	expectedSize := 1,
+	fieldName := "_DiscreteOutput.Ch1"
+);
+checkField(
+	assertions := assertions,
+	value := _DiscreteOutput.Ch4,
+	expectedType := __SYSTEM.TYPE_CLASS.TYPE_BOOL,
+	expectedSize := 1,
+	fieldName := "_DiscreteOutput.Ch4"
+);]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="testAnalogRepresentations" Id="{d79b9174-7c55-4236-8d9a-25d03678043c}">
+      <Declaration><![CDATA[(*!
+<summary>Checks EL3078 Real32 and the analog and serial EP endpoints.</summary>
+<description>Compares compiler descriptors against independent PDO field expectations.</description>
+<param name="assertions">Valid assertion context of the active case.</param>
+*)
+METHOD PRIVATE testAnalogRepresentations
+VAR_INPUT
+	assertions : REFERENCE TO TOF_Testing.Assertions;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[checkField(
+	assertions := assertions,
+	value := _MultiRangeInput.Ch1.Status,
+	expectedType := __SYSTEM.TYPE_CLASS.TYPE_WORD,
+	expectedSize := 2,
+	fieldName := "_MultiRangeInput.Ch1.Status"
+);
+checkField(
+	assertions := assertions,
+	value := _MultiRangeInput.Ch1.Value,
+	expectedType := __SYSTEM.TYPE_CLASS.TYPE_REAL,
+	expectedSize := 4,
+	fieldName := "_MultiRangeInput.Ch1.Value"
+);
+checkField(
+	assertions := assertions,
+	value := _MultiRangeInput.Ch8.Status,
+	expectedType := __SYSTEM.TYPE_CLASS.TYPE_WORD,
+	expectedSize := 2,
+	fieldName := "_MultiRangeInput.Ch8.Status"
+);
+checkField(
+	assertions := assertions,
+	value := _MultiRangeInput.Ch8.Value,
+	expectedType := __SYSTEM.TYPE_CLASS.TYPE_REAL,
+	expectedSize := 4,
+	fieldName := "_MultiRangeInput.Ch8.Value"
+);
+checkField(
+	assertions := assertions,
+	value := _FieldAnalogInput.Ch4.Status,
+	expectedType := __SYSTEM.TYPE_CLASS.TYPE_WORD,
+	expectedSize := 2,
+	fieldName := "_FieldAnalogInput.Ch4.Status"
+);
+checkField(
+	assertions := assertions,
+	value := _FieldAnalogInput.Ch4.Value,
+	expectedType := __SYSTEM.TYPE_CLASS.TYPE_INT,
+	expectedSize := 2,
+	fieldName := "_FieldAnalogInput.Ch4.Value"
+);
+checkField(
+	assertions := assertions,
+	value := _FieldAnalogOutput.Ch4,
+	expectedType := __SYSTEM.TYPE_CLASS.TYPE_INT,
+	expectedSize := 2,
+	fieldName := "_FieldAnalogOutput.Ch4"
+);
+checkField(
+	assertions := assertions,
+	value := _FieldSerial.Ch1.InData.Status,
+	expectedType := __SYSTEM.TYPE_CLASS.TYPE_WORD,
+	expectedSize := 2,
+	fieldName := "_FieldSerial.Ch1.InData.Status"
+);
+checkField(
+	assertions := assertions,
+	value := _FieldSerial.Ch1.OutData.Control,
+	expectedType := __SYSTEM.TYPE_CLASS.TYPE_WORD,
+	expectedSize := 2,
+	fieldName := "_FieldSerial.Ch1.OutData.Control"
+);
+
+assertions.ThatUDInt(
+	actual := SIZEOF(_FieldAnalogInput.AdsAddr),
+	message := "_FieldAnalogInput retains the supported CoE ADS endpoint"
+).ToBe(expected := 8);
+assertions.ThatUDInt(
+	actual := SIZEOF(_FieldAnalogOutput.AdsAddr),
+	message := "_FieldAnalogOutput retains the supported CoE ADS endpoint"
+).ToBe(expected := 8);
+assertions.ThatUDInt(
+	actual := SIZEOF(_FieldSerial.AdsAddr),
+	message := "_FieldSerial retains the supported CoE ADS endpoint"
+).ToBe(expected := 8);]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="testDintBinding" Id="{2475ad90-6c71-42ff-84da-8a14de0bcdda}">
+      <Declaration><![CDATA[(*!
+<summary>Checks signed DINT input binding, recovery, unbinding and source preservation.</summary>
+<description>Builds a fresh simulated channel in ordinary storage. Offsets describe the PLC layout.</description>
+<param name="assertions">Valid assertion context of the active case.</param>
+*)
+METHOD PRIVATE testDintBinding
+VAR_INPUT
+	assertions : REFERENCE TO TOF_Testing.Assertions;
+END_VAR
+VAR
+	converter : TOF_Devices_IO.DirectAnalogValueConverter;
+	analogInput : TOF_Devices_IO.AnalogInput(
+		name := "DintModelInput",
+		parent := _AutomationRoot,
+		converter := converter
+	);
+	channelStorage : ARRAY [0..31] OF BYTE;
+	unboundChannel : REFERENCE TO TOF_IOModels.ANALOG_INPUT_DINT_CHANNEL;
+	channel : POINTER TO TOF_IOModels.ANALOG_INPUT_DINT_CHANNEL;
+	rawValue : DINT;
+	rawStatus : WORD;
+	valueOffset : UDINT;
+	statusOffset : UDINT;
+	originalBytes : ARRAY [0..31] OF BYTE;
+	i : DINT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[channel := ADR(channelStorage);
+
+IF SIZEOF(channel^) > SIZEOF(channelStorage) THEN
+	assertions.ThatBool(
+		actual := FALSE,
+		message := "Simulated channel storage is too small"
+	).IsTrue();
+
+	RETURN;
+END_IF
+
+valueOffset := TO_UDINT(ADR(channel^.Value) - ADR(channel^));
+statusOffset := TO_UDINT(ADR(channel^.Status) - ADR(channel^));
+
+FOR i := LOWER_BOUND(channelStorage, 1) TO UPPER_BOUND(channelStorage, 1) DO
+	channelStorage[i] := _UnusedBufferByte;
+END_FOR
+
+rawValue := DINT#-123456789;
+rawStatus := WORD#0;
+Tc2_System.MEMCPY(
+	destAddr := ADR(channelStorage[valueOffset]),
+	srcAddr := ADR(rawValue),
+	n := SIZEOF(rawValue)
+);
+Tc2_System.MEMCPY(
+	destAddr := ADR(channelStorage[statusOffset]),
+	srcAddr := ADR(rawStatus),
+	n := SIZEOF(rawStatus)
+);
+
+FOR i := LOWER_BOUND(channelStorage, 1) TO UPPER_BOUND(channelStorage, 1) DO
+	originalBytes[i] := channelStorage[i];
+END_FOR
+
+IF NOT analogInput.Initialize() THEN
+	assertions.ThatBool(actual := FALSE, message := "The analog input must initialize").IsTrue();
+
+	RETURN;
+END_IF
+
+analogInput.BindToInt32IO(rawValues := channel^);
+analogInput.ProcessInput();
+assertions.ThatBool(
+	actual := analogInput.BoundToIO,
+	message := "Valid channel must bind"
+).IsTrue();
+assertions.ThatLongReal(
+	actual := analogInput.Value,
+	message := "The signed DINT value must survive binding"
+).ToBe(expected := LREAL#-123456789.0);
+
+FOR i := LOWER_BOUND(channelStorage, 1) TO UPPER_BOUND(channelStorage, 1) DO
+	assertions.ThatByte(
+		actual := channelStorage[i],
+		message := TOF_Core.WideStrings.Concat255("Binding and processing changed byte ", TO_WSTRING(i))
+	).ToBe(expected := originalBytes[i]);
+END_FOR
+
+rawStatus := _ChannelErrorStatus;
+Tc2_System.MEMCPY(
+	destAddr := ADR(channelStorage[statusOffset]),
+	srcAddr := ADR(rawStatus),
+	n := SIZEOF(rawStatus)
+);
+analogInput.ProcessInput();
+assertions.ThatBool(
+	actual := analogInput.HasError,
+	message := "Live channel error must be reported"
+).IsTrue();
+assertions.ThatBool(
+	actual := analogInput.Status.Error,
+	message := "Live channel must expose the sampled error bit"
+).IsTrue();
+analogInput.BindToInt32IO(rawValues := unboundChannel);
+analogInput.ProcessInput();
+assertions.ThatBool(
+	actual := analogInput.BoundToIO,
+	message := "Invalid reference must unbind value"
+).IsFalse();
+assertions.ThatBool(
+	actual := analogInput.Status.Error,
+	message := "Invalid reference must unbind status"
+).IsFalse();
+
+rawValue := DINT#7654321;
+rawStatus := WORD#0;
+Tc2_System.MEMCPY(
+	destAddr := ADR(channelStorage[valueOffset]),
+	srcAddr := ADR(rawValue),
+	n := SIZEOF(rawValue)
+);
+Tc2_System.MEMCPY(
+	destAddr := ADR(channelStorage[statusOffset]),
+	srcAddr := ADR(rawStatus),
+	n := SIZEOF(rawStatus)
+);
+
+FOR i := LOWER_BOUND(channelStorage, 1) TO UPPER_BOUND(channelStorage, 1) DO
+	originalBytes[i] := channelStorage[i];
+END_FOR
+
+analogInput.BindToInt32IO(rawValues := channel^);
+analogInput.ProcessInput();
+assertions.ThatBool(
+	actual := analogInput.BoundToIO,
+	message := "Recovered channel must bind again"
+).IsTrue();
+assertions.ThatLongReal(
+	actual := analogInput.Value,
+	message := "Rebinding must read the updated source"
+).ToBe(expected := LREAL#7654321.0);
+assertions.ThatBool(
+	actual := analogInput.HasError,
+	message := "Rebinding to recovered status must clear error"
+).IsFalse();
+analogInput.BindToInt32IO(rawValues := unboundChannel);
+
+FOR i := LOWER_BOUND(channelStorage, 1) TO UPPER_BOUND(channelStorage, 1) DO
+	assertions.ThatByte(
+		actual := channelStorage[i],
+		message := TOF_Core.WideStrings.Concat255(
+			"Rebinding, processing or unbinding changed byte ",
+			TO_WSTRING(i)
+		)
+	).ToBe(expected := originalBytes[i]);
+END_FOR]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="testRealBinding" Id="{8386f9d4-8b12-4cfa-b392-358126f21adf}">
+      <Declaration><![CDATA[(*!
+<summary>Checks fractional REAL input binding, recovery, unbinding and source preservation.</summary>
+<description>Builds a fresh simulated channel in ordinary storage. Offsets describe the PLC layout.</description>
+<param name="assertions">Valid assertion context of the active case.</param>
+*)
+METHOD PRIVATE testRealBinding
+VAR_INPUT
+	assertions : REFERENCE TO TOF_Testing.Assertions;
+END_VAR
+VAR
+	converter : TOF_Devices_IO.DirectAnalogValueConverter;
+	analogInput : TOF_Devices_IO.AnalogInput(
+		name := "RealModelInput",
+		parent := _AutomationRoot,
+		converter := converter
+	);
+	channelStorage : ARRAY [0..31] OF BYTE;
+	unboundChannel : REFERENCE TO TOF_IOModels.ANALOG_INPUT_REAL_CHANNEL;
+	channel : POINTER TO TOF_IOModels.ANALOG_INPUT_REAL_CHANNEL;
+	rawValue : REAL;
+	rawStatus : WORD;
+	valueOffset : UDINT;
+	statusOffset : UDINT;
+	originalBytes : ARRAY [0..31] OF BYTE;
+	i : DINT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[channel := ADR(channelStorage);
+
+IF SIZEOF(channel^) > SIZEOF(channelStorage) THEN
+	assertions.ThatBool(
+		actual := FALSE,
+		message := "Simulated channel storage is too small"
+	).IsTrue();
+
+	RETURN;
+END_IF
+
+valueOffset := TO_UDINT(ADR(channel^.Value) - ADR(channel^));
+statusOffset := TO_UDINT(ADR(channel^.Status) - ADR(channel^));
+
+FOR i := LOWER_BOUND(channelStorage, 1) TO UPPER_BOUND(channelStorage, 1) DO
+	channelStorage[i] := _UnusedBufferByte;
+END_FOR
+
+rawValue := REAL#-12.75;
+rawStatus := WORD#0;
+Tc2_System.MEMCPY(
+	destAddr := ADR(channelStorage[valueOffset]),
+	srcAddr := ADR(rawValue),
+	n := SIZEOF(rawValue)
+);
+Tc2_System.MEMCPY(
+	destAddr := ADR(channelStorage[statusOffset]),
+	srcAddr := ADR(rawStatus),
+	n := SIZEOF(rawStatus)
+);
+
+FOR i := LOWER_BOUND(channelStorage, 1) TO UPPER_BOUND(channelStorage, 1) DO
+	originalBytes[i] := channelStorage[i];
+END_FOR
+
+IF NOT analogInput.Initialize() THEN
+	assertions.ThatBool(actual := FALSE, message := "The analog input must initialize").IsTrue();
+
+	RETURN;
+END_IF
+
+analogInput.BindToReal32IO(rawValues := channel^);
+analogInput.ProcessInput();
+assertions.ThatBool(
+	actual := analogInput.BoundToIO,
+	message := "Valid channel must bind"
+).IsTrue();
+assertions.ThatLongReal(
+	actual := analogInput.Value,
+	message := "The fractional REAL value must survive binding"
+).ToBe(expected := LREAL#-12.75);
+
+FOR i := LOWER_BOUND(channelStorage, 1) TO UPPER_BOUND(channelStorage, 1) DO
+	assertions.ThatByte(
+		actual := channelStorage[i],
+		message := TOF_Core.WideStrings.Concat255("Binding and processing changed byte ", TO_WSTRING(i))
+	).ToBe(expected := originalBytes[i]);
+END_FOR
+
+rawStatus := _ChannelErrorStatus;
+Tc2_System.MEMCPY(
+	destAddr := ADR(channelStorage[statusOffset]),
+	srcAddr := ADR(rawStatus),
+	n := SIZEOF(rawStatus)
+);
+analogInput.ProcessInput();
+assertions.ThatBool(
+	actual := analogInput.HasError,
+	message := "Live channel error must be reported"
+).IsTrue();
+assertions.ThatBool(
+	actual := analogInput.Status.Error,
+	message := "Live channel must expose the sampled error bit"
+).IsTrue();
+analogInput.BindToReal32IO(rawValues := unboundChannel);
+analogInput.ProcessInput();
+assertions.ThatBool(
+	actual := analogInput.BoundToIO,
+	message := "Invalid reference must unbind value"
+).IsFalse();
+assertions.ThatBool(
+	actual := analogInput.Status.Error,
+	message := "Invalid reference must unbind status"
+).IsFalse();
+
+rawValue := REAL#23.5;
+rawStatus := WORD#0;
+Tc2_System.MEMCPY(
+	destAddr := ADR(channelStorage[valueOffset]),
+	srcAddr := ADR(rawValue),
+	n := SIZEOF(rawValue)
+);
+Tc2_System.MEMCPY(
+	destAddr := ADR(channelStorage[statusOffset]),
+	srcAddr := ADR(rawStatus),
+	n := SIZEOF(rawStatus)
+);
+
+FOR i := LOWER_BOUND(channelStorage, 1) TO UPPER_BOUND(channelStorage, 1) DO
+	originalBytes[i] := channelStorage[i];
+END_FOR
+
+analogInput.BindToReal32IO(rawValues := channel^);
+analogInput.ProcessInput();
+assertions.ThatBool(
+	actual := analogInput.BoundToIO,
+	message := "Recovered channel must bind again"
+).IsTrue();
+assertions.ThatLongReal(
+	actual := analogInput.Value,
+	message := "Rebinding must read the updated source"
+).ToBe(expected := LREAL#23.5);
+assertions.ThatBool(
+	actual := analogInput.HasError,
+	message := "Rebinding to recovered status must clear error"
+).IsFalse();
+analogInput.BindToReal32IO(rawValues := unboundChannel);
+
+FOR i := LOWER_BOUND(channelStorage, 1) TO UPPER_BOUND(channelStorage, 1) DO
+	assertions.ThatByte(
+		actual := channelStorage[i],
+		message := TOF_Core.WideStrings.Concat255(
+			"Rebinding, processing or unbinding changed byte ",
+			TO_WSTRING(i)
+		)
+	).ToBe(expected := originalBytes[i]);
+END_FOR]]></ST>
+      </Implementation>
+    </Method>
+  </POU>
+</TcPlcObject>

@@ -1,0 +1,354 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="FileContentScenarioTest" Id="{2235d467-627c-4a56-8c28-52c39799f90a}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+SPDX-FileCopyrightText: c 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+SPDX-License-Identifier: MIT
+License: https://opensource.org/license/mit
+*)
+
+(*!
+<summary>Drives one owned file-content scenario through preparation, execution and cooperative cleanup.</summary>
+<description>
+The parent owns a distinct directory fixture for this leaf. The leaf exclusively drives that fixture and
+its own manager from one task. The scenario deadline includes waiting for the shared root and excludes cleanup.
+Derived scenarios advance only one cycle at a time and retain failures in _ScenarioFailure. The leaf reports
+after the manager and any independent operations stop and the fixture finishes removal attempts. Native errors can leave
+artifacts or a retained resource requiring inspection. Do not copy the leaf or reset the runner while the leaf is active.
+</description>
+*)
+
+{attribute 'no_assign'}
+{attribute 'no_explicit_call' := 'do not call this function block directly'}
+FUNCTION_BLOCK ABSTRACT FileContentScenarioTest EXTENDS TOF_Testing.MultiCycleTest
+VAR CONSTANT
+	//! <summary>Timeout passed to each native file operation.</summary>
+	_NativeTimeout : TIME := T#2S;
+	//! <summary>Opens a truncated text file for both writing and reading through the same handle.</summary>
+	_UpdateTextMode : DWORD := Tc2_System.Global_Variables.FOPEN_MODEWRITE
+		OR Tc2_System.Global_Variables.FOPEN_MODEPLUS
+		OR Tc2_System.Global_Variables.FOPEN_MODETEXT;
+END_VAR
+VAR
+	_Directory : REFERENCE TO FileTestDirectory;
+	_Manager : TOF_FileSystem.FileContentManager(name := "FileContentManager");
+	_ScenarioFailure : TOF_Core.ERROR_MESSAGE;
+
+	_ScenarioTimeout : TIME;
+	_ScenarioDeadline : Tc2_Standard.TON;
+	_Lifecycle : FILE_TEST_LIFECYCLE;
+	_CleanupExceptionObserved : BOOL;
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[]]></ST>
+    </Implementation>
+    <Method Name="FB_init" Id="{9845124c-b89b-40f8-aeb0-8067ee7b1cd8}">
+      <Declaration><![CDATA[(*!
+<summary>Borrows the parent-owned fixture and configures the scenario deadline.</summary>
+<description>
+Performs no I/O. The parent keeps the fixture alive and gives this leaf exclusive use of it.
+The inherited initializer stores the display name and parent. The scenario deadline excludes cleanup.
+</description>
+<param name="name">Name used in the test report.</param>
+<param name="parent">Group that owns this leaf and its directory fixture.</param>
+<param name="directory">Dedicated fixture with a fixed path inside the shared test root.</param>
+<param name="scenarioTimeout">Positive limit for preparation and scenario work.</param>
+*)
+METHOD FB_init : BOOL
+VAR_INPUT
+	bInitRetains: BOOL; // TRUE: the retain variables are initialized (reset warm / reset cold)
+	bInCopyCode: BOOL; // TRUE: the instance will be copied to the copy code afterward (online change)
+	name : WSTRING;
+	parent : TOF_Testing.ITestElement;
+	directory : REFERENCE TO FileTestDirectory;
+	scenarioTimeout : TIME;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF NOT bInCopyCode THEN
+	_Directory REF= directory;
+	_ScenarioTimeout := scenarioTimeout;
+	// The scenario clock is separate from cleanup, which can span many PLC cycles.
+	_Timeout := T#0S;
+END_IF
+
+FB_init := TRUE;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="BeforeTest" Id="{abe5a0b9-113c-43e8-90ec-ef40bc36d113}">
+      <Declaration><![CDATA[(*!
+<summary>Rearms the idle manager, child tasks and directory before a run.</summary>
+<description>
+A retained resource or unsuccessful fixture cleanup blocks reuse. If preparation for reuse fails, record failure
+before any new I/O. Clearing waiting entries also covers a previous Start refusal while the manager was READY.
+</description>
+*)
+METHOD PROTECTED FINAL BeforeTest]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF NOT __ISVALIDREF(_Directory) OR_ELSE _ScenarioTimeout <= T#0S THEN
+	RecordFailure(message := "File scenario needs a valid fixture and a positive deadline");
+	RETURN;
+END_IF
+
+IF _Manager.State.Running OR_ELSE _Manager.ResourceManager.ResourceAcquired OR_ELSE NOT _Manager.Reset() THEN
+	RecordFailure(message := "File manager could not be rearmed after the previous run");
+	RETURN;
+END_IF
+
+_Manager.ClearWaitingTasks();
+
+IF NOT ResetScenario() THEN
+	RecordFailure(message := "A file scenario task refused to reset");
+	RETURN;
+END_IF
+
+IF NOT _Directory.Reset() THEN
+	RecordFailure(message := "File scenario directory could not be rearmed; inspect the retained fixture diagnostics");
+	RETURN;
+END_IF
+
+_ScenarioDeadline(IN := FALSE, PT := _ScenarioTimeout);
+_ScenarioFailure := "";
+_CleanupExceptionObserved := FALSE;
+_Lifecycle := FILE_TEST_LIFECYCLE.RUNNING_SCENARIO;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="ResetScenario" Id="{a9f3d173-343d-40ae-9011-2694b9b2a9f7}">
+      <Declaration><![CDATA[(*!
+<summary>Rearms the concrete child tasks and restores the scenario's initial step.</summary>
+<description>Called with the manager idle and its queue empty. Returns FALSE if a child refuses Reset.</description>
+*)
+METHOD PROTECTED ABSTRACT ResetScenario : BOOL]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="AdvanceScenario" Id="{63a0c3f9-d1fa-4677-8885-8f63748aaf97}">
+      <Declaration><![CDATA[(*!
+<summary>Advances one bounded scenario cycle once the test owns its directory.</summary>
+<description>
+Returns TRUE on successful completion. On failure, use CheckScenario or copy a diagnostic into _ScenarioFailure.
+The base waits for stopping and directory cleanup before reporting. Leave any started manager work available
+for cooperative cancellation. Override DrainScenario if an independent operation may still be active.
+</description>
+*)
+METHOD PROTECTED ABSTRACT AdvanceScenario : BOOL]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="CheckScenario" Id="{7f3851c2-42de-487c-89e2-b515f51f50e5}">
+      <Declaration><![CDATA[(*!
+<summary>Retains the first failed condition for reporting after cooperative cleanup.</summary>
+<description>
+Use during AdvanceScenario. This never marks the test finished or interrupts the current callback.
+The base starts cleanup after the callback returns.
+</description>
+<param name="condition">Condition required for the scenario to pass.</param>
+<param name="message">Nonempty diagnostic for a false condition.</param>
+*)
+METHOD PROTECTED FINAL CheckScenario
+VAR_INPUT
+	condition : BOOL;
+	message : WSTRING(255);
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF NOT condition AND_THEN _ScenarioFailure = "" THEN
+	_ScenarioFailure := message;
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="DrainScenario" Id="{56fbf5cc-5700-46c9-b05d-9800199c9566}">
+      <Declaration><![CDATA[(*!
+<summary>Advances stopping of any operations driven independently from the file manager.</summary>
+<description>
+Called after the manager stops and before the fixture attempts removal. Override only if the scenario starts
+operations outside the manager. Return FALSE while any such operation still needs cyclic work.
+The default returns TRUE. An exception delays cleanup for retry and is recorded as a cleanup failure.
+</description>
+*)
+METHOD PROTECTED DrainScenario : BOOL]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[DrainScenario := TRUE;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="ConfigureFile" Id="{b5f23438-223f-4a72-8fa7-93c9980ef40b}">
+      <Declaration><![CDATA[(*!
+<summary>Configures the idle manager to open an owned fixture file using the specified access and format.</summary>
+<description>Call before Start. The queue stops when its last operation finishes.</description>
+<param name="filePath">Absolute path of the registered file inside this scenario's directory.</param>
+<param name="modeFlags">Beckhoff file-open access and format flags.</param>
+*)
+METHOD PROTECTED FINAL ConfigureFile
+VAR_INPUT
+	filePath : Tc2_System.T_MaxString;
+	modeFlags : DWORD;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_Manager.FilePath := filePath;
+_Manager.ModeFlags := modeFlags;
+_Manager.PathType := Tc2_System.E_OpenPath.PATH_GENERIC;
+_Manager.Timeout := _NativeTimeout;
+_Manager.StopWhenNoPendingTasks := TRUE;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="ExecuteTest" Id="{42894896-e3fa-4361-848e-f43b6141a5e3}">
+      <Declaration><![CDATA[(*!
+<summary>Advances file work or cooperative cleanup and publishes the resulting outcome.</summary>
+<description>
+A scenario exception enters the same cleanup phase as an ordinary failure. The manager and independent operations
+are drained before fixture removal. A cleanup interruption is retained and retried on later calls.
+The inherited test boundary handles the terminal allocation latch.
+</description>
+*)
+METHOD PROTECTED FINAL ExecuteTest : TOF_Testing.TEST_CYCLE_RESULT
+VAR
+	exceptionCode : __SYSTEM.ExceptionCode;
+	exception : TOF_Core.IException;
+	finished : BOOL;
+	scenarioDiagnostic : TOF_Core.ERROR_MESSAGE;
+	cleanupFailure : TOF_Core.ERROR_MESSAGE;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[ExecuteTest := TOF_Testing.TEST_CYCLE_RESULT.BUSY;
+
+IF _Lifecycle = FILE_TEST_LIFECYCLE.RUNNING_SCENARIO THEN
+	__TRY
+		finished := runScenario();
+	__CATCH(exceptionCode)
+		IF _ScenarioFailure = "" THEN
+			_ScenarioFailure := "Exception interrupted fixture preparation or file work";
+
+			__TRY
+				exception := TOF_Core.ExceptionManager.GetLastException(
+					exceptionCode := exceptionCode,
+					catchPointNamespaceName := NamespaceName,
+					catchPointPOUName := __POUNAME(),
+					catchPointPosition := __POSITION()
+				);
+
+				IF exception <> 0 THEN
+					scenarioDiagnostic := exception.GetMessage();
+
+					IF scenarioDiagnostic <> "" THEN
+						_ScenarioFailure := scenarioDiagnostic;
+					END_IF
+				END_IF
+			__CATCH
+				(* Preserve the copied fallback if diagnostic formatting fails. *)
+			__ENDTRY
+		END_IF
+	__ENDTRY
+
+	IF finished OR_ELSE _ScenarioFailure <> "" THEN
+		_Lifecycle := FILE_TEST_LIFECYCLE.CLEANING_UP;
+	END_IF
+
+	RETURN;
+END_IF
+
+__TRY
+	IF _Manager.State.Running THEN
+		_Manager.Cancel();
+		_Manager.Execute();
+
+		IF _Manager.State.Running THEN
+			RETURN;
+		END_IF
+	END_IF
+
+	IF NOT DrainScenario() THEN
+		RETURN;
+	END_IF
+
+	_Directory.Cleanup();
+__CATCH
+	_CleanupExceptionObserved := TRUE;
+	RETURN;
+__ENDTRY
+
+IF NOT _Directory.CleanupComplete THEN
+	RETURN;
+END_IF
+
+IF NOT _Directory.CleanupSucceeded OR_ELSE _Directory.CleanupMessage <> TOF_Core.Strings.Empty THEN
+	cleanupFailure := TOF_Core.WideStrings.ConcatFit255(
+		"Directory cleanup reported a problem for ",
+		TO_WSTRING(_Directory.DirectoryPath),
+		": ",
+		TO_WSTRING(_Directory.CleanupMessage)
+	);
+ELSIF _Manager.ResourceManager.ResourceAcquired THEN
+	cleanupFailure := "File manager still reports an acquired resource after stopping";
+ELSIF _CleanupExceptionObserved THEN
+	cleanupFailure := "An exception interrupted a cleanup attempt";
+END_IF
+
+IF cleanupFailure <> "" THEN
+	IF _ScenarioFailure <> "" THEN
+		TOF_Core.WideStrings.AppendFit(targetString := _ScenarioFailure, sourceString := " | ");
+	END_IF
+
+	TOF_Core.WideStrings.AppendFit(targetString := _ScenarioFailure, sourceString := cleanupFailure);
+END_IF
+
+_Lifecycle := FILE_TEST_LIFECYCLE.FINISHED;
+ExecuteTest := TOF_Testing.TEST_CYCLE_RESULT.DONE;
+
+IF _ScenarioFailure <> "" THEN
+	RecordFailure(message := _ScenarioFailure);
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="runScenario" Id="{b8dcf390-59c0-440c-b401-d0a263d4c287}">
+      <Declaration><![CDATA[(*!
+<summary>Prepares the owned directory and dispatches one bounded scenario cycle.</summary>
+<description>
+The deadline applies even while waiting for the shared root. Returns the scenario completion signal.
+Retains deployment, ownership or deadline failures for reporting after cleanup.
+</description>
+*)
+METHOD PRIVATE runScenario : BOOL]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_ScenarioDeadline(IN := TRUE, PT := _ScenarioTimeout);
+
+IF FileTestRoot.FailureMessage <> TOF_Core.Strings.Empty THEN
+	_ScenarioFailure := TO_WSTRING(FileTestRoot.FailureMessage);
+	RETURN;
+END_IF
+
+IF _ScenarioDeadline.Q THEN
+	IF NOT FileTestRoot.Prepared THEN
+		_ScenarioFailure := "Shared filesystem test root was not ready before the scenario deadline";
+	ELSIF NOT _Directory.Prepared THEN
+		_ScenarioFailure := "Scenario directory preparation exceeded its deadline";
+	ELSE
+		_ScenarioFailure := "File work exceeded the scenario deadline";
+	END_IF
+
+	RETURN;
+END_IF
+
+IF NOT FileTestRoot.Prepared THEN
+	RETURN;
+END_IF
+
+IF NOT _Directory.Prepared THEN
+	_Directory.Prepare();
+
+	IF _Directory.PreparationFailed THEN
+		_ScenarioFailure := TOF_Core.WideStrings.ConcatFit255(
+			TO_WSTRING(_Directory.DirectoryPath), ": ", TO_WSTRING(_Directory.PreparationMessage)
+		);
+		RETURN;
+	END_IF
+
+	IF NOT _Directory.Prepared THEN
+		RETURN;
+	END_IF
+END_IF
+
+runScenario := AdvanceScenario();]]></ST>
+      </Implementation>
+    </Method>
+  </POU>
+</TcPlcObject>

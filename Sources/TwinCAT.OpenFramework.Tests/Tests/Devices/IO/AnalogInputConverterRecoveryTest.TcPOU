@@ -1,0 +1,208 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="AnalogInputConverterRecoveryTest" Id="{7993e5f2-ca47-4bb5-819f-f4ca3fdb88cc}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+SPDX-FileCopyrightText: c 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+SPDX-License-Identifier: MIT
+License: https://opensource.org/license/mit
+*)
+
+(*!
+<summary>Checks converter recovery and channel diagnostic precedence.</summary>
+<description>
+Uses a live case-owned automation parent and fresh local device fixtures on every run.
+The scenario reads and writes ordinary simulated storage within one task cycle.
+</description>
+*)
+
+{attribute 'no_assign'}
+{attribute 'no_explicit_call' := 'do not call this function block directly'}
+FUNCTION_BLOCK AnalogInputConverterRecoveryTest EXTENDS TOF_Testing.SingleCycleTest
+VAR CONSTANT
+	//! <summary>Bit 6 is the simulated channel measurement or hardware error.</summary>
+	_ChannelErrorStatus : WORD := WORD#16#0040;
+	//! <summary>Expected diagnostic for a sampled channel error.</summary>
+	_ChannelErrorMessage : WSTRING := "Analog input channel reports error";
+	//! <summary>Injected converter exception text used for diagnostic comparisons.</summary>
+	_ConversionErrorMessage : WSTRING := "Injected analog input conversion failure.";
+END_VAR
+VAR_STAT
+	{attribute 'hide'}
+	_ClassName : STRING := __POUNAME();
+END_VAR
+VAR
+	//! <summary>Live parent borrowed by the method-local simulated device.</summary>
+	_AutomationRoot : MockAutomationController(name := "DevicesIORoot");
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[]]></ST>
+    </Implementation>
+    <Method Name="ExecuteTest" Id="{c35b08b1-019a-4cdd-bbf4-7fd261ec9613}">
+      <Declaration><![CDATA[(*!
+<summary>Checks converter recovery and channel diagnostic precedence.</summary>
+*)
+METHOD PROTECTED ExecuteTest
+VAR
+	converter : AnalogInputConverterProbe;
+	analogInput : AnalogInputRecoveryProbe(
+		name := "AI_ConversionRecovery",
+		parent := _AutomationRoot,
+		converter := converter
+	);
+	//! <summary>Simulated status word at offset 0 and signed INT value bits at offset 1.</summary>
+	channelData : ARRAY [0..1] OF WORD;
+	channel : POINTER TO TOF_IOModels.ANALOG_INPUT_INT_CHANNEL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[Assert.ThatBool(
+	actual := analogInput.Initialize(),
+	message := "The analog input must initialize"
+).IsTrue();
+analogInput.ExceptionHandlingPolicy := TOF_Core.ExceptionHandlingPolicies.SetErrorAndContinue;
+
+IF SIZEOF(channel^) <> SIZEOF(channelData) THEN
+	RecordFailure(message := "The simulated INT16 channel must fit two words");
+
+	RETURN;
+END_IF
+
+channel := ADR(channelData);
+channelData[0] := WORD#0;
+channelData[1] := WORD#100;
+analogInput.BindToInt16IO(rawValues := channel^);
+analogInput.ProcessInput();
+analogInput.Execute();
+Assert.ThatBool(
+	actual := analogInput.Value = LREAL#100.0,
+	message := "The initial conversion must succeed"
+).IsTrue();
+
+converter.failureMessage := _ConversionErrorMessage;
+channelData[1] := WORD#200;
+analogInput.ProcessInput();
+analogInput.Execute();
+
+Assert.ThatBool(
+	actual := analogInput.HasError
+		AND_THEN analogInput.Error.Severity = TOF_Core.ERROR_SEVERITY.ERROR
+		AND_THEN analogInput.Error.TopMessage = _ConversionErrorMessage,
+	message := "Converter failure on a healthy channel must survive Execute"
+).IsTrue();
+Assert.ThatBool(
+	actual := analogInput.Value = LREAL#100.0 AND_THEN analogInput.RecoveryCalls = UDINT#0,
+	message := "A failed conversion must preserve the last value and defer recovery"
+).IsTrue();
+
+// Use different exception text to distinguish retaining the original error from copying a later one.
+converter.failureMessage := "Repeated analog input conversion failure.";
+channelData[0] := _ChannelErrorStatus;
+analogInput.ProcessInput();
+analogInput.Execute();
+
+Assert.ThatBool(
+	actual := analogInput.StatusWord = _ChannelErrorStatus
+		AND_THEN analogInput.Error.TopMessage = _ConversionErrorMessage,
+	message := "The converter diagnostic must take precedence while both errors are active"
+).IsTrue();
+
+channelData[0] := WORD#0;
+analogInput.ProcessInput();
+analogInput.Execute();
+
+Assert.ThatBool(
+	actual := analogInput.StatusWord = WORD#0
+		AND_THEN analogInput.HasError
+		AND_THEN analogInput.Error.Severity = TOF_Core.ERROR_SEVERITY.ERROR
+		AND_THEN analogInput.Error.TopMessage = _ConversionErrorMessage
+		AND_THEN analogInput.RecoveryCalls = UDINT#0,
+	message := "Channel recovery must preserve the failing converter diagnostic"
+).IsTrue();
+
+converter.failureMessage := "";
+analogInput.ProcessInput();
+
+Assert.ThatBool(
+	actual := analogInput.Value = LREAL#200.0
+		AND_THEN analogInput.Error.TopMessage = _ConversionErrorMessage,
+	message := "A successful input phase must update Value and leave recovery to Execute"
+).IsTrue();
+
+analogInput.Execute();
+
+Assert.ThatBool(
+	actual := NOT analogInput.HasError AND_THEN analogInput.RecoveryCalls = UDINT#1,
+	message := "Execute must clear the recovered conversion error and call OnRecover once"
+).IsTrue();
+
+// A new conversion failure must be reported even when the channel fails in the same phase.
+channelData[0] := _ChannelErrorStatus;
+channelData[1] := WORD#300;
+converter.failureMessage := _ConversionErrorMessage;
+analogInput.ProcessInput();
+analogInput.Execute();
+
+Assert.ThatBool(
+	actual := analogInput.StatusWord = _ChannelErrorStatus
+		AND_THEN analogInput.Error.Severity = TOF_Core.ERROR_SEVERITY.ERROR
+		AND_THEN analogInput.Error.TopMessage = _ConversionErrorMessage,
+	message := "An active channel error must not block capture of a new conversion failure"
+).IsTrue();
+
+// Recover the converter first, with the channel fault still active.
+converter.failureMessage := "";
+analogInput.ProcessInput();
+analogInput.Execute();
+
+Assert.ThatBool(
+	actual := analogInput.HasError
+		AND_THEN analogInput.Error.TopMessage = _ChannelErrorMessage
+		AND_THEN analogInput.Value = LREAL#300.0
+		AND_THEN analogInput.RecoveryCalls = UDINT#2,
+	message := "Converter recovery must expose the still-active channel error"
+).IsTrue();
+
+channelData[0] := WORD#0;
+analogInput.ProcessInput();
+analogInput.Execute();
+
+Assert.ThatBool(
+	actual := NOT analogInput.HasError AND_THEN analogInput.RecoveryCalls = UDINT#2,
+	message := "Channel recovery must clear its diagnostic without another recovery callback"
+).IsTrue();]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="ClassName" Id="{27f56a36-e37b-43b6-8cd4-bc5156fc4643}">
+      <Declaration><![CDATA[//! <summary>Borrows the concrete class name. Callers must not modify it.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{d15ebf82-886b-4f96-8a1f-6de3f9f13b00}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ClassName REF= _ClassName;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="NamespaceName" Id="{db7527a6-5372-4957-b186-a0dd5d04332d}">
+      <Declaration><![CDATA[//! <summary>Borrows the compiler-initialized namespace name. Callers must not modify it.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{998bacd7-bc3d-4e89-bb2f-26907eea26a6}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[NamespaceName REF= CurrentNamespace.Name;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="SelfSize" Id="{0fbee5d0-5798-4756-9342-06e3bd9e6d1d}">
+      <Declaration><![CDATA[//! <summary>Reports the concrete instance size in bytes.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY SelfSize : ULINT]]></Declaration>
+      <Get Name="Get" Id="{6b9a562a-fc26-45b7-82fd-931a39be6e21}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[SelfSize := XSIZEOF(THIS^);]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+  </POU>
+</TcPlcObject>

@@ -1,0 +1,172 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="TimerPendingRestartTest" Id="{d48eb53c-4744-4da0-ac83-fbeaf78601ea}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+SPDX-FileCopyrightText: © 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+SPDX-License-Identifier: MIT
+License: https://opensource.org/license/mit
+*)
+
+(*!
+<summary>Checks one-step restart preparation while asynchronous stopping remains pending.</summary>
+<description>
+The case executes in one PLC callback with a persistent restart probe and no external resources.
+AfterTest prepares the fixture for reuse by the runner.
+</description>
+*)
+
+{attribute 'no_assign'}
+{attribute 'no_explicit_call' := 'do not call this function block directly'}
+FUNCTION_BLOCK TimerPendingRestartTest EXTENDS TOF_Testing.SingleCycleTest
+VAR_STAT
+	{attribute 'hide'}
+	_ClassName : STRING := __POUNAME();
+END_VAR
+VAR CONSTANT
+	//! <summary>Keeps the old timer active until the scenario cancels or restarts it.</summary>
+	_ActiveInterval : TIME := T#1H;
+
+	//! <summary>Positive interval selected for the replacement run.</summary>
+	_PositiveInterval : TIME := T#30MS;
+END_VAR
+VAR
+	_Timer : TimerRestartProbe(name := "Pending restart");
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[]]></ST>
+    </Implementation>
+    <Method Name="ExecuteTest" Id="{c8e8be67-1570-43e7-8bda-423688795048}">
+      <Declaration><![CDATA[(*!
+<summary>Checks one-step restart preparation while asynchronous stopping remains pending.</summary>
+<description>Compares stopping calls relative to the cumulative count at entry.</description>
+*)
+METHOD PROTECTED ExecuteTest
+VAR
+	initialStoppingCalls : UINT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[initialStoppingCalls := _Timer.StoppingCalls;
+
+_Timer.Interval := _ActiveInterval;
+_Timer.AllowStopping := FALSE;
+
+IF NOT _Timer.Start() THEN
+	RecordFailure(message := "Probe must accept initial Start");
+	RETURN;
+END_IF
+
+Assert.ThatBool(
+	actual := _Timer.SetIntervalAndRestart(interval := _PositiveInterval),
+	message := "Restart must refuse while stopping remains pending"
+).IsFalse();
+Assert.ThatBool(
+	actual := _Timer.State.Running,
+	message := "Refused preparation must retain active cleanup"
+).IsTrue();
+Assert.ThatBool(
+	actual := _Timer.StoppingCalls = TO_UINT(TO_UDINT(initialStoppingCalls) + 1),
+	message := "Preparation must advance stopping exactly once"
+).IsTrue();
+Assert.ThatBool(
+	actual := _Timer.Interval = _ActiveInterval,
+	message := "Pending stopping must preserve the old PT"
+).IsTrue();
+Assert.ThatBool(actual := _Timer.Restart(), message := "Another pending restart must also refuse").IsFalse();
+Assert.ThatBool(
+	actual := _Timer.StoppingCalls = TO_UINT(TO_UDINT(initialStoppingCalls) + 2),
+	message := "Repeated preparation must add only one stopping call"
+).IsTrue();
+_Timer.AllowStopping := TRUE;
+_Timer.Execute();
+Assert.ThatBool(actual := _Timer.State.Stopped, message := "Open gate must allow cleanup to finish").IsTrue();
+Assert.ThatBool(
+	actual := _Timer.FinalStopReason.ExternalCancel,
+	message := "Active restart preparation cancels the old run"
+).IsTrue();
+Assert.ThatBool(
+	actual := _Timer.Interval = _ActiveInterval,
+	message := "Finishing cleanup must not apply a deferred PT"
+).IsTrue();
+_Timer.Execute();
+Assert.ThatBool(
+	actual := _Timer.State.Stopped,
+	message := "Refused restart must not schedule a later Start"
+).IsTrue();
+
+IF NOT _Timer.SetIntervalAndRestart(interval := _PositiveInterval) THEN
+	RecordFailure(message := "An explicit retry must succeed after cleanup");
+	RETURN;
+END_IF
+
+Assert.ThatBool(
+	actual := _Timer.Interval = _PositiveInterval,
+	message := "Successful retry must apply the new PT"
+).IsTrue();
+
+IF NOT _Timer.Cancel() THEN
+	RecordFailure(message := "Scenario must cancel its active replacement run");
+	RETURN;
+END_IF
+
+_Timer.Execute();
+Assert.ThatBool(
+	actual := _Timer.State.Stopped AND_THEN _Timer.FinalStopReason.ExternalCancel,
+	message := "The replacement run must finish cancellation"
+).IsTrue();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="AfterTest" Id="{ca9f722b-8915-4e7a-89f0-a6971fb86ff4}">
+      <Declaration><![CDATA[(*!
+<summary>Returns the owned timer to READY before reporting the result.</summary>
+<description>
+Reopens the stopping gate and disables callback injections before cooperative cleanup.
+</description>
+*)
+METHOD PROTECTED AfterTest]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_Timer.AllowStopping := TRUE;
+_Timer.ThrowOnBeforeStart := FALSE;
+_Timer.ThrowOnReset := FALSE;
+_Timer.ResetOnAfterStop := FALSE;
+
+Assert.ThatBool(
+	actual := PrepareTimerTestForReuse(timer := _Timer),
+	message := "The timer must return to READY after cleanup"
+).IsTrue();]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="ClassName" Id="{647ae2b1-dfd3-499a-b350-8d77849b590b}">
+      <Declaration><![CDATA[//! <summary>Borrows the concrete class name. Callers must not modify it.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{77808401-7aa6-4e10-acf5-0a3a1dbedcdf}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ClassName REF= _ClassName;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="NamespaceName" Id="{a6dfc712-e90c-49f5-8c9b-91f908d1466d}">
+      <Declaration><![CDATA[//! <summary>Borrows the compiler-initialized namespace. Callers must not modify it.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{d1b5e2e6-7e77-42ab-bf06-536b03214a13}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[NamespaceName REF= CurrentNamespace.Name;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="SelfSize" Id="{4b54d4cb-59c3-4421-a380-9f88c3f9de63}">
+      <Declaration><![CDATA[//! <summary>Reports the concrete instance size in bytes.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY SelfSize : ULINT]]></Declaration>
+      <Get Name="Get" Id="{0f8b5348-efd3-4d8d-863f-cf7731990cc5}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[SelfSize := XSIZEOF(THIS^);]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+  </POU>
+</TcPlcObject>

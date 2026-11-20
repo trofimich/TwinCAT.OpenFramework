@@ -1,0 +1,189 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="QueuedLoggerSnapshotTest" Id="{091de67e-43a0-4623-b477-40c328ffd8f0}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+SPDX-FileCopyrightText: c 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+SPDX-License-Identifier: MIT
+License: https://opensource.org/license/mit
+*)
+
+(*!
+<summary>Checks FIFO delivery and copied message, number and error snapshots.</summary>
+<description>
+The runner task owns the fixtures. Each run clears its observations and uses the same instances.
+</description>
+*)
+
+{attribute 'no_assign'}
+{attribute 'no_explicit_call' := 'do not call this function block directly'}
+FUNCTION_BLOCK QueuedLoggerSnapshotTest EXTENDS TOF_Testing.SingleCycleTest
+VAR_STAT
+	{attribute 'hide'}
+	_ClassName : STRING := __POUNAME();
+END_VAR
+VAR
+	_Queue : TOF_Loggers.QueuedLogger;
+	_Backend : LoggerCaptureBackend;
+	_QueueConfigured : BOOL;
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[]]></ST>
+    </Implementation>
+    <Method Name="ExecuteTest" Id="{27ca392c-552b-45b5-b544-705db1ffc76b}">
+      <Declaration><![CDATA[(*!
+<summary>Checks FIFO delivery and copied message, number and error snapshots.</summary>
+<description>
+The runner task owns the fixtures. Each run clears its observations and uses the same instances.
+</description>
+*)
+METHOD PROTECTED ExecuteTest
+VAR
+	message : TOF_Core.ERROR_MESSAGE := "first snapshot";
+	number : ULINT := 17;
+	error : TOF_Core.ERROR;
+	expectedError : TOF_Core.ERROR_MESSAGE;
+	record : LOGGER_CAPTURED_MESSAGE;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF NOT _QueueConfigured THEN
+	Assert.ThatBool(actual := _Queue.Configure(backend := 0), message := "Queue must reject a null backend").IsFalse();
+	Assert.ThatBool(actual := _Queue.Configure(backend := _Queue), message := "Queue must reject itself").IsFalse();
+	_QueueConfigured := _Queue.Configure(backend := _Backend);
+END_IF
+
+Assert.ThatBool(actual := _QueueConfigured, message := "Queue must bind to its capture backend").IsTrue();
+
+IF NOT _QueueConfigured THEN
+	RETURN;
+END_IF
+
+Assert.ThatBool(
+	actual := _Queue.PendingMessageCount = 0,
+	message := "Scenario must start with an empty queue"
+).IsTrue();
+Assert.ThatBool(
+	actual := _Queue.Configure(backend := _Backend),
+	message := "Queue must refuse to replace a configured backend"
+).IsFalse();
+
+Assert.ThatBool(
+	actual := _Queue.TryLogMessage(
+		category := TOF_Core.LOG_CATEGORY.WARNING,
+		message := message,
+		messageNumber := number
+	),
+	message := "Numbered message must be queued"
+).IsTrue();
+message := "second snapshot";
+number := 29;
+Assert.ThatBool(
+	actual := _Queue.TryLogMessage(category := TOF_Core.LOG_CATEGORY.DEBUG, message := message),
+	message := "Unnumbered message must be queued"
+).IsTrue();
+error.SetMessage(message := "copied critical error");
+error.SetSeverity(severity := TOF_Core.ERROR_SEVERITY.CRITICAL);
+expectedError := error.ToString(
+	sourceDisplayMode := TOF_Core.ERROR_SOURCE_DISPLAY_MODE.TOP_AND_ROOT,
+	timestampDisplayMode := TOF_Core.TIMESTAMP_DISPLAY_MODE.LOCAL
+);
+Assert.ThatBool(
+	actual := _Queue.TryLogError(error := error, messageNumber := number),
+	message := "Error must be queued"
+).IsTrue();
+message := "mutated caller storage";
+number := 99;
+error.Clear();
+Assert.ThatDInt(actual := _Queue.PendingMessageCount, message := "All three snapshots must be pending").ToBe(
+	expected := 3
+);
+Assert.ThatUInt(actual := _Backend.CapturedCount, message := "Admission must not deliver immediately").ToBe(expected := 0);
+_Queue.Execute();
+Assert.ThatBool(actual := _Backend.CapturedCount = 3, message := "All three records must reach the backend").IsTrue();
+record := _Backend.RecordAt(index := 0);
+Assert.ThatBool(
+	actual := record.Message = "first snapshot",
+	message := "First text must survive caller mutation"
+).IsTrue();
+Assert.ThatBool(
+	actual := record.HasMessageNumber AND_THEN record.MessageNumber = 17,
+	message := "Number must be copied"
+).IsTrue();
+Assert.ThatBool(
+	actual := record.Category = TOF_Core.LOG_CATEGORY.WARNING,
+	message := "First category must be preserved"
+).IsTrue();
+record := _Backend.RecordAt(index := 1);
+Assert.ThatBool(
+	actual := record.Message = "second snapshot",
+	message := "FIFO order must preserve the second record"
+).IsTrue();
+Assert.ThatBool(
+	actual := record.HasMessageNumber,
+	message := "An absent number must not inherit the prior slot number"
+).IsFalse();
+Assert.ThatBool(
+	actual := record.Category = TOF_Core.LOG_CATEGORY.DEBUG,
+	message := "Second category must be preserved"
+).IsTrue();
+
+record := _Backend.RecordAt(index := 2);
+Assert.ThatBool(actual := record.Message = expectedError, message := "Error text must be copied before Clear").IsTrue();
+Assert.ThatBool(
+	actual := record.Category = TOF_Core.LOG_CATEGORY.CRITICAL_ERROR,
+	message := "Critical severity must survive"
+).IsTrue();
+Assert.ThatBool(
+	actual := record.HasMessageNumber AND_THEN record.MessageNumber = 29,
+	message := "Error number must be copied"
+).IsTrue();
+Assert.ThatBool(actual := _Queue.PendingMessageCount = 0, message := "Queue must be empty after delivery").IsTrue();
+Assert.ThatBool(
+	actual := _Queue.FailedDeliveryCount = 0,
+	message := "Successful delivery must not increase failures"
+).IsTrue();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="BeforeTest" Id="{4403b729-540c-49f5-b2b7-417dcb17578b}">
+      <Declaration><![CDATA[(*!
+<summary>Clears capture observations and injected faults before each run.</summary>
+*)
+METHOD PROTECTED BeforeTest]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_Backend.ResetCapture();]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="ClassName" Id="{60d706f8-fe6f-4041-adf6-b2b6503f204b}">
+      <Declaration><![CDATA[//! <summary>Borrows the concrete class name for the instance lifetime. Callers must not modify it.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{41c9bf5f-8409-4ed8-a818-a0198171777f}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ClassName REF= _ClassName;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="NamespaceName" Id="{036a062e-788a-40c9-9e36-a291228a49bd}">
+      <Declaration><![CDATA[//! <summary>Borrows the compiler-initialized namespace. Callers must not modify it.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{977ead3c-6f9e-4ba8-833b-8658565cceec}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[NamespaceName REF= CurrentNamespace.Name;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="SelfSize" Id="{6d9a5f0a-dcc7-4348-9448-531c0a3037bd}">
+      <Declaration><![CDATA[//! <summary>Reports the complete instance size in bytes, excluding separately allocated storage.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY SelfSize : ULINT]]></Declaration>
+      <Get Name="Get" Id="{d00b903b-4a55-47fe-a00d-bbb4a6407ad7}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[SelfSize := XSIZEOF(THIS^);]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+  </POU>
+</TcPlcObject>

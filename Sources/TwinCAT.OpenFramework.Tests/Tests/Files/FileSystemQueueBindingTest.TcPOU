@@ -1,0 +1,256 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="FileSystemQueueBindingTest" Id="{e64dec38-42ac-4d21-b84e-f6d9f7a41558}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+SPDX-FileCopyrightText: © 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+SPDX-License-Identifier: MIT
+License: https://opensource.org/license/mit
+*)
+
+(*!
+<summary>Checks null enqueue, borrowed binding and READY/RUNNING/STOPPED rebinding rules without opening a file.</summary>
+<description>
+The fixture belongs to the runner task and is kept between runs. The test drives no native file requests.
+</description>
+*)
+
+{attribute 'no_assign'}
+{attribute 'no_explicit_call' := 'do not call this function block directly'}
+FUNCTION_BLOCK FileSystemQueueBindingTest EXTENDS TOF_Testing.SingleCycleTest
+VAR_STAT
+	{attribute 'hide'}
+	_ClassName : STRING := __POUNAME();
+END_VAR
+VAR CONSTANT
+	//! <summary>First path exposed to the child after binding.</summary>
+	_InitialFilePath : STRING(255) := 'initial-binding.bin';
+	//! <summary>Replacement path used to verify that the child still borrows the resource.</summary>
+	_UpdatedFilePath : STRING(255) := 'updated-binding.bin';
+END_VAR
+VAR
+	_Manager : TOF_FileSystem.FileContentManager(name := "binding manager");
+	_Read : TOF_FileSystem.ReadBytesFromFile(name := "bound read");
+	_Unbound : TOF_FileSystem.ReadBytesFromFile(name := "unbound view");
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[]]></ST>
+    </Implementation>
+    <Method Name="ExecuteTest" Id="{b090f15a-b02b-4e9b-9925-d1be3816639d}">
+      <Declaration><![CDATA[(*!
+<summary>Checks queue membership, the live borrowed binding and state-dependent rebinding without opening a file.</summary>
+<description>
+The child is removed from the queue before it is driven directly, then cancelled before Execute can submit I/O.
+Rejected changes in RUNNING and STOPPED must preserve the existing binding.
+</description>
+*)
+METHOD PROTECTED ExecuteTest
+VAR
+	exceptionCode : __SYSTEM.ExceptionCode;
+	caught : TOF_Core.IException;
+	missingArgument : TOF_Core.IArgumentNotSpecifiedException;
+	thrown : BOOL;
+	started : BOOL;
+	cancelled : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[__TRY
+	_Manager.Enqueue(fileHandleTask := 0);
+__CATCH(exceptionCode)
+	thrown := TRUE;
+	caught := TOF_Core.ExceptionManager.GetLastException(
+		exceptionCode := exceptionCode,
+		catchPointNamespaceName := NamespaceName,
+		catchPointPOUName := __POUNAME(),
+		catchPointPosition := __POSITION()
+	);
+	Assert.ThatBool(
+		actual := __QUERYINTERFACE(caught, missingArgument),
+		message := "Null enqueue must raise ArgumentNotSpecified"
+	).IsTrue();
+__ENDTRY
+
+Assert.ThatBool(actual := thrown, message := "Null enqueue must raise an exception").IsTrue();
+Assert.ThatDInt(actual := _Manager.PendingTaskCount, message := "Null enqueue must leave the queue empty").ToBe(
+	expected := 0
+);
+
+_Manager.FilePath := _InitialFilePath;
+_Manager.Enqueue(fileHandleTask := _Read);
+Assert.ThatDInt(actual := _Manager.PendingTaskCount, message := "Enqueue must add the child").ToBe(expected := 1);
+Assert.ThatString(
+	actual := _Read.FilePath,
+	message := "Enqueue must expose the manager's configured file path through the child"
+).ToBe(expected := _InitialFilePath);
+
+_Manager.ClearWaitingTasks();
+Assert.ThatDInt(actual := _Manager.PendingTaskCount, message := "ClearWaitingTasks must remove the child").ToBe(
+	expected := 0
+);
+
+IF _Manager.PendingTaskCount <> 0 THEN
+	RETURN;
+END_IF
+
+_Manager.FilePath := _UpdatedFilePath;
+Assert.ThatString(
+	actual := _Read.FilePath,
+	message := "A removed child must retain a live view of the manager's resource"
+).ToBe(expected := _UpdatedFilePath);
+
+Assert.ThatBool(actual := _Read.Reset(), message := "READY Reset is allowed").IsTrue();
+Assert.ThatString(
+	actual := _Read.FilePath,
+	message := "READY Reset must preserve the live binding"
+).ToBe(expected := _UpdatedFilePath);
+
+_Read.SetFileHandleResource(fileHandleResource := _Unbound.FileHandleResource);
+Assert.ThatBool(
+	actual := __ISVALIDREF(_Read.FileHandleResource),
+	message := "Invalid resource view must clear a READY binding"
+).IsFalse();
+
+_Manager.Enqueue(fileHandleTask := _Read);
+_Manager.ClearWaitingTasks();
+Assert.ThatDInt(actual := _Manager.PendingTaskCount, message := "Child must be unqueued before direct Start").ToBe(
+	expected := 0
+);
+
+IF _Manager.PendingTaskCount <> 0 THEN
+	RETURN;
+END_IF
+
+started := _Read.Start();
+Assert.ThatBool(actual := started, message := "Prepared child must accept Start").IsTrue();
+
+IF NOT started THEN
+	RETURN;
+END_IF
+
+checkRebindingRejected(phase := "RUNNING");
+
+cancelled := _Read.Cancel();
+Assert.ThatBool(actual := cancelled, message := "Prepared child must accept pre-submission cancellation").IsTrue();
+
+IF NOT cancelled THEN
+	RETURN;
+END_IF
+
+_Read.Execute();
+Assert.ThatBool(actual := _Read.State.Stopped, message := "Cancelled child must reach STOPPED").IsTrue();
+
+IF NOT _Read.State.Stopped THEN
+	RETURN;
+END_IF
+
+checkRebindingRejected(phase := "STOPPED");
+Assert.ThatBool(actual := _Read.Reset(), message := "Cancelled child must accept Reset").IsTrue();
+Assert.ThatBool(
+	actual := __ISVALIDREF(_Read.FileHandleResource),
+	message := "STOPPED Reset must clear the resource binding"
+).IsFalse();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="checkRebindingRejected" Id="{0e854f32-f945-4f79-aad4-783891a0882b}">
+      <Declaration><![CDATA[(*!
+<summary>Checks that clearing outside READY raises StandardException and preserves the bound file path.</summary>
+<param name="phase">Identifies the child lifecycle phase in assertion messages.</param>
+*)
+METHOD PRIVATE checkRebindingRejected
+VAR_INPUT
+	phase : WSTRING;
+END_VAR
+VAR
+	exceptionCode : __SYSTEM.ExceptionCode;
+	caught : TOF_Core.IException;
+	standard : TOF_Core.IStandardException;
+	thrown : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[__TRY
+	_Read.SetFileHandleResource(fileHandleResource := _Unbound.FileHandleResource);
+__CATCH(exceptionCode)
+	thrown := TRUE;
+	caught := TOF_Core.ExceptionManager.GetLastException(
+		exceptionCode := exceptionCode,
+		catchPointNamespaceName := NamespaceName,
+		catchPointPOUName := __POUNAME(),
+		catchPointPosition := __POSITION()
+	);
+	Assert.ThatBool(
+		actual := __QUERYINTERFACE(caught, standard),
+		message := TOF_Core.WideStrings.Concat255(phase, " rebinding must raise StandardException")
+	).IsTrue();
+__ENDTRY
+
+Assert.ThatBool(
+	actual := thrown,
+	message := TOF_Core.WideStrings.Concat255(phase, " rebinding must be rejected")
+).IsTrue();
+Assert.ThatString(
+	actual := _Read.FilePath,
+	message := TOF_Core.WideStrings.Concat255(phase, " rebinding refusal must preserve the bound file path")
+).ToBe(expected := _UpdatedFilePath);]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="AfterTest" Id="{4b08f9f0-776e-4e65-9d35-ab427d7948e7}">
+      <Declaration><![CDATA[(*!
+<summary>Removes any waiting child and restores the read fixture.</summary>
+<description>
+The manager is never started. Teardown can clear the borrowed binding after the child returns to READY.
+</description>
+*)
+METHOD PROTECTED AfterTest]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_Manager.ClearWaitingTasks();
+
+IF _Read.State.Running THEN
+	IF _Read.OriginalStopReason.ExternalCancel OR_ELSE _Read.Cancel() THEN
+		_Read.Execute();
+	END_IF
+END_IF
+
+Assert.ThatBool(
+	actual := _Read.Reset(),
+	message := "Read task must be ready after cleanup"
+).IsTrue();
+
+IF _Read.State.Ready AND_THEN __ISVALIDREF(_Read.FileHandleResource) THEN
+	_Read.SetFileHandleResource(fileHandleResource := _Unbound.FileHandleResource);
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="ClassName" Id="{fa45ff1a-0cbc-4039-ae78-0fbe6dbab6ae}">
+      <Declaration><![CDATA[//! <summary>Borrows the concrete class name for the lifetime of this instance; callers must not modify it.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{af6cba84-1c92-4b23-b822-518ddf2b3e31}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ClassName REF= _ClassName;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="NamespaceName" Id="{cc8276e2-bd75-4cf9-a445-1e0b99cfa0d1}">
+      <Declaration><![CDATA[//! <summary>Borrows the compiler-initialized namespace; callers must not modify the returned reference.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{ba90bd6f-00bf-4cf5-8a5e-cceb4e1c1a20}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[NamespaceName REF= CurrentNamespace.Name;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="SelfSize" Id="{15c393d4-82e0-47a3-adcd-9859eb49d156}">
+      <Declaration><![CDATA[//! <summary>Reports the complete concrete instance size, excluding separately allocated storage.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY SelfSize : ULINT]]></Declaration>
+      <Get Name="Get" Id="{a771f462-d02b-491e-bf56-2d49ce177a74}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[SelfSize := XSIZEOF(THIS^);]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+  </POU>
+</TcPlcObject>

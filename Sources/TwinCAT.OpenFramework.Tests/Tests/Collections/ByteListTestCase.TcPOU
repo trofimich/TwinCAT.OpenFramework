@@ -1,0 +1,96 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="ByteListTestCase" Id="{79603b11-a9f9-4ea9-ae1a-b9401a327336}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+SPDX-FileCopyrightText: c 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+SPDX-License-Identifier: MIT
+License: https://opensource.org/license/mit
+*)
+
+(*!
+<summary>Supplies independent byte-list storage and teardown for a single-cycle test.</summary>
+<description>
+Each case owns concrete dynamic and inline fixtures at a stable address. The constructor selects one fixture.
+BeforeTest binds that fixture and AfterTest clears it before the result is published. Descendants supply
+ExecuteTest and use the selected list only during that hook. Run each instance from one task.
+</description>
+*)
+
+{attribute 'no_assign'}
+{attribute 'no_explicit_call' := 'do not call this function block directly'}
+FUNCTION_BLOCK ABSTRACT ByteListTestCase EXTENDS TOF_Testing.SingleCycleTest
+VAR
+	//! <summary>Selected storage mode established by FB_init.</summary>
+	_UseDynamicStorage : BOOL;
+	//! <summary>Borrowed interface to the selected fixture during case execution.</summary>
+	_List : TOF_Collections.IByteList;
+
+	_DynamicList : TOF_Collections.ByteList<0>;
+	_InlineList : TOF_Collections.ByteList<12>;
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[]]></ST>
+    </Implementation>
+    <Method Name="FB_init" Id="{93b9189d-a518-430e-9ebb-f675231d8868}">
+      <Declaration><![CDATA[(*!
+<summary>Selects the storage fixture for the lifetime of the test case.</summary>
+<description>Stores only the mode. TestElement initializes the name and parent.</description>
+<param name="name">Display name of this case.</param>
+<param name="parent">Group that owns this case.</param>
+<param name="useDynamicStorage">TRUE selects dynamic storage. FALSE selects the 12-byte inline fixture.</param>
+*)
+METHOD FB_init : BOOL
+VAR_INPUT
+	bInitRetains: BOOL; // TRUE: the retain variables are initialized (reset warm / reset cold)
+	bInCopyCode: BOOL; // TRUE: the instance will be copied to the copy code afterward (online change)
+	name : WSTRING;
+	parent : TOF_Testing.ITestElement;
+	useDynamicStorage : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_UseDynamicStorage := useDynamicStorage;
+FB_init := TRUE;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="BeforeTest" Id="{c7cb946d-f6cf-42dc-9e13-985605f362e9}">
+      <Declaration><![CDATA[(*!
+<summary>Binds the case to its selected byte-list fixture for the run.</summary>
+*)
+METHOD PROTECTED FINAL BeforeTest]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF _UseDynamicStorage THEN
+	_List := _DynamicList;
+ELSE
+	_List := _InlineList;
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="AfterTest" Id="{28a15807-c6c9-4c77-ac19-4525bf9e30fd}">
+      <Declaration><![CDATA[(*!
+<summary>Clears the bound fixture and releases dynamic capacity before result publication.</summary>
+<description>Accepts a missing binding after interrupted preparation and clears the borrowed interface after use.</description>
+*)
+METHOD PROTECTED FINAL AfterTest]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF _List <> 0 THEN
+	_List.Clear(releaseDynamicMemory := TRUE);
+	_List := 0;
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="GetBufferAddress" Id="{7202a722-abf6-4dcb-aada-6c1c574032d7}">
+      <Declaration><![CDATA[(*!
+<summary>Borrows the data address of the selected fixture.</summary>
+<description>Read again after growth or release. The returned pointer may have become invalid.</description>
+*)
+METHOD PROTECTED FINAL GetBufferAddress : POINTER TO BYTE]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF _UseDynamicStorage THEN
+	GetBufferAddress := _DynamicList.DataAddress;
+ELSE
+	GetBufferAddress := _InlineList.DataAddress;
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+  </POU>
+</TcPlcObject>

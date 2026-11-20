@@ -1,0 +1,163 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="FileReadOnlyWriteTest" Id="{37dd4977-9413-4622-b2c6-fde2d4f8ca21}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+SPDX-FileCopyrightText: c 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+SPDX-License-Identifier: MIT
+License: https://opensource.org/license/mit
+*)
+
+(*!
+<summary>Checks native write failure on a read-only text handle and propagation through the file queue.</summary>
+<description>
+Creates and releases an empty file first, then reopens it for reading and queues a write followed by a read.
+The native write error must reach the manager and leave the successor unstarted.
+</description>
+*)
+
+{attribute 'no_assign'}
+{attribute 'no_explicit_call' := 'do not call this function block directly'}
+FUNCTION_BLOCK FileReadOnlyWriteTest EXTENDS FileContentScenarioTest
+VAR_STAT
+	//! <summary>Class name shared by instances of this concrete function block.</summary>
+	{attribute 'hide'}
+	_ClassName : STRING := __POUNAME();
+END_VAR
+VAR
+	_Step : READ_ONLY_FILE_TEST_STEP;
+	_WriteText : TOF_FileSystem.WriteString255ToFile(name := "Write through read-only handle");
+	_WaitingRead : TOF_FileSystem.ReadString255FromFile(name := "Read after failed write");
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[]]></ST>
+    </Implementation>
+    <Method Name="ResetScenario" Id="{bd251a35-af69-425e-9cc5-5fad6bae0726}">
+      <Declaration><![CDATA[//! <summary>Restores empty-file preparation and resets both child operations for reuse.</summary>
+METHOD PROTECTED ResetScenario : BOOL]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_Step := READ_ONLY_FILE_TEST_STEP.CREATE_FILE;
+ResetScenario := _WriteText.Reset() AND_THEN _WaitingRead.Reset();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="AdvanceScenario" Id="{04d0a662-9682-4fba-8ab9-642fe47a8914}">
+      <Declaration><![CDATA[(*!
+<summary>Creates the input file, opens it read-only and advances the failing queue.</summary>
+<description>Returns TRUE once the write diagnostic reached the manager and the successor stayed READY.</description>
+*)
+METHOD PROTECTED AdvanceScenario : BOOL
+VAR
+	writeMessage : WSTRING(255);
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[CASE _Step OF
+	READ_ONLY_FILE_TEST_STEP.CREATE_FILE:
+		_Directory.ExpectFirstFile();
+		ConfigureFile(
+			filePath := _Directory.FirstFilePath,
+			modeFlags := Tc2_System.Global_Variables.FOPEN_MODEWRITE OR Tc2_System.Global_Variables.FOPEN_MODETEXT
+		);
+
+		IF NOT _Manager.Start() THEN
+			_ScenarioFailure := "Empty file preparation refused Start";
+			RETURN;
+		END_IF
+
+		_Step := READ_ONLY_FILE_TEST_STEP.OPEN_FILE_FOR_READING;
+
+	READ_ONLY_FILE_TEST_STEP.OPEN_FILE_FOR_READING:
+		_Manager.Execute();
+
+		IF NOT _Manager.State.Stopped THEN
+			RETURN;
+		END_IF
+
+		IF NOT _Manager.FinalStopReason.WorkDone OR_ELSE _Manager.ResourceManager.ResourceAcquired THEN
+			_ScenarioFailure := "Fixture creation must succeed and release the file before reopening it";
+			RETURN;
+		END_IF
+
+		IF NOT _Manager.Reset() THEN
+			_ScenarioFailure := "File manager refused Reset before reopening the fixture for reading";
+			RETURN;
+		END_IF
+
+		ConfigureFile(
+			filePath := _Directory.FirstFilePath,
+			modeFlags := Tc2_System.Global_Variables.FOPEN_MODEREAD OR Tc2_System.Global_Variables.FOPEN_MODETEXT
+		);
+		_WriteText.StringToWrite := 'This text must be rejected by the read-only handle';
+		_WriteText.Timeout := _NativeTimeout;
+		_Manager.Enqueue(fileHandleTask := _WriteText);
+		_Manager.Enqueue(fileHandleTask := _WaitingRead);
+
+		IF NOT _Manager.Start() THEN
+			_ScenarioFailure := "Prepared read-only file manager refused Start before executing the write";
+			RETURN;
+		END_IF
+
+		_Step := READ_ONLY_FILE_TEST_STEP.CHECK_WRITE_FAILURE;
+
+	READ_ONLY_FILE_TEST_STEP.CHECK_WRITE_FAILURE:
+		_Manager.Execute();
+
+		IF NOT _Manager.State.Stopped THEN
+			RETURN;
+		END_IF
+
+		writeMessage := _WriteText.FinalStopReason.Message;
+
+		IF NOT _WriteText.State.Stopped OR_ELSE NOT _WriteText.FinalStopReason.Failure THEN
+			_ScenarioFailure := "The write child must fail on a handle opened for reading";
+		ELSIF NOT TOF_Core.WideStrings.Contains(
+			stringToSearchIn := writeMessage,
+			stringToFind := "writing string to file"
+		)
+		THEN
+			_ScenarioFailure := "The write child failed without the native string-write diagnostic";
+		ELSIF NOT _Manager.FinalStopReason.Failure THEN
+			_ScenarioFailure := "File manager must stop with Failure after a failed write";
+		ELSIF _Manager.FinalStopReason.Message <> _WriteText.FinalStopReason.Message THEN
+			_ScenarioFailure := "File manager must preserve the failed child's diagnostic";
+		ELSIF NOT _WaitingRead.State.Ready THEN
+			_ScenarioFailure := "The read queued after the failed write must remain READY";
+		ELSE
+			AdvanceScenario := TRUE;
+		END_IF
+END_CASE]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="ClassName" Id="{047db007-d617-4462-aa7f-03390f236c3d}">
+      <Declaration><![CDATA[//! <summary>Borrows this concrete type name; callers must not modify the referenced storage.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{5848edcf-48a2-4f75-85d8-2b8c7eedf2f4}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ClassName REF= _ClassName;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="NamespaceName" Id="{37a7ff28-082b-48f9-9309-f197bfb9fa84}">
+      <Declaration><![CDATA[//! <summary>Borrows the compiler-initialized namespace; callers must not modify the returned reference.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{fcff4445-28b1-4caf-a58a-f4ae1be54e2e}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[NamespaceName REF= CurrentNamespace.Name;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="SelfSize" Id="{80859722-793e-4d90-af24-43b1fb38d329}">
+      <Declaration><![CDATA[//! <summary>Reports this concrete instance size, excluding separately allocated storage.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY SelfSize : ULINT]]></Declaration>
+      <Get Name="Get" Id="{e15f0693-18ff-4c0e-989d-4c92aeaa2f7c}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[SelfSize := XSIZEOF(THIS^);]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+  </POU>
+</TcPlcObject>

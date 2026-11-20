@@ -1,0 +1,171 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="WideStringSplitTest" Id="{a51752f4-fb58-4b8a-b41b-115dd13a95bc}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+SPDX-FileCopyrightText: c 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+SPDX-License-Identifier: MIT
+License: https://opensource.org/license/mit
+*)
+
+(*!
+<summary>Checks split fragments, end-of-iteration behavior and cursor restart.</summary>
+<description>
+Uses one task and stays at a stable address while assertions are bound to this instance.
+</description>
+*)
+
+{attribute 'no_assign'}
+{attribute 'no_explicit_call' := 'do not call this function block directly'}
+FUNCTION_BLOCK WideStringSplitTest EXTENDS TOF_Testing.SingleCycleTest
+VAR_STAT
+	{attribute 'hide'}
+	_ClassName : STRING := __POUNAME();
+END_VAR
+VAR
+	_Source : WSTRING := "123 , 456, 789 ,,0,";
+	_Splitter : TOF_Core.WideStringSplittingEnumerator;
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[]]></ST>
+    </Implementation>
+    <Method Name="ExecuteTest" Id="{902c191f-38d5-4f3b-8bc1-3c2c52ab74a6}">
+      <Declaration><![CDATA[(*!
+<summary>Checks split fragments, end-of-iteration behavior and cursor restart.</summary>
+<description>
+Owns a persistent cursor and its borrowed source. Reset releases the current fragment before the result is reported.
+</description>
+*)
+METHOD PROTECTED ExecuteTest
+VAR
+	separator : WSTRING := ",";
+	allFragments : ARRAY [0..5] OF WSTRING := ["123 ", " 456", " 789 ", "", "0", ""];
+	selectedFragments : ARRAY [0..2] OF WSTRING := ["123", "456", "789"];
+	entry : REFERENCE TO WSTRING;
+	advanced : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_Splitter := TOF_Core.WideStrings.CreateSplitter(sourceString := _Source, separator := separator);
+assertFragments(expected := allFragments, scenario := "Unrestricted split");
+
+_Splitter.Reset();
+_Splitter := TOF_Core.WideStrings.CreateSplitter(
+	sourceString := _Source,
+	separator := separator,
+	maxCount := 3,
+	trimEntries := TRUE,
+	removeEmptyEntries := TRUE
+);
+assertFragments(expected := selectedFragments, scenario := "Trimmed split limited to three");
+
+_Splitter.Reset();
+entry REF= _Splitter.CurrentEntry;
+Assert.ThatBool(
+	actual := __ISVALIDREF(entry),
+	message := "Reset must leave CurrentEntry invalid until the next successful move"
+).IsFalse();
+
+advanced := _Splitter.MoveNext();
+entry REF= _Splitter.CurrentEntry;
+Assert.ThatBool(
+	actual := advanced AND_THEN __ISVALIDREF(entry) AND_THEN entry = "123",
+	message := "After Reset the first trimmed fragment must be available again"
+).IsTrue();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="assertFragments" Id="{4e18ad09-6f16-4a7b-b06d-410aec44c41e}">
+      <Declaration><![CDATA[(*!
+<summary>Checks the requested finite sequence and detects trailing fragments or a stale current reference.</summary>
+<param name="expected">Expected fragments in order.</param>
+<param name="scenario">Cursor configuration included in failure messages.</param>
+*)
+METHOD PRIVATE assertFragments
+VAR_IN_OUT CONSTANT
+	expected : ARRAY [*] OF WSTRING;
+END_VAR
+VAR_INPUT
+	scenario : WSTRING(80);
+END_VAR
+VAR
+	entry : REFERENCE TO WSTRING;
+	i : DINT;
+	advanced : BOOL;
+	fragmentLabel : WSTRING(255);
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[FOR i := LOWER_BOUND(expected, 1) TO UPPER_BOUND(expected, 1) DO
+	fragmentLabel := Tc2_Utilities.WCONCAT(STR1 := scenario, STR2 := " fragment ");
+	fragmentLabel := Tc2_Utilities.WCONCAT(STR1 := fragmentLabel, STR2 := TO_WSTRING(i));
+	advanced := _Splitter.MoveNext();
+	Assert.ThatBool(actual := advanced, message := fragmentLabel).IsTrue();
+
+	IF NOT advanced THEN
+		RETURN;
+	END_IF
+
+	entry REF= _Splitter.CurrentEntry;
+	Assert.ThatBool(actual := __ISVALIDREF(entry) AND_THEN entry = expected[i], message := fragmentLabel).IsTrue();
+END_FOR
+
+advanced := _Splitter.MoveNext();
+Assert.ThatBool(
+	actual := advanced,
+	message := Tc2_Utilities.WCONCAT(STR1 := "Unexpected extra fragment in ", STR2 := scenario)
+).IsFalse();
+
+IF advanced THEN
+	RETURN;
+END_IF
+
+entry REF= _Splitter.CurrentEntry;
+Assert.ThatBool(actual := __ISVALIDREF(entry), message := "End of iteration must invalidate CurrentEntry").IsFalse();
+advanced := _Splitter.MoveNext();
+Assert.ThatBool(actual := advanced, message := "An exhausted splitter must stay exhausted").IsFalse();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="AfterTest" Id="{cb841cec-7996-4187-b6ab-aa30fabbbae0}">
+      <Declaration><![CDATA[(*!
+<summary>Resets the splitter and releases any active fragment before reporting.</summary>
+<description>
+Safe after partial initialization and after explicit cleanup in the scenario.
+</description>
+*)
+METHOD PROTECTED AfterTest]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_Splitter.Reset();]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="ClassName" Id="{700706ec-bb64-4cca-8858-73889893d28b}">
+      <Declaration><![CDATA[//! <summary>Borrows the concrete class name. Callers must not modify it.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{ed101956-bbc4-49cc-a603-31a9f27c865d}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ClassName REF= _ClassName;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="NamespaceName" Id="{bce52d14-71f1-4b53-a928-b568e8891786}">
+      <Declaration><![CDATA[//! <summary>Borrows the compiler-initialized namespace name. Callers must not modify it.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{0a5b13c1-466c-4992-8ef0-97031d6c87f6}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[NamespaceName REF= CurrentNamespace.Name;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="SelfSize" Id="{999a016a-a875-46d9-82e4-da941f8d7ad8}">
+      <Declaration><![CDATA[//! <summary>Reports the concrete instance size in bytes.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY SelfSize : ULINT]]></Declaration>
+      <Get Name="Get" Id="{09ca6ed1-167f-4b0e-9e93-d642bbb19c89}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[SelfSize := XSIZEOF(THIS^);]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+  </POU>
+</TcPlcObject>

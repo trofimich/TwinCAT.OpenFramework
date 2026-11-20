@@ -1,0 +1,181 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="UniqueDataSetSetAndGetTest" Id="{337ccdca-65db-4827-8723-fcca39956499}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+SPDX-FileCopyrightText: c 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+SPDX-License-Identifier: MIT
+License: https://opensource.org/license/mit
+*)
+
+(*!
+<summary>Checks copy and generic insertion, duplicate updates and indexed values.</summary>
+<description>
+Borrows one group-owned set reserved for this case. Use from one task at a stable address.
+Teardown clears the set and releases its owned entries before publication.
+</description>
+*)
+
+{attribute 'no_assign'}
+{attribute 'no_explicit_call' := 'do not call this function block directly'}
+FUNCTION_BLOCK UniqueDataSetSetAndGetTest EXTENDS TOF_Testing.SingleCycleTest
+VAR_STAT
+	{attribute 'hide'}
+	_ClassName : STRING := __POUNAME();
+END_VAR
+VAR
+	_Set : TOF_Collections.IUniqueDataSet;
+	_GenericValues : ARRAY [0..2] OF STRING := ['String3', 'String5', 'String6'];
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[]]></ST>
+    </Implementation>
+    <Method Name="FB_init" Id="{1afa3227-c743-4fde-9d4a-40b71794af0e}">
+      <Declaration><![CDATA[(*!
+<summary>Binds the unique set fixture for this case.</summary>
+<description>
+Stores a borrowed interface without invoking the fixture. The owning group keeps it alive and
+reserves it for this case. TestElement initializes the name and parent.
+</description>
+<param name="name">Display name of this case.</param>
+<param name="parent">Group that owns this case.</param>
+<param name="dataSet">Required live unique set reserved for this case.</param>
+*)
+METHOD FB_init : BOOL
+VAR_INPUT
+	bInitRetains: BOOL; // TRUE: the retain variables are initialized (reset warm / reset cold)
+	bInCopyCode: BOOL; // TRUE: the instance will be copied to the copy code afterward (online change)
+	name : WSTRING;
+	parent : TOF_Testing.ITestElement;
+	dataSet : TOF_Collections.IUniqueDataSet;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_Set := dataSet;
+FB_init := TRUE;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="ExecuteTest" Id="{9058bc15-7a38-4f26-b0ee-cdd0acbf21d6}">
+      <Declaration><![CDATA[(*!
+<summary>Checks copy and generic insertion, duplicate updates and indexed values.</summary>
+*)
+METHOD PROTECTED ExecuteTest
+VAR
+	values : ARRAY [0..6] OF STRING :=
+		['String0', 'String1', 'String2', 'String3', 'String4', 'String5', 'String6'];
+	i : DINT;
+	position : DINT;
+	genericPosition : DINT;
+	insertedPosition : DINT;
+
+	query : TOF_Core.GENERIC_VALUE;
+	entry : REFERENCE TO TOF_Core.GENERIC_VALUE;
+	diagnostic : TOF_Core.ERROR_MESSAGE;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[FOR i := 5 TO 0 BY -1 DO
+	_Set.SetCopy(value := values[i]);
+END_FOR
+
+query := TOF_Core.GenericValueFactory.FromStringReference(value := _GenericValues[2]);
+_Set.SetGeneric(value := query, index => insertedPosition);
+
+Assert.ThatDInt(
+	actual := _Set.Length,
+	message := "SetGeneric must insert a new seventh value"
+).ToBe(expected := DINT#7);
+
+Assert.ThatDInt(
+	actual := _Set.GetValuePosition(value := values[6]),
+	message := "SetGeneric must report the position of the inserted value"
+).ToBe(expected := insertedPosition);
+
+_Set.SetCopy(value := values[3]);
+
+FOR i := 0 TO 1 DO
+	query := TOF_Core.GenericValueFactory.FromStringReference(value := _GenericValues[i]);
+	_Set.SetGeneric(value := query);
+END_FOR
+
+Assert.ThatDInt(
+	actual := _Set.Length,
+	message := "Duplicate updates must preserve length"
+).ToBe(expected := DINT#7);
+
+query := TOF_Core.GenericValueFactory.FromStringReference(value := values[2]);
+position := _Set.GetValuePosition(value := values[2]);
+genericPosition := _Set.GetGenericValuePosition(value := query, releaseValue := FALSE);
+
+Assert.ThatBool(
+	actual := position >= 0 AND_THEN position < _Set.Length,
+	message := "String2 must have a valid current position"
+).IsTrue();
+
+Assert.ThatDInt(
+	actual := genericPosition,
+	message := "Both lookup forms must return the same position for String2"
+).ToBe(expected := position);
+
+FOR i := 0 TO 6 DO
+	position := _Set.GetValuePosition(value := values[i]);
+
+	IF position < 0 OR_ELSE position >= _Set.Length THEN
+		diagnostic := TOF_Core.WideStrings.Concat255("Missing value at source offset ", TO_WSTRING(i));
+		RecordFailure(message := diagnostic);
+
+		RETURN;
+	END_IF
+
+	entry REF= _Set.GetByIndex(index := position);
+	Assert.ThatBool(
+		actual := __ISVALIDREF(entry) AND_THEN entry.AsString255() = values[i],
+		message := TOF_Core.WideStrings.Concat255("Indexed lookup must match the value at offset ", TO_WSTRING(i))
+	).IsTrue();
+END_FOR]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="AfterTest" Id="{a15b2539-daf7-447e-af22-b8639deccf9c}">
+      <Declaration><![CDATA[(*!
+<summary>Clears the fixture before the runner publishes the result.</summary>
+<description>
+Also runs after an unexpected exception interrupts the case.
+</description>
+*)
+METHOD PROTECTED AfterTest]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_Set.Clear();]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="ClassName" Id="{64d294cb-a472-4cd6-86c4-3c0f514f6819}">
+      <Declaration><![CDATA[//! <summary>Borrows the concrete class name. Callers must not modify it.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{9cb226ca-e728-4e3b-b178-01ff1cbeb278}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ClassName REF= _ClassName;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="NamespaceName" Id="{96d69280-b7f7-41c2-9d44-027f41d576f7}">
+      <Declaration><![CDATA[//! <summary>Borrows the compiler-initialized namespace name. Callers must not modify it.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{3fcb2297-be51-4fb3-bfc0-d6e9965103fb}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[NamespaceName REF= CurrentNamespace.Name;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="SelfSize" Id="{90d6a8d6-2448-4bc8-b35a-2d98a3523d96}">
+      <Declaration><![CDATA[//! <summary>Reports the concrete instance size in bytes.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY SelfSize : ULINT]]></Declaration>
+      <Get Name="Get" Id="{f7e414d1-5e42-46f7-995a-1eec31040fac}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[SelfSize := XSIZEOF(THIS^);]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+  </POU>
+</TcPlcObject>

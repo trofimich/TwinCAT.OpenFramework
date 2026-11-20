@@ -1,0 +1,219 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="AnalogInputChannelStatusAndErrorReportingTest" Id="{eff45819-2f09-4da6-a5d5-537e015810dd}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+SPDX-FileCopyrightText: c 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+SPDX-License-Identifier: MIT
+License: https://opensource.org/license/mit
+*)
+
+(*!
+<summary>Checks channel diagnostics across processing, execution and rebinding.</summary>
+<description>
+Uses a live case-owned automation parent and fresh local device fixtures on every run.
+The scenario reads and writes ordinary simulated storage within one task cycle.
+</description>
+*)
+
+{attribute 'no_assign'}
+{attribute 'no_explicit_call' := 'do not call this function block directly'}
+FUNCTION_BLOCK AnalogInputChannelStatusAndErrorReportingTest EXTENDS TOF_Testing.SingleCycleTest
+VAR CONSTANT
+	//! <summary>Bit 6 is the simulated channel measurement or hardware error.</summary>
+	_ChannelErrorStatus : WORD := WORD#16#0040;
+	//! <summary>Expected diagnostic for a sampled channel error.</summary>
+	_ChannelErrorMessage : WSTRING := "Analog input channel reports error";
+END_VAR
+VAR_STAT
+	{attribute 'hide'}
+	_ClassName : STRING := __POUNAME();
+END_VAR
+VAR
+	//! <summary>Live parent borrowed by the method-local simulated device.</summary>
+	_AutomationRoot : MockAutomationController(name := "DevicesIORoot");
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[]]></ST>
+    </Implementation>
+    <Method Name="ExecuteTest" Id="{691d9366-d9db-4f30-8380-919274080ec6}">
+      <Declaration><![CDATA[(*!
+<summary>Checks channel diagnostics across processing, execution and rebinding.</summary>
+*)
+METHOD PROTECTED ExecuteTest
+VAR
+	converter : TOF_Devices_IO.DirectAnalogValueConverter;
+	analogInput : AnalogInputRecoveryProbe(name := "AI_Chan", parent := _AutomationRoot, converter := converter);
+	//! <summary>Status word at offset 0 and signed 16-bit value bits at offset 1.</summary>
+	channelData : ARRAY [0..1] OF WORD;
+	channel : POINTER TO TOF_IOModels.ANALOG_INPUT_INT_CHANNEL;
+	unboundChannel : REFERENCE TO TOF_IOModels.ANALOG_INPUT_INT_CHANNEL;
+	i : INT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[Assert.ThatBool(
+	actual := analogInput.Initialize(),
+	message := "The analog input must initialize"
+).IsTrue();
+
+IF SIZEOF(channel^) <> SIZEOF(channelData) THEN
+	RecordFailure(message := "The simulated INT16 channel must fit two words");
+
+	RETURN;
+END_IF
+
+channel := ADR(channelData);
+channelData[0] := WORD#16#0000;
+channelData[1] := WORD#1000;
+analogInput.BindToInt16IO(rawValues := channel^);
+Assert.ThatBool(
+	actual := analogInput.BoundToIO,
+	message := "A valid simulated channel must bind"
+).IsTrue();
+Assert.ThatBool(
+	actual := channelData[0] = WORD#16#0000 AND_THEN channelData[1] = WORD#1000,
+	message := "Binding must leave both source words unchanged"
+).IsTrue();
+analogInput.ProcessInput();
+analogInput.Execute();
+
+Assert.ThatBool(
+	actual := analogInput.HasError,
+	message := "A healthy channel must have no error after the full cycle"
+).IsFalse();
+
+Assert.ThatLongReal(
+	actual := analogInput.Value,
+	message := "The bound component must read the simulated raw value"
+).ToBe(expected := LREAL#1000.0);
+
+// Hold bit 6 across two complete input and execution phases.
+channelData[0] := _ChannelErrorStatus;
+
+FOR i := 1 TO 2 DO
+	analogInput.ProcessInput();
+
+	Assert.ThatBool(
+		actual := analogInput.Status.Error
+				AND_THEN analogInput.StatusWord = _ChannelErrorStatus
+				AND_THEN analogInput.HasError
+				AND_THEN analogInput.Error.Severity = TOF_Core.ERROR_SEVERITY.ERROR
+				AND_THEN analogInput.Error.TopMessage = _ChannelErrorMessage,
+		message := "A sampled bit 6 must report the channel error after ProcessInput"
+	).IsTrue();
+
+	analogInput.Execute();
+
+	Assert.ThatBool(
+		actual := analogInput.StatusWord = _ChannelErrorStatus
+				AND_THEN analogInput.HasError
+				AND_THEN analogInput.Error.Severity = TOF_Core.ERROR_SEVERITY.ERROR
+				AND_THEN analogInput.Error.TopMessage = _ChannelErrorMessage
+				AND_THEN analogInput.OperationalState = TOF_Automation.OPERATIONAL_STATE.WORKING
+				AND_THEN analogInput.RecoveryCalls = UDINT#0,
+		message := "A persistent channel error must survive Execute without stopping or recovering the leaf"
+	).IsTrue();
+END_FOR
+
+channelData[0] := WORD#0;
+analogInput.ProcessInput();
+
+Assert.ThatBool(
+	actual := NOT analogInput.Status.Error AND_THEN analogInput.StatusWord = WORD#0 AND_THEN NOT analogInput.HasError,
+	message := "Sampling a clear bit 6 must clear the channel diagnostic in the input phase"
+).IsTrue();
+
+analogInput.Execute();
+
+Assert.ThatBool(
+	actual := analogInput.StatusWord = WORD#0
+		AND_THEN NOT analogInput.HasError
+		AND_THEN analogInput.Error.Empty
+		AND_THEN analogInput.RecoveryCalls = UDINT#0,
+	message := "The recovered channel must remain clear after Execute without a recovery callback"
+).IsTrue();
+
+channelData[0] := _ChannelErrorStatus;
+channelData[1] := WORD#2000;
+analogInput.ProcessInput();
+analogInput.Execute();
+analogInput.BindToInt16IO(rawValues := unboundChannel);
+
+Assert.ThatBool(
+	actual := NOT analogInput.BoundToIO
+		AND_THEN analogInput.StatusWord = _ChannelErrorStatus
+		AND_THEN analogInput.HasError,
+	message := "Unbinding clears the value link while keeping the last sample until input processing"
+).IsTrue();
+
+analogInput.ProcessInput();
+
+Assert.ThatBool(
+	actual := NOT analogInput.Status.Error AND_THEN analogInput.StatusWord = WORD#0 AND_THEN NOT analogInput.HasError,
+	message := "Input processing without a status binding must clear the sampled status and channel error"
+).IsTrue();
+
+analogInput.Execute();
+
+Assert.ThatBool(
+	actual := analogInput.StatusWord = WORD#0
+		AND_THEN NOT analogInput.HasError
+		AND_THEN analogInput.Error.Empty
+		AND_THEN analogInput.RecoveryCalls = UDINT#0,
+	message := "The unbound input must remain clear after Execute"
+).IsTrue();
+Assert.ThatBool(
+	actual := channelData[0] = WORD#16#0040 AND_THEN channelData[1] = WORD#2000,
+	message := "Unbinding must leave source data unchanged"
+).IsTrue();
+channelData[0] := WORD#16#0000;
+analogInput.BindToInt16IO(rawValues := channel^);
+analogInput.ProcessInput();
+Assert.ThatBool(
+	actual := analogInput.BoundToIO,
+	message := "A valid channel must bind again after unbinding"
+).IsTrue();
+Assert.ThatLongReal(
+	actual := analogInput.Value,
+	message := "Rebinding must read the current source value"
+).ToBe(expected := LREAL#2000.0);
+Assert.ThatBool(
+	actual := channelData[0] = WORD#16#0000 AND_THEN channelData[1] = WORD#2000,
+	message := "Input processing and rebinding must leave source data unchanged"
+).IsTrue();]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="ClassName" Id="{a49e2556-fa94-4b11-b35e-d1ecb382fb07}">
+      <Declaration><![CDATA[//! <summary>Borrows the concrete class name. Callers must not modify it.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{1fc3dc84-a1cb-48e9-bbe7-ed39799b1e77}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ClassName REF= _ClassName;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="NamespaceName" Id="{52f8e389-781b-426b-80e4-d85376831052}">
+      <Declaration><![CDATA[//! <summary>Borrows the compiler-initialized namespace name. Callers must not modify it.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{dfb3b394-3ad2-49f7-b2e2-dbf78cda3cca}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[NamespaceName REF= CurrentNamespace.Name;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="SelfSize" Id="{3734f104-824a-4914-a943-41dbce4f581b}">
+      <Declaration><![CDATA[//! <summary>Reports the concrete instance size in bytes.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY SelfSize : ULINT]]></Declaration>
+      <Get Name="Get" Id="{1b74f070-328b-4d0e-9400-c4188741b575}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[SelfSize := XSIZEOF(THIS^);]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+  </POU>
+</TcPlcObject>

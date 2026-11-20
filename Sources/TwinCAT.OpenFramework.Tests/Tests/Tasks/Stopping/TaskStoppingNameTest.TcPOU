@@ -1,0 +1,174 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="TaskStoppingNameTest" Id="{ade844da-893c-48a5-b743-8aaa7d8992f2}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+SPDX-FileCopyrightText: © 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+SPDX-License-Identifier: MIT
+License: https://opensource.org/license/mit
+*)
+
+(*!
+<summary>Checks default and explicit names through the task lifecycle.</summary>
+<description>
+Drives a probe without external resources. The instance retains borrowed name storage across Execute and Reset.
+</description>
+*)
+
+{attribute 'no_assign'}
+{attribute 'no_explicit_call' := 'do not call this function block directly'}
+FUNCTION_BLOCK TaskStoppingNameTest EXTENDS TOF_Testing.MultiCycleTest
+VAR_STAT
+	{attribute 'hide'}
+	_ClassName : STRING := __POUNAME();
+END_VAR
+VAR
+	_Task : TaskStoppingProbe(name := "");
+	_NamedTask : TaskStoppingProbe(name := "Named stopping probe");
+	_InitialName : WSTRING;
+	_BorrowedName : REFERENCE TO WSTRING;
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[]]></ST>
+    </Implementation>
+    <Method Name="BeforeTest" Id="{ab9f86ee-9e40-44be-8d77-25e41735f6ea}">
+      <Declaration><![CDATA[(*!
+<summary>Reads and retains the default name before starting resource-free work.</summary>
+*)
+METHOD PROTECTED BeforeTest]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_BorrowedName REF= _Task.Name;
+
+IF NOT __ISVALIDREF(_BorrowedName) THEN
+	RecordFailure(message := "Default name must be available before Start");
+	RETURN;
+END_IF
+
+_InitialName := _BorrowedName;
+Assert.ThatWideString(
+	actual := Tc2_Standard.WLEFT(STR := _InitialName, SIZE := Tc2_Standard.WLEN(STR := "TaskStoppingProbe")),
+	message := "Default name must include the initialized concrete class"
+).ToBe(expected := "TaskStoppingProbe");
+Assert.ThatWideString(
+	actual := _NamedTask.Name,
+	message := "Explicit name must survive construction"
+).ToBe(expected := "Named stopping probe");
+Assert.ThatWideString(
+	actual := _Task.Name,
+	message := "Repeated reads must preserve the name"
+).ToBe(expected := _InitialName);
+Assert.ThatBool(actual := _Task.State.Ready, message := "Reading Name must not start the task").IsTrue();
+
+IF Outcome = TOF_Testing.TEST_OUTCOME.FAILED THEN
+	RETURN;
+END_IF
+
+Assert.ThatBool(actual := _Task.Start(), message := "Prepared probe must accept Start").IsTrue();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="ExecuteTest" Id="{fdbadf0d-76d3-4029-b02a-0d4908dc6d12}">
+      <Declaration><![CDATA[(*!
+<summary>Checks the same name during execution and the borrowed address after Reset.</summary>
+*)
+METHOD PROTECTED ExecuteTest : TOF_Testing.TEST_CYCLE_RESULT
+VAR
+	nameAfterReset : REFERENCE TO WSTRING;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_Task.Execute();
+Assert.ThatWideString(
+	actual := _Task.Name,
+	message := "Lifecycle progress must preserve the name"
+).ToBe(expected := _InitialName);
+
+IF NOT _Task.State.Stopped THEN
+	ExecuteTest := TOF_Testing.TEST_CYCLE_RESULT.BUSY;
+	RETURN;
+END_IF
+
+ExecuteTest := TOF_Testing.TEST_CYCLE_RESULT.DONE;
+
+IF NOT _Task.Reset() THEN
+	RecordFailure(message := "Completed probe must accept Reset");
+	RETURN;
+END_IF
+
+nameAfterReset REF= _Task.Name;
+
+IF NOT __ISVALIDREF(nameAfterReset) OR_ELSE NOT __ISVALIDREF(_BorrowedName) THEN
+	RecordFailure(message := "Both name references must remain valid after Reset");
+	RETURN;
+END_IF
+
+Assert.ThatBool(
+	actual := ADR(nameAfterReset) = ADR(_BorrowedName),
+	message := "Reset must preserve the address of borrowed name storage"
+).IsTrue();
+Assert.ThatWideString(
+	actual := nameAfterReset,
+	message := "Reset must preserve the name text"
+).ToBe(expected := _InitialName);]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="AfterTest" Id="{cbea88cb-5c1c-4dc7-a450-4a35a32e6723}">
+      <Declaration><![CDATA[(*!
+<summary>Clears the borrowed name and completes up to two remaining resource-free stopping steps.</summary>
+*)
+METHOD PROTECTED AfterTest]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_BorrowedName REF= 0;
+
+IF _Task.State.Running THEN
+	IF NOT _Task.OriginalStopReason.ExternalCancel THEN
+		_Task.Cancel();
+	END_IF
+
+	// The probe has two synthetic cleanup steps and no bound resource.
+	_Task.Execute();
+
+	IF _Task.State.Running THEN
+		_Task.Execute();
+	END_IF
+END_IF
+
+IF _Task.State.Stopped THEN
+	Assert.ThatBool(actual := _Task.Reset(), message := "The name probe must accept cleanup Reset").IsTrue();
+END_IF
+
+Assert.ThatBool(actual := _Task.State.Ready, message := "The name probe must be READY after cleanup").IsTrue();]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="ClassName" Id="{ee4802c8-bc60-4bea-8a7c-5506862feb2d}">
+      <Declaration><![CDATA[//! <summary>Borrows the concrete class name. Callers must not modify it.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{0ded1d12-da70-4d3b-b0de-b9073e0692e8}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ClassName REF= _ClassName;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="NamespaceName" Id="{fdff1871-45b1-43a7-bc63-f0131b763511}">
+      <Declaration><![CDATA[//! <summary>Borrows the compiler-initialized namespace name. Callers must not modify it.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{6ed0c98f-4a9b-4dd3-bc59-f824c01dbdc3}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[NamespaceName REF= CurrentNamespace.Name;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="SelfSize" Id="{79e631dd-6046-40c6-a497-15fc87ee065b}">
+      <Declaration><![CDATA[//! <summary>Reports the concrete instance size in bytes.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY SelfSize : ULINT]]></Declaration>
+      <Get Name="Get" Id="{71db0154-fa7c-40a2-b35f-d0bc6d89519c}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[SelfSize := XSIZEOF(THIS^);]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+  </POU>
+</TcPlcObject>

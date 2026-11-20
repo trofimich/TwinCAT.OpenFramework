@@ -1,0 +1,243 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="FileSystemDefaultNamesTest" Id="{b2da7b03-f8f2-4c98-bde8-b24089de0e29}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+SPDX-FileCopyrightText: © 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+SPDX-License-Identifier: MIT
+License: https://opensource.org/license/mit
+*)
+
+(*!
+<summary>Checks all sixteen default names and cancellation/reset stability without starting native I/O.</summary>
+<description>
+The fixture belongs to the runner task and is kept between runs. The test drives no native file requests.
+</description>
+*)
+
+{attribute 'no_assign'}
+{attribute 'no_explicit_call' := 'do not call this function block directly'}
+FUNCTION_BLOCK FileSystemDefaultNamesTest EXTENDS TOF_Testing.SingleCycleTest
+VAR_STAT
+	{attribute 'hide'}
+	_ClassName : STRING := __POUNAME();
+END_VAR
+VAR
+	_CheckDirectory : TOF_FileSystem.CheckDirectoryExists(name := "");
+	_CreateDirectory : TOF_FileSystem.CreateDirectory(name := "");
+	_CreateIfAbsent : TOF_FileSystem.CreateDirectoryIfNotExists(name := "");
+	_RemoveDirectory : TOF_FileSystem.RemoveEmptyDirectory(name := "");
+	_RemoveIfPresent : TOF_FileSystem.RemoveEmptyDirectoryIfExists(name := "");
+	_DeleteFile : TOF_FileSystem.DeleteFile(name := "");
+	_RenameFile : TOF_FileSystem.RenameFile(name := "");
+	_LoadFile : TOF_FileSystem.LoadFile(name := "");
+	_Manager : TOF_FileSystem.FileContentManager(name := "");
+	_CheckEof : TOF_FileSystem.CheckEndOfFile(name := "");
+	_GetPosition : TOF_FileSystem.GetPositionInFile(name := "");
+	_SetPosition : TOF_FileSystem.SetPositionInFile(name := "");
+	_ReadBytes : TOF_FileSystem.ReadBytesFromFile(name := "");
+	_ReadString : TOF_FileSystem.ReadString255FromFile(name := "");
+	_WriteBytes : TOF_FileSystem.WriteBytesToFile(name := "");
+	_WriteString : TOF_FileSystem.WriteString255ToFile(name := "");
+	_ExplicitDirectory : TOF_FileSystem.CreateDirectory(name := "Explicit directory");
+	_ExplicitManager : TOF_FileSystem.FileContentManager(name := "Explicit manager");
+	_ExplicitRead : TOF_FileSystem.ReadBytesFromFile(name := "Explicit read");
+
+	_Tasks : ARRAY [0..15] OF TOF_Tasks.ITask :=
+	[
+		_CheckDirectory,
+		_CreateDirectory,
+		_CreateIfAbsent,
+		_RemoveDirectory,
+		_RemoveIfPresent,
+		_DeleteFile,
+		_RenameFile,
+		_LoadFile,
+		_Manager,
+		_CheckEof,
+		_GetPosition,
+		_SetPosition,
+		_ReadBytes,
+		_ReadString,
+		_WriteBytes,
+		_WriteString
+	];
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[]]></ST>
+    </Implementation>
+    <Method Name="ExecuteTest" Id="{6484ed56-ced0-4d3d-ba2f-628c3efe1af0}">
+      <Declaration><![CDATA[(*!
+<summary>Checks concrete metadata and name stability across cancellation and Reset for all sixteen tasks.</summary>
+<description>Each concrete reset hook is exercised. Cancellation occurs before issuing a native request.</description>
+*)
+METHOD PROTECTED ExecuteTest
+VAR
+	expectedTypes : ARRAY [0..15] OF STRING(80) := [
+		'CheckDirectoryExists',
+		'CreateDirectory',
+		'CreateDirectoryIfNotExists',
+		'RemoveEmptyDirectory',
+		'RemoveEmptyDirectoryIfExists',
+		'DeleteFile',
+		'RenameFile',
+		'LoadFile',
+		'FileContentManager',
+		'CheckEndOfFile',
+		'GetPositionInFile',
+		'SetPositionInFile',
+		'ReadBytesFromFile',
+		'ReadString255FromFile',
+		'WriteBytesToFile',
+		'WriteString255ToFile'
+	];
+	expectedName : WSTRING;
+	i : DINT;
+	caseName : WSTRING;
+	started : BOOL;
+	cancelled : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[FOR i := LOWER_BOUND(_Tasks, 1) TO UPPER_BOUND(_Tasks, 1) DO
+	caseName := TO_WSTRING(expectedTypes[i]);
+	expectedName := TO_WSTRING(TOF_Core.Strings.Concat255(
+		expectedTypes[i],
+		' (0x',
+		Tc2_Utilities.LWORD_TO_HEXSTR(in := TO_LWORD(_Tasks[i].SelfAddress), iPrecision := 16, bLoCase := FALSE),
+		')'
+	));
+	Assert.ThatBool(
+		actual := _Tasks[i].Name = expectedName,
+		message := TOF_Core.WideStrings.Concat255(caseName, ": Default name must include the concrete type and address")
+	).IsTrue();
+	Assert.ThatBool(
+		actual := _Tasks[i].ClassName = expectedTypes[i],
+		message := TOF_Core.WideStrings.Concat255(caseName, ": ", "ClassName must identify the concrete task")
+	).IsTrue();
+	Assert.ThatBool(
+		actual := _Tasks[i].NamespaceName = 'TOF_FileSystem',
+		message := TOF_Core.WideStrings.Concat255(caseName, ": ", "Task namespace must identify FileSystem")
+	).IsTrue();
+	Assert.ThatBool(
+		actual := _Tasks[i].State.Ready,
+		message := TOF_Core.WideStrings.Concat255(caseName, ": Metadata must leave the task READY")
+	).IsTrue();
+	started := _Tasks[i].Start();
+	Assert.ThatBool(
+		actual := started,
+		message := TOF_Core.WideStrings.Concat255(caseName, ": ", "Task must accept Start before cancellation")
+	).IsTrue();
+
+	IF NOT started THEN
+		CONTINUE;
+	END_IF
+
+	cancelled := _Tasks[i].Cancel();
+	Assert.ThatBool(
+		actual := cancelled,
+		message := TOF_Core.WideStrings.Concat255(caseName, ": ", "Task must accept Cancel before Execute")
+	).IsTrue();
+
+	IF NOT cancelled THEN
+		CONTINUE;
+	END_IF
+
+	_Tasks[i].Execute();
+	Assert.ThatBool(
+		actual := _Tasks[i].State.Stopped,
+		message := TOF_Core.WideStrings.Concat255(caseName, ": ", "Task must stop after cancellation")
+	).IsTrue();
+	Assert.ThatBool(
+		actual := _Tasks[i].FinalStopReason.ExternalCancel,
+		message := TOF_Core.WideStrings.Concat255(caseName, ": ", "Pre-submission cancellation must retain its reason")
+	).IsTrue();
+	Assert.ThatBool(
+		actual := _Tasks[i].Reset(),
+		message := TOF_Core.WideStrings.Concat255(caseName, ": ", "Stopped task must accept Reset")
+	).IsTrue();
+	Assert.ThatBool(
+		actual := _Tasks[i].State.Ready,
+		message := TOF_Core.WideStrings.Concat255(caseName, ": Reset must restore READY")
+	).IsTrue();
+	Assert.ThatBool(
+		actual := _Tasks[i].Name = expectedName,
+		message := TOF_Core.WideStrings.Concat255(caseName, ": Reset must preserve the stored default name")
+	).IsTrue();
+END_FOR
+
+Assert.ThatBool(
+	actual := _ExplicitDirectory.Name = "Explicit directory",
+	message := "Directory explicit name must be copied"
+).IsTrue();
+Assert.ThatBool(
+	actual := _ExplicitManager.Name = "Explicit manager",
+	message := "Manager explicit name must be copied"
+).IsTrue();
+Assert.ThatBool(
+	actual := _ExplicitRead.Name = "Explicit read",
+	message := "Content task explicit name must be copied"
+).IsTrue();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="AfterTest" Id="{d9727465-0828-4ae3-8c4a-89f42e768195}">
+      <Declaration><![CDATA[(*!
+<summary>Restores the fixtures after a completed or interrupted test.</summary>
+<description>
+Advances a running task only after cancellation is recorded. Resets fixtures only when they are not already READY.
+</description>
+*)
+METHOD PROTECTED AfterTest
+VAR
+	i : DINT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[FOR i := LOWER_BOUND(_Tasks, 1) TO UPPER_BOUND(_Tasks, 1) DO
+	IF _Tasks[i].State.Running THEN
+		IF _Tasks[i].OriginalStopReason.ExternalCancel OR_ELSE _Tasks[i].Cancel() THEN
+			_Tasks[i].Execute();
+		END_IF
+	END_IF
+
+	IF NOT _Tasks[i].State.Ready THEN
+		Assert.ThatBool(
+			actual := _Tasks[i].Reset(),
+			message := TOF_Core.WideStrings.Concat255(_Tasks[i].Name, " must accept Reset during cleanup")
+		).IsTrue();
+	END_IF
+END_FOR]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="ClassName" Id="{15879573-c285-46bb-bb3c-28a54178b2fd}">
+      <Declaration><![CDATA[//! <summary>Borrows the concrete class name for the lifetime of this instance; callers must not modify it.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{7b79ffab-0613-41e4-ab80-3038b229f8e6}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ClassName REF= _ClassName;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="NamespaceName" Id="{0019238b-d176-48f9-852f-770afcceb822}">
+      <Declaration><![CDATA[//! <summary>Borrows the compiler-initialized namespace; callers must not modify the returned reference.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{155a49d2-4823-4f9e-ace4-eafacfc000ef}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[NamespaceName REF= CurrentNamespace.Name;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="SelfSize" Id="{e3d1a6b9-c488-4f17-84d5-beb6a25e1b88}">
+      <Declaration><![CDATA[//! <summary>Reports the complete concrete instance size, excluding separately allocated storage.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY SelfSize : ULINT]]></Declaration>
+      <Get Name="Get" Id="{719351b1-9bff-4a2e-9dca-2c2fcef3180b}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[SelfSize := XSIZEOF(THIS^);]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+  </POU>
+</TcPlcObject>

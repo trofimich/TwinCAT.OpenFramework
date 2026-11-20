@@ -1,0 +1,147 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="StaticStackOverflowTest" Id="{181be26e-4273-4402-bc8b-9fc6581e8867}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+SPDX-FileCopyrightText: c 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+SPDX-License-Identifier: MIT
+License: https://opensource.org/license/mit
+*)
+
+(*!
+<summary>Checks overflow at three entries and reuse after removing the top.</summary>
+<description>
+Owns a stack and its copied values at a stable address. Use from one task.
+Teardown clears surviving entries before publication.
+</description>
+*)
+
+{attribute 'no_assign'}
+{attribute 'no_explicit_call' := 'do not call this function block directly'}
+FUNCTION_BLOCK StaticStackOverflowTest EXTENDS TOF_Testing.SingleCycleTest
+VAR_STAT
+	{attribute 'hide'}
+	_ClassName : STRING := __POUNAME();
+END_VAR
+VAR
+	_Stack : TOF_Collections.Stack<3>(valueValidator := 0);
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[]]></ST>
+    </Implementation>
+    <Method Name="ExecuteTest" Id="{b879daae-cb9c-412d-863c-faa28a4702ee}">
+      <Declaration><![CDATA[(*!
+<summary>Checks overflow at three entries and reuse after removing the top.</summary>
+*)
+METHOD PROTECTED ExecuteTest
+VAR
+	values : ARRAY [1..4] OF INT := [11, 22, 33, 44];
+	i : DINT;
+
+	exceptionCode : __SYSTEM.ExceptionCode;
+	caught : TOF_Core.IException;
+	fullException : TOF_Core.IStaticCollectionFullException;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_Stack.PushCopy(value := values[1]);
+_Stack.PushCopy(value := values[2]);
+_Stack.PushCopy(value := values[3]);
+
+Assert.ThatBool(
+	actual := _Stack.Full,
+	message := "Overflow fixture must start full"
+).IsTrue();
+
+__TRY
+	_Stack.PushCopy(value := values[4]);
+__CATCH(exceptionCode)
+	caught := TOF_Core.ExceptionManager.GetLastException(
+		exceptionCode := exceptionCode,
+		catchPointNamespaceName := NamespaceName,
+		catchPointPOUName := __POUNAME(),
+		catchPointPosition := __POSITION()
+	);
+__ENDTRY
+
+Assert.ThatBool(
+	actual := __QUERYINTERFACE(caught, fullException),
+	message := "Pushing beyond capacity must raise StaticCollectionFullException"
+).IsTrue();
+
+Assert.ThatBool(
+	actual := _Stack.Full AND_THEN _Stack.Length = 3 AND_THEN _Stack.Capacity = 3,
+	message := "Rejected push must preserve full length and capacity"
+).IsTrue();
+
+FOR i := 0 TO 2 DO
+	Assert.ThatInt(
+		actual := _Stack.GetByIndex(index := i).AsInt(),
+		message := "Rejected push must preserve every entry in top-first order"
+	).ToBe(expected := values[3 - i]);
+END_FOR
+
+_Stack.RemoveLast();
+_Stack.PushCopy(value := values[4]);
+
+Assert.ThatBool(
+	actual := _Stack.Full AND_THEN _Stack.Length = 3,
+	message := "Pushing after removal must reuse the freed slot"
+).IsTrue();
+
+Assert.ThatInt(
+	actual := _Stack.Peek().AsInt(),
+	message := "Reusing the slot must expose the new top"
+).ToBe(expected := values[4]);
+
+Assert.ThatInt(
+	actual := _Stack.GetByIndex(index := 1).AsInt(),
+	message := "Reusing the slot must preserve the prior entries"
+).ToBe(expected := values[2]);]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="AfterTest" Id="{398986df-42ee-4557-a392-d616e0b821d3}">
+      <Declaration><![CDATA[(*!
+<summary>Clears the fixture before the runner publishes the result.</summary>
+<description>
+Also runs after an unexpected exception interrupts the case.
+</description>
+*)
+METHOD PROTECTED AfterTest]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_Stack.Clear();]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="ClassName" Id="{2a1fc8d4-b2d3-4ee8-8bed-6187df15bc18}">
+      <Declaration><![CDATA[//! <summary>Borrows the concrete class name. Callers must not modify it.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{8e1df54e-cbd1-4516-9fda-7074dd904d10}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ClassName REF= _ClassName;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="NamespaceName" Id="{0d2c0d96-fb6b-4763-91b2-f9c8db65ae81}">
+      <Declaration><![CDATA[//! <summary>Borrows the compiler-initialized namespace name. Callers must not modify it.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{2fcd964b-c8db-4437-b8fe-8029b8122985}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[NamespaceName REF= CurrentNamespace.Name;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="SelfSize" Id="{d66c085e-fedb-452a-84f6-83015e00fc77}">
+      <Declaration><![CDATA[//! <summary>Reports the concrete instance size in bytes.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY SelfSize : ULINT]]></Declaration>
+      <Get Name="Get" Id="{da23298d-38e7-46e7-a5a3-380d2fba08c2}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[SelfSize := XSIZEOF(THIS^);]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+  </POU>
+</TcPlcObject>

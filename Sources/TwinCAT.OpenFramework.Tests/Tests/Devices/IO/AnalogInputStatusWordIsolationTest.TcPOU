@@ -1,0 +1,152 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="AnalogInputStatusWordIsolationTest" Id="{83d2ae1c-32c7-40f1-8213-d145b5161886}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+SPDX-FileCopyrightText: c 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+SPDX-License-Identifier: MIT
+License: https://opensource.org/license/mit
+*)
+
+(*!
+<summary>Checks sampled status isolation through the read-only input interface.</summary>
+<description>
+Uses a live case-owned automation parent and fresh local device fixtures on every run.
+The scenario reads and writes ordinary simulated storage within one task cycle.
+</description>
+*)
+
+{attribute 'no_assign'}
+{attribute 'no_explicit_call' := 'do not call this function block directly'}
+FUNCTION_BLOCK AnalogInputStatusWordIsolationTest EXTENDS TOF_Testing.SingleCycleTest
+VAR CONSTANT
+	//! <summary>Bit 6 is the simulated channel measurement or hardware error.</summary>
+	_ChannelErrorStatus : WORD := WORD#16#0040;
+	//! <summary>Expected diagnostic for a sampled channel error.</summary>
+	_ChannelErrorMessage : WSTRING := "Analog input channel reports error";
+END_VAR
+VAR_STAT
+	{attribute 'hide'}
+	_ClassName : STRING := __POUNAME();
+END_VAR
+VAR
+	//! <summary>Live parent borrowed by the method-local simulated device.</summary>
+	_AutomationRoot : MockAutomationController(name := "DevicesIORoot");
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[]]></ST>
+    </Implementation>
+    <Method Name="ExecuteTest" Id="{cb73430b-8e88-4ca0-b732-6155e205e8e7}">
+      <Declaration><![CDATA[(*!
+<summary>Checks sampled status isolation through the read-only input interface.</summary>
+*)
+METHOD PROTECTED ExecuteTest
+VAR
+	converter : TOF_Devices_IO.DirectAnalogValueConverter;
+	analogInput : TOF_Devices_IO.AnalogInput(name := "AI_StatusWord", parent := _AutomationRoot, converter := converter);
+	inputView : TOF_Devices_IO.IReadOnlyAnalogInput;
+	statusProvider : TOF_Devices_IO.IAnalogInputStatusProvider;
+	legacyStatus : REFERENCE TO TOF_Devices_IO.ANALOG_INPUT_STATUS;
+	statusCopy : WORD;
+	//! <summary>Simulated status word at offset 0 and signed INT value bits at offset 1.</summary>
+	channelData : ARRAY [0..1] OF WORD;
+	channel : POINTER TO TOF_IOModels.ANALOG_INPUT_INT_CHANNEL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[Assert.ThatBool(
+	actual := analogInput.Initialize(),
+	message := "The analog input must initialize"
+).IsTrue();
+inputView := analogInput;
+
+IF NOT __QUERYINTERFACE(inputView, statusProvider) OR_ELSE statusProvider = 0 THEN
+	Assert.ThatBool(
+		actual := FALSE,
+		message := "IReadOnlyAnalogInput must support querying IAnalogInputStatusProvider"
+	).IsTrue();
+
+	RETURN;
+END_IF
+
+Assert.ThatBool(
+	actual := statusProvider.StatusWord = WORD#0,
+	message := "StatusWord must start at zero"
+).IsTrue();
+
+IF SIZEOF(channel^) <> SIZEOF(channelData) THEN
+	RecordFailure(message := "The simulated INT16 channel must fit two words");
+
+	RETURN;
+END_IF
+
+channel := ADR(channelData);
+channelData[0] := _ChannelErrorStatus;
+channelData[1] := WORD#0;
+analogInput.BindToInt16IO(rawValues := channel^);
+inputView.ProcessInput();
+
+legacyStatus REF= inputView.Status;
+
+IF NOT __ISVALIDREF(legacyStatus) THEN
+	RecordFailure(message := "The legacy status reference must be valid");
+
+	RETURN;
+END_IF
+
+legacyStatus.SetStatus(status := WORD#0);
+statusCopy := statusProvider.StatusWord;
+statusCopy.6 := FALSE;
+inputView.Execute();
+
+Assert.ThatBool(
+	actual := statusCopy = WORD#0
+		AND_THEN NOT inputView.Status.Error
+		AND_THEN statusProvider.StatusWord = _ChannelErrorStatus
+		AND_THEN inputView.HasError
+		AND_THEN inputView.Error.TopMessage = _ChannelErrorMessage,
+	message := "Mutating the legacy view or local copy must leave the sampled word and diagnostic intact"
+).IsTrue();
+
+inputView.ProcessInput();
+inputView.Execute();
+
+Assert.ThatBool(
+	actual := inputView.Status.Error AND_THEN statusProvider.StatusWord = _ChannelErrorStatus,
+	message := "Input processing must refresh the legacy view from the sampled word"
+).IsTrue();]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="ClassName" Id="{e17aaafb-0b4b-48ce-a52c-44096176d3bf}">
+      <Declaration><![CDATA[//! <summary>Borrows the concrete class name. Callers must not modify it.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{ec322622-42bf-42c9-93c5-c16ea4ee7268}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ClassName REF= _ClassName;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="NamespaceName" Id="{ce25932f-179d-4025-9fa9-7bc2ceac412b}">
+      <Declaration><![CDATA[//! <summary>Borrows the compiler-initialized namespace name. Callers must not modify it.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{2412eb61-2fd3-43c8-897e-622bd083adc7}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[NamespaceName REF= CurrentNamespace.Name;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="SelfSize" Id="{a9848e83-8393-44dd-ac90-341527e2906a}">
+      <Declaration><![CDATA[//! <summary>Reports the concrete instance size in bytes.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY SelfSize : ULINT]]></Declaration>
+      <Get Name="Get" Id="{cc429802-ab3a-400b-a222-4784d41b591b}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[SelfSize := XSIZEOF(THIS^);]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+  </POU>
+</TcPlcObject>

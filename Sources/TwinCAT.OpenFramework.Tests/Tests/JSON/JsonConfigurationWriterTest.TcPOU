@@ -1,5 +1,5 @@
 ﻿<?xml version="1.0" encoding="utf-8"?>
-<TcPlcObject Version="1.1.0.1">
+<TcPlcObject Version="1.1.0.1" ProductVersion="3.1.4026.21">
   <POU Name="JsonConfigurationWriterTest" Id="{0c817d2b-f993-472f-97f1-486c1de2ee2d}" SpecialFunc="None">
     <Declaration><![CDATA[(*
 SPDX-FileCopyrightText: © 2026 Oleksandr Tiutyk <trofimich@gmail.com>
@@ -18,6 +18,10 @@ manual document streaming, and destination buffer overflow detection.
 {attribute 'no_assign'}
 {attribute 'no_explicit_call' := 'do not call this function block directly'}
 FUNCTION_BLOCK JsonConfigurationWriterTest EXTENDS TOF_Testing.SingleCycleTest
+VAR CONSTANT
+	//! <summary>E_INVALIDARG identifies a rejected writer operand.</summary>
+	_InvalidArgument : UDINT := 16#80070057;
+END_VAR
 VAR_STAT
 	{attribute 'hide'}
 	_ClassName : STRING := __POUNAME();
@@ -29,13 +33,52 @@ VAR
 END_VAR
 VAR
 	_Writer : TOF_JSON.JsonConfigurationWriter;
-	_Reader : TOF_JSON.JsonConfigurationReader;
+	_Dom : Tc3_JsonXml.FB_JsonDomParser;
 	_Mock : MockConfigurationWritable;
 	_Doc : TOF_Core.JSON_DOCUMENT;
 END_VAR]]></Declaration>
     <Implementation>
       <ST><![CDATA[]]></ST>
     </Implementation>
+    <Method Name="checkCaughtException" Id="{c750804b-82f3-4fea-9b98-f7f412898bbb}">
+      <Declaration><![CDATA[(*!
+<summary>Checks the source message of a caught framework exception and its HRESULT when specified.</summary>
+<description>Reads the payload in the current task before cleanup. A missing or unrelated payload fails the test.</description>
+*)
+METHOD PRIVATE checkCaughtException
+VAR_INPUT
+	exceptionCode : __SYSTEM.ExceptionCode;
+	expectedMessage : WSTRING(255);
+	scenario : WSTRING(255);
+	expectedCode : UDINT := 0;
+END_VAR
+VAR
+	exception : TOF_Core.IException;
+	generalException : TOF_Core.IGeneralException;
+	diagnostic : TOF_Core.ERROR_MESSAGE;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[exception := TOF_Core.ExceptionManager.GetLastException(
+	exceptionCode := exceptionCode,
+	catchPointNamespaceName := NamespaceName,
+	catchPointPOUName := __POUNAME(),
+	catchPointPosition := __POSITION()
+);
+
+IF exception = 0 OR_ELSE NOT __QUERYINTERFACE(exception, generalException) THEN
+	diagnostic := TOF_Core.WideStrings.Concat255(scenario, ": expected a framework exception");
+	RecordFailure(message := diagnostic);
+
+	RETURN;
+END_IF
+
+Assert.ThatWideString(actual := generalException.SourceMessage, message := scenario).ToBe(expected := expectedMessage);
+
+IF expectedCode <> TOF_Core.UnsignedInt32.ZERO THEN
+	Assert.ThatUDInt(actual := generalException.ErrorCode, message := scenario).ToBe(expected := expectedCode);
+END_IF]]></ST>
+      </Implementation>
+    </Method>
     <Property Name="ClassName" Id="{37b6c46b-4a64-46ae-9509-a0a164265f89}">
       <Declaration><![CDATA[(*!
 <summary>Borrows the concrete class name for the lifetime of this instance.</summary>
@@ -51,18 +94,51 @@ PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
     </Property>
     <Method Name="ExecuteTest" Id="{e8e9f135-9b72-4b59-879b-3317b0a3a9fe}">
       <Declaration><![CDATA[(*!
-<summary>Executes all writer test scenarios in a single PLC cycle.</summary>
+<summary>Exercises serialization, operand rejection and writer recovery in a single PLC cycle.</summary>
 *)
 METHOD PROTECTED ExecuteTest]]></Declaration>
       <Implementation>
         <ST><![CDATA[testSerializeWritable();
-testDeserializeContextFreeObject();
 testSerializeFailureClearsDocumentAndAllowsReuse();
 testSerializeNullSource();
-testWriteValueNullDataOrZeroSize();
-testWriteValueInvalidSize();
+testInvalidValueOperands();
 testDocumentBufferOverflow();
 testManualDocumentConstruction();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="expectInvalidValueOperand" Id="{822bc991-b7f6-40fc-8de6-bd1dae44dace}">
+      <Declaration><![CDATA[(*!
+<summary>Requires the invalid-argument HRESULT when writing a DINT with the supplied source and size.</summary>
+*)
+METHOD PRIVATE expectInvalidValueOperand
+VAR_INPUT
+	name : STRING;
+	data : PVOID;
+	size : UDINT;
+END_VAR
+VAR
+	exceptionCode : __SYSTEM.ExceptionCode;
+	diagnostic : TOF_Core.ERROR_MESSAGE;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[__TRY
+	_Writer.WriteValue(
+		name := name,
+		valueType := TOF_Core.CONFIGURATION_VALUE_TYPE.TYPE_DINT,
+		data := data,
+		size := size
+	);
+
+	diagnostic := TOF_Core.WideStrings.Concat255("Writer accepted invalid operand: ", TO_WSTRING(name));
+	RecordFailure(message := diagnostic);
+__CATCH(exceptionCode)
+	checkCaughtException(
+		exceptionCode := exceptionCode,
+		expectedMessage := "Cannot write configuration document",
+		expectedCode := _InvalidArgument,
+		scenario := TO_WSTRING(name)
+	);
+__ENDTRY]]></ST>
       </Implementation>
     </Method>
     <Property Name="NamespaceName" Id="{764057de-66e1-40ba-96ca-32f03d8080c4}">
@@ -93,7 +169,7 @@ PROPERTY SelfSize : ULINT]]></Declaration>
     </Property>
     <Method Name="testDocumentBufferOverflow" Id="{ecf77c8f-5c04-4620-af64-c106070133d6}">
       <Declaration><![CDATA[(*!
-<summary>Verifies that EndDocument raises when serialized content exceeds destination buffer capacity.</summary>
+<summary>Checks the writer diagnostic when the serialized document exceeds the destination capacity.</summary>
 <description>The array's string contents alone exceed the byte size of the destination buffer.</description>
 *)
 METHOD PRIVATE testDocumentBufferOverflow
@@ -101,7 +177,6 @@ VAR
 	i : UDINT;
 	itemCount : UDINT;
 	value : STRING(50) := '01234567890123456789012345678901234567890123456789';
-	caught : BOOL;
 	exceptionCode : __SYSTEM.ExceptionCode;
 END_VAR]]></Declaration>
       <Implementation>
@@ -124,26 +199,78 @@ END_FOR
 
 _Writer.EndArray();
 
-caught := FALSE;
 __TRY
 	_Writer.EndDocument(document := _Doc);
-__CATCH (exceptionCode)
-	caught := TRUE;
-__ENDTRY
+	RecordFailure(message := "Expected failure: Oversized document");
+__CATCH(exceptionCode)
+	checkCaughtException(
+		exceptionCode := exceptionCode,
+		expectedMessage := "Cannot write configuration document",
+		scenario := "Oversized document"
+	);
+__ENDTRY]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="testInvalidValueOperands" Id="{2da88161-f470-4a8b-9689-3d707e49a46a}">
+      <Declaration><![CDATA[(*!
+<summary>Checks that rejected inputs leave a valid object ready for its next field.</summary>
+*)
+METHOD PRIVATE testInvalidValueOperands
+VAR
+	value : DINT := 123;
+	root : Tc3_JsonXml.SJsonValue;
+	member : Tc3_JsonXml.SJsonValue;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_Writer.BeginDocument();
+expectInvalidValueOperand(name := 'nullData', data := 0, size := SIZEOF(value));
+expectInvalidValueOperand(name := 'zeroSize', data := ADR(value), size := 0);
+expectInvalidValueOperand(name := 'invalidSize', data := ADR(value), size := 3);
+_Writer.WriteValue(
+	name := 'valid',
+	valueType := TOF_Core.CONFIGURATION_VALUE_TYPE.TYPE_DINT,
+	data := ADR(value),
+	size := SIZEOF(value)
+);
+_Writer.EndDocument(document := _Doc);
 
-Assert.ThatBool(actual := caught, message := "EndDocument must reject an oversized document").IsTrue();]]></ST>
+root := _Dom.ParseDocument(sJson := _Doc);
+
+IF root = 0 OR_ELSE NOT _Dom.IsObject(v := root) THEN
+	RecordFailure(message := "Rejected fields must leave the writer able to finish a valid object");
+	RETURN;
+END_IF
+
+IF _Dom.FindMember(v := root, member := 'nullData') <> 0
+	OR_ELSE _Dom.FindMember(v := root, member := 'zeroSize') <> 0
+	OR_ELSE _Dom.FindMember(v := root, member := 'invalidSize') <> 0
+THEN
+	RecordFailure(message := "A rejected argument emitted a property key");
+	RETURN;
+END_IF
+
+member := _Dom.FindMember(v := root, member := 'valid');
+
+IF member = 0 OR_ELSE NOT _Dom.IsInt(v := member) THEN
+	RecordFailure(message := "Expected the next valid field to contain an integer");
+	RETURN;
+END_IF
+
+Assert.ThatDInt(actual := _Dom.GetInt(v := member), message := "Value after rejected operands").ToBe(expected := value);]]></ST>
       </Implementation>
     </Method>
     <Method Name="testManualDocumentConstruction" Id="{c9770a11-4b87-436c-a1a5-43e92e3fedaf}">
       <Declaration><![CDATA[(*!
-<summary>Verifies manual BeginDocument/BeginObject/BeginArray/End* streaming.</summary>
+<summary>Verifies the shape and values produced by manual object and array streaming.</summary>
 *)
 METHOD PRIVATE testManualDocumentConstruction
 VAR
 	val : DINT := 10;
 	item : DINT := 1;
-	hasCfg : BOOL;
-	hasItems : BOOL;
+	root : Tc3_JsonXml.SJsonValue;
+	cfg : Tc3_JsonXml.SJsonValue;
+	items : Tc3_JsonXml.SJsonValue;
+	value : Tc3_JsonXml.SJsonValue;
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[_Writer.BeginDocument();
@@ -168,23 +295,54 @@ _Writer.EndArray();
 
 _Writer.EndDocument(document := _Doc);
 
-// SA0175: ASCII substring search in serialized JSON document.
-{analysis -175}
-hasCfg := Tc2_Standard.FIND(STR1 := _Doc, STR2 := 'cfg') > 0;
-hasItems := Tc2_Standard.FIND(STR1 := _Doc, STR2 := 'items') > 0;
-{analysis +175}
+root := _Dom.ParseDocument(sJson := _Doc);
+IF root = 0 OR_ELSE NOT _Dom.IsObject(v := root) THEN
+	RecordFailure(message := "Manual serialization must produce a JSON object");
+	RETURN;
+END_IF
 
-Assert.ThatBool(actual := hasCfg).IsTrue();
-Assert.ThatBool(actual := hasItems).IsTrue();]]></ST>
+cfg := _Dom.FindMember(v := root, member := 'cfg');
+
+IF cfg = 0 OR_ELSE NOT _Dom.IsObject(v := cfg) THEN
+	RecordFailure(message := "cfg must be a nested JSON object");
+	RETURN;
+END_IF
+
+value := _Dom.FindMember(v := cfg, member := 'num');
+
+IF value = 0 OR_ELSE NOT _Dom.IsInt(v := value) THEN
+	RecordFailure(message := "cfg.num must be a JSON integer");
+	RETURN;
+END_IF
+
+Assert.ThatDInt(actual := _Dom.GetInt(v := value), message := "cfg.num value").ToBe(expected := 10);
+
+items := _Dom.FindMember(v := root, member := 'items');
+IF items = 0 OR_ELSE NOT _Dom.IsArray(v := items) THEN
+	RecordFailure(message := "items must be a JSON array");
+	RETURN;
+END_IF
+
+IF _Dom.GetArraySize(v := items) <> 1 THEN
+	RecordFailure(message := "items must contain exactly one element");
+	RETURN;
+END_IF
+
+value := _Dom.GetArrayValueByIdx(v := items, idx := 0);
+IF value = 0 OR_ELSE NOT _Dom.IsInt(v := value) THEN
+	RecordFailure(message := "items[0] must be a JSON integer");
+	RETURN;
+END_IF
+
+Assert.ThatDInt(actual := _Dom.GetInt(v := value), message := "items[0] value").ToBe(expected := 1);]]></ST>
       </Implementation>
     </Method>
     <Method Name="testSerializeFailureClearsDocumentAndAllowsReuse" Id="{da9d4c54-a69d-4943-bb20-3eb35f2a4dbe}">
       <Declaration><![CDATA[(*!
-<summary>Verifies document clearing on failure and writer reuse without manual reset.</summary>
+<summary>Checks propagation of the callback failure, document clearing, and reuse without manual reset.</summary>
 *)
 METHOD PRIVATE testSerializeFailureClearsDocumentAndAllowsReuse
 VAR
-	caught : BOOL;
 	exceptionCode : __SYSTEM.ExceptionCode;
 	hasContent : BOOL;
 END_VAR]]></Declaration>
@@ -193,14 +351,17 @@ END_VAR]]></Declaration>
 _Mock.ThrowOnSerialize := TRUE;
 _Doc := 'pre-existing content that must be cleared';
 
-caught := FALSE;
 __TRY
 	_Writer.Serialize(source := _Mock, document := _Doc);
-__CATCH (exceptionCode)
-	caught := TRUE;
+	RecordFailure(message := "Expected failure: Throwing serialization callback");
+__CATCH(exceptionCode)
+	checkCaughtException(
+		exceptionCode := exceptionCode,
+		expectedMessage := "Mock serialize failure",
+		scenario := "Throwing serialization callback"
+	);
 __ENDTRY
 
-Assert.ThatBool(actual := caught).IsTrue();
 Assert.ThatString(actual := _Doc).ToBe(expected := '');
 
 _Mock.ThrowOnSerialize := FALSE;
@@ -213,147 +374,63 @@ Assert.ThatUDInt(actual := _Mock.SerializeCount).ToBe(expected := 1);]]></ST>
     </Method>
     <Method Name="testSerializeNullSource" Id="{860a5c75-a29d-4d6e-93b8-da14ae1e11e8}">
       <Declaration><![CDATA[(*!
-<summary>Verifies that Serialize rejects null source with an exception.</summary>
+<summary>Requires the invalid-argument diagnostic for a null serialization source.</summary>
 *)
 METHOD PRIVATE testSerializeNullSource
 VAR
 	nullSource : TOF_Core.IConfigurationSerializable := 0;
-	caught : BOOL;
 	exceptionCode : __SYSTEM.ExceptionCode;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[caught := FALSE;
-__TRY
+        <ST><![CDATA[__TRY
 	_Writer.Serialize(source := nullSource, document := _Doc);
-__CATCH (exceptionCode)
-	caught := TRUE;
-__ENDTRY
-
-Assert.ThatBool(actual := caught).IsTrue();]]></ST>
+	RecordFailure(message := "Expected failure: Null serialization source");
+__CATCH(exceptionCode)
+	checkCaughtException(
+		exceptionCode := exceptionCode,
+		expectedMessage := "Cannot write configuration document",
+		expectedCode := _InvalidArgument,
+		scenario := "Null serialization source"
+	);
+__ENDTRY]]></ST>
       </Implementation>
     </Method>
     <Method Name="testSerializeWritable" Id="{be17a119-22a3-40af-909b-f880885c7d0c}">
       <Declaration><![CDATA[(*!
-<summary>Verifies successful serialization of an IConfigurationSerializable object.</summary>
+<summary>Verifies the serialized object values and JSON types with the native DOM parser.</summary>
 *)
 METHOD PRIVATE testSerializeWritable
 VAR
-	hasIntField : BOOL;
-	hasStringField : BOOL;
+	root : Tc3_JsonXml.SJsonValue;
+	value : Tc3_JsonXml.SJsonValue;
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[_Mock.Reset();
 _Writer.Serialize(source := _Mock, document := _Doc);
-
 Assert.ThatUDInt(actual := _Mock.SerializeCount).ToBe(expected := 1);
 
-// SA0175: ASCII substring search in serialized JSON document.
-{analysis -175}
-hasIntField := Tc2_Standard.FIND(STR1 := _Doc, STR2 := 'intField') > 0;
-hasStringField := Tc2_Standard.FIND(STR1 := _Doc, STR2 := 'stringField') > 0;
-{analysis +175}
+root := _Dom.ParseDocument(sJson := _Doc);
+IF root = 0 OR_ELSE NOT _Dom.IsObject(v := root) THEN
+	RecordFailure(message := "Object serialization must produce a JSON object");
+	RETURN;
+END_IF
 
-Assert.ThatBool(actual := hasIntField).IsTrue();
-Assert.ThatBool(actual := hasStringField).IsTrue();]]></ST>
-      </Implementation>
-    </Method>
-    <Method Name="testDeserializeContextFreeObject" Id="{16157275-0ae9-47a7-8250-4fd46dbd539e}">
-      <Declaration><![CDATA[(*!
-<summary>Verifies that a context-free object deserializes successfully with null deserialization context.</summary>
-*)
-METHOD PRIVATE testDeserializeContextFreeObject
-VAR
-	root : TOF_Core.CONFIGURATION_NODE;
-END_VAR]]></Declaration>
-      <Implementation>
-        <ST><![CDATA[_Mock.Reset();
-_Mock.IntField := 123;
-_Mock.StringField := 'test context-free';
-_Writer.Serialize(source := _Mock, document := _Doc);
+value := _Dom.FindMember(v := root, member := 'intField');
+IF value = 0 OR_ELSE NOT _Dom.IsInt(v := value) THEN
+	RecordFailure(message := "intField must be a JSON integer");
+	RETURN;
+END_IF
 
-root := _Reader.Parse(document := _Doc);
-_Mock.Reset();
-_Mock.Deserialize(reader := _Reader, node := root, context := 0);
+Assert.ThatDInt(actual := _Dom.GetInt(v := value), message := "intField value").ToBe(expected := 42);
 
-Assert.ThatUDInt(actual := _Mock.DeserializeCount).ToBe(expected := 1);
-Assert.ThatDInt(actual := _Mock.IntField).ToBe(expected := 123);
-Assert.ThatString(actual := _Mock.StringField).ToBe(expected := 'test context-free');]]></ST>
-      </Implementation>
-    </Method>
-    <Method Name="testWriteValueInvalidSize" Id="{822bc991-b7f6-40fc-8de6-bd1dae44dace}">
-      <Declaration><![CDATA[(*!
-<summary>Verifies rejection of invalid data size for a fixed configuration value type.</summary>
-*)
-METHOD PRIVATE testWriteValueInvalidSize
-VAR
-	dummy : DINT := 123;
-	caught : BOOL;
-	exceptionCode : __SYSTEM.ExceptionCode;
-END_VAR]]></Declaration>
-      <Implementation>
-        <ST><![CDATA[_Writer.BeginDocument();
+value := _Dom.FindMember(v := root, member := 'stringField');
+IF value = 0 OR_ELSE NOT _Dom.IsString(v := value) THEN
+	RecordFailure(message := "stringField must be a JSON string");
+	RETURN;
+END_IF
 
-caught := FALSE;
-__TRY
-	_Writer.WriteValue(
-		name := 'invalidSize',
-		valueType := TOF_Core.CONFIGURATION_VALUE_TYPE.TYPE_DINT,
-		data := ADR(dummy),
-		size := 3
-	);
-__CATCH (exceptionCode)
-	caught := TRUE;
-__ENDTRY
-
-Assert.ThatBool(actual := caught).IsTrue();
-
-_Writer.EndDocument(document := _Doc);]]></ST>
-      </Implementation>
-    </Method>
-    <Method Name="testWriteValueNullDataOrZeroSize" Id="{2da88161-f470-4a8b-9689-3d707e49a46a}">
-      <Declaration><![CDATA[(*!
-<summary>Verifies that WriteValue rejects null pointer or zero size.</summary>
-*)
-METHOD PRIVATE testWriteValueNullDataOrZeroSize
-VAR
-	dummy : DINT := 123;
-	caught : BOOL;
-	exceptionCode : __SYSTEM.ExceptionCode;
-END_VAR]]></Declaration>
-      <Implementation>
-        <ST><![CDATA[_Writer.BeginDocument();
-
-caught := FALSE;
-__TRY
-	_Writer.WriteValue(
-		name := 'nullData',
-		valueType := TOF_Core.CONFIGURATION_VALUE_TYPE.TYPE_DINT,
-		data := 0,
-		size := 4
-	);
-__CATCH (exceptionCode)
-	caught := TRUE;
-__ENDTRY
-
-Assert.ThatBool(actual := caught).IsTrue();
-
-caught := FALSE;
-__TRY
-	_Writer.WriteValue(
-		name := 'zeroSize',
-		valueType := TOF_Core.CONFIGURATION_VALUE_TYPE.TYPE_DINT,
-		data := ADR(dummy),
-		size := 0
-	);
-__CATCH (exceptionCode)
-	caught := TRUE;
-__ENDTRY
-
-Assert.ThatBool(actual := caught).IsTrue();
-
-_Writer.EndDocument(document := _Doc);]]></ST>
+Assert.ThatString(actual := _Dom.GetString(v := value), message := "stringField value").ToBe(expected := 'hello');]]></ST>
       </Implementation>
     </Method>
   </POU>
 </TcPlcObject>
-

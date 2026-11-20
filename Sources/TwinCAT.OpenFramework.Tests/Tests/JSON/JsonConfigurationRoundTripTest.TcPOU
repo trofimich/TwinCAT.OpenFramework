@@ -30,6 +30,8 @@ END_VAR
 VAR
 	_Writer : TOF_JSON.JsonConfigurationWriter;
 	_Reader : TOF_JSON.JsonConfigurationReader;
+	_Dom : Tc3_JsonXml.FB_JsonDomParser;
+	_ReferenceConverter : Tc3_JsonXml.FB_JsonReadWriteDataType;
 	_Doc : TOF_Core.JSON_DOCUMENT;
 END_VAR]]></Declaration>
     <Implementation>
@@ -50,14 +52,14 @@ PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
     </Property>
     <Method Name="ExecuteTest" Id="{0a32637e-d145-4674-8324-a88fe370c6a2}">
       <Declaration><![CDATA[(*!
-<summary>Executes all round-trip test scenarios in a single PLC cycle.</summary>
+<summary>Exercises JSON round trips for elementary values and nested objects and arrays.</summary>
 *)
 METHOD PROTECTED ExecuteTest]]></Declaration>
       <Implementation>
         <ST><![CDATA[testIntegerTypesRoundTrip();
 testBitStringTypesRoundTrip();
 testFloatTypesRoundTrip();
-testStringsRoundTripAndP5();
+testStringsRoundTrip();
 testWideStringsRoundTrip();
 testDateTimeTypesRoundTrip();
 testStructuralRoundTrip();]]></ST>
@@ -201,11 +203,16 @@ Assert.ThatLWord(actual := lwordDst).ToBe(expected := 16#0123456789ABCDEF);]]></
     </Method>
     <Method Name="testDateTimeTypesRoundTrip" Id="{f47258fd-2ce2-4fc0-a0d2-15310dea42d1}">
       <Declaration><![CDATA[(*!
-<summary>Verifies round-trip serialization of TIME, LTIME, DATE, LDATE, TOD, LTOD, DT and LDT.</summary>
+<summary>Verifies round-trip serialization of eight time types and compares LTIME with direct native serialization.</summary>
 *)
 METHOD PRIVATE testDateTimeTypesRoundTrip
 VAR
 	root : TOF_Core.CONFIGURATION_NODE;
+	domRoot : Tc3_JsonXml.SJsonValue;
+	serializedTime : Tc3_JsonXml.SJsonValue;
+	referenceJson : STRING(255);
+	referenceSize : UDINT;
+	actualJson : STRING(255);
 	timeVal : TIME := T#49D17H2M47S295MS;
 	ltimeVal : LTIME := LTIME#100D12H30M15S;
 	dateVal : DATE := D#2026-11-09;
@@ -274,6 +281,45 @@ _Writer.WriteValue(
 	size := SIZEOF(ldtVal)
 );
 _Writer.EndDocument(document := _Doc);
+
+referenceSize := SIZEOF(referenceJson);
+
+// SA0175: GetJsonFromSymbol writes to the string buffer using its size in bytes.
+{analysis -175}
+IF NOT _ReferenceConverter.GetJsonFromSymbol(
+	sDatatype := 'LTIME',
+	nData := SIZEOF(ltimeVal),
+	pData := ADR(ltimeVal),
+	nJson := referenceSize,
+	pJson := ADR(referenceJson)
+) THEN
+	RecordFailure(message := "Native LTIME reference serialization failed");
+	RETURN;
+END_IF
+{analysis +175}
+
+domRoot := _Dom.ParseDocument(sJson := _Doc);
+
+IF domRoot = 0 OR_ELSE NOT _Dom.IsObject(v := domRoot) THEN
+	RecordFailure(message := "Serialized temporal values must form a JSON object");
+	RETURN;
+END_IF
+
+serializedTime := _Dom.FindMember(v := domRoot, member := 'ltimeV');
+
+IF serializedTime = 0 THEN
+	RecordFailure(message := "The serialized document must contain ltimeV");
+	RETURN;
+END_IF
+
+IF _Dom.CopyJson(v := serializedTime, pDoc := actualJson, nDoc := SIZEOF(actualJson)) = 0 THEN
+	RecordFailure(message := "Could not read the serialized ltimeV JSON value");
+	RETURN;
+END_IF
+
+Assert.ThatString(actual := actualJson, message := "LTIME JSON must match its native representation").ToBe(
+	expected := referenceJson
+);
 
 root := _Reader.Parse(document := _Doc);
 
@@ -421,11 +467,13 @@ Assert.ThatLongReal(actual := lrealDst).ToBe(expected := -987654.3210123, tolera
     </Method>
     <Method Name="testIntegerTypesRoundTrip" Id="{dfee5b7b-a695-4f81-a109-2b869c651bc0}">
       <Declaration><![CDATA[(*!
-<summary>Verifies round-trip serialization of signed and unsigned integer boundary values.</summary>
+<summary>Verifies round-trip and exact JSON numeric values at representative signed and unsigned integer boundaries.</summary>
 *)
 METHOD PRIVATE testIntegerTypesRoundTrip
 VAR
 	root : TOF_Core.CONFIGURATION_NODE;
+	domRoot : Tc3_JsonXml.SJsonValue;
+	number : Tc3_JsonXml.SJsonValue;
 	sintMin : SINT := -128;
 	sintMax : SINT := 127;
 	usintMax : USINT := 255;
@@ -515,6 +563,35 @@ _Writer.WriteValue(
 	size := SIZEOF(ulintVal)
 );
 _Writer.EndDocument(document := _Doc);
+
+domRoot := _Dom.ParseDocument(sJson := _Doc);
+
+IF domRoot = 0 OR_ELSE NOT _Dom.IsObject(v := domRoot) THEN
+	RecordFailure(message := "Serialized integer values must form a JSON object");
+	RETURN;
+END_IF
+
+number := _Dom.FindMember(v := domRoot, member := 'lintV');
+
+IF number = 0 OR_ELSE NOT _Dom.IsInt64(v := number) THEN
+	RecordFailure(message := "lintV must remain a signed 64-bit JSON integer");
+	RETURN;
+END_IF
+
+Assert.ThatLInt(actual := _Dom.GetInt64(v := number), message := "Signed 64-bit JSON value").ToBe(
+	expected := lintVal
+);
+
+number := _Dom.FindMember(v := domRoot, member := 'ulintV');
+
+IF number = 0 OR_ELSE NOT _Dom.IsUint64(v := number) THEN
+	RecordFailure(message := "ulintV must remain an unsigned 64-bit JSON integer");
+	RETURN;
+END_IF
+
+Assert.ThatULInt(actual := _Dom.GetUint64(v := number), message := "Unsigned 64-bit JSON value").ToBe(
+	expected := ulintVal
+);
 
 root := _Reader.Parse(document := _Doc);
 
@@ -607,13 +684,15 @@ _Reader.ReadValue(
 Assert.ThatULInt(actual := ulintDst).ToBe(expected := ulintVal);]]></ST>
       </Implementation>
     </Method>
-    <Method Name="testStringsRoundTripAndP5" Id="{0dcf39fc-2978-4e69-899d-2e1673bfce2e}">
+    <Method Name="testStringsRoundTrip" Id="{0dcf39fc-2978-4e69-899d-2e1673bfce2e}">
       <Declaration><![CDATA[(*!
-<summary>Verifies round-trip for empty string (P5 hypothesis), regular string and escape sequences.</summary>
+<summary>Verifies empty and escaped strings using a literal JSON fixture and native DOM decoding.</summary>
 *)
-METHOD PRIVATE testStringsRoundTripAndP5
+METHOD PRIVATE testStringsRoundTrip
 VAR
 	root : TOF_Core.CONFIGURATION_NODE;
+	domRoot : Tc3_JsonXml.SJsonValue;
+	escapedValue : Tc3_JsonXml.SJsonValue;
 	emptySrc : STRING(80) := '';
 	regSrc : STRING(80) := 'Hello Structured World';
 	escapeSrc : STRING(80) := 'Line1$NLine2$T"Quoted"\';
@@ -643,9 +722,26 @@ _Writer.WriteValue(
 );
 _Writer.EndDocument(document := _Doc);
 
+domRoot := _Dom.ParseDocument(sJson := _Doc);
+
+IF domRoot = 0 OR_ELSE NOT _Dom.IsObject(v := domRoot) THEN
+	RecordFailure(message := "Serialized STRING values must form a JSON object");
+	RETURN;
+END_IF
+
+escapedValue := _Dom.FindMember(v := domRoot, member := 'escapeStr');
+
+IF escapedValue = 0 OR_ELSE NOT _Dom.IsString(v := escapedValue) THEN
+	RecordFailure(message := "escapeStr must be a JSON string");
+	RETURN;
+END_IF
+
+Assert.ThatString(actual := _Dom.GetString(v := escapedValue), message := "DOM-decoded escaped value").ToBe(
+	expected := 'Line1$NLine2$T"Quoted"\'
+);
+
 root := _Reader.Parse(document := _Doc);
 
-// P5 check: verify empty string does not fail with 'value too large'
 _Reader.ReadValue(
 	node := _Reader.GetField(node := root, name := 'emptyStr'),
 	valueType := TOF_Core.CONFIGURATION_VALUE_TYPE.TYPE_STRING,
@@ -815,18 +911,23 @@ Assert.ThatBool(actual := flagDst).IsTrue();]]></ST>
     </Method>
     <Method Name="testWideStringsRoundTrip" Id="{857159a7-e6e6-4912-807d-7ce077f47a45}">
       <Declaration><![CDATA[(*!
-<summary>Verifies round-trip for empty wide string, standard wide string and escapes.</summary>
+<summary>Verifies empty, Unicode and escaped wide strings, including an independently encoded JSON escape.</summary>
+<description>Checks that data following the wide null terminator is excluded from the serialized JSON string.</description>
 *)
 METHOD PRIVATE testWideStringsRoundTrip
 VAR
 	root : TOF_Core.CONFIGURATION_NODE;
+	domRoot : Tc3_JsonXml.SJsonValue;
+	emptyValue : Tc3_JsonXml.SJsonValue;
 	emptyWide : WSTRING(80) := "";
-	regWide : WSTRING(80) := "Hello Wide Text";
+	regWide : WSTRING(80) := "Café";
 	escapeWide : WSTRING(80) := "Wide $N newline and \ backslash";
 	wstrDst : WSTRING(80) := "initial";
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[_Writer.BeginDocument();
+        <ST><![CDATA[emptyWide[1] := 16#0058; // Leave an X after the terminator to detect serialization of unused storage.
+
+_Writer.BeginDocument();
 _Writer.WriteValue(
 	name := 'emptyWide',
 	valueType := TOF_Core.CONFIGURATION_VALUE_TYPE.TYPE_WSTRING,
@@ -847,6 +948,19 @@ _Writer.WriteValue(
 );
 _Writer.EndDocument(document := _Doc);
 
+domRoot := _Dom.ParseDocument(sJson := _Doc);
+emptyValue := _Dom.FindMember(v := domRoot, member := 'emptyWide');
+
+IF emptyValue = 0 OR_ELSE NOT _Dom.IsString(v := emptyValue) THEN
+	RecordFailure(message := "Writer did not emit emptyWide as a JSON string");
+	RETURN;
+END_IF
+
+Assert.ThatUDInt(
+	actual := _Dom.GetStringLength(v := emptyValue),
+	message := "Serialized emptyWide contains only the terminator"
+).ToBe(expected := TOF_Core.Strings.CharSize);
+
 root := _Reader.Parse(document := _Doc);
 
 _Reader.ReadValue(
@@ -863,7 +977,7 @@ _Reader.ReadValue(
 	data := ADR(wstrDst),
 	size := SIZEOF(wstrDst)
 );
-Assert.ThatWideString(actual := wstrDst).ToBe(expected := "Hello Wide Text");
+Assert.ThatWideString(actual := wstrDst).ToBe(expected := "Café");
 
 _Reader.ReadValue(
 	node := _Reader.GetField(node := root, name := 'escapeWide'),
@@ -871,7 +985,20 @@ _Reader.ReadValue(
 	data := ADR(wstrDst),
 	size := SIZEOF(wstrDst)
 );
-Assert.ThatWideString(actual := wstrDst).ToBe(expected := "Wide $N newline and \ backslash");]]></ST>
+Assert.ThatWideString(actual := wstrDst).ToBe(expected := "Wide $N newline and \ backslash");
+
+_Doc := '{"unicode":"Caf\u00e9"}';
+root := _Reader.Parse(document := _Doc);
+wstrDst := "initial";
+_Reader.ReadValue(
+	node := _Reader.GetField(node := root, name := 'unicode'),
+	valueType := TOF_Core.CONFIGURATION_VALUE_TYPE.TYPE_WSTRING,
+	data := ADR(wstrDst),
+	size := SIZEOF(wstrDst)
+);
+Assert.ThatWideString(actual := wstrDst, message := "Decode a JSON Unicode escape").ToBe(
+	expected := "Café"
+);]]></ST>
       </Implementation>
     </Method>
   </POU>

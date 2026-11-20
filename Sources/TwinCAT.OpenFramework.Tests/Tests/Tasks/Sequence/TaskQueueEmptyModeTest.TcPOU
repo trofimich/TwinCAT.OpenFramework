@@ -1,0 +1,235 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="TaskQueueEmptyModeTest" Id="{9f0c5925-a881-4322-b44f-afdfc8c37ec6}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+SPDX-FileCopyrightText: © 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+SPDX-License-Identifier: MIT
+License: https://opensource.org/license/mit
+*)
+
+(*!
+<summary>Checks one setting of StopWhenNoPendingTasks for empty and populated queues.</summary>
+<description>
+Owns separate resource-free fixtures per case. Calls Execute a bounded number of times in one task cycle.
+Copying would invalidate internal references and queue ownership.
+</description>
+*)
+
+{attribute 'no_assign'}
+{attribute 'no_explicit_call' := 'do not call this function block directly'}
+FUNCTION_BLOCK TaskQueueEmptyModeTest EXTENDS TOF_Testing.SingleCycleTest
+VAR_STAT
+	{attribute 'hide'}
+	_ClassName : STRING := __POUNAME();
+END_VAR
+VAR CONSTANT
+	//! <summary>Number of work calls needed by the counter after its separate start call.</summary>
+	_Target : INT := 3;
+END_VAR
+VAR
+	_StopWhenEmpty : BOOL;
+	_Queue : TOF_Tasks.StandardTaskQueue(name := "Empty mode queue");
+	_Child : CounterTask(name := "Empty mode child");
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[]]></ST>
+    </Implementation>
+    <Method Name="FB_init" Id="{2f205847-7eaa-4dba-aa7d-4545ea556789}">
+      <Declaration><![CDATA[(*!
+<summary>Stores the queue mode selected by this case.</summary>
+<param name="name">Display name of this case.</param>
+<param name="parent">Group that owns this case.</param>
+<param name="stopWhenEmpty">TRUE tests automatic completion. FALSE tests waiting and late enqueue.</param>
+*)
+METHOD FB_init : BOOL
+VAR_INPUT
+	bInitRetains: BOOL; // TRUE: the retain variables are initialized (reset warm / reset cold)
+	bInCopyCode: BOOL; // TRUE: the instance will be copied to the copy code afterward (online change)
+	name : WSTRING;
+	parent : TOF_Testing.ITestElement;
+	stopWhenEmpty : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_StopWhenEmpty := stopWhenEmpty;
+FB_init := TRUE;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="ExecuteTest" Id="{88756224-5396-4757-adad-21fe0497bf28}">
+      <Declaration><![CDATA[(*!
+<summary>Exercises an empty queue, then a completed child under the same mode.</summary>
+<description>
+With automatic completion, restarts the empty stopped queue with a prepared child. Otherwise adds the
+child to the running empty queue, verifies that it can wait again, and explicitly cancels.
+</description>
+*)
+METHOD PROTECTED ExecuteTest
+VAR
+	i : INT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF NOT _Queue.State.Ready OR_ELSE _Queue.PendingTaskCount <> 0 OR_ELSE NOT _Child.State.Ready THEN
+	RecordFailure(message := "Empty mode test requires an empty READY queue and a READY child");
+	RETURN;
+END_IF
+
+_Queue.StopWhenNoPendingTasks := _StopWhenEmpty;
+
+IF NOT _Queue.Start() THEN
+	RecordFailure(message := "An empty READY queue must accept Start");
+	RETURN;
+END_IF
+
+_Queue.Execute();
+
+IF _StopWhenEmpty THEN
+	IF NOT _Queue.State.Stopped THEN
+		RecordFailure(message := "Automatic mode must stop the initially empty queue");
+		RETURN;
+	END_IF
+
+	Assert.ThatBool(
+		actual := _Queue.FinalStopReason.WorkDone,
+		message := "Initially empty queue must finish with WorkDone"
+	).IsTrue();
+
+	IF NOT _Queue.Reset() THEN
+		RecordFailure(message := "Initially empty queue must accept Reset after completion");
+		RETURN;
+	END_IF
+
+	_Queue.StopWhenNoPendingTasks := TRUE;
+ELSIF NOT _Queue.State.Running THEN
+	RecordFailure(message := "Waiting mode must keep the initially empty queue running");
+	RETURN;
+END_IF
+
+_Child.TargetValue := _Target;
+_Queue.Enqueue(task := _Child);
+Assert.ThatDInt(actual := _Queue.PendingTaskCount, message := "Queue must retain the new child").ToBe(expected := 1);
+
+IF _StopWhenEmpty AND_THEN NOT _Queue.Start() THEN
+	RecordFailure(message := "READY queue with a prepared child must accept Start");
+	RETURN;
+END_IF
+
+_Queue.Execute();
+
+FOR i := 1 TO _Target DO
+	_Queue.Execute();
+END_FOR
+
+Assert.ThatInt(actual := _Child.Counter, message := "The enqueued child must finish exactly its work")
+	.ToBe(expected := _Target);
+Assert.ThatBool(
+	actual := _Child.State.Stopped AND_THEN _Child.FinalStopReason.WorkDone,
+	message := "The enqueued child must finish in STOPPED with WorkDone"
+).IsTrue();
+Assert.ThatDInt(
+	actual := _Queue.PendingTaskCount,
+	message := "The successfully completed child must be removed"
+).ToBe(expected := 0);
+Assert.ThatBool(
+	actual := _Queue.State.Running,
+	message := "The last child must be removed before the queue handles the empty state"
+).IsTrue();
+
+_Queue.Execute();
+
+IF _StopWhenEmpty THEN
+	Assert.ThatBool(
+		actual := _Queue.State.Stopped AND_THEN _Queue.FinalStopReason.WorkDone,
+		message := "Automatic mode must stop with WorkDone when the last child has been removed"
+	).IsTrue();
+
+	RETURN;
+END_IF
+
+Assert.ThatBool(
+	actual := _Queue.State.Running,
+	message := "Waiting mode must remain running after the last child has been removed"
+).IsTrue();
+
+IF NOT _Queue.Cancel() THEN
+	RecordFailure(message := "The empty running queue must accept Cancel");
+	RETURN;
+END_IF
+
+_Queue.Execute();
+Assert.ThatBool(
+	actual := _Queue.State.Stopped AND_THEN _Queue.FinalStopReason.ExternalCancel,
+	message := "The empty queue must stop with ExternalCancel after accepted cancellation"
+).IsTrue();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="AfterTest" Id="{a27b1155-2c0f-4d62-8e6a-0a30ebde43f0}">
+      <Declaration><![CDATA[(*!
+<summary>Stops and empties the queue before resetting its counter.</summary>
+<description>
+Checks for completion after one cancellation call to Execute. Leaves a still-running queue in control of its child.
+</description>
+*)
+METHOD PROTECTED AfterTest]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF _Queue.State.Running THEN
+	IF _Queue.OriginalStopReason.ExternalCancel OR_ELSE _Queue.Cancel() THEN
+		_Queue.Execute();
+	END_IF
+END_IF
+
+IF _Queue.State.Running THEN
+	RecordFailure(message := "Cleanup could not stop the queue");
+	RETURN;
+END_IF
+
+IF _Queue.State.Stopped THEN
+	IF NOT _Queue.Reset() THEN
+		RecordFailure(message := "Stopped queue refused Reset during cleanup");
+		RETURN;
+	END_IF
+ELSE
+	_Queue.ClearWaitingTasks();
+END_IF
+
+IF NOT _Queue.State.Ready OR_ELSE _Queue.PendingTaskCount <> 0 THEN
+	RecordFailure(message := "Queue must be READY and empty before resetting its former children");
+	RETURN;
+END_IF
+
+Assert.ThatBool(actual := _Child.Reset(), message := "Counter child must accept cleanup Reset").IsTrue();]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="ClassName" Id="{6707ef06-e140-480d-8f98-87156e82b780}">
+      <Declaration><![CDATA[//! <summary>Borrows the concrete class name. Callers must not modify the returned storage.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{dfa8b9a3-0115-4932-a889-823c9ba74ee0}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ClassName REF= _ClassName;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="NamespaceName" Id="{d84a3d47-0fec-4e45-9a91-cf560a3d9e0b}">
+      <Declaration><![CDATA[//! <summary>Borrows the compiler-initialized namespace name. Callers must not modify it.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{9d5669f7-1c5e-455c-80b1-ec2ffa1428a6}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[NamespaceName REF= CurrentNamespace.Name;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="SelfSize" Id="{8bafea9a-e1e6-48c9-810d-5187040efa3e}">
+      <Declaration><![CDATA[//! <summary>Reports the complete concrete instance size in bytes.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY SelfSize : ULINT]]></Declaration>
+      <Get Name="Get" Id="{93ee4964-ff65-4f36-9f14-1adb483ca8e1}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[SelfSize := XSIZEOF(THIS^);]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+  </POU>
+</TcPlcObject>

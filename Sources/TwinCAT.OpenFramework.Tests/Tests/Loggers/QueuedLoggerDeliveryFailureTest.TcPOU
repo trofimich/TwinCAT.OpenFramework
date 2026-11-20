@@ -1,0 +1,158 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="QueuedLoggerDeliveryFailureTest" Id="{56a56307-c86b-4316-9ae0-53b3071ceb52}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+SPDX-FileCopyrightText: c 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+SPDX-License-Identifier: MIT
+License: https://opensource.org/license/mit
+*)
+
+(*!
+<summary>Checks single-attempt delivery, failure accounting and continued backend service.</summary>
+<description>
+The runner task owns the fixtures. Each run clears its observations and uses the same instances.
+</description>
+*)
+
+{attribute 'no_assign'}
+{attribute 'no_explicit_call' := 'do not call this function block directly'}
+FUNCTION_BLOCK QueuedLoggerDeliveryFailureTest EXTENDS TOF_Testing.SingleCycleTest
+VAR_STAT
+	{attribute 'hide'}
+	_ClassName : STRING := __POUNAME();
+END_VAR
+VAR
+	_Queue : TOF_Loggers.QueuedLogger;
+	_Backend : LoggerCaptureBackend;
+	_QueueConfigured : BOOL;
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[]]></ST>
+    </Implementation>
+    <Method Name="ExecuteTest" Id="{ac66091d-6b48-4275-ba3a-778b2a8f70e0}">
+      <Declaration><![CDATA[(*!
+<summary>Checks single-attempt delivery, failure accounting and continued backend service.</summary>
+<description>
+The runner task owns the fixtures. Each run clears its observations and uses the same instances.
+</description>
+*)
+METHOD PROTECTED ExecuteTest
+VAR
+	message : TOF_Core.ERROR_MESSAGE := "delivery probe";
+	failuresBefore : ULINT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF NOT _QueueConfigured THEN
+	_QueueConfigured := _Queue.Configure(backend := _Backend);
+END_IF
+
+Assert.ThatBool(actual := _QueueConfigured, message := "Queue must bind to its capture backend").IsTrue();
+
+IF NOT _QueueConfigured THEN
+	RETURN;
+END_IF
+
+Assert.ThatBool(
+	actual := _Queue.PendingMessageCount = 0,
+	message := "Scenario must start with an empty queue"
+).IsTrue();
+
+failuresBefore := _Queue.FailedDeliveryCount;
+_Queue.Execute();
+Assert.ThatBool(actual := _Backend.ExecuteCount = 1, message := "Empty queue must still service the backend").IsTrue();
+_Backend.DeliveryBehavior := LOGGER_DELIVERY_BEHAVIOR.REFUSE;
+Assert.ThatBool(
+	actual := _Queue.TryLogMessage(category := TOF_Core.LOG_CATEGORY.ERROR, message := message),
+	message := "First refusal probe must be admitted"
+).IsTrue();
+Assert.ThatBool(
+	actual := _Queue.TryLogMessage(category := TOF_Core.LOG_CATEGORY.ERROR, message := message),
+	message := "Second refusal probe must be admitted"
+).IsTrue();
+_Queue.Execute();
+Assert.ThatBool(
+	actual := _Queue.FailedDeliveryCount = failuresBefore + 2,
+	message := "Refused attempts must be counted once each"
+).IsTrue();
+_Backend.DeliveryBehavior := LOGGER_DELIVERY_BEHAVIOR.THROW_EXCEPTION;
+Assert.ThatBool(
+	actual := _Queue.TryLogMessage(category := TOF_Core.LOG_CATEGORY.ERROR, message := message),
+	message := "Delivery-exception probe must be admitted"
+).IsTrue();
+_Queue.Execute();
+Assert.ThatBool(
+	actual := _Queue.FailedDeliveryCount = failuresBefore + 3,
+	message := "A hostile delivery exception must be contained and counted"
+).IsTrue();
+_Backend.DeliveryBehavior := LOGGER_DELIVERY_BEHAVIOR.ACCEPT;
+_Backend.ThrowOnExecute := TRUE;
+Assert.ThatBool(
+	actual := _Queue.TryLogMessage(category := TOF_Core.LOG_CATEGORY.INFORMATION, message := message),
+	message := "Record must be admitted while the backend Execute fault is armed"
+).IsTrue();
+_Queue.Execute();
+_Backend.ThrowOnExecute := FALSE;
+_Queue.Execute();
+Assert.ThatBool(
+	actual := _Backend.AttemptCount = 4,
+	message := "Every dequeued record must have exactly one attempt"
+).IsTrue();
+Assert.ThatBool(
+	actual := _Backend.CapturedCount = 1,
+	message := "Normal delivery must resume after the nonfatal faults"
+).IsTrue();
+Assert.ThatBool(
+	actual := _Backend.ExecuteCount = 5,
+	message := "Execute faults must not prevent later service calls"
+).IsTrue();
+Assert.ThatBool(
+	actual := _Queue.FailedDeliveryCount = failuresBefore + 3,
+	message := "Backend Execute failure must not count as delivery failure"
+).IsTrue();
+Assert.ThatBool(actual := _Queue.PendingMessageCount = 0, message := "Failed records must not be retried").IsTrue();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="BeforeTest" Id="{568e879e-b04a-46e7-8bbd-10890e856a9f}">
+      <Declaration><![CDATA[(*!
+<summary>Clears capture observations and injected faults before each run.</summary>
+*)
+METHOD PROTECTED BeforeTest]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_Backend.ResetCapture();]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="ClassName" Id="{12504612-5e90-4da0-bd60-4f4f99ed461e}">
+      <Declaration><![CDATA[//! <summary>Borrows the concrete class name for the instance lifetime. Callers must not modify it.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{af0206b8-b2a9-488d-a394-d7f3345cdcc5}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ClassName REF= _ClassName;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="NamespaceName" Id="{d1a04d79-319e-486c-8f46-cbb707ce4226}">
+      <Declaration><![CDATA[//! <summary>Borrows the compiler-initialized namespace. Callers must not modify it.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{29e3234e-c12c-4f0c-a5e6-0d35a7a2c892}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[NamespaceName REF= CurrentNamespace.Name;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="SelfSize" Id="{6c19e914-a34a-4c27-abde-9e4a3f008aaf}">
+      <Declaration><![CDATA[//! <summary>Reports the complete instance size in bytes, excluding separately allocated storage.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY SelfSize : ULINT]]></Declaration>
+      <Get Name="Get" Id="{084b0cfc-be57-4fb8-b67f-1293953c01b1}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[SelfSize := XSIZEOF(THIS^);]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+  </POU>
+</TcPlcObject>

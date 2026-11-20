@@ -1,0 +1,134 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="StaticByteListOverflowTest" Id="{771bb9ec-9195-4f38-8f4a-725b4e7ee9b3}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+SPDX-FileCopyrightText: c 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+SPDX-License-Identifier: MIT
+License: https://opensource.org/license/mit
+*)
+
+(*!
+<summary>Checks full-capacity rejection, unchanged bytes and subsequent reuse.</summary>
+<description>
+Owns a fixed-capacity byte list. Run from one task at a stable address. Teardown clears the logical bytes.
+</description>
+*)
+
+{attribute 'no_assign'}
+{attribute 'no_explicit_call' := 'do not call this function block directly'}
+FUNCTION_BLOCK StaticByteListOverflowTest EXTENDS TOF_Testing.SingleCycleTest
+VAR_STAT
+	{attribute 'hide'}
+	_ClassName : STRING := __POUNAME();
+END_VAR
+VAR
+	_List : TOF_Collections.ByteList<12>;
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[]]></ST>
+    </Implementation>
+    <Method Name="ExecuteTest" Id="{7be32475-6d49-4d67-97cc-fa90c5725611}">
+      <Declaration><![CDATA[(*!
+<summary>Checks full-capacity rejection, unchanged bytes and subsequent reuse.</summary>
+*)
+METHOD PROTECTED ExecuteTest
+VAR
+	values : ARRAY [0..11] OF BYTE := [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
+	i : DINT;
+
+	exceptionCode : __SYSTEM.ExceptionCode;
+	caught : TOF_Core.IException;
+	fullException : TOF_Core.IStaticCollectionFullException;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_List.AppendAny(data := values);
+
+Assert.ThatBool(
+	actual := _List.Full AND_THEN _List.Length = 12 AND_THEN _List.Capacity = 12,
+	message := "The list must accept exactly twelve bytes"
+).IsTrue();
+
+__TRY
+	_List.AppendByte(value := BYTE#255);
+__CATCH(exceptionCode)
+	caught := TOF_Core.ExceptionManager.GetLastException(
+		exceptionCode := exceptionCode,
+		catchPointNamespaceName := NamespaceName,
+		catchPointPOUName := __POUNAME(),
+		catchPointPosition := __POSITION()
+	);
+__ENDTRY
+
+Assert.ThatBool(
+	actual := __QUERYINTERFACE(caught, fullException),
+	message := "Appending to a full list must raise StaticCollectionFullException"
+).IsTrue();
+
+Assert.ThatBool(
+	actual := _List.Full AND_THEN _List.Length = 12 AND_THEN _List.Capacity = 12,
+	message := "Rejected append must preserve the full list and its capacity"
+).IsTrue();
+
+FOR i := 0 TO 11 DO
+	Assert.ThatByte(
+		actual := _List.Get(index := i),
+		message := "Rejected append must preserve every byte"
+	).ToBe(expected := values[i]);
+END_FOR
+
+_List.RemoveAt(index := 11, count := 1);
+_List.AppendByte(value := BYTE#255);
+
+Assert.ThatBool(
+	actual := _List.Full AND_THEN _List.Get(index := 11) = BYTE#255,
+	message := "Freeing one slot must allow the next append"
+).IsTrue();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="AfterTest" Id="{9cfc0733-8176-4822-9daa-8ded607483d3}">
+      <Declaration><![CDATA[(*!
+<summary>Restores the fixture before the runner publishes the result.</summary>
+<description>
+Also runs after an unexpected exception interrupts the case.
+</description>
+*)
+METHOD PROTECTED AfterTest]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_List.Clear(releaseDynamicMemory := TRUE);]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="ClassName" Id="{b43259a5-3778-4ff3-bd82-185831252568}">
+      <Declaration><![CDATA[//! <summary>Borrows the concrete class name. Callers must not modify it.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{711ea326-940c-46c8-832d-e69dbd636685}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ClassName REF= _ClassName;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="NamespaceName" Id="{4d0b9464-c4ee-402a-8f59-9b55032649c1}">
+      <Declaration><![CDATA[//! <summary>Borrows the compiler-initialized namespace name. Callers must not modify it.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{a4970b55-226a-40dd-baeb-844b9d43af6d}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[NamespaceName REF= CurrentNamespace.Name;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="SelfSize" Id="{ea4f5308-4873-4e7b-ae03-17a05ef68282}">
+      <Declaration><![CDATA[//! <summary>Reports the concrete instance size in bytes.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY SelfSize : ULINT]]></Declaration>
+      <Get Name="Get" Id="{d0d03136-ca4c-4918-8c6a-a3ad3c2155b3}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[SelfSize := XSIZEOF(THIS^);]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+  </POU>
+</TcPlcObject>

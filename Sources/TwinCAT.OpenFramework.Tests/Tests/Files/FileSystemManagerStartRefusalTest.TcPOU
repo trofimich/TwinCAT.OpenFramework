@@ -1,0 +1,154 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="FileSystemManagerStartRefusalTest" Id="{59227da5-2cf2-487c-b2f5-f89283541abd}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+SPDX-FileCopyrightText: © 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+SPDX-License-Identifier: MIT
+License: https://opensource.org/license/mit
+*)
+
+(*!
+<summary>Checks that a manager can retry Start directly after a contained preparation failure.</summary>
+<description>
+The fixture belongs to the runner task and is kept between runs. The test drives no native file requests.
+</description>
+*)
+
+{attribute 'no_assign'}
+{attribute 'no_explicit_call' := 'do not call this function block directly'}
+FUNCTION_BLOCK FileSystemManagerStartRefusalTest EXTENDS TOF_Testing.SingleCycleTest
+VAR_STAT
+	{attribute 'hide'}
+	_ClassName : STRING := __POUNAME();
+END_VAR
+VAR
+	_Manager : FileManagerStartRefusalProbe(name := "refused file manager");
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[]]></ST>
+    </Implementation>
+    <Method Name="ExecuteTest" Id="{2d5076a3-b171-421b-8393-c4fd07417a39}">
+      <Declaration><![CDATA[(*!
+<summary>Checks that a refused start leaves the manager idle and eligible for an immediate successful retry.</summary>
+<description>Disables the injected refusal and cancels the accepted retry before advancing acquisition.</description>
+*)
+METHOD PROTECTED ExecuteTest
+VAR
+	accepted : BOOL;
+	cancelled : BOOL;
+	refuseReason : TOF_Core.ERROR_MESSAGE;
+	refuseText : STRING(255);
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_Manager.FilePath := 'unused.bin';
+_Manager.RefuseStart := TRUE;
+accepted := _Manager.Start(refuseReason => refuseReason);
+refuseText := TO_STRING(refuseReason);
+Assert.ThatBool(actual := accepted, message := "Preparation exception must refuse Start").IsFalse();
+Assert.ThatBool(actual := _Manager.State.Ready, message := "Refused Start must leave the manager READY").IsTrue();
+Assert.ThatBool(
+	actual := TOF_Core.Strings.Contains(
+		stringToSearchIn := refuseText,
+		stringToFind := 'Synthetic file-manager Start refusal'
+	),
+	message := "Refused Start must identify the preparation failure"
+).IsTrue();
+Assert.ThatBool(
+	actual := _Manager.ResourceManager.ResourceAcquired,
+	message := "Refused Start must acquire no resource"
+).IsFalse();
+
+IF accepted OR_ELSE NOT _Manager.State.Ready THEN
+	RETURN;
+END_IF
+
+_Manager.Execute();
+Assert.ThatBool(
+	actual := _Manager.State.Ready,
+	message := "Execute after refusal must not initiate acquisition"
+).IsTrue();
+Assert.ThatBool(
+	actual := _Manager.ResourceManager.ResourceAcquired,
+	message := "Execute after refusal must leave the resource unacquired"
+).IsFalse();
+
+IF NOT _Manager.State.Ready THEN
+	RETURN;
+END_IF
+
+_Manager.RefuseStart := FALSE;
+accepted := _Manager.Start();
+Assert.ThatBool(actual := accepted, message := "Start must allow a retry without Reset").IsTrue();
+
+IF NOT accepted THEN
+	RETURN;
+END_IF
+
+cancelled := _Manager.Cancel();
+Assert.ThatBool(actual := cancelled, message := "Cancel must be accepted before file acquisition").IsTrue();
+
+IF NOT cancelled THEN
+	RETURN;
+END_IF
+
+_Manager.Execute();
+Assert.ThatBool(actual := _Manager.State.Stopped, message := "Cancelled retry must reach STOPPED").IsTrue();
+Assert.ThatBool(
+	actual := _Manager.FinalStopReason.ExternalCancel,
+	message := "The successful retry must report its own cancellation"
+).IsTrue();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="AfterTest" Id="{54de55e7-356d-4cc2-8b9d-80d55bbd58ff}">
+      <Declaration><![CDATA[(*!
+<summary>Cancels an unexpectedly started manager before advancing it and resets the fixture.</summary>
+*)
+METHOD PROTECTED AfterTest]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF _Manager.State.Running THEN
+	IF _Manager.OriginalStopReason.ExternalCancel OR_ELSE _Manager.Cancel() THEN
+		_Manager.Execute();
+	END_IF
+END_IF
+
+Assert.ThatBool(
+	actual := _Manager.Reset(),
+	message := "File manager must be ready after cleanup"
+).IsTrue();]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="ClassName" Id="{11a3d0dc-188a-4d9f-b217-24e8c6d65f9a}">
+      <Declaration><![CDATA[//! <summary>Borrows the concrete class name for the lifetime of this instance; callers must not modify it.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{c5ec8ea4-6263-4497-95af-4a8c52d67fbe}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ClassName REF= _ClassName;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="NamespaceName" Id="{2e251c04-dbea-4144-9322-15c4581098b1}">
+      <Declaration><![CDATA[//! <summary>Borrows the compiler-initialized namespace; callers must not modify the returned reference.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{f594ab90-133d-484a-a2e5-014ad7c2080e}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[NamespaceName REF= CurrentNamespace.Name;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="SelfSize" Id="{7c69309a-c8d7-40b5-aa42-c354c04166f5}">
+      <Declaration><![CDATA[//! <summary>Reports the complete concrete instance size, excluding separately allocated storage.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY SelfSize : ULINT]]></Declaration>
+      <Get Name="Get" Id="{446d690b-820c-41a5-bb45-ed40e0c77b3c}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[SelfSize := XSIZEOF(THIS^);]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+  </POU>
+</TcPlcObject>

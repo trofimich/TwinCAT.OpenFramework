@@ -1,0 +1,152 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="AutomaticJsonThrowingCallbackPropagationTest" Id="{bf6cd8f2-bc40-46c2-9950-3da04e551542}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+SPDX-FileCopyrightText: c 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+SPDX-License-Identifier: MIT
+License: https://opensource.org/license/mit
+*)
+
+(*!
+<summary>Checks that throwing Create APIs propagate callback failures with their category.</summary>
+<description>
+Owns persistent native serializer state and any payload buffers used by this case.
+Run from one task at a stable address. The caller provides task-boundary exception cleanup.
+</description>
+*)
+
+{attribute 'no_assign'}
+{attribute 'no_explicit_call' := 'do not call this function block directly'}
+FUNCTION_BLOCK AutomaticJsonThrowingCallbackPropagationTest EXTENDS TOF_Testing.SingleCycleTest
+VAR_STAT
+	{attribute 'hide'}
+	_ClassName : STRING := __POUNAME();
+END_VAR
+VAR
+	_Serializer : TOF_JSON.AutomaticJsonSerializer;
+	_Extender : JsonExtenderProbe;
+	_Source : JSON_TEST_VALUE;
+	_Json : TOF_Core.JSON_DOCUMENT;
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[]]></ST>
+    </Implementation>
+    <Method Name="ExecuteTest" Id="{e8498f8a-f446-43df-9867-d656facf7f7b}">
+      <Declaration><![CDATA[(*!
+<summary>Checks that throwing Create APIs propagate callback failures with their category.</summary>
+*)
+METHOD PROTECTED ExecuteTest
+VAR
+	exceptionCode : __SYSTEM.ExceptionCode;
+	caughtException : TOF_Core.IException;
+	standard : TOF_Core.IStandardException;
+	sourceInfo : __SYSTEM.VAR_INFO;
+	jsonSize : UDINT;
+	i : INT;
+	scenario : WSTRING(255);
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_Source.Number := 42;
+_Source.Ready := TRUE;
+
+_Json := '';
+
+_Extender.Reset();
+
+sourceInfo := __VARINFO(_Source);
+
+FOR i := 0 TO 3 DO
+	_Extender.Reset();
+	_Extender.ThrowAtStart := (i MOD 2) = 0;
+	_Extender.ThrowAtFinish := NOT _Extender.ThrowAtStart;
+	scenario := TOF_Core.WideStrings.Concat255("Throwing callback case ", TO_WSTRING(i + 1));
+	caughtException := 0;
+	standard := 0;
+
+	__TRY
+		IF i < 2 THEN
+			_Serializer.Serialize(
+				sourceStructure := _Source,
+				extender := _Extender,
+				targetJson := _Json,
+				jsonSize => jsonSize
+			);
+		ELSE
+			_Serializer.SerializeByVarInfo(
+				sourceStructureVarInfo := sourceInfo,
+				sourceStructureAddress := ADR(_Source),
+				extender := _Extender,
+				targetJson := _Json,
+				jsonSize => jsonSize
+			);
+		END_IF
+	__CATCH(exceptionCode)
+		caughtException := TOF_Core.ExceptionManager.GetLastException(
+			exceptionCode := exceptionCode,
+			catchPointNamespaceName := CurrentNamespace.Name,
+			catchPointPOUName := __POUNAME(),
+			catchPointPosition := __POSITION()
+		);
+	__ENDTRY
+
+	Assert.ThatBool(
+		actual := __QUERYINTERFACE(caughtException, standard),
+		message := TOF_Core.WideStrings.Concat255(scenario, " must propagate a StandardException")
+	).IsTrue();
+
+	IF standard <> 0 THEN
+		Assert.ThatWideString(
+			actual := standard.SourceMessage,
+			message := TOF_Core.WideStrings.Concat255(scenario, " must preserve the injected diagnostic")
+		).ToBe(expected := "JSON extender injected failure");
+	END_IF
+END_FOR]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="AfterTest" Id="{02536270-0efa-41fc-a2a1-bcce80e205d2}">
+      <Declaration><![CDATA[(*!
+<summary>Restores the fixture before the runner publishes the result.</summary>
+<description>
+Also runs after an unexpected exception interrupts the case.
+</description>
+*)
+METHOD PROTECTED AfterTest]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_Extender.Reset();]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="ClassName" Id="{7b4bcf18-2f67-4aba-9217-f0655bbee02f}">
+      <Declaration><![CDATA[//! <summary>Borrows the concrete class name. Callers must not modify it.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{4e89e280-28fb-4a0b-bcf7-a84eec0097fa}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ClassName REF= _ClassName;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="NamespaceName" Id="{f2f0b75b-13b2-4a6e-a69e-fc258bc7e309}">
+      <Declaration><![CDATA[//! <summary>Borrows the compiler-initialized namespace name. Callers must not modify it.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{9c175729-54d4-4342-bc3c-3c095826d3a3}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[NamespaceName REF= CurrentNamespace.Name;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="SelfSize" Id="{e512e592-c9f3-4012-8a80-59d60c39b3ec}">
+      <Declaration><![CDATA[//! <summary>Reports the concrete instance size in bytes.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY SelfSize : ULINT]]></Declaration>
+      <Get Name="Get" Id="{c78722b2-97b1-4449-9487-f8f9f5b21480}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[SelfSize := XSIZEOF(THIS^);]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+  </POU>
+</TcPlcObject>

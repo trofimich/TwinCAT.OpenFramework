@@ -1,0 +1,172 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1" ProductVersion="3.1.4026.21">
+  <POU Name="DictionaryRemoveTest" Id="{72616c4e-d83c-49cd-8de7-272b4c24b550}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+SPDX-FileCopyrightText: c 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+SPDX-License-Identifier: MIT
+License: https://opensource.org/license/mit
+*)
+
+(*!
+<summary>Checks removal by current position and by both key forms.</summary>
+<description>
+Borrows one group-owned dictionary reserved for this case. Use from one task at a stable address.
+Teardown clears entries owned by the dictionary before publication.
+</description>
+*)
+
+{attribute 'no_assign'}
+{attribute 'no_explicit_call' := 'do not call this function block directly'}
+FUNCTION_BLOCK DictionaryRemoveTest EXTENDS TOF_Testing.SingleCycleTest
+VAR_STAT
+	{attribute 'hide'}
+	_ClassName : STRING := __POUNAME();
+END_VAR
+VAR
+	_Dictionary : TOF_Collections.IDictionary;
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[]]></ST>
+    </Implementation>
+    <Method Name="AfterTest" Id="{33f8e477-6965-4959-839c-07b7db34df9b}">
+      <Declaration><![CDATA[(*!
+<summary>Clears the fixture before the runner publishes the result.</summary>
+<description>
+Also runs after an unexpected exception interrupts the case.
+</description>
+*)
+METHOD PROTECTED AfterTest]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_Dictionary.Clear();]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="ClassName" Id="{36d1cd4b-c5c2-46bd-8bcd-5340a6def6fc}">
+      <Declaration><![CDATA[//! <summary>Borrows the concrete class name. Callers must not modify it.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{459ece7c-3878-45d3-aad1-af0bcf5ed060}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ClassName REF= _ClassName;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="ExecuteTest" Id="{0990cfd5-c507-4076-8c06-4d4317923d0c}">
+      <Declaration><![CDATA[(*!
+<summary>Checks removal by current position and by both key forms.</summary>
+*)
+METHOD PROTECTED ExecuteTest
+VAR
+	keys : ARRAY [0..6] OF INT := [0, 1, 2, 3, 4, 5, 6];
+	values : ARRAY [0..6] OF STRING :=
+		['String0', 'String1', 'String2', 'String3', 'String4', 'String5', 'String6'];
+	i : DINT;
+	position : DINT;
+	query : TOF_Core.GENERIC_VALUE;
+	removed : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[FOR i := 6 TO 0 BY -1 DO
+	_Dictionary.SetCopy(key := keys[i], value := values[i]);
+END_FOR
+
+_Dictionary.SetCopy(key := keys[3], value := values[3]);
+
+position := _Dictionary.GetKeyPosition(key := keys[3]);
+
+IF position < 0 OR_ELSE position >= _Dictionary.Length THEN
+	RecordFailure(message := "Key 3 must have a valid position before removal");
+
+	RETURN;
+END_IF
+
+_Dictionary.RemoveAt(index := position);
+
+Assert.ThatBool(
+	actual := _Dictionary.Length = 6 AND_THEN NOT _Dictionary.ContainsKey(key := keys[3]),
+	message := "RemoveAt must remove only key 3"
+).IsTrue();
+
+_Dictionary.TryRemoveByKey(key := keys[2], removed => removed);
+
+Assert.ThatBool(
+	actual := removed AND_THEN _Dictionary.Length = 5 AND_THEN NOT _Dictionary.ContainsKey(key := keys[2]),
+	message := "TryRemoveByKey must remove key 2 and report success"
+).IsTrue();
+
+query := TOF_Core.GenericValueFactory.FromIntReference(value := keys[1]);
+_Dictionary.TryRemoveByGenericKey(key := query, releaseKey := FALSE, removed => removed);
+
+Assert.ThatBool(
+	actual := removed AND_THEN _Dictionary.Length = 4 AND_THEN NOT _Dictionary.ContainsKey(key := keys[1]),
+	message := "TryRemoveByGenericKey must remove key 1 and report success"
+).IsTrue();
+
+_Dictionary.TryRemoveByGenericKey(key := query, releaseKey := FALSE, removed => removed);
+
+Assert.ThatBool(
+	actual := NOT removed AND_THEN _Dictionary.Length = 4,
+	message := "A second removal of key 1 must leave the dictionary unchanged"
+).IsTrue();
+
+FOR i := 4 TO 6 DO
+	Assert.ThatBool(
+		actual := _Dictionary.ContainsKey(key := keys[i]),
+		message := TOF_Core.WideStrings.Concat255("Removal must preserve key ", TO_WSTRING(i))
+	).IsTrue();
+END_FOR
+
+Assert.ThatBool(
+	actual := _Dictionary.ContainsKey(key := keys[0]),
+	message := "Removal must preserve key 0"
+).IsTrue();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="FB_init" Id="{558145b3-7cd1-4d6b-a32b-5db6e709bd03}">
+      <Declaration><![CDATA[(*!
+<summary>Binds the dictionary fixture for this case.</summary>
+<description>
+Stores a borrowed interface without invoking the fixture. The owning group keeps it alive and
+reserves it for this case. TestElement initializes the name and parent.
+</description>
+<param name="name">Display name of this case.</param>
+<param name="parent">Group that owns this case.</param>
+<param name="dictionary">Required live dictionary reserved for this case.</param>
+*)
+METHOD FB_init : BOOL
+VAR_INPUT
+	bInitRetains: BOOL; // TRUE: the retain variables are initialized (reset warm / reset cold)
+	bInCopyCode: BOOL; // TRUE: the instance will be copied to the copy code afterward (online change)
+	name : WSTRING;
+	parent : TOF_Testing.ITestElement;
+	dictionary : TOF_Collections.IDictionary;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_Dictionary := dictionary;
+FB_init := TRUE;]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="NamespaceName" Id="{e434a579-8f6f-4090-932f-cfc17f1b0462}">
+      <Declaration><![CDATA[//! <summary>Borrows the compiler-initialized namespace name. Callers must not modify it.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{a8e76133-010b-45d4-8623-874b6156b83f}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[NamespaceName REF= CurrentNamespace.Name;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="SelfSize" Id="{30bdd0ab-6212-4cf1-9ae3-15b6e549b9b1}">
+      <Declaration><![CDATA[//! <summary>Reports the concrete instance size in bytes.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY SelfSize : ULINT]]></Declaration>
+      <Get Name="Get" Id="{90964999-ee6b-4270-ad43-f06c7efed1ba}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[SelfSize := XSIZEOF(THIS^);]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+  </POU>
+</TcPlcObject>

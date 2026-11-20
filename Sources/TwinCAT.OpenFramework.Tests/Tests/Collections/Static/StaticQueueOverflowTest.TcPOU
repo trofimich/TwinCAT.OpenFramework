@@ -1,0 +1,143 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="StaticQueueOverflowTest" Id="{ab8bd45c-30fe-46c8-bc78-1145b267d347}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+SPDX-FileCopyrightText: c 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+SPDX-License-Identifier: MIT
+License: https://opensource.org/license/mit
+*)
+
+(*!
+<summary>Checks full-capacity rejection without losing entries or FIFO order.</summary>
+<description>
+Owns an inline queue and its copied entry payloads. Run from one task at a stable address.
+Teardown clears surviving entries before publication, including after an aborted case.
+</description>
+*)
+
+{attribute 'no_assign'}
+{attribute 'no_explicit_call' := 'do not call this function block directly'}
+FUNCTION_BLOCK StaticQueueOverflowTest EXTENDS TOF_Testing.SingleCycleTest
+VAR_STAT
+	{attribute 'hide'}
+	_ClassName : STRING := __POUNAME();
+END_VAR
+VAR
+	_Queue : TOF_Collections.Queue<3>(valueValidator := 0);
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[]]></ST>
+    </Implementation>
+    <Method Name="ExecuteTest" Id="{659df5d8-a91e-431e-b885-f440cf155572}">
+      <Declaration><![CDATA[(*!
+<summary>Checks full-capacity rejection without losing entries or FIFO order.</summary>
+*)
+METHOD PROTECTED ExecuteTest
+VAR
+	values : ARRAY [1..4] OF INT := [11, 22, 33, 44];
+	i : DINT;
+
+	exceptionCode : __SYSTEM.ExceptionCode;
+	caught : TOF_Core.IException;
+	fullException : TOF_Core.IStaticCollectionFullException;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_Queue
+	.EnqueueCopy(value := values[1])
+	.EnqueueCopy(value := values[2])
+	.EnqueueCopy(value := values[3]);
+
+__TRY
+	_Queue.EnqueueCopy(value := values[4]);
+__CATCH(exceptionCode)
+	caught := TOF_Core.ExceptionManager.GetLastException(
+		exceptionCode := exceptionCode,
+		catchPointNamespaceName := NamespaceName,
+		catchPointPOUName := __POUNAME(),
+		catchPointPosition := __POSITION()
+	);
+__ENDTRY
+
+Assert.ThatBool(
+	actual := __QUERYINTERFACE(caught, fullException),
+	message := "A full queue must raise StaticCollectionFullException"
+).IsTrue();
+
+Assert.ThatBool(
+	actual := _Queue.Full AND_THEN _Queue.Length = 3 AND_THEN _Queue.Capacity = 3,
+	message := "Rejected enqueue must preserve the full queue and its capacity"
+).IsTrue();
+
+FOR i := 1 TO 3 DO
+	Assert.ThatInt(
+		actual := _Queue.GetByIndex(index := i - 1).AsInt(),
+		message := "A rejected enqueue must preserve every entry in FIFO order"
+	).ToBe(expected := values[i]);
+END_FOR
+
+_Queue.RemoveFirst();
+_Queue.EnqueueCopy(value := values[4]);
+
+Assert.ThatBool(
+	actual := _Queue.Full,
+	message := "Enqueue must succeed after freeing a slot"
+).IsTrue();
+
+Assert.ThatInt(
+	actual := _Queue.Peek().AsInt(),
+	message := "Enqueue after freeing a slot must preserve the current head"
+).ToBe(expected := values[2]);
+
+Assert.ThatInt(
+	actual := _Queue.GetByIndex(index := 2).AsInt(),
+	message := "The new entry must become the tail"
+).ToBe(expected := values[4]);]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="AfterTest" Id="{0a6ae888-e910-4760-a1ae-3144ccfd055b}">
+      <Declaration><![CDATA[(*!
+<summary>Restores the fixture before the runner publishes the result.</summary>
+<description>
+Also runs after an unexpected exception interrupts the case.
+</description>
+*)
+METHOD PROTECTED AfterTest]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_Queue.Clear();]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="ClassName" Id="{0ff703a9-0367-459c-ad98-23da7fa0e854}">
+      <Declaration><![CDATA[//! <summary>Borrows the concrete class name. Callers must not modify it.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{7ef1d05e-2635-4c13-b3f5-4aff93e4489d}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ClassName REF= _ClassName;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="NamespaceName" Id="{f9710cb7-046a-449e-af18-10dd52742c11}">
+      <Declaration><![CDATA[//! <summary>Borrows the compiler-initialized namespace name. Callers must not modify it.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{d37a7a1b-09ea-424d-a853-c539cf978bfc}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[NamespaceName REF= CurrentNamespace.Name;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="SelfSize" Id="{22a7ab7b-0297-4719-9905-ad847743150c}">
+      <Declaration><![CDATA[//! <summary>Reports the concrete instance size in bytes.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY SelfSize : ULINT]]></Declaration>
+      <Get Name="Get" Id="{2070deda-b237-4bb8-be6f-3d66766c84af}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[SelfSize := XSIZEOF(THIS^);]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+  </POU>
+</TcPlcObject>

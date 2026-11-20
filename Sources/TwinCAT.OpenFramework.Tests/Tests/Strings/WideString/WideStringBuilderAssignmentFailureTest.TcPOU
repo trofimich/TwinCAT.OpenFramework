@@ -1,0 +1,149 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="WideStringBuilderAssignmentFailureTest" Id="{7b87318e-996d-4822-b9d4-aebcec5cf63c}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+SPDX-FileCopyrightText: c 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+SPDX-License-Identifier: MIT
+License: https://opensource.org/license/mit
+*)
+
+(*!
+<summary>Checks the concrete assignment failures and recovery with a matching buffer.</summary>
+<description>
+Uses one task and stays at a stable address while assertions are bound to this instance.
+</description>
+*)
+
+{attribute 'no_assign'}
+{attribute 'no_explicit_call' := 'do not call this function block directly'}
+FUNCTION_BLOCK WideStringBuilderAssignmentFailureTest EXTENDS TOF_Testing.SingleCycleTest
+VAR_STAT
+	{attribute 'hide'}
+	_ClassName : STRING := __POUNAME();
+END_VAR
+VAR
+	_Builder : TOF_Core.WideStringBuilder;
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[]]></ST>
+    </Implementation>
+    <Method Name="ExecuteTest" Id="{6640a95c-0973-45a8-91a0-6f19ed6e8409}">
+      <Declaration><![CDATA[(*!
+<summary>Checks the concrete assignment failures and recovery with a matching buffer.</summary>
+<description>
+The builder is persistent so teardown can release its buffer after an unexpected hook exception.
+</description>
+*)
+METHOD PROTECTED ExecuteTest
+VAR
+	byteTarget : STRING := 'byte sentinel';
+	shortTarget : WSTRING(10) := "keep";
+	exactTarget : WSTRING(16);
+
+	exceptionCode : __SYSTEM.ExceptionCode;
+	caught : TOF_Core.IException;
+	typeException : TOF_Core.IArgumentTypeClassNotSupportedException;
+	capacityException : TOF_Core.ITargetVariableMemoryOverflowException;
+	copied : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_Builder.AppendString255(value := "String1234567890");
+
+// Invoke a wrong-width target and check that the argument is rejected before modification.
+__TRY
+	_Builder.AssignToString(targetString := byteTarget);
+__CATCH(exceptionCode)
+	caught := TOF_Core.ExceptionManager.GetLastException(
+		exceptionCode := exceptionCode,
+		catchPointNamespaceName := NamespaceName,
+		catchPointPOUName := __POUNAME(),
+		catchPointPosition := __POSITION()
+	);
+__ENDTRY
+
+Assert.ThatBool(
+	actual := __QUERYINTERFACE(caught, typeException),
+	message := "AssignToString must report an incompatible STRING target"
+).IsTrue();
+Assert.ThatBool(
+	actual := byteTarget = 'byte sentinel',
+	message := "Wrong-width assignment must preserve the target"
+).IsTrue();
+
+caught := 0;
+
+// Invoke an undersized WSTRING target and capture the documented capacity exception.
+__TRY
+	_Builder.AssignToString(targetString := shortTarget);
+__CATCH(exceptionCode)
+	caught := TOF_Core.ExceptionManager.GetLastException(
+		exceptionCode := exceptionCode,
+		catchPointNamespaceName := NamespaceName,
+		catchPointPOUName := __POUNAME(),
+		catchPointPosition := __POSITION()
+	);
+__ENDTRY
+
+Assert.ThatBool(
+	actual := __QUERYINTERFACE(caught, capacityException),
+	message := "AssignToString must report insufficient capacity"
+).IsTrue();
+Assert.ThatBool(
+	actual := shortTarget = "keep",
+	message := "Capacity rejection must preserve the target"
+).IsTrue();
+
+copied := _Builder.AssignToString(targetString := exactTarget);
+Assert.ThatBool(
+	actual := copied AND_THEN exactTarget = "String1234567890",
+	message := "The same builder must still copy successfully into the exact-fit target"
+).IsTrue();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="AfterTest" Id="{e7742bcf-ec5e-4c92-afaf-6990aba9e40a}">
+      <Declaration><![CDATA[(*!
+<summary>Releases the builder buffer before reporting the case result.</summary>
+<description>
+Safe after partial initialization and after explicit cleanup in the scenario.
+</description>
+*)
+METHOD PROTECTED AfterTest]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_Builder.Clear(releaseMemory := TRUE);]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="ClassName" Id="{18d28ce0-6701-488a-b9ba-92c34f37f429}">
+      <Declaration><![CDATA[//! <summary>Borrows the concrete class name. Callers must not modify it.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{d97d895a-3ac5-4069-ba89-1406fcd27cf7}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ClassName REF= _ClassName;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="NamespaceName" Id="{c6cabf7c-d924-4be6-b2b4-78da98b04585}">
+      <Declaration><![CDATA[//! <summary>Borrows the compiler-initialized namespace name. Callers must not modify it.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{557981e1-398f-490c-9aa1-33684f5270e9}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[NamespaceName REF= CurrentNamespace.Name;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="SelfSize" Id="{540ca1ef-93dd-49e7-8cb9-46c68e143d22}">
+      <Declaration><![CDATA[//! <summary>Reports the concrete instance size in bytes.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY SelfSize : ULINT]]></Declaration>
+      <Get Name="Get" Id="{935b831a-f36f-4afd-949b-12db2474f576}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[SelfSize := XSIZEOF(THIS^);]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+  </POU>
+</TcPlcObject>

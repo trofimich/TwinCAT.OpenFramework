@@ -1,0 +1,173 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="TimerIntervalObservationTest" Id="{89d5fbd7-c60e-4512-8015-e2b58076ca26}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+SPDX-FileCopyrightText: © 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+SPDX-License-Identifier: MIT
+License: https://opensource.org/license/mit
+*)
+
+(*!
+<summary>Checks that changing the timer preset preserves the current observation.</summary>
+<description>
+Starts a long interval and waits for a nonzero elapsed observation before changing the preset in RUNNING.
+Also checks assignment while READY and STOPPED. One task owns the timer and AfterTest prepares it for reuse.
+</description>
+*)
+
+{attribute 'no_assign'}
+{attribute 'no_explicit_call' := 'do not call this function block directly'}
+FUNCTION_BLOCK TimerIntervalObservationTest EXTENDS TOF_Testing.MultiCycleTest
+VAR_STAT
+	{attribute 'hide'}
+	_ClassName : STRING := __POUNAME();
+END_VAR
+VAR CONSTANT
+	//! <summary>Keeps the old timer active until the scenario cancels or restarts it.</summary>
+	_ActiveInterval : TIME := T#1H;
+END_VAR
+VAR
+	_Timer : TOF_Timers.Timer(name := "Configured timer");
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[]]></ST>
+    </Implementation>
+    <Method Name="BeforeTest" Id="{226e26ba-e4b7-476e-9c0e-16bff1bcf052}">
+      <Declaration><![CDATA[(*!
+<summary>Sets the initial interval while READY and starts the timer explicitly.</summary>
+*)
+METHOD PROTECTED BeforeTest]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_Timer.Interval := _ActiveInterval;
+Assert.ThatBool(
+	actual := _Timer.State.Ready,
+	message := "Configuring Interval must leave a READY timer idle"
+).IsTrue();
+Assert.ThatBool(actual := _Timer.Start(), message := "The configured timer must accept Start").IsTrue();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="ExecuteTest" Id="{acaf479f-1e28-4ef1-ae6d-9ddc14f60cdb}">
+      <Declaration><![CDATA[(*!
+<summary>Changes the running preset after observing positive elapsed time.</summary>
+*)
+METHOD PROTECTED ExecuteTest : TOF_Testing.TEST_CYCLE_RESULT
+VAR
+	observedTime : TIME;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_Timer.Execute();
+observedTime := _Timer.ElapsedTime;
+
+IF observedTime = TOF_Core.Times.MIN_VALUE THEN
+	ExecuteTest := TOF_Testing.TEST_CYCLE_RESULT.BUSY;
+	RETURN;
+END_IF
+
+ExecuteTest := TOF_Testing.TEST_CYCLE_RESULT.DONE;
+Assert.ThatBool(
+	actual := _Timer.State.Running,
+	message := "A nonzero elapsed observation must belong to a running timer"
+).IsTrue();
+_Timer.Interval := TOF_Core.Times.MIN_VALUE;
+Assert.ThatBool(
+	actual := _Timer.State.Running,
+	message := "Assignment of the zero preset must preserve RUNNING"
+).IsTrue();
+Assert.ThatBool(
+	actual := _Timer.ElapsedTime = observedTime,
+	message := "Assignment must preserve the nonzero elapsed observation"
+).IsTrue();
+Assert.ThatBool(
+	actual := _Timer.Elapsed,
+	message := "Assignment must leave TON.Q at its previous value"
+).IsFalse();
+Assert.ThatBool(
+	actual := _Timer.Triggered,
+	message := "Assignment must leave the completion pulse clear"
+).IsFalse();
+
+_Timer.Execute();
+Assert.ThatBool(
+	actual := _Timer.Triggered,
+	message := "The next Execute must evaluate the changed zero preset"
+).IsTrue();
+observedTime := _Timer.ElapsedTime;
+
+_Timer.Interval := _ActiveInterval;
+Assert.ThatBool(
+	actual := _Timer.State.Stopped,
+	message := "Assigning a preset while STOPPED must keep the timer stopped"
+).IsTrue();
+Assert.ThatBool(
+	actual := _Timer.Elapsed,
+	message := "Assignment in STOPPED must preserve retained TON.Q"
+).IsTrue();
+Assert.ThatBool(
+	actual := _Timer.ElapsedTime = observedTime,
+	message := "Assignment in STOPPED must preserve elapsed time"
+).IsTrue();
+
+_Timer.Execute();
+Assert.ThatBool(
+	actual := _Timer.Elapsed,
+	message := "Stopped Execute must preserve the retained TON observation"
+).IsTrue();
+
+IF NOT _Timer.Reset() THEN
+	RecordFailure(message := "Explicit Reset must remain available after assigning the preset");
+	RETURN;
+END_IF
+
+Assert.ThatBool(actual := _Timer.Elapsed, message := "Explicit Reset must clear TON.Q").IsFalse();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="AfterTest" Id="{54b767a5-95a3-48f7-9f75-f28c6fd96b2f}">
+      <Declaration><![CDATA[(*!
+<summary>Returns the owned timer to READY before reporting the result.</summary>
+<description>
+Cooperatively cancels active work and clears any retained TON observations through Reset.
+</description>
+*)
+METHOD PROTECTED AfterTest]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[Assert.ThatBool(
+	actual := PrepareTimerTestForReuse(timer := _Timer),
+	message := "The timer must return to READY after cleanup"
+).IsTrue();]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="ClassName" Id="{7628572a-c3c5-401f-bc70-ae735eaf4cd5}">
+      <Declaration><![CDATA[//! <summary>Borrows the concrete class name. Callers must not modify it.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{c3d51b16-1795-4f42-a189-7f203d8769dd}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ClassName REF= _ClassName;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="NamespaceName" Id="{61d8e1f9-83f9-4cb2-88f5-367672f00ac0}">
+      <Declaration><![CDATA[//! <summary>Borrows the compiler-initialized namespace. Callers must not modify it.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{f942137a-f38a-487a-aa9f-69e22b50b253}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[NamespaceName REF= CurrentNamespace.Name;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="SelfSize" Id="{7da82b75-5b56-4490-a6f7-ce0d1e2b4e65}">
+      <Declaration><![CDATA[//! <summary>Reports the concrete instance size in bytes.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY SelfSize : ULINT]]></Declaration>
+      <Get Name="Get" Id="{71de7b15-968d-4d80-828c-924ab4911df0}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[SelfSize := XSIZEOF(THIS^);]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+  </POU>
+</TcPlcObject>

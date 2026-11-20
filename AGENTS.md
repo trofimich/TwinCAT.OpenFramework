@@ -94,7 +94,7 @@ be reflected in Beckhoff documentation; do not override it based on documentatio
   End a standalone call with `);`.
 - Use named arguments in method, function, and FB calls, including Beckhoff and third-party libraries.
   Use `:=` for inputs and `=>` when connecting outputs. Match the declared names, for example
-  `MEMCPY(destAddr := ..., srcAddr := ..., n := ...)` and `TEST(TestName := ...)`. Exceptions:
+  `MEMCPY(destAddr := ..., srcAddr := ..., n := ...)` and `RecordFailure(message := ...)`. Exceptions:
   - Built-in operators and single-argument conversions without named parameter support (`ADR`, `SIZEOF`, `XSIZEOF`,
     `TO_*`, `__QUERYINTERFACE`, `__QUERYPOINTER`, `__ISVALIDREF`, `__NEW`, `__DELETE`, `SEL`, `LIMIT`, `MIN`, `MAX`,
     `MUX`, `SHL`, `SHR`, `ROL`, `ROR`, `LOWER_BOUND`, `UPPER_BOUND`).
@@ -228,6 +228,8 @@ be reflected in Beckhoff documentation; do not override it based on documentatio
   - Check `REFERENCE TO` validity via `__ISVALIDREF`; never compare references to 0.
   - `__QUERYINTERFACE` converts only between interfaces. To obtain a pointer to an FB, use `THIS` (pointer to the own
     instance; `THIS^` is the instance itself) or `__QUERYPOINTER` (from an interface).
+  - Before comparing an interface returned by a call, assign the result to a local variable of the matching interface
+    type. Compare that variable with another interface or with zero.
   - No duplicate field declarations with the same name (notably `_ClassName`) if already declared in a base FB.
   - IEC identifiers are case-insensitive. Parameters and locals shadow same-named instance members. Qualify the
     intended member with `THIS^.` (e.g. `THIS^.Name`), because implicit conversions can let the wrong expression compile.
@@ -252,6 +254,11 @@ be reflected in Beckhoff documentation; do not override it based on documentatio
 - For new diagnostic string parameters, use `VAR_INPUT` for `STRING(255)` and `WSTRING(255)`.
   Use `VAR_IN_OUT CONSTANT` when the declared capacity exceeds 255 characters.
   Preserve existing API signatures that already pass strings by reference.
+- Initialize every declaration in `VAR_GENERIC CONSTANT`, even when all instances pass explicit generic arguments.
+  Build 4026 can report zero `FB_init` inputs for a specialization that relies on inherited custom inputs. For
+  a reusable test that varies only by fixture mode, use a non-generic test and select a concrete fixture via `FB_init`.
+- An out-of-range literal passed to a subrange parameter such as `DINT_INDEX` is rejected during compilation.
+  To test a runtime guard, assign the invalid value to a local of the underlying integer type and pass that local.
 - Subclasses of generic function blocks (`VAR_GENERIC CONSTANT`, e.g. `CompositeAutomationComponent<N>`)
   must not redeclare `VAR_GENERIC CONSTANT`. They specialize the base class (`EXTENDS Base<N>`) and directly use
   the inherited generic constant identifier (e.g. `_ChildCount`) to dimension internal arrays
@@ -281,16 +288,27 @@ be reflected in Beckhoff documentation; do not override it based on documentatio
 ## Tests and Samples
 
 - Unit tests live in `Sources/TwinCAT.OpenFramework.Tests/Tests/<Area>/`. Name each suite `<Subject>Test`.
-- The project is gradually migrating from TcUnit to `TwinCAT.OpenFramework.Testing`. Extend an existing suite
-  using its current framework unless its migration is part of the agreed work.
-- Connect each new suite to its execution path. For TcUnit, extend `TcUnit.FB_TestSuite` and instantiate the suite
-  in `TestAutomationController`. For OpenFramework.Testing, create individual `SingleCycleTest` or `MultiCycleTest`
-  descendants and register test/group instances through the `ITestElement` array passed to
-  `TestRunner<N>.Configure(children := ...)`.
-- TcUnit stops invoking a suite once all its tests are finished. Do not rely on later suite calls after the
-  last `TEST_FINISHED()` to drain resources or remove artifacts. Complete cleanup attempts before reporting
-  test completion, or provide a cleanup driver independent of the finished suite. Report cleanup failures
-  without replacing the original test failure; never treat completion as proof of physical native release.
+- Use `TwinCAT.OpenFramework.Testing` for general regression tests. Tests of the testing framework itself use
+  `TestRunnerContractTest`, which advances fixture runners and evaluates their outcomes independently.
+- Before adding or reviewing a scenario, identify its documented contract, required initial state, and a concrete
+  regression that its assertions would detect. Check nearby coverage for equivalent cases and missing boundaries.
+- Prepare each scenario so it can run on a fresh fixture and repeat after the runner resets. Restore mutable
+  fixture state and shared services between runs. Document application reinitialization or a dedicated task
+  when the scenario requires it. A multi-step scenario may depend on its own earlier steps.
+- Derive expected values from the contract and explicit test inputs. Use independent observations for timing,
+  serialization, and externally visible effects when reusing the implementation could reproduce the same defect.
+- Make skipped observations fail when they are required by the scenario. Bound cyclic waits, verify completion
+  before reading final results, and check that the failure path, state invariants, and cleanup actually occurred.
+  Identify the scenario and failed condition in diagnostics. Use positive controls for fault injection when
+  the injected fault could otherwise pass because the affected operation never ran.
+- Record significant coverage decisions and runtime checks in the thematic journal. Use targeted mutation
+  checks in an isolated copy for high-value scenarios when authorized, and record the actual observed result.
+- Connect each new suite to its execution path. Create `SingleCycleTest` or `MultiCycleTest` descendants and
+  register them or their groups in the fixed `ITestElement` arrays exposed by `Children` on `TestRunner<N>`
+  and `TestGroup<N>`. `TestAutomationController` advances the independent framework contract suite directly.
+- Complete cleanup attempts before reporting test completion, or provide a cleanup driver independent of the
+  finished suite. Report cleanup failures without replacing the original test failure and verify physical
+  native release independently when it is part of the contract.
 - Usage examples belong to `TwinCAT.OpenFramework.Samples` and `TwinCAT.OpenFramework.HowTo`; their intended split is
   described in `docs/audit/tests-and-examples-review.md`.
 - New behavior and fixed defects must be covered by tests in the same change. Include these tests in the proposed plan;
@@ -334,7 +352,7 @@ be reflected in Beckhoff documentation; do not override it based on documentatio
   decisions only upon new facts or explicit instructions, explaining the rationale.
 - Read the required materials and follow dependencies as far as the agreed scope requires.
 - Verifications are performed by the owner. Without explicit authorization, do not launch compilation,
-  test suites (TcUnit or OpenFramework.Testing), the PLC runtime, XML validation, check scripts, or DocGen generation.
+  test suites, the PLC runtime, XML validation, check scripts, or DocGen generation.
   Reading and searching are permitted. Previous results apply only to the revision verified.
 - Git: without a direct instruction from the owner, do not add changes to the staging area, commit (including amend),
   or push. Do not discard or rewrite owner changes (`reset`, `checkout`, `restore`, `stash`). Read-only commands

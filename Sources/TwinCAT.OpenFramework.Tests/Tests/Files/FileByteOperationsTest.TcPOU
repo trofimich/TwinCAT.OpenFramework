@@ -1,0 +1,615 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="FileByteOperationsTest" Id="{84cc07a6-83b3-410d-b54c-b8ac4d809a0a}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+SPDX-FileCopyrightText: © 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+SPDX-License-Identifier: MIT
+License: https://opensource.org/license/mit
+*)
+
+(*!
+<summary>Exercises queued binary I/O and standalone collision, load, rename and delete operations.</summary>
+<description>
+Uses one exclusive directory and bounded persistent buffers. Checks short read, EOF, tell and guarded results
+before and after cancellation. Independent directory probes must preserve the sentinel file. Rename and delete
+are followed by readback and a failed load. Direct operations are drained before the base attempts removal.
+Use from one task and keep the case alive until cleanup finishes. Do not copy this test.
+</description>
+*)
+
+{attribute 'no_assign'}
+{attribute 'no_explicit_call' := 'do not call this function block directly'}
+FUNCTION_BLOCK FileByteOperationsTest EXTENDS FileContentScenarioTest
+VAR_STAT
+	//! <summary>Class name shared by instances of this concrete function block.</summary>
+	{attribute 'hide'}
+	_ClassName : STRING := __POUNAME();
+END_VAR
+VAR CONSTANT
+	//! <summary>Truncates the file and permits binary writes and reads through the same handle.</summary>
+	_UpdateBinaryMode : DWORD := Tc2_System.Global_Variables.FOPEN_MODEWRITE
+		OR Tc2_System.Global_Variables.FOPEN_MODEPLUS
+		OR Tc2_System.Global_Variables.FOPEN_MODEBINARY;
+	//! <summary>Marks bytes beyond the written range so partial and empty reads can detect stray writes.</summary>
+	_UnusedByte : BYTE := BYTE#16#A5;
+END_VAR
+VAR
+	_Phase : FILE_OPERATIONS_TEST_PHASE;
+	_ReusedTask : TOF_Tasks.ITask;
+	_Write : TOF_FileSystem.WriteBytesToFile(name := "Write four bytes");
+	_TellAfterWrite : TOF_FileSystem.GetPositionInFile(name := "Tell after write");
+	_Seek : TOF_FileSystem.SetPositionInFile(name := "Rewind binary file");
+	_Read : TOF_FileSystem.ReadBytesFromFile(name := "Short binary read");
+	_TellAfterRead : TOF_FileSystem.GetPositionInFile(name := "Tell after read");
+	_ReadEof : TOF_FileSystem.ReadBytesFromFile(name := "Read past EOF");
+	_CheckEof : TOF_FileSystem.CheckEndOfFile(name := "Check EOF");
+
+	_CheckDirectory : TOF_FileSystem.CheckDirectoryExists(name := "Check file as directory");
+	_CreateIfAbsent : TOF_FileSystem.CreateDirectoryIfNotExists(name := "Create on file collision");
+	_RemoveIfPresent : TOF_FileSystem.RemoveEmptyDirectoryIfExists(name := "Remove on file collision");
+	_CreateExisting : TOF_FileSystem.CreateDirectory(name := "Create existing directory");
+	_Load : TOF_FileSystem.LoadFile(name := "Load binary file");
+	_Rename : TOF_FileSystem.RenameFile(name := "Rename binary file");
+	_Delete : TOF_FileSystem.DeleteFile(name := "Delete binary file");
+
+	_ResultTasks : ARRAY [0..5] OF TOF_Tasks.ITask :=
+		[_Write, _TellAfterWrite, _Read, _TellAfterRead, _ReadEof, _CheckEof];
+	_CollisionTasks : ARRAY [0..3] OF TOF_Tasks.ITask :=
+		[_CheckDirectory, _CreateIfAbsent, _RemoveIfPresent, _CreateExisting];
+
+	_Data : ARRAY [0..3] OF BYTE := [BYTE#16#41, BYTE#16#42, BYTE#16#43, BYTE#16#44];
+	_ReadBuffer : ARRAY [0..7] OF BYTE;
+	_LoadBuffer : ARRAY [0..7] OF BYTE;
+	_EofBuffer : BYTE;
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[]]></ST>
+    </Implementation>
+    <Method Name="ResetScenario" Id="{481372d0-be7e-40a4-bb13-ae666f467669}">
+      <Declaration><![CDATA[(*!
+<summary>Rearms the direct and queued tasks and restores the initial binary buffers.</summary>
+*)
+METHOD PROTECTED ResetScenario : BOOL
+VAR
+	i : DINT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_Phase := FILE_OPERATIONS_TEST_PHASE.START_WRITE;
+_ReusedTask := 0;
+_EofBuffer := _UnusedByte;
+
+FOR i := LOWER_BOUND(_ReadBuffer, 1) TO UPPER_BOUND(_ReadBuffer, 1) DO
+	_ReadBuffer[i] := _UnusedByte;
+END_FOR
+
+FOR i := LOWER_BOUND(_ResultTasks, 1) TO UPPER_BOUND(_ResultTasks, 1) DO
+	IF NOT _ResultTasks[i].Reset() THEN
+		RETURN;
+	END_IF
+END_FOR
+
+FOR i := LOWER_BOUND(_CollisionTasks, 1) TO UPPER_BOUND(_CollisionTasks, 1) DO
+	IF NOT _CollisionTasks[i].Reset() THEN
+		RETURN;
+	END_IF
+END_FOR
+
+ResetScenario := _Seek.Reset() AND_THEN _Load.Reset() AND_THEN _Rename.Reset() AND_THEN _Delete.Reset();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="DrainScenario" Id="{c4f7a07e-c29d-48e1-ab95-f827c0124857}">
+      <Declaration><![CDATA[(*!
+<summary>Drains direct and pre-submission cancellation tasks before owned directory removal.</summary>
+<description>The base invokes this after the manager stops. Every eligible task is advanced on each call.</description>
+*)
+METHOD PROTECTED DrainScenario : BOOL
+VAR
+	i : DINT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[DrainScenario := TRUE;
+
+FOR i := LOWER_BOUND(_CollisionTasks, 1) TO UPPER_BOUND(_CollisionTasks, 1) DO
+	DrainScenario := drainTask(task := _CollisionTasks[i]) AND DrainScenario;
+END_FOR
+
+IF _ReusedTask <> 0 THEN
+	DrainScenario := drainTask(task := _ReusedTask) AND DrainScenario;
+END_IF
+
+DrainScenario := drainTask(task := _Load) AND DrainScenario;
+DrainScenario := drainTask(task := _Rename) AND DrainScenario;
+DrainScenario := drainTask(task := _Delete) AND DrainScenario;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="drainTask" Id="{6e9fbc4b-901f-4311-81da-50475388ec10}">
+      <Declaration><![CDATA[(*!
+<summary>Requests cooperative cancellation and advances an active task one cycle.</summary>
+<param name="task">Live task that is no longer controlled by the file manager.</param>
+*)
+METHOD PRIVATE drainTask : BOOL
+VAR_INPUT
+	task : TOF_Tasks.ITask;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF task.State.Running THEN
+	task.Cancel();
+	task.Execute();
+END_IF
+
+drainTask := NOT task.State.Running;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="AdvanceScenario" Id="{e42c53bd-11e6-41ab-bfa2-7fa8f9b98526}">
+      <Declaration><![CDATA[(*!
+<summary>Advances the native byte, collision and path-operation phases.</summary>
+<description>Returns TRUE after the final missing-file check. The base handles reporting after cleanup.</description>
+*)
+METHOD PROTECTED AdvanceScenario : BOOL
+VAR
+	i : DINT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[CASE _Phase OF
+	FILE_OPERATIONS_TEST_PHASE.START_WRITE:
+		startByteQueue();
+
+	FILE_OPERATIONS_TEST_PHASE.WAIT_FOR_WRITE:
+		_Manager.Execute();
+
+		IF _Write.State.Running THEN
+			CheckScenario(
+				condition := _Write.ActuallyWrittenBytes = TOF_Core.UnsignedInt32.ZERO,
+				message := "RUNNING write must hide its byte count"
+			);
+		END_IF
+
+		IF _Read.State.Running THEN
+			CheckScenario(
+				condition := _Read.ActuallyReadBytes = TOF_Core.UnsignedInt32.ZERO AND_THEN NOT _Read.IsEndOfFile,
+				message := "RUNNING read must hide its byte count and EOF"
+			);
+		END_IF
+
+		IF _TellAfterWrite.State.Running THEN
+			CheckScenario(
+				condition := _TellAfterWrite.Position = TOF_Core.SignedInt32.ZERO,
+				message := "RUNNING tell must hide its file position"
+			);
+		END_IF
+
+		IF _Manager.State.Stopped AND_THEN _ScenarioFailure = "" THEN
+			IF checkWorkDone(task := _Manager) THEN
+				checkByteResults();
+			END_IF
+
+			_Phase := FILE_OPERATIONS_TEST_PHASE.CHECK_COLLISIONS;
+		END_IF
+
+	FILE_OPERATIONS_TEST_PHASE.CHECK_COLLISIONS:
+		startCollisions();
+
+	FILE_OPERATIONS_TEST_PHASE.WAIT_FOR_COLLISIONS:
+		IF checkCollisions() THEN
+			_Phase := FILE_OPERATIONS_TEST_PHASE.START_LOAD;
+		END_IF
+
+	FILE_OPERATIONS_TEST_PHASE.START_LOAD:
+		_Load.TargetBuffer := ADR(_LoadBuffer);
+		_Load.TargetBufferSize := SIZEOF(_LoadBuffer);
+		_Load.Timeout := _NativeTimeout;
+		startLoad(filePath := _Directory.FirstFilePath);
+		_Phase := FILE_OPERATIONS_TEST_PHASE.WAIT_FOR_LOAD;
+
+	FILE_OPERATIONS_TEST_PHASE.WAIT_FOR_LOAD:
+		_Load.Execute();
+
+		IF _Load.State.Running THEN
+			CheckScenario(
+				condition := _Load.LoadedBytesCount = TOF_Core.UnsignedInt32.ZERO,
+				message := "RUNNING load must hide its byte count"
+			);
+		ELSIF _Load.State.Stopped AND_THEN checkWorkDone(task := _Load) THEN
+			checkLoadedBytes(context := "File after collision attempts");
+			_Phase := FILE_OPERATIONS_TEST_PHASE.START_RENAME;
+		END_IF
+
+	FILE_OPERATIONS_TEST_PHASE.START_RENAME:
+		_Directory.ExpectSecondFile();
+		_Rename.OldFilePath := _Directory.FirstFilePath;
+		_Rename.NewFilePath := _Directory.SecondFilePath;
+		_Rename.PathType := Tc2_System.E_OpenPath.PATH_GENERIC;
+		_Rename.Timeout := _NativeTimeout;
+		CheckScenario(condition := _Rename.Start(), message := "Rename refused Start");
+		_Phase := FILE_OPERATIONS_TEST_PHASE.WAIT_FOR_RENAME;
+
+	FILE_OPERATIONS_TEST_PHASE.WAIT_FOR_RENAME:
+		_Rename.Execute();
+
+		IF _Rename.State.Stopped AND_THEN checkWorkDone(task := _Rename) THEN
+			_Directory.ConfirmFirstFileAbsent();
+			_Phase := FILE_OPERATIONS_TEST_PHASE.LOAD_RENAMED_FILE;
+		END_IF
+
+	FILE_OPERATIONS_TEST_PHASE.LOAD_RENAMED_FILE:
+		startLoad(filePath := _Directory.SecondFilePath);
+		_Phase := FILE_OPERATIONS_TEST_PHASE.WAIT_FOR_RENAMED_LOAD;
+
+	FILE_OPERATIONS_TEST_PHASE.WAIT_FOR_RENAMED_LOAD:
+		_Load.Execute();
+
+		IF _Load.State.Stopped AND_THEN checkWorkDone(task := _Load) THEN
+			checkLoadedBytes(context := "Renamed file");
+			_Phase := FILE_OPERATIONS_TEST_PHASE.START_DELETE;
+		END_IF
+
+	FILE_OPERATIONS_TEST_PHASE.START_DELETE:
+		_Delete.FilePath := _Directory.SecondFilePath;
+		_Delete.PathType := Tc2_System.E_OpenPath.PATH_GENERIC;
+		_Delete.Timeout := _NativeTimeout;
+		CheckScenario(condition := _Delete.Start(), message := "Delete refused Start");
+		_Phase := FILE_OPERATIONS_TEST_PHASE.WAIT_FOR_DELETE;
+
+	FILE_OPERATIONS_TEST_PHASE.WAIT_FOR_DELETE:
+		_Delete.Execute();
+
+		IF _Delete.State.Stopped AND_THEN checkWorkDone(task := _Delete) THEN
+			_Directory.ConfirmSecondFileAbsent();
+			_Phase := FILE_OPERATIONS_TEST_PHASE.LOAD_DELETED_FILE;
+		END_IF
+
+	FILE_OPERATIONS_TEST_PHASE.LOAD_DELETED_FILE:
+		startLoad(filePath := _Directory.SecondFilePath);
+		_Phase := FILE_OPERATIONS_TEST_PHASE.WAIT_FOR_MISSING_LOAD;
+
+	FILE_OPERATIONS_TEST_PHASE.WAIT_FOR_MISSING_LOAD:
+		_Load.Execute();
+
+		IF _Load.State.Stopped THEN
+			CheckScenario(
+				condition := _Load.FinalStopReason.Failure
+					AND_THEN _Load.LoadedBytesCount = TOF_Core.UnsignedInt32.ZERO,
+				message := "Load of a deleted file must fail and expose zero bytes"
+			);
+
+			FOR i := LOWER_BOUND(_LoadBuffer, 1) TO UPPER_BOUND(_LoadBuffer, 1) DO
+				IF _LoadBuffer[i] <> _UnusedByte THEN
+					CheckScenario(
+						condition := FALSE,
+						message := TOF_Core.WideStrings.ConcatFit255("Missing-file load altered buffer byte ", TO_WSTRING(i))
+					);
+					RETURN;
+				END_IF
+			END_FOR
+
+			AdvanceScenario := TRUE;
+		END_IF
+END_CASE]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="startByteQueue" Id="{729f187b-071b-4fb0-971a-1133f340deba}">
+      <Declaration><![CDATA[(*!
+<summary>Configures and starts the binary write, seek, read and position queue.</summary>
+<description>The directory is owned and all borrowed queue tasks are READY.</description>
+*)
+METHOD PRIVATE startByteQueue]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_Directory.ExpectFirstFile();
+ConfigureFile(filePath := _Directory.FirstFilePath, modeFlags := _UpdateBinaryMode);
+_Write.SourceBuffer := ADR(_Data);
+_Write.BytesCountToWrite := SIZEOF(_Data);
+_Write.Timeout := _NativeTimeout;
+_TellAfterWrite.Timeout := _NativeTimeout;
+_Seek.Position := TOF_Core.SignedInt32.ZERO;
+_Seek.Origin := Tc2_System.E_SeekOrigin.SEEK_SET;
+_Seek.Timeout := _NativeTimeout;
+_Read.TargetBuffer := ADR(_ReadBuffer);
+_Read.BytesCountToRead := SIZEOF(_ReadBuffer);
+_Read.Timeout := _NativeTimeout;
+_TellAfterRead.Timeout := _NativeTimeout;
+_ReadEof.TargetBuffer := ADR(_EofBuffer);
+_ReadEof.BytesCountToRead := SIZEOF(_EofBuffer);
+_ReadEof.Timeout := _NativeTimeout;
+_CheckEof.Timeout := _NativeTimeout;
+
+_Manager.Enqueue(fileHandleTask := _Write);
+_Manager.Enqueue(fileHandleTask := _TellAfterWrite);
+_Manager.Enqueue(fileHandleTask := _Seek);
+_Manager.Enqueue(fileHandleTask := _Read);
+_Manager.Enqueue(fileHandleTask := _TellAfterRead);
+_Manager.Enqueue(fileHandleTask := _ReadEof);
+_Manager.Enqueue(fileHandleTask := _CheckEof);
+
+CheckScenario(
+	condition := _Write.ActuallyWrittenBytes = TOF_Core.UnsignedInt32.ZERO,
+	message := "READY write must expose zero bytes"
+);
+CheckScenario(
+	condition := _Read.ActuallyReadBytes = TOF_Core.UnsignedInt32.ZERO AND_THEN NOT _Read.IsEndOfFile,
+	message := "READY read must expose zero bytes and FALSE EOF"
+);
+CheckScenario(condition := NOT _CheckEof.IsEndOfFile, message := "READY EOF query must expose FALSE");
+
+IF _ScenarioFailure = "" THEN
+	CheckScenario(condition := _Manager.Start(), message := "Binary write/read queue refused Start");
+	_Phase := FILE_OPERATIONS_TEST_PHASE.WAIT_FOR_WRITE;
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="checkByteResults" Id="{5281d8b1-f06b-4d71-b3ab-8154a0909259}">
+      <Declaration><![CDATA[(*!
+<summary>Verifies the readback and neutral results after pre-submission cancellation.</summary>
+<description>Call after the manager completes the full queue and releases the resource.</description>
+*)
+METHOD PRIVATE checkByteResults
+VAR
+	i : DINT;
+	task : TOF_Tasks.ITask;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[CheckScenario(
+	condition := _Write.ActuallyWrittenBytes = 4,
+	message := "Full write must report four bytes"
+);
+CheckScenario(condition := _Read.ActuallyReadBytes = 4, message := "Short read must report the actual four bytes");
+CheckScenario(condition := _TellAfterWrite.Position = 4, message := "Tell after write must report position four");
+CheckScenario(condition := _TellAfterRead.Position = 4, message := "Tell after short read must report position four");
+CheckScenario(
+	condition := _ReadEof.ActuallyReadBytes = TOF_Core.UnsignedInt32.ZERO AND_THEN _ReadEof.IsEndOfFile,
+	message := "Read past the data must return zero bytes and TRUE EOF"
+);
+CheckScenario(condition := _CheckEof.IsEndOfFile, message := "EOF query after empty read must report TRUE");
+CheckScenario(condition := _EofBuffer = _UnusedByte, message := "Empty read must preserve its destination");
+
+FOR i := LOWER_BOUND(_Data, 1) TO UPPER_BOUND(_Data, 1) DO
+	CheckScenario(
+		condition := _ReadBuffer[i] = _Data[i],
+		message := TOF_Core.WideStrings.ConcatFit255("Binary readback differs at byte ", TO_WSTRING(i))
+	);
+END_FOR
+
+FOR i := UPPER_BOUND(_Data, 1) + 1 TO UPPER_BOUND(_ReadBuffer, 1) DO
+	CheckScenario(
+		condition := _ReadBuffer[i] = _UnusedByte,
+		message := TOF_Core.WideStrings.ConcatFit255("Short read altered buffer tail at byte ", TO_WSTRING(i))
+	);
+END_FOR
+
+IF _ScenarioFailure <> "" THEN
+	RETURN;
+END_IF
+
+FOR i := LOWER_BOUND(_ResultTasks, 1) TO UPPER_BOUND(_ResultTasks, 1) DO
+	task := _ResultTasks[i];
+	_ReusedTask := task;
+
+	IF NOT task.Reset() OR_ELSE NOT task.Start() OR_ELSE NOT task.Cancel() THEN
+		_ScenarioFailure := TOF_Core.WideStrings.ConcatFit255(task.Name, " refused Reset, Start or Cancel during reuse");
+		RETURN;
+	END_IF
+
+	task.Execute();
+
+	IF NOT task.State.Stopped OR_ELSE NOT task.FinalStopReason.ExternalCancel THEN
+		_ScenarioFailure := TOF_Core.WideStrings.ConcatFit255(
+			task.Name, " did not stop with pre-submission cancellation"
+		);
+		RETURN;
+	END_IF
+
+	_ReusedTask := 0;
+END_FOR
+
+CheckScenario(
+	condition := _Write.ActuallyWrittenBytes = TOF_Core.UnsignedInt32.ZERO,
+	message := "Cancelled write exposed its previous byte count"
+);
+CheckScenario(
+	condition := _Read.ActuallyReadBytes = TOF_Core.UnsignedInt32.ZERO,
+	message := "Cancelled read exposed its previous byte count"
+);
+CheckScenario(
+	condition := _TellAfterWrite.Position = TOF_Core.SignedInt32.ZERO
+		AND_THEN _TellAfterRead.Position = TOF_Core.SignedInt32.ZERO,
+	message := "Cancelled tell exposed its previous file position"
+);
+CheckScenario(condition := NOT _ReadEof.IsEndOfFile, message := "Cancelled read exposed its previous TRUE EOF");
+CheckScenario(
+	condition := NOT _CheckEof.IsEndOfFile,
+	message := "Cancelled EOF query exposed its previous TRUE EOF"
+);]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="startCollisions" Id="{9d195039-0dc3-457d-9896-6e879237b669}">
+      <Declaration><![CDATA[(*!
+<summary>Starts directory probes against the existing sentinel file and its parent.</summary>
+<description>Only the original fixture owns the directory. All four probes borrow paths only.</description>
+*)
+METHOD PRIVATE startCollisions
+VAR
+	i : DINT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_CheckDirectory.DirectoryPath := _Directory.FirstFilePath;
+_CreateIfAbsent.DirectoryPath := _Directory.FirstFilePath;
+_RemoveIfPresent.DirectoryPath := _Directory.FirstFilePath;
+_CreateExisting.DirectoryPath := _Directory.DirectoryPath;
+_CheckDirectory.PathType := Tc2_System.E_OpenPath.PATH_GENERIC;
+_CreateIfAbsent.PathType := Tc2_System.E_OpenPath.PATH_GENERIC;
+_RemoveIfPresent.PathType := Tc2_System.E_OpenPath.PATH_GENERIC;
+_CreateExisting.PathType := Tc2_System.E_OpenPath.PATH_GENERIC;
+_CheckDirectory.Timeout := _NativeTimeout;
+_CreateIfAbsent.Timeout := _NativeTimeout;
+_RemoveIfPresent.Timeout := _NativeTimeout;
+_CreateExisting.Timeout := _NativeTimeout;
+
+FOR i := LOWER_BOUND(_CollisionTasks, 1) TO UPPER_BOUND(_CollisionTasks, 1) DO
+	IF NOT _CollisionTasks[i].Start() THEN
+		_ScenarioFailure := TOF_Core.WideStrings.ConcatFit255(_CollisionTasks[i].Name, " refused Start");
+		RETURN;
+	END_IF
+END_FOR
+
+_Phase := FILE_OPERATIONS_TEST_PHASE.WAIT_FOR_COLLISIONS;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="checkCollisions" Id="{2de8501f-95f7-42bc-ae9e-85e47e4377f5}">
+      <Declaration><![CDATA[(*!
+<summary>Advances outstanding collision probes and verifies their stopped results.</summary>
+<description>Returns TRUE after all four operations stop with the expected outcomes.</description>
+*)
+METHOD PRIVATE checkCollisions : BOOL
+VAR
+	i : DINT;
+	allStopped : BOOL := TRUE;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[FOR i := LOWER_BOUND(_CollisionTasks, 1) TO UPPER_BOUND(_CollisionTasks, 1) DO
+	IF _CollisionTasks[i].State.Running THEN
+		_CollisionTasks[i].Execute();
+	END_IF
+
+	allStopped := allStopped AND _CollisionTasks[i].State.Stopped;
+END_FOR
+
+IF NOT allStopped THEN
+	RETURN;
+END_IF
+
+IF NOT checkWorkDone(task := _CheckDirectory) THEN
+	RETURN;
+END_IF
+
+CheckScenario(condition := NOT _CheckDirectory.DirectoryExists, message := "A file was reported as a directory");
+CheckScenario(
+	condition := _CreateIfAbsent.FinalStopReason.Failure,
+	message := "Conditional directory creation did not reject the file collision"
+);
+CheckScenario(
+	condition := _RemoveIfPresent.FinalStopReason.Failure,
+	message := "Conditional directory removal did not reject the file collision"
+);
+CheckScenario(
+	condition := _CreateExisting.FinalStopReason.Failure,
+	message := "Ordinary directory creation did not reject the existing directory"
+);
+checkCollisions := _ScenarioFailure = "";]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="startLoad" Id="{2bd97115-3c3b-4594-a9aa-39bd94e0ac63}">
+      <Declaration><![CDATA[(*!
+<summary>Resets the load task, refills its target and starts loading the specified file.</summary>
+<param name="filePath">Owned fixture path to load, including the deliberate missing-file check.</param>
+*)
+METHOD PRIVATE startLoad
+VAR_INPUT
+	filePath : Tc2_System.T_MaxString;
+END_VAR
+VAR
+	i : DINT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF NOT _Load.Reset() THEN
+	_ScenarioFailure := "File load refused Reset";
+	RETURN;
+END_IF
+
+IF _Load.LoadedBytesCount <> TOF_Core.UnsignedInt32.ZERO THEN
+	_ScenarioFailure := "READY file load exposed its previous byte count";
+	RETURN;
+END_IF
+
+FOR i := LOWER_BOUND(_LoadBuffer, 1) TO UPPER_BOUND(_LoadBuffer, 1) DO
+	_LoadBuffer[i] := _UnusedByte;
+END_FOR
+
+_Load.FilePath := filePath;
+CheckScenario(condition := _Load.Start(), message := "File load refused Start");]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="checkLoadedBytes" Id="{1492f66a-27ae-4548-814b-de476c0569c9}">
+      <Declaration><![CDATA[(*!
+<summary>Checks the full sentinel and the untouched tail of a successful load.</summary>
+<param name="context">Operation that preceded this readback.</param>
+*)
+METHOD PRIVATE checkLoadedBytes
+VAR_INPUT
+	context : WSTRING(80);
+END_VAR
+VAR
+	i : DINT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[CheckScenario(
+	condition := _Load.LoadedBytesCount = 4,
+	message := TOF_Core.WideStrings.ConcatFit255(context, ": expected four loaded bytes")
+);
+
+FOR i := LOWER_BOUND(_Data, 1) TO UPPER_BOUND(_Data, 1) DO
+	CheckScenario(
+		condition := _LoadBuffer[i] = _Data[i],
+		message := TOF_Core.WideStrings.ConcatFit255(context, ": sentinel differs at byte ", TO_WSTRING(i))
+	);
+END_FOR
+
+FOR i := UPPER_BOUND(_Data, 1) + 1 TO UPPER_BOUND(_LoadBuffer, 1) DO
+	CheckScenario(
+		condition := _LoadBuffer[i] = _UnusedByte,
+		message := TOF_Core.WideStrings.ConcatFit255(context, ": load altered buffer tail at byte ", TO_WSTRING(i))
+	);
+END_FOR]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="checkWorkDone" Id="{938d96a2-3d01-4303-9b7b-12db75a7d59b}">
+      <Declaration><![CDATA[(*!
+<summary>Reports the task name and copied stop diagnostic when a native operation fails.</summary>
+<param name="task">Stopped task whose success is required to continue.</param>
+*)
+METHOD PRIVATE checkWorkDone : BOOL
+VAR_INPUT
+	task : TOF_Tasks.ITask;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[checkWorkDone := task.FinalStopReason.WorkDone;
+
+IF NOT checkWorkDone AND_THEN _ScenarioFailure = "" THEN
+	_ScenarioFailure := TOF_Core.WideStrings.ConcatFit255(task.Name, " did not finish with WorkDone: ");
+	TOF_Core.WideStrings.AppendFit(targetString := _ScenarioFailure, sourceString := task.FinalStopReason.Message);
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="ClassName" Id="{69f7fe59-7d35-4531-a8b1-1c5987ba1966}">
+      <Declaration><![CDATA[//! <summary>Borrows the concrete type name; callers must not modify the referenced storage.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{12ecae3d-5d9c-4239-b80b-8036b9a2e325}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ClassName REF= _ClassName;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="NamespaceName" Id="{5362d982-b2dd-4f59-840b-4cc1dcec3b1a}">
+      <Declaration><![CDATA[//! <summary>Borrows the compiler-initialized namespace; callers must not modify it.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{5405d858-68a4-495f-ab89-ff757828b7e0}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[NamespaceName REF= CurrentNamespace.Name;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="SelfSize" Id="{91c577ac-b8ec-426f-b95c-263a172e66b9}">
+      <Declaration><![CDATA[//! <summary>Reports the concrete instance size in bytes, excluding separately allocated storage.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY SelfSize : ULINT]]></Declaration>
+      <Get Name="Get" Id="{72dcee77-31d5-41ce-b537-e2a2d1e349b1}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[SelfSize := XSIZEOF(THIS^);]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+  </POU>
+</TcPlcObject>

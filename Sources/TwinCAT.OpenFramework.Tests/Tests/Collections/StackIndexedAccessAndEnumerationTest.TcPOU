@@ -1,0 +1,249 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1" ProductVersion="3.1.4026.21">
+  <POU Name="StackIndexedAccessAndEnumerationTest" Id="{86f8dde1-932f-4371-9d27-166858f45ddf}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+SPDX-FileCopyrightText: c 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+SPDX-License-Identifier: MIT
+License: https://opensource.org/license/mit
+*)
+
+(*!
+<summary>Checks top-first lookup, independent traversal, exhaustion and reset.</summary>
+<description>
+Borrows a group-owned stack reserved for this case. Use from one task at a stable address.
+Teardown clears the stack and test-owned resources before publication.
+</description>
+*)
+
+{attribute 'no_assign'}
+{attribute 'no_explicit_call' := 'do not call this function block directly'}
+FUNCTION_BLOCK StackIndexedAccessAndEnumerationTest EXTENDS TOF_Testing.SingleCycleTest
+VAR_STAT
+	{attribute 'hide'}
+	_ClassName : STRING := __POUNAME();
+END_VAR
+VAR
+	_Stack : TOF_Collections.IStack;
+	_Enumerator : TOF_Core.IEnumerator;
+	_SecondEnumerator : TOF_Core.IEnumerator;
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[]]></ST>
+    </Implementation>
+    <Method Name="AfterTest" Id="{191a45fe-8356-4b43-ba94-c686e4d74517}">
+      <Declaration><![CDATA[(*!
+<summary>Clears the fixture before the runner publishes the result.</summary>
+<description>
+Also runs after an unexpected exception interrupts the case.
+</description>
+*)
+METHOD PROTECTED AfterTest]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[releaseCursor(cursor := _Enumerator);
+releaseCursor(cursor := _SecondEnumerator);
+_Stack.Clear();]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="ClassName" Id="{8f50453b-abe9-411f-bbe4-601185f67501}">
+      <Declaration><![CDATA[//! <summary>Borrows the concrete class name. Callers must not modify it.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{185d2999-125d-4ca4-b5c2-0d4a6d870530}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ClassName REF= _ClassName;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="ExecuteTest" Id="{9e6e91ad-33fd-4799-9603-9b02d6da241f}">
+      <Declaration><![CDATA[(*!
+<summary>Checks top-first lookup, independent traversal, exhaustion and reset.</summary>
+*)
+METHOD PROTECTED ExecuteTest
+VAR
+	values : ARRAY [1..4] OF INT := [11, 22, 33, 44];
+	i : DINT;
+	moved : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_Stack.PushCopy(value := values[1]);
+_Stack.PushCopy(value := values[2]);
+_Stack.PushCopy(value := values[3]);
+
+FOR i := 0 TO 2 DO
+	Assert.ThatInt(
+		actual := _Stack.GetByIndex(index := i).AsInt(),
+		message := "Indexed access must run from top to bottom"
+	).ToBe(expected := values[3 - i]);
+END_FOR
+
+_Enumerator := _Stack.CreateEnumerator();
+_SecondEnumerator := _Stack.CreateEnumerator();
+
+IF _Enumerator = 0 OR_ELSE _SecondEnumerator = 0 THEN
+	RecordFailure(message := "Stack must create both cursors");
+
+	RETURN;
+END_IF
+
+IF _Enumerator = _SecondEnumerator THEN
+	_SecondEnumerator := 0;
+	RecordFailure(message := "Two traversals must own distinct cursors");
+
+	RETURN;
+END_IF
+
+Assert.ThatBool(
+	actual := _Enumerator.Current.TypeClass = TOF_Core.GENERIC_TYPE_CLASS.UNSPECIFIED,
+	message := "Current before traversal must be empty"
+).IsTrue();
+
+FOR i := 3 TO 1 BY -1 DO
+	moved := _Enumerator.MoveNext();
+
+	Assert.ThatBool(
+		actual := moved AND_THEN _Enumerator.Current.AsInt() = values[i],
+		message := "Cursor must visit entries in LIFO order"
+	).IsTrue();
+END_FOR
+
+Assert.ThatBool(
+	actual := _Enumerator.MoveNext(),
+	message := "Cursor must stop at end"
+).IsFalse();
+
+Assert.ThatBool(
+	actual := _Enumerator.MoveNext(),
+	message := "Exhaustion must persist"
+).IsFalse();
+
+Assert.ThatBool(
+	actual := _Enumerator.Current.TypeClass = TOF_Core.GENERIC_TYPE_CLASS.UNSPECIFIED,
+	message := "Exhausted Current must be empty"
+).IsTrue();
+
+moved := _SecondEnumerator.MoveNext();
+
+Assert.ThatBool(
+	actual := moved AND_THEN _SecondEnumerator.Current.AsInt() = values[3],
+	message := "The independent cursor must start at the top"
+).IsTrue();
+
+_Enumerator.Reset();
+
+Assert.ThatBool(
+	actual := _Enumerator.Current.TypeClass = TOF_Core.GENERIC_TYPE_CLASS.UNSPECIFIED,
+	message := "Reset must clear Current"
+).IsTrue();
+
+moved := _Enumerator.MoveNext();
+
+Assert.ThatBool(
+	actual := moved AND_THEN _Enumerator.Current.AsInt() = values[3],
+	message := "Reset must restart at the top"
+).IsTrue();
+
+releaseCursor(cursor := _Enumerator);
+releaseCursor(cursor := _SecondEnumerator);
+
+_Stack.Clear();
+_Enumerator := _Stack.CreateEnumerator();
+
+IF _Enumerator = 0 THEN
+	RecordFailure(message := "Empty stack must create a cursor");
+
+	RETURN;
+END_IF
+
+Assert.ThatBool(
+	actual := _Enumerator.MoveNext(),
+	message := "An empty cursor must have no next entry"
+).IsFalse();
+
+Assert.ThatBool(
+	actual := _Enumerator.MoveNext(),
+	message := "An empty cursor must stay exhausted"
+).IsFalse();
+
+Assert.ThatBool(
+	actual := _Enumerator.Current.TypeClass = TOF_Core.GENERIC_TYPE_CLASS.UNSPECIFIED,
+	message := "Empty Current must be unspecified"
+).IsTrue();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="FB_init" Id="{d601b184-74a2-4512-ad21-c0149221e70c}">
+      <Declaration><![CDATA[(*!
+<summary>Binds the stack fixture for this case.</summary>
+<description>
+Stores a borrowed interface without invoking the fixture. The owning group keeps it alive and
+reserves it for this case. TestElement initializes the name and parent.
+</description>
+<param name="name">Display name of this case.</param>
+<param name="parent">Group that owns this case.</param>
+<param name="stack">Required live stack reserved for this case.</param>
+*)
+METHOD FB_init : BOOL
+VAR_INPUT
+	bInitRetains: BOOL; // TRUE: the retain variables are initialized (reset warm / reset cold)
+	bInCopyCode: BOOL; // TRUE: the instance will be copied to the copy code afterward (online change)
+	name : WSTRING;
+	parent : TOF_Testing.ITestElement;
+	stack : TOF_Collections.IStack;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_Stack := stack;
+FB_init := TRUE;]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="NamespaceName" Id="{71042b53-609e-4afe-974b-902ad3b23cb0}">
+      <Declaration><![CDATA[//! <summary>Borrows the compiler-initialized namespace name. Callers must not modify it.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{397d9a69-d71f-4d5a-b5e1-cef3a8ece67c}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[NamespaceName REF= CurrentNamespace.Name;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="releaseCursor" Id="{572ece08-a547-418e-aed8-e8bd7d6cf428}">
+      <Declaration><![CDATA[(*!
+<summary>Releases an owned cursor and invalidates the caller handle.</summary>
+<description>
+Reports failed disposal without replacing an earlier test failure. Call before mutating the source stack.
+</description>
+<param name="cursor">Owned cursor or zero. The caller handle is cleared before attempting disposal.</param>
+*)
+METHOD PRIVATE releaseCursor
+VAR_IN_OUT
+	cursor : TOF_Core.IEnumerator;
+END_VAR
+VAR
+	owned : TOF_Core.IObject;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF cursor = 0 THEN
+	RETURN;
+END_IF
+
+owned := cursor;
+cursor := 0;
+
+IF NOT TOF_Core.Memory.TryReleaseDynamicObject(instance := owned) THEN
+	RecordFailure(message := "Could not release the stack cursor");
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="SelfSize" Id="{15eda7c5-a305-47d9-a2c4-ad1a15286f9b}">
+      <Declaration><![CDATA[//! <summary>Reports the concrete instance size in bytes.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY SelfSize : ULINT]]></Declaration>
+      <Get Name="Get" Id="{bd34d163-e8d7-4a52-9a6e-85c1e0a283c8}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[SelfSize := XSIZEOF(THIS^);]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+  </POU>
+</TcPlcObject>

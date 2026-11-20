@@ -1,0 +1,143 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="AnalogInputCriticalConversionErrorTest" Id="{16ed1032-1710-4f9f-bdfb-8877fab85561}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+SPDX-FileCopyrightText: c 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+SPDX-License-Identifier: MIT
+License: https://opensource.org/license/mit
+*)
+
+(*!
+<summary>Checks critical converter errors and explicit recovery through Reset.</summary>
+<description>
+Uses a live case-owned automation parent and fresh local device fixtures on every run.
+The scenario reads and writes ordinary simulated storage within one task cycle.
+</description>
+*)
+
+{attribute 'no_assign'}
+{attribute 'no_explicit_call' := 'do not call this function block directly'}
+FUNCTION_BLOCK AnalogInputCriticalConversionErrorTest EXTENDS TOF_Testing.SingleCycleTest
+VAR CONSTANT
+	//! <summary>Bit 6 is the simulated channel measurement or hardware error.</summary>
+	_ChannelErrorStatus : WORD := WORD#16#0040;
+	//! <summary>Injected converter exception text used for diagnostic comparisons.</summary>
+	_ConversionErrorMessage : WSTRING := "Injected analog input conversion failure.";
+END_VAR
+VAR_STAT
+	{attribute 'hide'}
+	_ClassName : STRING := __POUNAME();
+END_VAR
+VAR
+	//! <summary>Live parent borrowed by the method-local simulated device.</summary>
+	_AutomationRoot : MockAutomationController(name := "DevicesIORoot");
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[]]></ST>
+    </Implementation>
+    <Method Name="ExecuteTest" Id="{50d1babc-4ff0-4c78-830d-0e3042245483}">
+      <Declaration><![CDATA[(*!
+<summary>Checks critical converter errors and explicit recovery through Reset.</summary>
+*)
+METHOD PROTECTED ExecuteTest
+VAR
+	converter : AnalogInputConverterProbe;
+	analogInput : AnalogInputRecoveryProbe(
+		name := "AI_CriticalConversion",
+		parent := _AutomationRoot,
+		converter := converter
+	);
+	//! <summary>Simulated status word at offset 0 and signed INT value bits at offset 1.</summary>
+	channelData : ARRAY [0..1] OF WORD;
+	channel : POINTER TO TOF_IOModels.ANALOG_INPUT_INT_CHANNEL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[Assert.ThatBool(
+	actual := analogInput.Initialize(),
+	message := "The analog input must initialize"
+).IsTrue();
+analogInput.ExceptionHandlingPolicy := TOF_Core.ExceptionHandlingPolicies.SetErrorAndStop;
+
+IF SIZEOF(channel^) <> SIZEOF(channelData) THEN
+	RecordFailure(message := "The simulated INT16 channel must fit two words");
+
+	RETURN;
+END_IF
+
+channel := ADR(channelData);
+channelData[0] := _ChannelErrorStatus;
+channelData[1] := WORD#100;
+analogInput.BindToInt16IO(rawValues := channel^);
+converter.failureMessage := _ConversionErrorMessage;
+analogInput.ProcessInput();
+analogInput.Execute();
+
+Assert.ThatBool(
+	actual := analogInput.OperationalState = TOF_Automation.OPERATIONAL_STATE.STOPPED
+		AND_THEN analogInput.HasError
+		AND_THEN analogInput.Error.Severity = TOF_Core.ERROR_SEVERITY.CRITICAL
+		AND_THEN analogInput.Error.TopMessage = _ConversionErrorMessage,
+	message := "The critical conversion error must stop the leaf and take precedence over the channel error"
+).IsTrue();
+
+converter.failureMessage := "";
+channelData[0] := WORD#0;
+analogInput.ProcessInput();
+analogInput.Execute();
+
+Assert.ThatBool(
+	actual := analogInput.OperationalState = TOF_Automation.OPERATIONAL_STATE.STOPPED
+		AND_THEN analogInput.StatusWord = WORD#0
+		AND_THEN analogInput.Value = LREAL#100.0
+		AND_THEN analogInput.HasError
+		AND_THEN analogInput.Error.Severity = TOF_Core.ERROR_SEVERITY.CRITICAL
+		AND_THEN analogInput.Error.TopMessage = _ConversionErrorMessage,
+	message := "Successful input with a healthy channel must preserve the critical diagnostic while stopped"
+).IsTrue();
+
+analogInput.Reset();
+analogInput.Execute();
+
+Assert.ThatBool(
+	actual := analogInput.OperationalState = TOF_Automation.OPERATIONAL_STATE.WORKING
+		AND_THEN NOT analogInput.HasError
+		AND_THEN analogInput.RecoveryCalls = UDINT#0,
+	message := "Reset must clear the critical diagnostic and restore WORKING"
+).IsTrue();]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="ClassName" Id="{8a878455-189a-4162-aaa8-17d72b5840a2}">
+      <Declaration><![CDATA[//! <summary>Borrows the concrete class name. Callers must not modify it.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{d847ea7a-e910-4dd1-b766-94338ba8d703}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ClassName REF= _ClassName;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="NamespaceName" Id="{a6936ddc-e5f0-4493-8b12-23f4c83db0d8}">
+      <Declaration><![CDATA[//! <summary>Borrows the compiler-initialized namespace name. Callers must not modify it.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{9f2d66c1-743f-4063-b4f4-14a9305abe07}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[NamespaceName REF= CurrentNamespace.Name;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="SelfSize" Id="{e4e6a987-1fd9-46eb-87ae-92294c30ca4a}">
+      <Declaration><![CDATA[//! <summary>Reports the concrete instance size in bytes.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY SelfSize : ULINT]]></Declaration>
+      <Get Name="Get" Id="{56fe0211-7f0b-458f-ab5d-fd79c4f3860f}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[SelfSize := XSIZEOF(THIS^);]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+  </POU>
+</TcPlcObject>

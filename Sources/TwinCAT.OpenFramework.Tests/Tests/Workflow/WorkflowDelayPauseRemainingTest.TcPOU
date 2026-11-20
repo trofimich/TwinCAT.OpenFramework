@@ -1,0 +1,288 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="WorkflowDelayPauseRemainingTest" Id="{91ffe7cc-debc-447a-8065-a8d6d48f5122}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+SPDX-FileCopyrightText: © 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+SPDX-License-Identifier: MIT
+License: https://opensource.org/license/mit
+*)
+
+(*!
+<summary>Checks remaining delay duration across two pauses and after reset.</summary>
+<description>
+Advances one bounded step per PLC cycle. Uses independent task timestamps and a forty-second deadline.
+Each pause exceeds the nominal active duration. Run without debugger pauses or clock adjustments.
+The task must sample the two active segments before expiry. Diagnostics include the last sampling gap.
+</description>
+*)
+
+{attribute 'no_assign'}
+{attribute 'no_explicit_call' := 'do not call this function block directly'}
+FUNCTION_BLOCK WorkflowDelayPauseRemainingTest EXTENDS TOF_Testing.MultiCycleTest
+VAR_STAT
+	{attribute 'hide'}
+	_ClassName : STRING := __POUNAME();
+END_VAR
+VAR
+	_Phase : DELAY_PAUSE_TEST_PHASE;
+	_Delay : TOF_Workflow.DelayActivity(workflow := 0);
+	_TestStartedAt : ULINT;
+	_SegmentStartedAt : ULINT;
+	_PausedAt : ULINT;
+	_LastObservedAt : ULINT;
+	_ActiveTicks : ULINT;
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[]]></ST>
+    </Implementation>
+    <Method Name="BeforeTest" Id="{3c2e52fe-0c89-477e-84d8-93428dfcff56}">
+      <Declaration><![CDATA[(*!
+<summary>Starts a fresh timing run using the independent task-clock deadline.</summary>
+*)
+METHOD PROTECTED BeforeTest]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_Timeout := T#0S;
+_Phase := DELAY_PAUSE_TEST_PHASE.BEFORE_START;
+_ActiveTicks := 0;
+_LastObservedAt := 0;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="ExecuteTest" Id="{736ba94b-0e37-455f-b165-4d6a2fab9357}">
+      <Declaration><![CDATA[(*!
+<summary>Advances one step of suspension, resume, completion or fresh-run timing.</summary>
+<description>Completion must fall within the timer quantization and actual observation interval.</description>
+*)
+METHOD PROTECTED ExecuteTest : TOF_Testing.TEST_CYCLE_RESULT
+VAR
+	assertions : REFERENCE TO TOF_Testing.Assertions;
+	currentTaskTime : ULINT;
+	elapsedTicks : ULINT;
+	observationGap : ULINT;
+END_VAR
+VAR CONSTANT
+	//! <summary>Active target with room for two observed 740ms scheduling gaps before suspension.</summary>
+	interval : TIME := T#5S;
+	//! <summary>Active duration observed before each suspension, well below the total interval.</summary>
+	beforePause : TIME := T#40MS;
+	//! <summary>Suspended duration deliberately exceeding the full interval.</summary>
+	pauseDuration : TIME := T#6S;
+	//! <summary>Allowance for millisecond quantization over three active segments.</summary>
+	tolerance : TIME := T#3MS;
+	//! <summary>Independent task-time deadline for reporting a scenario that cannot progress.</summary>
+	deadline : TIME := T#40S;
+	//! <summary>F_GetTaskTime returns 100ns ticks; TIME is expressed in milliseconds.</summary>
+	ticksPerMillisecond : ULINT := 10000;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[assertions REF= Assert;
+ExecuteTest := TOF_Testing.TEST_CYCLE_RESULT.DONE;
+
+currentTaskTime := Tc2_System.F_GetTaskTime();
+
+IF _Phase <> DELAY_PAUSE_TEST_PHASE.BEFORE_START
+	AND_THEN currentTaskTime - _TestStartedAt > TO_ULINT(deadline) * ticksPerMillisecond
+THEN
+	assertions.ThatBool(actual := FALSE, message := "Delay pause scenario exceeded its independent deadline").IsTrue();
+
+	_Phase := DELAY_PAUSE_TEST_PHASE.FINISHED;
+
+	RETURN;
+END_IF
+
+observationGap := currentTaskTime - _LastObservedAt;
+
+CASE _Phase OF
+	DELAY_PAUSE_TEST_PHASE.BEFORE_START:
+		_TestStartedAt := currentTaskTime;
+		_SegmentStartedAt := currentTaskTime;
+		_Delay.Interval := interval;
+		_Delay.RequestStart();
+		_Phase := DELAY_PAUSE_TEST_PHASE.FIRST_RUNNING;
+
+	DELAY_PAUSE_TEST_PHASE.FIRST_RUNNING,
+	DELAY_PAUSE_TEST_PHASE.SECOND_RUNNING:
+		_Delay.Execute();
+
+		IF _Delay.State <> TOF_Workflow.WORKFLOW_ELEMENT_STATE.ACTIVE_RUNNING THEN
+			assertions.ThatBool(
+				actual := FALSE,
+				message := TO_WSTRING(TOF_Core.Strings.Concat255(
+					'Delay before pause: phase=', TO_STRING(_Phase), ', state=', TO_STRING(_Delay.State),
+					', segment ms=', TO_STRING((currentTaskTime - _SegmentStartedAt) / ticksPerMillisecond),
+					', gap ms=', TO_STRING(observationGap / ticksPerMillisecond),
+					', active ms=', TO_STRING(_ActiveTicks / ticksPerMillisecond)
+				))
+			).IsTrue();
+			_Phase := DELAY_PAUSE_TEST_PHASE.FINISHED;
+
+			RETURN;
+		END_IF
+
+		IF currentTaskTime - _SegmentStartedAt >= TO_ULINT(beforePause) * ticksPerMillisecond THEN
+			_ActiveTicks := _ActiveTicks + currentTaskTime - _SegmentStartedAt;
+			_Delay.RequestSuspend();
+			assertions.ThatBool(
+				actual := _Delay.State = TOF_Workflow.WORKFLOW_ELEMENT_STATE.PASSIVE_SUSPENDED,
+				message := "Suspension must stop the timer segment immediately"
+			).IsTrue();
+			assertions.ThatBool(
+				actual := _Delay.Interval = interval,
+				message := "Suspension must preserve nominal Interval"
+			).IsTrue();
+			_PausedAt := currentTaskTime;
+
+			IF _Phase = DELAY_PAUSE_TEST_PHASE.FIRST_RUNNING THEN
+				_Phase := DELAY_PAUSE_TEST_PHASE.FIRST_PAUSE;
+			ELSE
+				_Phase := DELAY_PAUSE_TEST_PHASE.SECOND_PAUSE;
+			END_IF
+		END_IF
+
+	DELAY_PAUSE_TEST_PHASE.FIRST_PAUSE,
+	DELAY_PAUSE_TEST_PHASE.SECOND_PAUSE:
+		_Delay.Execute();
+		assertions.ThatBool(
+			actual := _Delay.State = TOF_Workflow.WORKFLOW_ELEMENT_STATE.PASSIVE_SUSPENDED,
+			message := "Executing a suspended delay must not consume the remaining duration"
+		).IsTrue();
+
+		IF currentTaskTime - _PausedAt >= TO_ULINT(pauseDuration) * ticksPerMillisecond THEN
+			_Delay.RequestStart();
+			assertions.ThatBool(
+				actual := _Delay.State = TOF_Workflow.WORKFLOW_ELEMENT_STATE.ACTIVE_RUNNING,
+				message := "Long suspension must leave a positive active remainder after resume"
+			).IsTrue();
+			_SegmentStartedAt := currentTaskTime;
+
+			IF _Phase = DELAY_PAUSE_TEST_PHASE.FIRST_PAUSE THEN
+				_Phase := DELAY_PAUSE_TEST_PHASE.SECOND_RUNNING;
+			ELSE
+				_Phase := DELAY_PAUSE_TEST_PHASE.REMAINING_RUNNING;
+			END_IF
+		END_IF
+
+	DELAY_PAUSE_TEST_PHASE.REMAINING_RUNNING,
+	DELAY_PAUSE_TEST_PHASE.FRESH_RUNNING:
+		_Delay.Execute();
+		elapsedTicks := _ActiveTicks + currentTaskTime - _SegmentStartedAt;
+
+		IF _Delay.State = TOF_Workflow.WORKFLOW_ELEMENT_STATE.PASSIVE_COMPLETED THEN
+			assertions.ThatBool(
+				actual := elapsedTicks + TO_ULINT(tolerance) * ticksPerMillisecond
+					>= TO_ULINT(interval) * ticksPerMillisecond,
+				message := "Completion must include the full active interval without suspended wall time"
+			).IsTrue();
+			assertions.ThatBool(
+				actual := elapsedTicks <= TO_ULINT(interval + tolerance) * ticksPerMillisecond + observationGap,
+				message := "Completion must retain the active remainder instead of restarting the full interval"
+			).IsTrue();
+			_Delay.RequestReset();
+			assertions.ThatBool(
+				actual := _Delay.State = TOF_Workflow.WORKFLOW_ELEMENT_STATE.PASSIVE_READY,
+				message := "Reset after completion must prepare a fresh delay"
+			).IsTrue();
+
+			IF _Phase = DELAY_PAUSE_TEST_PHASE.REMAINING_RUNNING THEN
+				assertions.ThatBool(
+					actual := _Delay.Interval = interval,
+					message := "Reset must preserve configured Interval"
+				).IsTrue();
+				_ActiveTicks := 0;
+				_SegmentStartedAt := currentTaskTime;
+				_Delay.RequestStart();
+				assertions.ThatBool(
+					actual := _Delay.State = TOF_Workflow.WORKFLOW_ELEMENT_STATE.ACTIVE_RUNNING,
+					message := "Fresh start must clear previously accumulated active time"
+				).IsTrue();
+				_Phase := DELAY_PAUSE_TEST_PHASE.FRESH_RUNNING;
+			ELSE
+				_Phase := DELAY_PAUSE_TEST_PHASE.FINISHED;
+			END_IF
+		ELSE
+			assertions.ThatBool(
+				actual := _Delay.State = TOF_Workflow.WORKFLOW_ELEMENT_STATE.ACTIVE_RUNNING,
+				message := "A delay awaiting its remainder must stay RUNNING"
+			).IsTrue();
+			assertions.ThatBool(
+				actual := elapsedTicks <= TO_ULINT(interval + tolerance) * ticksPerMillisecond,
+				message := "Delay must complete by the active interval plus timer quantization"
+			).IsTrue();
+		END_IF
+END_CASE
+
+_LastObservedAt := currentTaskTime;
+
+IF _Phase <> DELAY_PAUSE_TEST_PHASE.FINISHED THEN
+	ExecuteTest := TOF_Testing.TEST_CYCLE_RESULT.BUSY;
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="AfterTest" Id="{649c53ff-ab47-48bb-abac-dc3fececa226}">
+      <Declaration><![CDATA[(*!
+<summary>Cancels a running or suspended delay and checks that reset leaves it ready.</summary>
+<description>DelayActivity uses an in-place timer. Cleanup completes without another PLC cycle.</description>
+*)
+METHOD PROTECTED AfterTest]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF _Delay.CancellingAllowed THEN
+	_Delay.RequestCancel(reason := "Timing scenario teardown");
+END_IF
+
+IF _Delay.ResettingAllowed THEN
+	_Delay.RequestReset();
+END_IF
+
+IF _Delay.State <> TOF_Workflow.WORKFLOW_ELEMENT_STATE.PASSIVE_READY THEN
+	IF Outcome = TOF_Testing.TEST_OUTCOME.FAILED THEN
+		Tc2_System.ADSLOGSTR(
+			msgCtrlMask := Tc2_System.Global_Variables.ADSLOG_MSGTYPE_ERROR,
+			msgFmtStr := 'Delay timing fixture did not reset from %s',
+			strArg := TO_STRING(_Delay.State)
+		);
+	ELSE
+		RecordFailure(message := "Delay timing fixture did not reset to ready");
+	END_IF
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="ClassName" Id="{b60626c3-0b4b-44bb-9e4f-418dfcfb2ae7}">
+      <Declaration><![CDATA[(*!
+<summary>Borrows the concrete class name. Callers must not modify it.</summary>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{bde59800-3a81-4e7e-aca1-38843befdb44}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ClassName REF= _ClassName;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="NamespaceName" Id="{c339156f-0310-4c0d-a70a-d4d948d96d25}">
+      <Declaration><![CDATA[(*!
+<summary>Borrows the project namespace name. Callers must not modify it.</summary>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{e1c6beff-fbbd-4315-ac36-7788a59b17be}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[NamespaceName REF= CurrentNamespace.Name;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="SelfSize" Id="{4146a6c9-b184-4713-8252-6a1d13eca048}">
+      <Declaration><![CDATA[(*!
+<summary>Reports the complete instance size in bytes.</summary>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY SelfSize : ULINT]]></Declaration>
+      <Get Name="Get" Id="{17c0a1a4-91a7-4713-932d-5e4dc5d18d16}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[SelfSize := XSIZEOF(THIS^);]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+  </POU>
+</TcPlcObject>

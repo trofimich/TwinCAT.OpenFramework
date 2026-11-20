@@ -1,0 +1,139 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="DynamicDictionaryClearTest" Id="{1f8edf0a-7881-465f-bcb4-58b5446fc8cc}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+SPDX-FileCopyrightText: c 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+SPDX-License-Identifier: MIT
+License: https://opensource.org/license/mit
+*)
+
+(*!
+<summary>Checks clearing grown entries and rebuilding a usable index on reuse.</summary>
+<description>
+Owns a dynamic dictionary and copied pairs at a stable address. Run from one task.
+Teardown releases remaining entries and dynamic storage.
+</description>
+*)
+
+{attribute 'no_assign'}
+{attribute 'no_explicit_call' := 'do not call this function block directly'}
+FUNCTION_BLOCK DynamicDictionaryClearTest EXTENDS TOF_Testing.SingleCycleTest
+VAR_STAT
+	{attribute 'hide'}
+	_ClassName : STRING := __POUNAME();
+END_VAR
+VAR
+	_Dictionary : TOF_Collections.Dictionary<0>(keyValidator := 0, valueValidator := 0, keyEqualityComparer := 0);
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[]]></ST>
+    </Implementation>
+    <Method Name="ExecuteTest" Id="{df1601aa-7550-449a-a369-aa6aa625b15a}">
+      <Declaration><![CDATA[(*!
+<summary>Checks clearing grown entries and rebuilding a usable index on reuse.</summary>
+*)
+METHOD PROTECTED ExecuteTest
+VAR
+	keys : ARRAY [0..6] OF INT := [0, 1, 2, 3, 4, 5, 6];
+	values : ARRAY [0..6] OF STRING :=
+		['String0', 'String1', 'String2', 'String3', 'String4', 'String5', 'String6'];
+	i : DINT;
+	value : TOF_Core.GENERIC_VALUE;
+	found : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_Dictionary.DefaultDynamicAllocationElementCount := BYTE#2;
+
+FOR i := 6 TO 0 BY -1 DO
+	_Dictionary.SetCopy(key := keys[i], value := values[i]);
+END_FOR
+
+Assert.ThatBool(
+	actual := _Dictionary.Length = 7 AND_THEN _Dictionary.Capacity = 8,
+	message := "The clear fixture must start with grown capacity"
+).IsTrue();
+
+FOR i := 0 TO 6 DO
+	found := _Dictionary.TryGetValueByKey(key := keys[i], value => value);
+
+	Assert.ThatBool(
+		actual := found AND_THEN value.AsString255() = values[i],
+		message := TOF_Core.WideStrings.Concat255("Growth must preserve the pair at key ", TO_WSTRING(i))
+	).IsTrue();
+END_FOR
+
+_Dictionary.Clear();
+
+Assert.ThatBool(
+	actual := _Dictionary.Empty AND_THEN _Dictionary.Length = 0 AND_THEN _Dictionary.Capacity = 0,
+	message := "Clear must empty the dictionary and release capacity"
+).IsTrue();
+
+Assert.ThatBool(
+	actual := _Dictionary.ContainsKey(key := keys[3]),
+	message := "The cleared index must not find an old key"
+).IsFalse();
+
+_Dictionary.Clear();
+_Dictionary.SetCopy(key := keys[3], value := values[6]);
+
+found := _Dictionary.TryGetValueByKey(key := keys[3], value => value);
+
+Assert.ThatBool(
+	actual := found AND_THEN value.AsString255() = 'String6',
+	message := "Reinsertion must make the new value visible"
+).IsTrue();
+
+Assert.ThatBool(
+	actual := _Dictionary.Length = 1 AND_THEN _Dictionary.Capacity = 2,
+	message := "Reinsertion must allocate only the initial capacity"
+).IsTrue();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="AfterTest" Id="{c4fa6a47-ea85-49bf-807a-ad057a02da72}">
+      <Declaration><![CDATA[(*!
+<summary>Clears the fixture before the runner publishes the result.</summary>
+<description>
+Also runs after an unexpected exception interrupts the case.
+</description>
+*)
+METHOD PROTECTED AfterTest]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_Dictionary.Clear();]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="ClassName" Id="{4900a7d2-0ec2-405e-8a08-9e6a16a4e28f}">
+      <Declaration><![CDATA[//! <summary>Borrows the concrete class name. Callers must not modify it.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{ba9eaa23-032c-48df-9ef4-58ee4f1600ee}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ClassName REF= _ClassName;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="NamespaceName" Id="{ccd8513e-ea9b-4692-80b4-f728c013475e}">
+      <Declaration><![CDATA[//! <summary>Borrows the compiler-initialized namespace name. Callers must not modify it.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{c08ed388-6d7d-4e2f-8caa-98f29a28e223}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[NamespaceName REF= CurrentNamespace.Name;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="SelfSize" Id="{c89551f1-2029-43c7-bc47-8d7247531b9e}">
+      <Declaration><![CDATA[//! <summary>Reports the concrete instance size in bytes.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY SelfSize : ULINT]]></Declaration>
+      <Get Name="Get" Id="{cc009642-36d6-42f2-ae50-2d159eeabc5f}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[SelfSize := XSIZEOF(THIS^);]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+  </POU>
+</TcPlcObject>

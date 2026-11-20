@@ -1,0 +1,161 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="LoggerNonCyclicInitializationTest" Id="{2dd7e7e4-62ce-4257-a9b1-29cd9edd8d6e}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+SPDX-FileCopyrightText: c 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+SPDX-License-Identifier: MIT
+License: https://opensource.org/license/mit
+*)
+
+(*!
+<summary>Asserts the non-cyclic FB_init probe and absence of an initialization logger assignment.</summary>
+<description>
+Captures initialization observations once and checks them in each cyclic run. The runner retains no logger alias.
+</description>
+*)
+
+{attribute 'no_assign'}
+{attribute 'no_explicit_call' := 'do not call this function block directly'}
+FUNCTION_BLOCK LoggerNonCyclicInitializationTest EXTENDS TOF_Testing.SingleCycleTest
+VAR_STAT
+	{attribute 'hide'}
+	_ClassName : STRING := __POUNAME();
+END_VAR
+VAR
+	//! <summary>Records that initialization exercised a non-cyclic execution context.</summary>
+	_InitializationContextObserved : BOOL;
+	//! <summary>Records rejection without exceptions, counter changes or a published non-cyclic destination.</summary>
+	_InitializationCallsRejected : BOOL;
+	_InitializationLogger : TOF_Core.AdsLogger;
+	_InitializationError : TOF_Core.ERROR;
+	_InitializationException : TOF_Core.StandardException;
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[]]></ST>
+    </Implementation>
+    <Method Name="ExecuteTest" Id="{35610d22-65ae-4074-9f9f-fcb26f02eea5}">
+      <Declaration><![CDATA[(*!
+<summary>Asserts the non-cyclic FB_init probe and absence of an initialization logger assignment.</summary>
+<description>
+Captures initialization observations once and checks them in each cyclic run. The runner retains no logger alias.
+</description>
+*)
+METHOD PROTECTED ExecuteTest
+VAR
+	currentLogger : TOF_Core.ILogger;
+	initializationLogger : TOF_Core.ILogger;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[Assert.ThatBool(
+	actual := _InitializationContextObserved,
+	message := "FB_init must exercise a non-cyclic context"
+).IsTrue();
+Assert.ThatBool(
+	actual := _InitializationCallsRejected,
+	message := "Non-cyclic calls must return defaults without logging or changing counters"
+).IsTrue();
+currentLogger := TOF_Core.LogManager.CurrentTaskLogger;
+initializationLogger := _InitializationLogger;
+Assert.ThatBool(
+	actual := currentLogger <> initializationLogger,
+	message := "An initialization setter must not assign a cyclic destination"
+).IsTrue();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="FB_init" Id="{95b8df70-d6ef-476e-8c1e-a8c50a336f3c}">
+      <Declaration><![CDATA[(*!
+<summary>Records manager behavior outside cyclic context without raising exceptions.</summary>
+<description>
+Uses persistent passive diagnostics and a dedicated ADS instance as an attempted assignment. The manager must
+reject every logging call before filtering or counter changes, ignore assignment and do no cyclic work.
+The cyclic test asserts these observations. The probe does not inject failures or allocate exceptions.
+</description>
+<param name="name">Name forwarded to the inherited test initializer for reporting.</param>
+<param name="parent">Owning group forwarded to the inherited test initializer.</param>
+*)
+METHOD FB_init : BOOL
+VAR_INPUT
+	bInitRetains: BOOL; // TRUE: the retain variables are initialized (reset warm / reset cold)
+	bInCopyCode: BOOL; // TRUE: the instance will be copied to the copy code afterward (online change)
+	name : WSTRING;
+	parent : TOF_Testing.ITestElement;
+END_VAR
+VAR
+	taskIndex : DINT;
+	loggerBefore : TOF_Core.ILogger;
+	loggerAfter : TOF_Core.ILogger;
+	totalBefore : ULINT;
+	passedBefore : ULINT;
+	message : TOF_Core.ERROR_MESSAGE := "non-cyclic initialization probe";
+	messageAccepted : BOOL;
+	errorAccepted : BOOL;
+	exceptionAccepted : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[FB_init := TRUE;
+taskIndex := TOF_Core.System.GetCurrentTaskIndex();
+
+IF taskIndex >= 1 AND_THEN taskIndex <= TOF_Core.System.TASK_COUNT THEN
+	RETURN;
+END_IF
+
+_InitializationContextObserved := TRUE;
+loggerBefore := TOF_Core.LogManager.CurrentTaskLogger;
+TOF_Core.LogManager.CurrentTaskLogger := _InitializationLogger;
+loggerAfter := TOF_Core.LogManager.CurrentTaskLogger;
+totalBefore := TOF_Core.LogManager.TotalMessageCounter;
+passedBefore := TOF_Core.LogManager.PassedFilterMessageCounter;
+messageAccepted := TOF_Core.LogManager.TryLogMessage(
+	message := message,
+	category := TOF_Core.LOG_CATEGORY.INFORMATION
+);
+errorAccepted := TOF_Core.LogManager.TryLogError(error := _InitializationError);
+exceptionAccepted := TOF_Core.LogManager.TryLogException(
+	exception := _InitializationException,
+	severity := TOF_Core.ERROR_SEVERITY.ERROR
+);
+TOF_Core.LogManager.ExecuteCurrentTaskLogger();
+_InitializationCallsRejected := loggerBefore = 0
+	AND_THEN loggerAfter = 0
+	AND_THEN NOT messageAccepted
+	AND_THEN NOT errorAccepted
+	AND_THEN NOT exceptionAccepted
+	AND_THEN TOF_Core.LogManager.TotalMessageCounter = totalBefore
+	AND_THEN TOF_Core.LogManager.PassedFilterMessageCounter = passedBefore;]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="ClassName" Id="{9b2672ea-273d-4ab2-895e-331860dce8a5}">
+      <Declaration><![CDATA[//! <summary>Borrows the concrete class name for the instance lifetime. Callers must not modify it.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{d3e201be-4cde-4d77-b898-67ca2c0be02e}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ClassName REF= _ClassName;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="NamespaceName" Id="{96d45448-c9bd-4d9f-8a57-8931bbbc88ea}">
+      <Declaration><![CDATA[//! <summary>Borrows the compiler-initialized namespace. Callers must not modify it.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{fc590e0a-d41b-4798-95aa-7cbf1a4c1a76}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[NamespaceName REF= CurrentNamespace.Name;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="SelfSize" Id="{f092a237-eb8e-4b43-bea0-e79ac285e0b1}">
+      <Declaration><![CDATA[//! <summary>Reports the complete instance size in bytes, excluding separately allocated storage.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY SelfSize : ULINT]]></Declaration>
+      <Get Name="Get" Id="{b0140eb7-43da-4d11-b784-dda00b0b2b34}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[SelfSize := XSIZEOF(THIS^);]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+  </POU>
+</TcPlcObject>

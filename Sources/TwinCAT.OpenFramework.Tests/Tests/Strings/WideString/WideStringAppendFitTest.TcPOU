@@ -1,0 +1,217 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="WideStringAppendFitTest" Id="{edbaff26-ab9a-4b09-b0a0-af2e64f5521f}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+SPDX-FileCopyrightText: c 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+SPDX-License-Identifier: MIT
+License: https://opensource.org/license/mit
+*)
+
+(*!
+<summary>Checks fitted appends at exact capacity and on truncation.</summary>
+<description>
+Uses one task and stays at a stable address while assertions are bound to this instance.
+</description>
+*)
+
+{attribute 'no_assign'}
+{attribute 'no_explicit_call' := 'do not call this function block directly'}
+FUNCTION_BLOCK WideStringAppendFitTest EXTENDS TOF_Testing.SingleCycleTest
+VAR_STAT
+	{attribute 'hide'}
+	_ClassName : STRING := __POUNAME();
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[]]></ST>
+    </Implementation>
+    <Method Name="ExecuteTest" Id="{a4adc487-fe1f-47d9-beac-12bab46e385d}">
+      <Declaration><![CDATA[(*!
+<summary>Checks fitted appends at exact capacity and on truncation.</summary>
+*)
+METHOD PROTECTED ExecuteTest
+VAR
+	oneCharacter : WSTRING(1);
+	twoCharacters : WSTRING(2);
+	target : WSTRING(10);
+	longFragment : WSTRING(30) := "01234567890123456789";
+	accepted : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[// Fits within capacity
+target := "12345";
+TOF_Core.WideStrings.AppendFit(targetString := target, sourceString := "67");
+Assert.ThatBool(
+	actual := target = "1234567",
+	message := "AppendFit must append normally when it fits"
+).IsTrue();
+
+// Exact fit: fills capacity without ellipsis
+target := "12345";
+TOF_Core.WideStrings.AppendFit(targetString := target, sourceString := "67890");
+Assert.ThatBool(
+	actual := target = "1234567890",
+	message := "AppendFit must fit exactly without ellipsis"
+).IsTrue();
+
+// Overflow by one code unit uses U+2026.
+target := "12345";
+TOF_Core.WideStrings.AppendFit(targetString := target, sourceString := "678901");
+Assert.ThatBool(
+	actual := target = "123456789$2026",
+	message := "AppendFit must truncate and append ellipsis on 1 char overflow"
+).IsTrue();
+
+// A larger overflow still uses one U+2026 code unit.
+target := "12345";
+TOF_Core.WideStrings.AppendFit(targetString := target, sourceString := longFragment);
+Assert.ThatBool(
+	actual := target = "123450123$2026",
+	message := "AppendFit must truncate and append ellipsis on large overflow"
+).IsTrue();
+
+// Empty source: target remains unchanged
+target := "12345";
+TOF_Core.WideStrings.AppendFit(targetString := target, sourceString := "");
+Assert.ThatBool(
+	actual := target = "12345",
+	message := "AppendFit must leave target unchanged for empty source"
+).IsTrue();
+
+// Appending to empty target
+target := "";
+TOF_Core.WideStrings.AppendFit(targetString := target, sourceString := longFragment);
+Assert.ThatBool(
+	actual := target = "012345678$2026",
+	message := "AppendFit to empty target must truncate and append ellipsis"
+).IsTrue();
+
+// TryAppendFit normal fit
+target := "123";
+accepted := TOF_Core.WideStrings.TryAppendFit(targetString := target, sourceString := "45");
+Assert.ThatBool(
+	actual := accepted,
+	message := "TryAppendFit must return TRUE on normal fit"
+).IsTrue();
+Assert.ThatBool(
+	actual := target = "12345",
+	message := "TryAppendFit must append text"
+).IsTrue();
+
+// TryAppendFit overflow
+target := "12345";
+accepted := TOF_Core.WideStrings.TryAppendFit(targetString := target, sourceString := longFragment);
+Assert.ThatBool(
+	actual := accepted,
+	message := "TryAppendFit must return TRUE on overflow"
+).IsTrue();
+Assert.ThatBool(
+	actual := target = "123450123$2026",
+	message := "TryAppendFit must truncate and append ellipsis"
+).IsTrue();
+
+// AppendFit255 multiple arguments and literals
+target := "12";
+TOF_Core.WideStrings.AppendFit255(target, "3", "4", "5");
+Assert.ThatBool(
+	actual := target = "12345",
+	message := "AppendFit255 must append multiple fragments"
+).IsTrue();
+
+// AppendFit255 overflow truncation
+target := "12";
+TOF_Core.WideStrings.AppendFit255(target, "345", "678", "9012");
+Assert.ThatBool(
+	actual := target = "123456789$2026",
+	message := "AppendFit255 must truncate and append ellipsis on overflow"
+).IsTrue();
+
+// TryAppendFit255 normal fit
+target := "12";
+accepted := TOF_Core.WideStrings.TryAppendFit255(
+	targetString := target,
+	sourceString1 := "3",
+	sourceString2 := "4",
+	sourceString3 := "5"
+);
+Assert.ThatBool(
+	actual := accepted,
+	message := "TryAppendFit255 must return TRUE on normal fit"
+).IsTrue();
+Assert.ThatBool(
+	actual := target = "12345",
+	message := "TryAppendFit255 must append multiple fragments"
+).IsTrue();
+
+// TryAppendFit255 overflow
+target := "12";
+accepted := TOF_Core.WideStrings.TryAppendFit255(
+	targetString := target,
+	sourceString1 := "345",
+	sourceString2 := "678",
+	sourceString3 := "9012"
+);
+Assert.ThatBool(
+	actual := accepted,
+	message := "TryAppendFit255 must return TRUE on overflow"
+).IsTrue();
+Assert.ThatBool(
+	actual := target = "123456789$2026",
+	message := "TryAppendFit255 must truncate and append ellipsis on overflow"
+).IsTrue();
+
+accepted := TOF_Core.WideStrings.TryAppendFit(targetString := oneCharacter, sourceString := longFragment);
+Assert.ThatBool(
+	actual := accepted,
+	message := "Truncation must succeed in a one-character buffer"
+).IsTrue();
+Assert.ThatBool(
+	actual := oneCharacter = "$2026",
+	message := "One-character truncation marker"
+).IsTrue();
+
+accepted := TOF_Core.WideStrings.TryAppendFit255(targetString := twoCharacters, sourceString1 := longFragment);
+Assert.ThatBool(
+	actual := accepted,
+	message := "Truncation must succeed in a two-character buffer"
+).IsTrue();
+Assert.ThatBool(
+	actual := twoCharacters = "0$2026",
+	message := "Two-character truncation marker"
+).IsTrue();]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="ClassName" Id="{fce33411-88bb-454c-a3d1-9400be012f1c}">
+      <Declaration><![CDATA[//! <summary>Borrows the concrete class name. Callers must not modify it.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{c8f2582e-57f1-4f20-b6d3-d47e5277f28c}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ClassName REF= _ClassName;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="NamespaceName" Id="{61dddad9-2f06-405a-9ebc-d26eefe42da6}">
+      <Declaration><![CDATA[//! <summary>Borrows the compiler-initialized namespace name. Callers must not modify it.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{c76a36b2-9f13-41b9-a8c6-269f441c1f9d}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[NamespaceName REF= CurrentNamespace.Name;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="SelfSize" Id="{7a2c5f60-5d7a-4a19-a50a-e408771397a7}">
+      <Declaration><![CDATA[//! <summary>Reports the concrete instance size in bytes.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY SelfSize : ULINT]]></Declaration>
+      <Get Name="Get" Id="{6a63f519-e3b3-49da-bfef-16fa77a8f6a4}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[SelfSize := XSIZEOF(THIS^);]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+  </POU>
+</TcPlcObject>

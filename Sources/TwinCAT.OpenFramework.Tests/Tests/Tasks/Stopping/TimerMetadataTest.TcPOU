@@ -1,0 +1,149 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="TimerMetadataTest" Id="{542130a2-a630-481b-bbd9-ea6efe1ac1b3}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+SPDX-FileCopyrightText: © 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+SPDX-License-Identifier: MIT
+License: https://opensource.org/license/mit
+*)
+
+(*!
+<summary>Checks default and explicit names before Start and after reuse.</summary>
+<description>
+The case executes in one PLC callback with a persistent timer and no external resources.
+AfterTest prepares the fixture for reuse by the runner.
+</description>
+*)
+
+{attribute 'no_assign'}
+{attribute 'no_explicit_call' := 'do not call this function block directly'}
+FUNCTION_BLOCK TimerMetadataTest EXTENDS TOF_Testing.SingleCycleTest
+VAR_STAT
+	{attribute 'hide'}
+	_ClassName : STRING := __POUNAME();
+END_VAR
+VAR
+	_Timer : TOF_Timers.Timer(name := "");
+	_NamedTimer : TOF_Timers.Timer(name := "Explicit timer");
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[]]></ST>
+    </Implementation>
+    <Method Name="ExecuteTest" Id="{430c0423-5895-44de-bd86-be470c6c015a}">
+      <Declaration><![CDATA[(*!
+<summary>Checks default and explicit names before Start and after reuse.</summary>
+*)
+METHOD PROTECTED ExecuteTest
+VAR
+	initialName : WSTRING;
+	borrowedName : REFERENCE TO WSTRING;
+	nameAfterReset : REFERENCE TO WSTRING;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[borrowedName REF= _Timer.Name;
+
+IF NOT __ISVALIDREF(borrowedName) THEN
+	RecordFailure(message := "Timer must expose a valid borrowed name");
+	RETURN;
+END_IF
+
+initialName := borrowedName;
+Assert.ThatBool(
+	actual := Tc2_Standard.WLEFT(STR := initialName, SIZE := Tc2_Standard.WLEN(STR := "Timer")) = "Timer",
+	message := "Default name must contain the initialized Timer class before Start"
+).IsTrue();
+Assert.ThatBool(
+	actual := _NamedTimer.Name = "Explicit timer",
+	message := "Explicit name must be copied unchanged"
+).IsTrue();
+Assert.ThatBool(
+	actual := _Timer.ClassName = 'Timer',
+	message := "ClassName must identify the concrete Timer"
+).IsTrue();
+Assert.ThatBool(
+	actual := _Timer.NamespaceName = 'TOF_Timers',
+	message := "NamespaceName must identify the timer library"
+).IsTrue();
+Assert.ThatBool(
+	actual := _Timer.SelfSize = XSIZEOF(_Timer),
+	message := "SelfSize must match the concrete timer"
+).IsTrue();
+Assert.ThatBool(actual := _Timer.State.Ready, message := "Metadata reads must not start the timer").IsTrue();
+_Timer.Interval := TOF_Core.Times.MIN_VALUE;
+
+IF NOT _Timer.Start() THEN
+	RecordFailure(message := "Unnamed timer must accept Start");
+	RETURN;
+END_IF
+
+_Timer.Execute();
+Assert.ThatBool(actual := _Timer.Triggered, message := "Unnamed zero timer must complete").IsTrue();
+
+IF NOT _Timer.Reset() THEN
+	RecordFailure(message := "Completed unnamed timer must accept Reset");
+	RETURN;
+END_IF
+
+nameAfterReset REF= _Timer.Name;
+
+IF NOT __ISVALIDREF(nameAfterReset) THEN
+	RecordFailure(message := "Reset must leave the borrowed name reference valid");
+	RETURN;
+END_IF
+
+Assert.ThatBool(
+	actual := ADR(nameAfterReset) = ADR(borrowedName) AND_THEN nameAfterReset = initialName,
+	message := "The name storage must survive Reset"
+).IsTrue();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="AfterTest" Id="{bbb5f0c7-b61a-42c6-8ee6-dd27ba74632b}">
+      <Declaration><![CDATA[(*!
+<summary>Returns the owned timer to READY before reporting the result.</summary>
+<description>
+Cooperatively cancels active work and clears any retained TON observations through Reset.
+</description>
+*)
+METHOD PROTECTED AfterTest]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[Assert.ThatBool(
+	actual := PrepareTimerTestForReuse(timer := _Timer),
+	message := "The timer must return to READY after cleanup"
+).IsTrue();]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="ClassName" Id="{ef39c7e3-ef14-469c-b44a-d86d28a5c853}">
+      <Declaration><![CDATA[//! <summary>Borrows the concrete class name. Callers must not modify it.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{ff29f579-ab86-43d0-a669-1180c67aed27}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ClassName REF= _ClassName;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="NamespaceName" Id="{41511009-f297-4ba4-a819-1d81eef253d9}">
+      <Declaration><![CDATA[//! <summary>Borrows the compiler-initialized namespace. Callers must not modify it.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{48766acb-e17c-4f6a-aa3f-14f4a623244a}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[NamespaceName REF= CurrentNamespace.Name;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="SelfSize" Id="{c9095c6b-6362-4282-960b-6d5a7efb307c}">
+      <Declaration><![CDATA[//! <summary>Reports the concrete instance size in bytes.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY SelfSize : ULINT]]></Declaration>
+      <Get Name="Get" Id="{ecaf29fb-0c59-40f1-93c7-8513674e4571}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[SelfSize := XSIZEOF(THIS^);]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+  </POU>
+</TcPlcObject>

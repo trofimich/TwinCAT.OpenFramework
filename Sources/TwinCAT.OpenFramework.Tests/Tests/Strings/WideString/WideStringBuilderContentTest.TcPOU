@@ -1,0 +1,174 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="WideStringBuilderContentTest" Id="{79b305b2-3330-41f5-89e5-039ac3c7a8f2}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+SPDX-FileCopyrightText: c 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+SPDX-License-Identifier: MIT
+License: https://opensource.org/license/mit
+*)
+
+(*!
+<summary>Checks chaining, retained-capacity reuse and a WSTRING longer than 255 characters.</summary>
+<description>
+Uses one task and stays at a stable address while assertions are bound to this instance.
+</description>
+*)
+
+{attribute 'no_assign'}
+{attribute 'no_explicit_call' := 'do not call this function block directly'}
+FUNCTION_BLOCK WideStringBuilderContentTest EXTENDS TOF_Testing.SingleCycleTest
+VAR_STAT
+	{attribute 'hide'}
+	_ClassName : STRING := __POUNAME();
+END_VAR
+VAR
+	_Builder : TOF_Core.WideStringBuilder;
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[]]></ST>
+    </Implementation>
+    <Method Name="ExecuteTest" Id="{7bba1b1f-3b89-41a5-9bf0-94e42df42bba}">
+      <Declaration><![CDATA[(*!
+<summary>Checks chaining, retained-capacity reuse and a WSTRING longer than 255 characters.</summary>
+<description>
+The builder is persistent so teardown can release its buffer after an unexpected hook exception.
+The 320-unit wide fixture and the copied buffer are compared including the terminator.
+</description>
+*)
+METHOD PROTECTED ExecuteTest
+VAR
+	first : WSTRING := "String1";
+	second : WSTRING := "String2";
+	target : WSTRING(320);
+	longText : WSTRING(320);
+	originalBuffer : POINTER TO WSTRING;
+	inputUnits : POINTER TO WORD;
+	outputUnits : POINTER TO WORD;
+	reservedCapacity : UDINT;
+	i : DINT;
+	copied : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_Builder
+	.Append(value := first)
+	.AppendIf(value := first, condition := FALSE)
+	.AppendString(value := second)
+	.AppendStringIf(value := second, condition := FALSE)
+	.AppendString255(value := "String3")
+	.AppendString255If(value := "String3", condition := FALSE);
+
+copied := _Builder.AssignToString(targetString := target);
+Assert.ThatBool(
+	actual := copied AND_THEN target = "String1String2String3",
+	message := "Chaining must retain all included fragments in order"
+).IsTrue();
+Assert.ThatUDInt(
+	actual := _Builder.StringLength,
+	message := "Builder length must exclude the terminator"
+).ToBe(expected := UDINT#21);
+
+reservedCapacity := _Builder.Capacity;
+originalBuffer := _Builder.StringAddress;
+_Builder.Clear(releaseMemory := FALSE);
+Assert.ThatBool(
+	actual := _Builder.StringLength = 0
+		AND_THEN _Builder.Capacity = reservedCapacity
+		AND_THEN _Builder.StringAddress = originalBuffer,
+	message := "Clear without release must empty the builder while preserving its allocation"
+).IsTrue();
+
+copied := _Builder.AssignToString(targetString := target);
+Assert.ThatBool(
+	actual := copied AND_THEN target = "",
+	message := "Clearing the builder must hide the previous text"
+).IsTrue();
+
+// SA0175: The 320-unit wide fixture needs an exact final code unit and a terminator.
+{analysis -175}
+inputUnits := ADR(longText);
+{analysis +175}
+
+FOR i := 0 TO 318 DO
+	inputUnits[i] := WORD#16#0410;
+END_FOR
+
+inputUnits[319] := WORD#16#2026;
+inputUnits[320] := WORD#0;
+
+// SA0175: Seed the last destination code unit to verify that the copy writes the terminator.
+{analysis -175}
+outputUnits := ADR(target);
+outputUnits[320] := WORD#16#0058;
+{analysis +175}
+
+_Builder.Append(value := longText);
+copied := _Builder.AssignToString(targetString := target);
+
+Assert.ThatUDInt(
+	actual := _Builder.StringLength,
+	message := "Append through ANY must preserve the long WSTRING length"
+).ToBe(expected := UDINT#320);
+Assert.ThatBool(
+	actual := copied AND_THEN outputUnits[319] = WORD#16#2026
+		AND_THEN outputUnits[320] = WORD#0,
+	message := "AssignToString must copy the last code unit beyond 255 and its terminator"
+).IsTrue();
+Assert.ThatBool(
+	actual := Tc2_System.MEMCMP(pBuf1 := inputUnits, pBuf2 := outputUnits, n := SIZEOF(target)) = 0,
+	message := "The long WSTRING must round-trip byte for byte"
+).IsTrue();
+
+_Builder.Clear(releaseMemory := TRUE);
+Assert.ThatBool(
+	actual := _Builder.Capacity = 0 AND_THEN _Builder.StringAddress = TOF_Core.Memory.NULL_ADDRESS,
+	message := "Clear with release must reset both the capacity and the address"
+).IsTrue();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="AfterTest" Id="{603f73c2-cc35-4831-95b1-4de4a3c25584}">
+      <Declaration><![CDATA[(*!
+<summary>Releases the builder buffer before reporting the case result.</summary>
+<description>
+Safe after partial initialization and after explicit cleanup in the scenario.
+</description>
+*)
+METHOD PROTECTED AfterTest]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_Builder.Clear(releaseMemory := TRUE);]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="ClassName" Id="{0a846652-4f23-4eca-9241-0dc1088ccd2b}">
+      <Declaration><![CDATA[//! <summary>Borrows the concrete class name. Callers must not modify it.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{045ad8a7-afd5-4a6f-8f78-398b7e0b7379}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ClassName REF= _ClassName;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="NamespaceName" Id="{b2843d66-4bf0-4d53-b35e-d0134887562a}">
+      <Declaration><![CDATA[//! <summary>Borrows the compiler-initialized namespace name. Callers must not modify it.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{afa15df0-fbb7-410e-9ead-b1979bf2d0d7}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[NamespaceName REF= CurrentNamespace.Name;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="SelfSize" Id="{27a7d3c3-268d-4565-b308-246bc68c797b}">
+      <Declaration><![CDATA[//! <summary>Reports the concrete instance size in bytes.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY SelfSize : ULINT]]></Declaration>
+      <Get Name="Get" Id="{c2b7cc4b-f0da-4f99-8256-31361aef9a47}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[SelfSize := XSIZEOF(THIS^);]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+  </POU>
+</TcPlcObject>

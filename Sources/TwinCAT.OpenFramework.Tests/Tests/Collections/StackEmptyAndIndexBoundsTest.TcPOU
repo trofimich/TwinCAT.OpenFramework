@@ -1,0 +1,208 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1" ProductVersion="3.1.4026.21">
+  <POU Name="StackEmptyAndIndexBoundsTest" Id="{4a3cbcae-ac89-469d-9893-fd4c38e4ed08}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+SPDX-FileCopyrightText: c 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+SPDX-License-Identifier: MIT
+License: https://opensource.org/license/mit
+*)
+
+(*!
+<summary>Checks empty operations and negative and end index rejection.</summary>
+<description>
+Borrows a group-owned stack reserved for this case. Use from one task at a stable address.
+Teardown clears the stack and test-owned resources before publication.
+</description>
+*)
+
+{attribute 'no_assign'}
+{attribute 'no_explicit_call' := 'do not call this function block directly'}
+FUNCTION_BLOCK StackEmptyAndIndexBoundsTest EXTENDS TOF_Testing.SingleCycleTest
+VAR_STAT
+	{attribute 'hide'}
+	_ClassName : STRING := __POUNAME();
+END_VAR
+VAR
+	_Stack : TOF_Collections.IStack;
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[]]></ST>
+    </Implementation>
+    <Method Name="AfterTest" Id="{b8e4ee17-caa1-4857-aaea-5af5966d070a}">
+      <Declaration><![CDATA[(*!
+<summary>Clears the fixture before the runner publishes the result.</summary>
+<description>
+Also runs after an unexpected exception interrupts the case.
+</description>
+*)
+METHOD PROTECTED AfterTest]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_Stack.Clear();]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="ClassName" Id="{183f8c33-6b89-44b9-a4d8-11e103ee80d8}">
+      <Declaration><![CDATA[//! <summary>Borrows the concrete class name. Callers must not modify it.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{da1a0dd4-1bb9-4d18-beff-9ba792a40d5a}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ClassName REF= _ClassName;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="ExecuteTest" Id="{5300de04-ac14-4396-81b3-e4ab39cbeec8}">
+      <Declaration><![CDATA[(*!
+<summary>Checks empty operations and negative and end index rejection.</summary>
+*)
+METHOD PROTECTED ExecuteTest
+VAR
+	value : INT := 7;
+	invalidIndex : DINT;
+	ignoredEntry : REFERENCE TO TOF_Core.GENERIC_VALUE;
+
+	exceptionCode : __SYSTEM.ExceptionCode;
+	caught : TOF_Core.IException;
+	emptyException : TOF_Core.ICollectionEmptyException;
+	indexException : TOF_Core.IArgumentOutOfRangeException;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[__TRY
+	ignoredEntry REF= _Stack.Peek();
+__CATCH(exceptionCode)
+	caught := TOF_Core.ExceptionManager.GetLastException(
+		exceptionCode := exceptionCode,
+		catchPointNamespaceName := NamespaceName,
+		catchPointPOUName := __POUNAME(),
+		catchPointPosition := __POSITION()
+	);
+__ENDTRY
+
+Assert.ThatBool(
+	actual := __QUERYINTERFACE(caught, emptyException),
+	message := "Peek on an empty stack must raise CollectionEmptyException"
+).IsTrue();
+
+caught := 0;
+
+__TRY
+	_Stack.RemoveLast();
+__CATCH(exceptionCode)
+	caught := TOF_Core.ExceptionManager.GetLastException(
+		exceptionCode := exceptionCode,
+		catchPointNamespaceName := NamespaceName,
+		catchPointPOUName := __POUNAME(),
+		catchPointPosition := __POSITION()
+	);
+__ENDTRY
+
+Assert.ThatBool(
+	actual := __QUERYINTERFACE(caught, emptyException),
+	message := "RemoveLast on an empty stack must raise CollectionEmptyException"
+).IsTrue();
+
+Assert.ThatBool(
+	actual := _Stack.Empty,
+	message := "Rejected empty operations must preserve the empty stack"
+).IsTrue();
+
+_Stack.PushCopy(value := value);
+
+// Supply an invalid runtime value to the DINT_INDEX parameter.
+invalidIndex := -1;
+caught := 0;
+
+__TRY
+	ignoredEntry REF= _Stack.GetByIndex(index := invalidIndex);
+__CATCH(exceptionCode)
+	caught := TOF_Core.ExceptionManager.GetLastException(
+		exceptionCode := exceptionCode,
+		catchPointNamespaceName := NamespaceName,
+		catchPointPOUName := __POUNAME(),
+		catchPointPosition := __POSITION()
+	);
+__ENDTRY
+
+Assert.ThatBool(
+	actual := __QUERYINTERFACE(caught, indexException),
+	message := "Index -1 must raise ArgumentOutOfRangeException"
+).IsTrue();
+
+invalidIndex := _Stack.Length;
+caught := 0;
+
+__TRY
+	ignoredEntry REF= _Stack.GetByIndex(index := invalidIndex);
+__CATCH(exceptionCode)
+	caught := TOF_Core.ExceptionManager.GetLastException(
+		exceptionCode := exceptionCode,
+		catchPointNamespaceName := NamespaceName,
+		catchPointPOUName := __POUNAME(),
+		catchPointPosition := __POSITION()
+	);
+__ENDTRY
+
+Assert.ThatBool(
+	actual := __QUERYINTERFACE(caught, indexException),
+	message := "Index equal to Length must raise ArgumentOutOfRangeException"
+).IsTrue();
+
+Assert.ThatDInt(
+	actual := _Stack.Length,
+	message := "Rejected accesses must preserve the entry count"
+).ToBe(expected := DINT#1);
+
+Assert.ThatInt(
+	actual := _Stack.Peek().AsInt(),
+	message := "Rejected accesses must preserve the top"
+).ToBe(expected := value);]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="FB_init" Id="{65333e5f-59bc-4189-a69e-d45f6fffee75}">
+      <Declaration><![CDATA[(*!
+<summary>Binds the stack fixture for this case.</summary>
+<description>
+Stores a borrowed interface without invoking the fixture. The owning group keeps it alive and
+reserves it for this case. TestElement initializes the name and parent.
+</description>
+<param name="name">Display name of this case.</param>
+<param name="parent">Group that owns this case.</param>
+<param name="stack">Required live stack reserved for this case.</param>
+*)
+METHOD FB_init : BOOL
+VAR_INPUT
+	bInitRetains: BOOL; // TRUE: the retain variables are initialized (reset warm / reset cold)
+	bInCopyCode: BOOL; // TRUE: the instance will be copied to the copy code afterward (online change)
+	name : WSTRING;
+	parent : TOF_Testing.ITestElement;
+	stack : TOF_Collections.IStack;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_Stack := stack;
+FB_init := TRUE;]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="NamespaceName" Id="{6f5eb47f-e088-43ba-9e3c-534d0d2b8dbc}">
+      <Declaration><![CDATA[//! <summary>Borrows the compiler-initialized namespace name. Callers must not modify it.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{63c06ff9-475b-4079-a2ad-15cb8a5515b4}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[NamespaceName REF= CurrentNamespace.Name;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="SelfSize" Id="{ae970106-a9ac-44cc-8e59-c4d52f3e94ae}">
+      <Declaration><![CDATA[//! <summary>Reports the concrete instance size in bytes.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY SelfSize : ULINT]]></Declaration>
+      <Get Name="Get" Id="{8aa5fc6a-99d9-4a31-a868-a1a259f22924}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[SelfSize := XSIZEOF(THIS^);]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+  </POU>
+</TcPlcObject>

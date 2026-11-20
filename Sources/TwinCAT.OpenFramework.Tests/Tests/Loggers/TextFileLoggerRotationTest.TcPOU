@@ -1,0 +1,283 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="TextFileLoggerRotationTest" Id="{315d0f2a-7ae0-4bb3-8c17-cf8704bf4efc}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+SPDX-FileCopyrightText: c 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+SPDX-License-Identifier: MIT
+License: https://opensource.org/license/mit
+*)
+
+(*!
+<summary>Checks numbered UTF-16 records and file rotation in an exclusively owned directory.</summary>
+<description>
+One task writes 49 records, stops the logger and reads the five generated files before removal.
+A 30-second scenario deadline includes preparation and readback. Failures retain cooperative cleanup
+without a forced deadline. Reset the runner only after completion.
+</description>
+*)
+
+{attribute 'no_assign'}
+{attribute 'no_explicit_call' := 'do not call this function block directly'}
+FUNCTION_BLOCK TextFileLoggerRotationTest EXTENDS TOF_Testing.MultiCycleTest
+VAR_STAT
+	{attribute 'hide'}
+	_ClassName : STRING := __POUNAME();
+END_VAR
+VAR
+	_SimpleTextFileLogger : TOF_Loggers.SimpleTextFileLogger(
+		directoryPath := 'C:\OpenFrameworkTests\Logger_Smoke',
+		logFilePrefix := 'Log',
+		maxRecordsPerFile := 10,
+		directoryPathType := Tc2_System.E_OpenPath.PATH_GENERIC,
+		timeout := Tc2_System.Global_Variables.DEFAULT_ADS_TIMEOUT,
+		amsNetId := ''
+	);
+	_LogDirectory : LoggerTestDirectory(
+		directoryPath := 'C:\OpenFrameworkTests\Logger_Smoke',
+		logFilePrefix := 'Log'
+	);
+	_Phase : LOGGER_FILE_TEST_PHASE;
+	_Number : ULINT;
+	_Deadline : Tc2_Standard.TON;
+	_Failure : TOF_Core.ERROR_MESSAGE;
+	_CleanupInterrupted : BOOL;
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[]]></ST>
+    </Implementation>
+    <Method Name="BeforeTest" Id="{0c5e017a-5b58-49a3-aa83-97f04b3c3c09}">
+      <Declaration><![CDATA[(*!
+<summary>Rearms the owned directory, logger and scenario clock before each run.</summary>
+*)
+METHOD PROTECTED BeforeTest]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_Timeout := T#0S;
+
+IF _SimpleTextFileLogger.State = TOF_Loggers.SIMPLE_TEXT_FILE_LOGGER_STATE.FAILED THEN
+	RecordFailure(message := "File logger remains in terminal failure");
+	RETURN;
+END_IF
+
+IF NOT _LogDirectory.Reset() THEN
+	RecordFailure(message := "Cannot rearm Logger_Smoke directory after its previous run");
+	RETURN;
+END_IF
+
+IF _SimpleTextFileLogger.State = TOF_Loggers.SIMPLE_TEXT_FILE_LOGGER_STATE.STOPPED THEN
+	IF NOT _SimpleTextFileLogger.Start() THEN
+		RecordFailure(message := "Previously stopped file logger refused Start");
+		RETURN;
+	END_IF
+END_IF
+
+_Phase := LOGGER_FILE_TEST_PHASE.PREPARE_DIRECTORY;
+_Number := 0;
+_Failure := "";
+_CleanupInterrupted := FALSE;
+_Deadline(IN := FALSE, PT := T#30S);]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="advanceScenario" Id="{0e5ee68c-f51d-4abb-9eb4-a5c58c84d940}">
+      <Declaration><![CDATA[(*!
+<summary>Advances preparation, one numbered write, stopping or readback within the scenario deadline.</summary>
+*)
+METHOD PRIVATE advanceScenario
+VAR
+	logMessage : TOF_Core.ERROR_MESSAGE;
+	expectedRecord : WSTRING(255);
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_Deadline(IN := TRUE, PT := T#30S);
+
+IF _Deadline.Q THEN
+	_Failure := "File logger scenario exceeded 30 seconds";
+	RETURN;
+END_IF
+
+CASE _Phase OF
+	LOGGER_FILE_TEST_PHASE.PREPARE_DIRECTORY:
+		IF FileTestRoot.FailureMessage <> TOF_Core.Strings.Empty THEN
+			_Failure := TO_WSTRING(FileTestRoot.FailureMessage);
+			RETURN;
+		END_IF
+
+		IF FileTestRoot.Prepared THEN
+			_LogDirectory.Prepare();
+
+			IF _LogDirectory.PreparationFailed THEN
+				_Failure := TOF_Core.WideStrings.ConcatFit255(
+					"Directory preparation failed: ",
+					TO_WSTRING(_LogDirectory.PreparationMessage)
+				);
+			ELSIF _LogDirectory.Prepared THEN
+				_Phase := LOGGER_FILE_TEST_PHASE.SEND_MESSAGES;
+			END_IF
+		END_IF
+
+	LOGGER_FILE_TEST_PHASE.SEND_MESSAGES:
+		_Number := _Number + 1;
+		logMessage := TOF_Core.WideStrings.Concat255("This is log message #", TO_WSTRING(_Number));
+		expectedRecord := TOF_Core.WideStrings.Concat255(
+			"#",
+			TO_WSTRING(_Number),
+			": [INFORMATION] This is log message #",
+			TO_WSTRING(_Number)
+		);
+
+		IF NOT _LogDirectory.ExpectRecord(text := expectedRecord) THEN
+			_Failure := TOF_Core.WideStrings.Concat255("Cannot register expected record ", TO_WSTRING(_Number));
+			RETURN;
+		END_IF
+
+		IF NOT _SimpleTextFileLogger.TryLogMessage(
+			category := TOF_Core.LOG_CATEGORY.INFORMATION,
+			message := logMessage,
+			messageNumber := _Number
+		) THEN
+			_Failure := TOF_Core.WideStrings.Concat255("Logger rejected record ", TO_WSTRING(_Number));
+			RETURN;
+		END_IF
+
+		_SimpleTextFileLogger.Execute();
+
+		IF _Number = 49 THEN
+			IF NOT _SimpleTextFileLogger.Stop() THEN
+				_Failure := "File logger refused normal stopping";
+			END_IF
+
+			_Phase := LOGGER_FILE_TEST_PHASE.WAIT_FOR_STOP;
+		END_IF
+
+	LOGGER_FILE_TEST_PHASE.WAIT_FOR_STOP:
+		_SimpleTextFileLogger.Execute();
+
+		IF _SimpleTextFileLogger.State = TOF_Loggers.SIMPLE_TEXT_FILE_LOGGER_STATE.STOPPED THEN
+			IF _SimpleTextFileLogger.Busy THEN
+				_Failure := "Stopped file logger remains busy";
+			ELSIF _SimpleTextFileLogger.TryLogMessage(
+				category := TOF_Core.LOG_CATEGORY.INFORMATION,
+				message := "after stop"
+			) THEN
+				_Failure := "Stopped file logger accepted a message";
+			END_IF
+
+			_Phase := LOGGER_FILE_TEST_PHASE.READBACK;
+		END_IF
+
+	LOGGER_FILE_TEST_PHASE.READBACK:
+		_LogDirectory.Cleanup();
+
+		IF _LogDirectory.CleanupComplete THEN
+			IF _LogDirectory.FileCount <> 5 THEN
+				_Failure := "Forty-nine records must rotate into five files";
+			ELSIF _LogDirectory.LargestFileRecordCount > 10 THEN
+				_Failure := "A rotated log file exceeded its ten-record limit";
+			ELSIF _LogDirectory.RecordCount <> 49 THEN
+				_Failure := "Readback must contain forty-nine records";
+			END_IF
+
+			_Phase := LOGGER_FILE_TEST_PHASE.COMPLETE;
+		END_IF
+END_CASE
+
+IF _SimpleTextFileLogger.State = TOF_Loggers.SIMPLE_TEXT_FILE_LOGGER_STATE.FAILED AND_THEN _Failure = "" THEN
+	_Failure := TOF_Core.WideStrings.ConcatFit255("File logger failed: ", _SimpleTextFileLogger.ErrorMessage);
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="ExecuteTest" Id="{4de6593c-96d4-4f46-a127-0397c8fddad7}">
+      <Declaration><![CDATA[(*!
+<summary>Retains scenario failures until the logger drains and directory cleanup completes.</summary>
+*)
+METHOD PROTECTED ExecuteTest : TOF_Testing.TEST_CYCLE_RESULT]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[ExecuteTest := TOF_Testing.TEST_CYCLE_RESULT.BUSY;
+
+IF _Phase <> LOGGER_FILE_TEST_PHASE.COMPLETE THEN
+	__TRY
+		advanceScenario();
+	__CATCH
+		_Failure := "Exception interrupted the file logger scenario";
+	__ENDTRY
+
+	IF _Failure <> "" THEN
+		_Phase := LOGGER_FILE_TEST_PHASE.COMPLETE;
+	END_IF
+
+	RETURN;
+END_IF
+
+__TRY
+	IF _SimpleTextFileLogger.State = TOF_Loggers.SIMPLE_TEXT_FILE_LOGGER_STATE.FAILED THEN
+		IF _SimpleTextFileLogger.Busy THEN
+			_SimpleTextFileLogger.Execute();
+			RETURN;
+		END_IF
+
+	ELSIF _SimpleTextFileLogger.State <> TOF_Loggers.SIMPLE_TEXT_FILE_LOGGER_STATE.STOPPED THEN
+		_SimpleTextFileLogger.Stop();
+		_SimpleTextFileLogger.Execute();
+		RETURN;
+	END_IF
+
+	_LogDirectory.Cleanup();
+__CATCH
+	_CleanupInterrupted := TRUE;
+	RETURN;
+__ENDTRY
+
+IF NOT _LogDirectory.CleanupComplete THEN
+	RETURN;
+END_IF
+
+IF _CleanupInterrupted THEN
+	TOF_Core.WideStrings.AppendFit(targetString := _Failure, sourceString := " Cleanup was interrupted.");
+END_IF
+
+IF NOT _LogDirectory.CleanupSucceeded OR_ELSE _LogDirectory.CleanupMessage <> TOF_Core.Strings.Empty THEN
+	TOF_Core.WideStrings.AppendFit(targetString := _Failure, sourceString := " Logger_Smoke cleanup: ");
+	TOF_Core.WideStrings.AppendFit255(_Failure, TO_WSTRING(_LogDirectory.CleanupMessage));
+END_IF
+
+IF _Failure <> "" THEN
+	RecordFailure(message := _Failure);
+END_IF
+
+ExecuteTest := TOF_Testing.TEST_CYCLE_RESULT.DONE;]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="ClassName" Id="{575b65d7-ffd8-4769-9afb-e49175f46034}">
+      <Declaration><![CDATA[//! <summary>Borrows the concrete class name for the instance lifetime. Callers must not modify it.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{1a736263-34e3-4a90-a992-3d971dd3868e}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ClassName REF= _ClassName;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="NamespaceName" Id="{1c34563c-c7e7-40ba-b73e-572f3f418b11}">
+      <Declaration><![CDATA[//! <summary>Borrows the compiler-initialized namespace. Callers must not modify it.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{9fc9e27f-64fa-4bf9-b284-caaed4bcf901}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[NamespaceName REF= CurrentNamespace.Name;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="SelfSize" Id="{48ea15b5-6af7-42c7-b428-86c52d7849f8}">
+      <Declaration><![CDATA[//! <summary>Reports the complete instance size in bytes, excluding separately allocated storage.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY SelfSize : ULINT]]></Declaration>
+      <Get Name="Get" Id="{1b0c5db9-0d2d-407a-a125-9121941874ac}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[SelfSize := XSIZEOF(THIS^);]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+  </POU>
+</TcPlcObject>

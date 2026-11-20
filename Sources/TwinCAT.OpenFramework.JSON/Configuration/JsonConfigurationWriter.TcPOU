@@ -11,6 +11,7 @@ License: https://opensource.org/license/mit
 <summary>Serializes configuration objects into a JSON document.</summary>
 <description>
 The instance owns its native SAX writer. Use sequentially from one task without reentry.
+WriteValue validates the source address, type and size before emitting a field. WSTRING values produce JSON text.
 The writer does not track key uniqueness or nesting depth; maintaining unique property names and balanced
 object/array calls is the responsibility of the caller. Structural violations are propagated from the native writer.
 </description>
@@ -30,6 +31,7 @@ END_VAR
 VAR
 	_Writer : Tc3_JsonXml.FB_JsonSaxWriter;
 	_Converter : Tc3_JsonXml.FB_JsonReadWriteDatatype;
+	_Utf8Value : TOF_Core.JSON_DOCUMENT;
 END_VAR]]></Declaration>
     <Implementation>
       <ST><![CDATA[]]></ST>
@@ -258,7 +260,10 @@ EndDocument(document := document);]]></ST>
       <Declaration><![CDATA[(*!
 <summary>Copies one elementary IEC value.</summary>
 <description>
-Writes a property key when name is nonempty, then writes the symbol value. Property names within an enclosing
+Rejects a null source or invalid type/size before writing a key. These validation failures preserve the document.
+For WSTRING, converts the text up to its first null word to UTF-8 before writing the optional key.
+An unterminated source or incomplete conversion raises StandardException.
+Writes the value after its optional key. Property names within an enclosing
 object must be unique. Propagates native writer errors to the active serialization call. A native value conversion
 failure reports the field name and requested native datatype.
 </description>
@@ -277,15 +282,13 @@ END_VAR
 VAR
 	typeName : STRING;
 	written : BOOL;
+	sourceWords : POINTER TO WORD;
+	wordCount : UDINT;
+	textLength : UDINT;
 	result : HRESULT;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[IF name <> '' THEN
-	// Tc3_JsonXml.FB_JsonSaxWriter.AddKey returns VOID; state errors are caught by subsequent calls.
-	_Writer.AddKey(key := name);
-END_IF
-
-IF data = 0 OR_ELSE size = 0 THEN
+        <ST><![CDATA[IF data = 0 OR_ELSE size = 0 THEN
 	checkResult(result := _InvalidArgument);
 END_IF
 
@@ -293,6 +296,42 @@ typeName := JsonDatatypes.ToDatatypeName(valueType := valueType, size := size);
 
 IF typeName = '' THEN
 	checkResult(result := _InvalidArgument);
+END_IF
+
+IF valueType = TOF_Core.CONFIGURATION_VALUE_TYPE.TYPE_WSTRING THEN
+	sourceWords := data;
+	wordCount := size / TOF_Core.WideStrings.CharSize;
+
+	WHILE textLength < wordCount AND_THEN sourceWords[textLength] <> 0 DO
+		textLength := textLength + 1;
+	END_WHILE
+
+	IF textLength = wordCount THEN
+		checkResult(result := _InvalidArgument, name := name, typeName := typeName);
+	END_IF
+
+	_Utf8Value := '';
+
+	IF textLength > 0 THEN
+		IF NOT Tc2_Utilities.WSTRING_TO_UTF8(
+			pDstUTF8 := ADR(_Utf8Value),
+			pSrcWSTRING := data,
+			nDstSize := SIZEOF(_Utf8Value)
+		) OR_ELSE Tc2_Utilities.UTF8Len(pUTF8 := ADR(_Utf8Value)) <> textLength
+		THEN
+			checkResult(result := _InvalidArgument, name := name, typeName := typeName);
+		END_IF
+	END_IF
+END_IF
+
+IF name <> '' THEN
+	// Tc3_JsonXml.FB_JsonSaxWriter.AddKey returns VOID; state errors are caught by subsequent calls.
+	_Writer.AddKey(key := name);
+END_IF
+
+IF valueType = TOF_Core.CONFIGURATION_VALUE_TYPE.TYPE_WSTRING THEN
+	_Writer.AddString(value := _Utf8Value);
+	RETURN;
 END_IF
 
 written := _Converter.AddJsonValueFromSymbol(

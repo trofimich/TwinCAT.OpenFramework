@@ -1,0 +1,283 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="FileBinaryBufferMatrixTest" Id="{e5929575-df4a-4ae4-84a3-e9dfc3b15d7f}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+SPDX-FileCopyrightText: © 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+SPDX-License-Identifier: MIT
+License: https://opensource.org/license/mit
+*)
+
+(*!
+<summary>Checks six invalid binary buffer configurations on an acquired file resource.</summary>
+<description>
+Uses an owned file and opens a fresh update handle for each row. Verifies the configured property diagnostic,
+neutral public results, intact caller data and resource release. No sampled cycle may report native busy;
+native tracing is needed to rule out a submission that completed between observations.
+Use from one task and do not copy this test.
+</description>
+*)
+
+{attribute 'no_assign'}
+{attribute 'no_explicit_call' := 'do not call this function block directly'}
+FUNCTION_BLOCK FileBinaryBufferMatrixTest EXTENDS FileContentScenarioTest
+VAR_STAT
+	//! <summary>Class name shared by instances of this concrete function block.</summary>
+	{attribute 'hide'}
+	_ClassName : STRING := __POUNAME();
+END_VAR
+VAR CONSTANT
+	//! <summary>First row using WriteBytesToFile. The preceding three rows use ReadBytesFromFile.</summary>
+	_FirstWriteRow : DINT := 3;
+	//! <summary>Total number of null and zero sized buffer configurations under test.</summary>
+	_RowCount : DINT := 6;
+	//! <summary>Identifies unexpected changes to caller-owned storage in each invalid row.</summary>
+	_BufferSentinel : BYTE := BYTE#16#A5;
+	//! <summary>Creates a new, empty binary file before the validation rows.</summary>
+	_CreateBinaryMode : DWORD := Tc2_System.Global_Variables.FOPEN_MODEWRITE
+		OR Tc2_System.Global_Variables.FOPEN_MODEBINARY;
+	//! <summary>Reopens the existing file for binary reads and writes without truncating it.</summary>
+	_OpenBinaryMode : DWORD := Tc2_System.Global_Variables.FOPEN_MODEREAD
+		OR Tc2_System.Global_Variables.FOPEN_MODEPLUS
+		OR Tc2_System.Global_Variables.FOPEN_MODEBINARY;
+END_VAR
+VAR
+	_Phase : FILE_BUFFER_TEST_PHASE;
+	_Read : TOF_FileSystem.ReadBytesFromFile(name := "Invalid read buffer");
+	_Write : TOF_FileSystem.WriteBytesToFile(name := "Invalid write buffer");
+	_Operation : TOF_Tasks.ITask;
+	_ExpectedProperty : STRING(32);
+	_Row : DINT;
+	_Buffer : BYTE;
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[]]></ST>
+    </Implementation>
+    <Method Name="ResetScenario" Id="{864820d6-2adc-49c8-9d79-5de9ee9d0c32}">
+      <Declaration><![CDATA[(*!
+<summary>Rearms the binary operations and restarts the matrix from its first row.</summary>
+*)
+METHOD PROTECTED ResetScenario : BOOL]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_Phase := FILE_BUFFER_TEST_PHASE.CREATE_FILE;
+_Operation := 0;
+_Row := 0;
+ResetScenario := _Read.Reset() AND_THEN _Write.Reset();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="AdvanceScenario" Id="{fac0f9cc-b81b-4cdb-94a1-d2e6af60f106}">
+      <Declaration><![CDATA[(*!
+<summary>Creates the fixture file and advances one invalid buffer row at a time.</summary>
+<description>Queues the invalid child only after acquisition is observed. Returns TRUE after the sixth row.</description>
+*)
+METHOD PROTECTED AdvanceScenario : BOOL]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[CASE _Phase OF
+	FILE_BUFFER_TEST_PHASE.CREATE_FILE:
+		_Directory.ExpectFirstFile();
+		ConfigureFile(filePath := _Directory.FirstFilePath, modeFlags := _CreateBinaryMode);
+		CheckScenario(condition := _Manager.Start(), message := "Creating the matrix file refused Start");
+		_Phase := FILE_BUFFER_TEST_PHASE.WAIT_FOR_FILE;
+
+	FILE_BUFFER_TEST_PHASE.WAIT_FOR_FILE:
+		_Manager.Execute();
+
+		IF _Manager.State.Stopped THEN
+			IF NOT _Manager.FinalStopReason.WorkDone OR_ELSE _Manager.ResourceManager.ResourceAcquired THEN
+				_ScenarioFailure := "Creating the matrix file did not finish and release the resource: ";
+				TOF_Core.WideStrings.AppendFit(
+					targetString := _ScenarioFailure,
+					sourceString := _Manager.FinalStopReason.Message
+				);
+				RETURN;
+			END_IF
+
+			_Phase := FILE_BUFFER_TEST_PHASE.START_INVALID_OPERATION;
+		END_IF
+
+	FILE_BUFFER_TEST_PHASE.START_INVALID_OPERATION:
+		startRow();
+
+	FILE_BUFFER_TEST_PHASE.WAIT_FOR_INVALID_OPERATION:
+		_Manager.Execute();
+
+		IF _Manager.State.Stopped THEN
+			IF NOT checkRow() THEN
+				RETURN;
+			END_IF
+
+			_Row := _Row + 1;
+			AdvanceScenario := _Row = _RowCount;
+			_Phase := FILE_BUFFER_TEST_PHASE.START_INVALID_OPERATION;
+		ELSIF _Read.FileOperationInProgress OR_ELSE _Write.FileOperationInProgress THEN
+			failRow(reason := "an invalid buffer exposed a pending native request");
+		ELSIF _Manager.ResourceManager.ResourceAcquired
+			AND_THEN _Manager.RunningSubstate.Processing
+			AND_THEN _Manager.PendingTaskCount = 0
+			AND_THEN _Operation.State.Ready
+		THEN
+			IF _Row < _FirstWriteRow THEN
+				_Manager.Enqueue(fileHandleTask := _Read);
+			ELSE
+				_Manager.Enqueue(fileHandleTask := _Write);
+			END_IF
+
+			_Manager.StopWhenNoPendingTasks := TRUE;
+		END_IF
+END_CASE]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="startRow" Id="{c57297b0-13a6-47d6-8321-655f46fcf3ae}">
+      <Declaration><![CDATA[(*!
+<summary>Configures one null or zero buffer combination and starts acquiring its file.</summary>
+<description>Called with no active file operation, after creating the file or checking the previous row.</description>
+*)
+METHOD PRIVATE startRow]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF NOT _Manager.Reset() OR_ELSE NOT _Read.Reset() OR_ELSE NOT _Write.Reset() THEN
+	_ScenarioFailure := TOF_Core.WideStrings.ConcatFit255(
+		"Buffer row ", TO_WSTRING(_Row + 1), ": the manager or a binary operation refused Reset"
+	);
+	RETURN;
+END_IF
+
+ConfigureFile(filePath := _Directory.FirstFilePath, modeFlags := _OpenBinaryMode);
+_Manager.StopWhenNoPendingTasks := FALSE;
+_Buffer := _BufferSentinel;
+_Read.Timeout := _NativeTimeout;
+_Write.Timeout := _NativeTimeout;
+_Read.TargetBuffer := TOF_Core.Memory.NULL_ADDRESS;
+_Read.BytesCountToRead := TOF_Core.UnsignedInt32.ZERO;
+_Write.SourceBuffer := TOF_Core.Memory.NULL_ADDRESS;
+_Write.BytesCountToWrite := TOF_Core.UnsignedInt32.ZERO;
+
+CASE _Row OF
+	0:
+		_Read.BytesCountToRead := 1;
+		_ExpectedProperty := 'TargetBuffer';
+	1:
+		_Read.TargetBuffer := ADR(_Buffer);
+		_ExpectedProperty := 'BytesCountToRead';
+	2:
+		_ExpectedProperty := 'TargetBuffer';
+	3:
+		_Write.BytesCountToWrite := 1;
+		_ExpectedProperty := 'SourceBuffer';
+	4:
+		_Write.SourceBuffer := ADR(_Buffer);
+		_ExpectedProperty := 'BytesCountToWrite';
+	5:
+		_ExpectedProperty := 'SourceBuffer';
+END_CASE
+
+IF _Row < _FirstWriteRow THEN
+	_Operation := _Read;
+ELSE
+	_Operation := _Write;
+END_IF
+
+IF NOT _Manager.Start() THEN
+	failRow(reason := "the update file manager refused Start");
+	RETURN;
+END_IF
+
+_Phase := FILE_BUFFER_TEST_PHASE.WAIT_FOR_INVALID_OPERATION;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="checkRow" Id="{dee10696-9af4-4d66-a1de-60c0bf6b56fc}">
+      <Declaration><![CDATA[(*!
+<summary>Verifies the actual child failure, release and data after the manager stops.</summary>
+<description>Returns TRUE for a failed child with its expected property diagnostic and no retained resource.</description>
+*)
+METHOD PRIVATE checkRow : BOOL
+VAR
+	diagnostic : STRING(255);
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF NOT _Operation.State.Stopped OR_ELSE NOT _Operation.FinalStopReason.Failure THEN
+	failRow(reason := "the invalid child did not reach STOPPED with Failure");
+	TOF_Core.WideStrings.AppendFit(targetString := _ScenarioFailure, sourceString := " | Manager: ");
+	TOF_Core.WideStrings.AppendFit(targetString := _ScenarioFailure, sourceString := _Manager.FinalStopReason.Message);
+	RETURN;
+END_IF
+
+IF NOT _Manager.FinalStopReason.Failure OR_ELSE _Manager.ResourceManager.ResourceAcquired THEN
+	failRow(reason := "the manager did not report Failure with the resource released");
+	RETURN;
+END_IF
+
+IF _Read.FileOperationInProgress OR_ELSE _Write.FileOperationInProgress THEN
+	failRow(reason := "native I/O was still pending after the manager stopped");
+	RETURN;
+END_IF
+
+IF _Buffer <> _BufferSentinel
+	OR_ELSE _Read.ActuallyReadBytes <> TOF_Core.UnsignedInt32.ZERO
+	OR_ELSE _Write.ActuallyWrittenBytes <> TOF_Core.UnsignedInt32.ZERO
+	OR_ELSE _Read.IsEndOfFile
+THEN
+	failRow(reason := "the invalid operation altered caller data or exposed a non-neutral result");
+	RETURN;
+END_IF
+
+diagnostic := TO_STRING(_Operation.FinalStopReason.Message);
+
+IF NOT TOF_Core.Strings.Contains(stringToSearchIn := diagnostic, stringToFind := _ExpectedProperty) THEN
+	failRow(reason := "the child diagnostic did not name the expected public property");
+	TOF_Core.WideStrings.AppendFit(targetString := _ScenarioFailure, sourceString := " | Actual: ");
+	TOF_Core.WideStrings.AppendFit(targetString := _ScenarioFailure, sourceString := _Operation.FinalStopReason.Message);
+	RETURN;
+END_IF
+
+checkRow := TRUE;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="failRow" Id="{b86034d6-8eca-485c-952d-71c44e957552}">
+      <Declaration><![CDATA[(*!
+<summary>Copies the matrix row, expected property and its first failure for deferred reporting.</summary>
+<param name="reason">Condition that failed before cooperative cleanup.</param>
+*)
+METHOD PRIVATE failRow
+VAR_INPUT
+	reason : WSTRING(255);
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_ScenarioFailure := TOF_Core.WideStrings.ConcatFit255(
+	"Buffer row ", TO_WSTRING(_Row + 1), " (", TO_WSTRING(_ExpectedProperty), "): ", reason
+);]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="ClassName" Id="{6a98acae-f2e5-4069-a381-7efe32a74256}">
+      <Declaration><![CDATA[//! <summary>Borrows the concrete type name; callers must not modify the referenced storage.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{02cebf06-5e63-44fc-bbb4-5036573497a6}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ClassName REF= _ClassName;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="NamespaceName" Id="{155fc00b-16c2-4d58-a560-2b026931db70}">
+      <Declaration><![CDATA[//! <summary>Borrows the compiler-initialized namespace; callers must not modify it.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{6850793d-b3a5-4662-81fb-7a5795e93888}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[NamespaceName REF= CurrentNamespace.Name;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="SelfSize" Id="{531cc56e-4455-459d-b9f0-e731942c04f9}">
+      <Declaration><![CDATA[//! <summary>Reports the concrete instance size in bytes, excluding separately allocated storage.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY SelfSize : ULINT]]></Declaration>
+      <Get Name="Get" Id="{4ccfc268-1700-4c82-92d1-3aab0a1077a8}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[SelfSize := XSIZEOF(THIS^);]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+  </POU>
+</TcPlcObject>

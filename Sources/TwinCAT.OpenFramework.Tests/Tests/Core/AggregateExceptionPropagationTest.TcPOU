@@ -1,0 +1,222 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="AggregateExceptionPropagationTest" Id="{0e37efab-418c-4012-ae0d-526219635187}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+SPDX-FileCopyrightText: c 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+SPDX-License-Identifier: MIT
+License: https://opensource.org/license/mit
+*)
+
+(*!
+<summary>Checks aggregate flattening, transport, ordering and diagnostic snapshots.</summary>
+<description>
+Uses one task and stays at a stable address while assertions are bound to this instance.
+</description>
+*)
+
+{attribute 'no_assign'}
+{attribute 'no_explicit_call' := 'do not call this function block directly'}
+FUNCTION_BLOCK AggregateExceptionPropagationTest EXTENDS TOF_Testing.SingleCycleTest
+VAR_STAT
+	{attribute 'hide'}
+	_ClassName : STRING := __POUNAME();
+END_VAR
+VAR
+	_Aggregate : TOF_Core.AggregateException;
+	_AdditionalCauses : TOF_Core.AggregateException;
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[]]></ST>
+    </Implementation>
+    <Method Name="ExecuteTest" Id="{e5ded981-817b-4633-85b5-0bb4f0105fa9}">
+      <Declaration><![CDATA[(*!
+<summary>Checks aggregate flattening, transport, ordering and diagnostic snapshots.</summary>
+<description>
+The persistent arrays belong to this test. Within the current PLC cycle, compares borrowed causes by
+read-only interface identity and checks null results on both sides of the valid index range.
+Compares the full default message and reports the expected and actual text if they differ.
+</description>
+*)
+METHOD PROTECTED ExecuteTest
+VAR
+	exceptionCode : __SYSTEM.ExceptionCode;
+	caught : TOF_Core.IException;
+	cause : TOF_Core.IStandardException;
+	aggregate : TOF_Core.IAggregateException;
+	causes : ARRAY [0..2] OF TOF_Core.IReadOnlyException;
+	observedCause : TOF_Core.IReadOnlyException;
+
+	causeMessages : ARRAY [0..2] OF WSTRING := ["First cause", "Second cause", "Third cause"];
+	causeMessage : TOF_Core.ERROR_MESSAGE;
+	message : TOF_Core.ERROR_MESSAGE;
+	expectedMessage : TOF_Core.ERROR_MESSAGE;
+	snapshot : TOF_Core.ERROR;
+	i : DINT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[FOR i := 0 TO UPPER_BOUND(causes, 1) DO
+	causeMessage := causeMessages[i];
+	caught := 0;
+
+	// Capture each deliberate throw before adding its task-owned payload to the fixture.
+	__TRY
+		TOF_Core.Exceptions.ThrowStandard(
+			sourceNamespaceName := NamespaceName,
+			sourceClassName := ClassName,
+			sourcePOUName := 'RaiseCause',
+			sourcePosition := __POSITION(),
+			message := causeMessage
+		);
+	__CATCH(exceptionCode)
+		caught := TOF_Core.ExceptionManager.GetLastException(
+			exceptionCode := exceptionCode,
+			catchPointNamespaceName := NamespaceName,
+			catchPointPOUName := __POUNAME(),
+			catchPointPosition := __POSITION()
+		);
+	__ENDTRY
+
+	IF NOT __QUERYINTERFACE(caught, cause) THEN
+		Assert.ThatBool(
+			actual := FALSE,
+			message := Tc2_Utilities.WCONCAT(STR1 := "Aggregate setup did not catch ", STR2 := causeMessages[i])
+		).IsTrue();
+		RETURN;
+	END_IF
+
+	causes[i] := cause;
+
+	IF i = 0 THEN
+		_Aggregate.AddInnerException(innerException := cause);
+	ELSE
+		_AdditionalCauses.AddInnerException(innerException := cause);
+	END_IF
+END_FOR
+
+_Aggregate.AddInnerException(innerException := _AdditionalCauses);
+_AdditionalCauses.Clear();
+
+// Catch the aggregate snapshot before clearing its caller-owned source.
+caught := 0;
+
+__TRY
+	_Aggregate.Throw(
+		sourceNamespaceName := NamespaceName,
+		sourceClassName := ClassName,
+		sourcePOUName := __POUNAME(),
+		sourcePosition := __POSITION()
+	);
+__CATCH(exceptionCode)
+	caught := TOF_Core.ExceptionManager.GetLastException(
+		exceptionCode := exceptionCode,
+		catchPointNamespaceName := NamespaceName,
+		catchPointPOUName := __POUNAME(),
+		catchPointPosition := __POSITION()
+	);
+__ENDTRY
+
+_Aggregate.Clear();
+
+IF NOT __QUERYINTERFACE(caught, aggregate) THEN
+	RecordFailure(message := "Aggregate Throw must propagate a concrete aggregate snapshot");
+	RETURN;
+END_IF
+
+Assert.ThatUInt(
+	actual := aggregate.InnerExceptionCount,
+	message := "The propagated aggregate must contain all three flattened causes"
+).ToBe(expected := UINT#3);
+
+FOR i := 0 TO UPPER_BOUND(causes, 1) DO
+	observedCause := aggregate.GetInnerException(index := i);
+	Assert.ThatBool(
+		actual := observedCause = causes[i],
+		message := Tc2_Utilities.WCONCAT(STR1 := "Wrong aggregate position for ", STR2 := causeMessages[i])
+	).IsTrue();
+END_FOR
+
+observedCause := aggregate.GetInnerException(index := -1);
+Assert.ThatBool(
+	actual := observedCause = 0,
+	message := "Aggregate indexing before the first entry must return null"
+).IsTrue();
+
+observedCause := aggregate.GetInnerException(index := 3);
+Assert.ThatBool(
+	actual := observedCause = 0,
+	message := "Aggregate indexing after the last entry must return null"
+).IsTrue();
+
+observedCause := aggregate.GetRootException();
+Assert.ThatBool(
+	actual := observedCause = causes[0],
+	message := "Aggregate root must come from the first cause"
+).IsTrue();
+
+// The index suffix includes a space and the formatter appends one more before each cause.
+expectedMessage := "3 aggregated exceptions$R0:  First cause$R1:  Second cause$R2:  Third cause";
+message := aggregate.GetMessage();
+Assert.That(
+	actual := message,
+	message := "The aggregate must describe all three causes in index order"
+).ToBe(expected := expectedMessage);
+
+aggregate.ToError(targetError := snapshot, severity := TOF_Core.ERROR_SEVERITY.CRITICAL);
+Assert.ThatBool(
+	actual := snapshot.TopMessage = message AND_THEN snapshot.RootMessage = "First cause",
+	message := "The aggregate ERROR must copy the complete message and the first root diagnostic"
+).IsTrue();
+Assert.ThatBool(
+	actual := snapshot.Severity = TOF_Core.ERROR_SEVERITY.CRITICAL,
+	message := "Aggregate ToError must copy the supplied severity"
+).IsTrue();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="AfterTest" Id="{c2c3f1d1-5a1b-4822-b89b-d2a0b906a8eb}">
+      <Declaration><![CDATA[(*!
+<summary>Clears the caller-owned aggregate storage before the result is reported.</summary>
+<description>
+Safe after partial setup or repeated Clear. The task memory manager retains ownership of dynamic causes.
+</description>
+*)
+METHOD PROTECTED AfterTest]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_AdditionalCauses.Clear();
+_Aggregate.Clear();]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="ClassName" Id="{ef8e4770-3c49-4b22-ac64-09e276200145}">
+      <Declaration><![CDATA[//! <summary>Borrows the concrete class name. Callers must not modify it.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{bf84b1e1-6dc5-437e-b5a1-b3ef7deb65e8}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ClassName REF= _ClassName;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="NamespaceName" Id="{c8d47bc3-2cc9-44d0-9da3-383d22e64cbb}">
+      <Declaration><![CDATA[//! <summary>Borrows the compiler-initialized namespace name. Callers must not modify it.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{ec503060-17d0-4505-8733-b3df1ae44fed}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[NamespaceName REF= CurrentNamespace.Name;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="SelfSize" Id="{b885607f-07fe-4cd5-9523-767718904052}">
+      <Declaration><![CDATA[//! <summary>Reports the concrete instance size in bytes.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY SelfSize : ULINT]]></Declaration>
+      <Get Name="Get" Id="{78a90079-b575-4b73-af64-76e1ff1f76d0}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[SelfSize := XSIZEOF(THIS^);]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+  </POU>
+</TcPlcObject>

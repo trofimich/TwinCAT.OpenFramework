@@ -1,0 +1,181 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="GenericBorrowedWritesTest" Id="{6d53b67a-2423-4c54-be68-d5a1e6a796e3}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+SPDX-FileCopyrightText: c 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+SPDX-License-Identifier: MIT
+License: https://opensource.org/license/mit
+*)
+
+(*!
+<summary>Checks compatible writes and nonmutating rejection in borrowed storage.</summary>
+<description>
+Uses run-local fixtures and references that are used only within the executing PLC task.
+The runner binds assertions to the instance address. Keep the instance at that address for its run.
+</description>
+*)
+
+{attribute 'no_assign'}
+{attribute 'no_explicit_call' := 'do not call this function block directly'}
+FUNCTION_BLOCK GenericBorrowedWritesTest EXTENDS TOF_Testing.SingleCycleTest
+VAR_STAT
+	{attribute 'hide'}
+	_ClassName : STRING := __POUNAME();
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[]]></ST>
+    </Implementation>
+    <Method Name="ExecuteTest" Id="{18ad630a-f263-4181-8c58-7d3e79e867ec}">
+      <Declaration><![CDATA[(*!
+<summary>Checks compatible borrowed writes and direct rejection of type and capacity mismatches.</summary>
+<description>
+Both Try entry points exercise live source and destination storage. Each rejection preserves the destination
+and the known task exception. The original string descriptor address is captured before writes. Borrowed
+descriptors and their addresses stay within the callback.
+</description>
+*)
+METHOD PROTECTED ExecuteTest
+VAR
+	destination : TOF_Core.GENERIC_VALUE;
+	stored : REAL := 3.0;
+	integerInput : DINT := 5;
+	realInput : REAL := 5.0;
+	shortDestination : TOF_Core.GENERIC_VALUE;
+	originalShortAddress : POINTER TO BYTE;
+	shortText : STRING(1) := 'x';
+	longText : STRING(8) := 'longer';
+	replacementText : STRING(1) := 'y';
+	source : TOF_Core.GENERIC_VALUE;
+	accepted : BOOL;
+	exceptionCode : __SYSTEM.ExceptionCode;
+	sentinel : TOF_Core.IException;
+	afterFailure : TOF_Core.IException;
+	sentinelMessage : TOF_Core.ERROR_MESSAGE := "Try write exception sentinel";
+	standardException : TOF_Core.IStandardException;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[// Establish a known task payload so a false result cannot hide a replaced exception.
+__TRY
+	TOF_Core.Exceptions.ThrowStandard(
+		sourceNamespaceName := NamespaceName,
+		sourceClassName := ClassName,
+		sourcePOUName := __POUNAME(),
+		sourcePosition := __POSITION(),
+		message := sentinelMessage
+	);
+__CATCH(exceptionCode)
+	sentinel := TOF_Core.ExceptionManager.GetLastException(
+		exceptionCode := exceptionCode,
+		catchPointNamespaceName := NamespaceName,
+		catchPointPOUName := __POUNAME(),
+		catchPointPosition := __POSITION()
+	);
+__ENDTRY
+
+IF NOT __QUERYINTERFACE(sentinel, standardException) THEN
+	RecordFailure(message := "The test must establish a standard exception before attempting writes");
+	RETURN;
+END_IF
+
+Assert.ThatBool(
+	actual := standardException.SourceMessage = sentinelMessage,
+	message := "The task payload must be the test sentinel"
+).IsTrue();
+
+destination := TOF_Core.GenericValueFactory.FromRealReference(value := stored);
+accepted := destination.TryChangeValueByAny(value := integerInput);
+afterFailure := TOF_Core.ExceptionManager.GetLastException(
+	exceptionCode := __SYSTEM.ExceptionCode.RTSEXCPT_USER_EXCEPTION_BASE,
+	catchPointNamespaceName := NamespaceName,
+	catchPointPOUName := __POUNAME(),
+	catchPointPosition := __POSITION()
+);
+Assert.ThatBool(actual := accepted, message := "DINT cannot replace REAL storage").IsFalse();
+Assert.ThatBool(actual := sentinel = afterFailure, message := "Type rejection must preserve the task payload").IsTrue();
+Assert.ThatReal(actual := stored, message := "Rejected DINT changed REAL storage").ToBe(expected := REAL#3.0);
+
+shortDestination := TOF_Core.GenericValueFactory.FromAny(
+	value := shortText,
+	isObject := FALSE,
+	memoryManagementBehavior := TOF_Core.GENERIC_MEMORY_MANAGEMENT_BEHAVIOR.STORE_ORIGINAL_REFERENCE_AND_NOT_OWNS_MEMORY
+);
+originalShortAddress := shortDestination.Address;
+source := TOF_Core.GenericValueFactory.FromAny(
+	value := longText,
+	isObject := FALSE,
+	memoryManagementBehavior := TOF_Core.GENERIC_MEMORY_MANAGEMENT_BEHAVIOR.STORE_ORIGINAL_REFERENCE_AND_NOT_OWNS_MEMORY
+);
+accepted := shortDestination.TryChangeValueByAnyType(value := source.AsAnyType());
+afterFailure := TOF_Core.ExceptionManager.GetLastException(
+	exceptionCode := __SYSTEM.ExceptionCode.RTSEXCPT_USER_EXCEPTION_BASE,
+	catchPointNamespaceName := NamespaceName,
+	catchPointPOUName := __POUNAME(),
+	catchPointPosition := __POSITION()
+);
+Assert.ThatBool(actual := accepted, message := "Undersized storage must reject the string copy").IsFalse();
+Assert.ThatBool(
+	actual := sentinel = afterFailure,
+	message := "Capacity rejection must preserve the task payload"
+).IsTrue();
+Assert.ThatBool(
+	actual := standardException.SourceMessage = sentinelMessage,
+	message := "Type and capacity rejections must preserve the original exception text"
+).IsTrue();
+Assert.ThatBool(actual := shortText = 'x', message := "Rejected size changed STRING storage").IsTrue();
+
+accepted := destination.TryChangeValueByAny(value := realInput);
+Assert.ThatBool(actual := accepted, message := "Compatible REAL storage must accept a copy").IsTrue();
+Assert.ThatReal(actual := stored, message := "Compatible REAL copy lost the value").ToBe(expected := realInput);
+
+source := TOF_Core.GenericValueFactory.FromAny(
+	value := replacementText,
+	isObject := FALSE,
+	memoryManagementBehavior := TOF_Core.GENERIC_MEMORY_MANAGEMENT_BEHAVIOR.STORE_ORIGINAL_REFERENCE_AND_NOT_OWNS_MEMORY
+);
+accepted := shortDestination.TryChangeValueByAnyType(value := source.AsAnyType());
+Assert.ThatBool(actual := accepted, message := "Equal STRING capacity must accept a copy").IsTrue();
+Assert.ThatBool(actual := shortText = 'y', message := "Compatible STRING copy lost the value").IsTrue();
+Assert.ThatBool(
+	actual := shortDestination.Address = originalShortAddress
+		AND_THEN shortDestination.Size = XSIZEOF(shortText)
+		AND_THEN shortDestination.TypeClass = TOF_Core.GENERIC_TYPE_CLASS.STRING_8
+		AND_THEN NOT shortDestination.IsMemoryOwner,
+	message := "STRING writes must preserve size, type, address and borrowed ownership"
+).IsTrue();]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="ClassName" Id="{e7f52761-a0d4-4444-995a-952eee74742c}">
+      <Declaration><![CDATA[//! <summary>Borrows the concrete class name. Callers must not modify it.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{5fc7f42a-0c6a-476c-9a43-d8d3319d51cd}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ClassName REF= _ClassName;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="NamespaceName" Id="{58d1dbbf-ec6e-4873-b709-702dfecd65c8}">
+      <Declaration><![CDATA[//! <summary>Borrows the compiler-initialized namespace name. Callers must not modify it.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{510f9c34-c0ec-4d63-97e5-a409d20a49b0}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[NamespaceName REF= CurrentNamespace.Name;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="SelfSize" Id="{e8e5d178-40f2-4d36-bfd6-cae9f53def3f}">
+      <Declaration><![CDATA[//! <summary>Reports the concrete instance size in bytes.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY SelfSize : ULINT]]></Declaration>
+      <Get Name="Get" Id="{4972f44d-496b-4b93-8b18-47537fce766e}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[SelfSize := XSIZEOF(THIS^);]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+  </POU>
+</TcPlcObject>

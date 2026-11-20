@@ -1,4 +1,4 @@
-<?xml version="1.0" encoding="utf-8"?>
+﻿<?xml version="1.0" encoding="utf-8"?>
 <TcPlcObject Version="1.1.0.1">
   <POU Name="TestCase" Id="{a31ba67b-3136-4955-a98e-c221d790c630}" SpecialFunc="None">
     <Declaration><![CDATA[(*
@@ -18,7 +18,8 @@ A failing exception formatter produces a stage/code fallback without replacing a
 Exceptions from scenario hooks become one failed leaf result; catches do not roll back user side effects.
 Terminal OOM propagates outside recoverable handlers and stops normal execution; teardown is not promised then.
 Throwing callbacks must not use method-local resource-owning FBs that require stack unwinding.
-Path-provider and reporter exceptions propagate after terminal state is committed; completed callbacks are never retried.
+Path-provider and reporter exceptions propagate after terminal state is committed and the stored reporter reference
+is cleared. Completed callbacks are never retried.
 </description>
 *)
 
@@ -99,11 +100,15 @@ PROPERTY FINAL Elapsed : TIME]]></Declaration>
       <Declaration><![CDATA[(*!
 <summary>Schedules one leaf cycle and commits one result after teardown.</summary>
 <description>
-Scenario exceptions are converted to FAILED so the containing sequence can continue. Reporter failures propagate.
+Scenario exceptions are converted to FAILED so the containing sequence can continue. Completion clears the
+stored reporter reference before path lookup and result delivery. Exceptions from either callback propagate.
 </description>
 *)
+// Manual stack estimate for TwinCAT. Reassess if callbacks or test workloads change.
+{attribute 'estimated-stack-usage' := '16384'}
 METHOD FINAL Execute
 VAR
+	resultReporter : ITestReporter;
 	groupPath : WSTRING(255);
 	exceptionCode : __SYSTEM.ExceptionCode;
 	cycleResult : TEST_CYCLE_RESULT;
@@ -181,23 +186,23 @@ ELSE
 	_PassedCount := 1;
 END_IF
 
+resultReporter := _Reporter;
+_Reporter := 0;
 _State := TEST_ELEMENT_STATE.COMPLETED;
 
-IF _Reporter <> 0 THEN
+IF resultReporter <> 0 THEN
 	IF _Parent <> 0 THEN
 		groupPath := _Parent.GetPath();
 	END_IF
 
-	_Reporter.ReportTestCaseResult(
+	resultReporter.ReportTestCaseResult(
 		groupPath := groupPath,
 		testName := _Name,
 		outcome := _Outcome,
 		duration := Duration,
 		message := _FailureMessage
 	);
-END_IF
-
-_Reporter := 0;]]></ST>
+END_IF]]></ST>
       </Implementation>
     </Method>
     <Property Name="FailureMessage" Id="{53c0c4a4-1fd1-47f9-96b9-2c4bd55bf1c2}">
@@ -306,5 +311,18 @@ METHOD PROTECTED ABSTRACT RunCycle : TEST_CYCLE_RESULT]]></Declaration>
         <ST><![CDATA[]]></ST>
       </Implementation>
     </Method>
+    <Property Name="TestCount" Id="{06655745-6194-4112-8ff9-bf68f1de8991}">
+      <Declaration><![CDATA[(*!
+<summary>Counts this single scenario regardless of execution state or outcome.</summary>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY FINAL TestCount : TOF_Core.DINT_LENGTH]]></Declaration>
+      <Get Name="Get" Id="{653a1bc8-b657-4d26-8b2d-3c8b803ac45b}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[TestCount := 1;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
   </POU>
 </TcPlcObject>

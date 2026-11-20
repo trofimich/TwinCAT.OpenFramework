@@ -1,0 +1,173 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="AutomaticJsonCallbackContainmentAndReuseTest" Id="{2ef77c8e-fc0e-4239-93f0-783a5ba72746}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+SPDX-FileCopyrightText: c 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+SPDX-License-Identifier: MIT
+License: https://opensource.org/license/mit
+*)
+
+(*!
+<summary>Checks exceptions from each hook in both TryCreate paths and writer reset on reuse.</summary>
+<description>
+Owns persistent native serializer state and any payload buffers used by this case.
+Run from one task at a stable address. The caller provides task-boundary exception cleanup.
+</description>
+*)
+
+{attribute 'no_assign'}
+{attribute 'no_explicit_call' := 'do not call this function block directly'}
+FUNCTION_BLOCK AutomaticJsonCallbackContainmentAndReuseTest EXTENDS TOF_Testing.SingleCycleTest
+VAR_STAT
+	{attribute 'hide'}
+	_ClassName : STRING := __POUNAME();
+END_VAR
+VAR
+	_Serializer : TOF_JSON.AutomaticJsonSerializer;
+	_Extender : JsonExtenderProbe;
+	_Source : JSON_TEST_VALUE;
+	_Json : TOF_Core.JSON_DOCUMENT;
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[]]></ST>
+    </Implementation>
+    <Method Name="ExecuteTest" Id="{42b1888a-73c7-4b77-9f22-f04861008ccd}">
+      <Declaration><![CDATA[(*!
+<summary>Checks exceptions from each hook in both TryCreate paths and writer reset on reuse.</summary>
+*)
+METHOD PROTECTED ExecuteTest
+VAR
+	i : INT;
+	sourceInfo : __SYSTEM.VAR_INFO;
+	success : BOOL;
+	leaked : BOOL;
+	jsonSize : UDINT;
+	expectedJson : STRING(40) := '[{"Number":42,"Ready":true}]';
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_Source.Number := 42;
+_Source.Ready := TRUE;
+
+_Json := '';
+
+_Extender.Reset();
+
+sourceInfo := __VARINFO(_Source);
+
+FOR i := 0 TO 3 DO
+	_Extender.Reset();
+	_Extender.ThrowAtStart := (i MOD 2) = 0;
+	_Extender.ThrowAtFinish := NOT _Extender.ThrowAtStart;
+	leaked := FALSE;
+
+	__TRY
+		IF i < 2 THEN
+			success := _Serializer.TrySerialize(
+				sourceStructure := _Source,
+				extender := _Extender,
+				targetJson := _Json,
+				jsonSize => jsonSize
+			);
+		ELSE
+			success := _Serializer.TrySerializeByVarInfo(
+				sourceStructureVarInfo := sourceInfo,
+				sourceStructureAddress := ADR(_Source),
+				extender := _Extender,
+				targetJson := _Json,
+				jsonSize => jsonSize
+			);
+		END_IF
+	__CATCH
+		leaked := TRUE;
+	__ENDTRY
+
+	Assert.ThatBool(
+		actual := leaked,
+		message := "Callback exception must not escape Try"
+	).IsFalse();
+	Assert.ThatBool(
+		actual := success,
+		message := "Each callback exception must fail Try"
+	).IsFalse();
+	Assert.ThatUDInt(
+		actual := _Extender.StartCount,
+		message := "Start must be observed"
+	).ToBe(expected := 1);
+
+	IF _Extender.ThrowAtStart THEN
+		Assert.ThatUDInt(
+			actual := _Extender.FinishCount,
+			message := "Failed start must skip finish"
+		).ToBe(expected := 0);
+	ELSE
+		Assert.ThatUDInt(
+			actual := _Extender.FinishCount,
+			message := "Finish failure must be observed"
+		).ToBe(expected := 1);
+	END_IF
+
+	_Extender.Reset();
+	success := _Serializer.TrySerialize(
+		sourceStructure := _Source,
+		extender := _Extender,
+		targetJson := _Json,
+		jsonSize => jsonSize
+	);
+	Assert.ThatBool(
+		actual := success,
+		message := "Writer must be reusable after either callback failure"
+	).IsTrue();
+	Assert.That(
+		actual := _Json,
+		message := "Reuse must discard the previous partial document"
+	).ToBe(expected := expectedJson);
+END_FOR]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="AfterTest" Id="{7be871cc-6d90-4466-aac8-99815b41b91d}">
+      <Declaration><![CDATA[(*!
+<summary>Restores the fixture before the runner publishes the result.</summary>
+<description>
+Also runs after an unexpected exception interrupts the case.
+</description>
+*)
+METHOD PROTECTED AfterTest]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_Extender.Reset();]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="ClassName" Id="{7dcef803-7878-4b0f-813f-bc54a216edac}">
+      <Declaration><![CDATA[//! <summary>Borrows the concrete class name. Callers must not modify it.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{20160fed-aea9-4cc5-abfd-902b93e464f2}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ClassName REF= _ClassName;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="NamespaceName" Id="{52966b5c-fef2-4be1-8751-670c78a7937a}">
+      <Declaration><![CDATA[//! <summary>Borrows the compiler-initialized namespace name. Callers must not modify it.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{4ced5b63-cac6-4ccf-adf0-82c693b9c2f5}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[NamespaceName REF= CurrentNamespace.Name;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="SelfSize" Id="{32318eaf-9849-4022-a24e-0ab9979be9e3}">
+      <Declaration><![CDATA[//! <summary>Reports the concrete instance size in bytes.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY SelfSize : ULINT]]></Declaration>
+      <Get Name="Get" Id="{9916e9bc-83be-46b3-9c12-50cba1840f2e}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[SelfSize := XSIZEOF(THIS^);]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+  </POU>
+</TcPlcObject>

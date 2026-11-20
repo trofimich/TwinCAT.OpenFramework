@@ -49,7 +49,7 @@ It brings modern software tools — ready-to-use data structures, structured err
 | `TwinCAT.OpenFramework.Testing` | `TOF_Testing` | Native PLC unit-test runner, typed assertions, ADS & JUnit XML reporters |
 | `TwinCAT.OpenFramework.HowTo` | `TOF_HowTo` | Minimal standalone learning examples (`IO`, `Testing`) without extra framework dependencies |
 | `TwinCAT.OpenFramework.Samples` | `TOF_Samples` | Complete demo applications (`Intersection`, `Workflow`) |
-| `TwinCAT.OpenFramework.Tests` | `TOF_Tests` | Automated unit and contract test suites (`TcUnit` & `TOF_Testing`) |
+| `TwinCAT.OpenFramework.Tests` | `TOF_Tests` | Automated `TOF_Testing` suites and an independent driver for framework contract tests |
 
 ---
 
@@ -80,7 +80,6 @@ Compare traditional ST approaches with the framework:
 ## 📈 Roadmap & Community
 
 Active development focuses on:
-* Gradual migration of existing unit tests from `TcUnit` to `TwinCAT.OpenFramework.Testing`.
 * Resolving remaining `Devices.IO` diagnostic/converter edge cases and expanding `HowTo` examples (`FileSystem`, `Tasks`, `Collections`, `Exceptions`, `JSON`).
 * Expanding industrial device abstractions with `ISimulatable` support (valves, cylinders, drives, `Tc2_MC2` axes) and `TwinCAT HMI` integration.
 

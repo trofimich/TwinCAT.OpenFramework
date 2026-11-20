@@ -1,0 +1,169 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1" ProductVersion="3.1.4026.21">
+  <POU Name="UniqueDataSetRemoveTest" Id="{cecc88c2-5cdc-4b6e-b346-9f1b6477ef08}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+SPDX-FileCopyrightText: c 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+SPDX-License-Identifier: MIT
+License: https://opensource.org/license/mit
+*)
+
+(*!
+<summary>Checks positional, raw and generic removal with stable membership afterward.</summary>
+<description>
+Borrows one group-owned set reserved for this case. Use from one task at a stable address.
+Teardown clears the set and releases its owned entries before publication.
+</description>
+*)
+
+{attribute 'no_assign'}
+{attribute 'no_explicit_call' := 'do not call this function block directly'}
+FUNCTION_BLOCK UniqueDataSetRemoveTest EXTENDS TOF_Testing.SingleCycleTest
+VAR_STAT
+	{attribute 'hide'}
+	_ClassName : STRING := __POUNAME();
+END_VAR
+VAR
+	_Set : TOF_Collections.IUniqueDataSet;
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[]]></ST>
+    </Implementation>
+    <Method Name="AfterTest" Id="{48e55607-5043-43ec-a78d-7d5f529954c1}">
+      <Declaration><![CDATA[(*!
+<summary>Clears the fixture before the runner publishes the result.</summary>
+<description>
+Also runs after an unexpected exception interrupts the case.
+</description>
+*)
+METHOD PROTECTED AfterTest]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_Set.Clear();]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="ClassName" Id="{766516b2-74f9-4a2c-96d7-b0186f8cfbee}">
+      <Declaration><![CDATA[//! <summary>Borrows the concrete class name. Callers must not modify it.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{e3beac03-a0bf-4a3f-a773-82027d0749d6}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ClassName REF= _ClassName;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="ExecuteTest" Id="{dc1d0145-a7da-423c-abff-0c5fbcc9d368}">
+      <Declaration><![CDATA[(*!
+<summary>Checks positional, raw and generic removal with stable membership afterward.</summary>
+*)
+METHOD PROTECTED ExecuteTest
+VAR
+	values : ARRAY [0..6] OF STRING :=
+		['String0', 'String1', 'String2', 'String3', 'String4', 'String5', 'String6'];
+	i : DINT;
+	position : DINT;
+	removed : BOOL;
+	query : TOF_Core.GENERIC_VALUE;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[FOR i := 6 TO 0 BY -1 DO
+	_Set.SetCopy(value := values[i]);
+END_FOR
+
+position := _Set.GetValuePosition(value := values[3]);
+
+IF position < 0 OR_ELSE position >= _Set.Length THEN
+	RecordFailure(message := "String3 must have a valid position before removal");
+
+	RETURN;
+END_IF
+
+_Set.RemoveAt(index := position);
+
+Assert.ThatBool(
+	actual := _Set.Length = 6 AND_THEN NOT _Set.Contains(value := values[3]),
+	message := "RemoveAt must remove String3 from the set"
+).IsTrue();
+
+_Set.TryRemove(value := values[2], removed => removed);
+
+Assert.ThatBool(
+	actual := removed AND_THEN _Set.Length = 5 AND_THEN NOT _Set.Contains(value := values[2]),
+	message := "TryRemove must remove String2 and report success"
+).IsTrue();
+
+query := TOF_Core.GenericValueFactory.FromStringReference(value := values[1]);
+_Set.TryRemoveGeneric(value := query, releaseValue := FALSE, removed => removed);
+
+Assert.ThatBool(
+	actual := removed AND_THEN _Set.Length = 4 AND_THEN NOT _Set.Contains(value := values[1]),
+	message := "TryRemoveGeneric must remove String1 and report success"
+).IsTrue();
+
+_Set.TryRemoveGeneric(value := query, releaseValue := FALSE, removed => removed);
+
+Assert.ThatBool(
+	actual := NOT removed AND_THEN _Set.Length = 4,
+	message := "Repeating removal of String1 must leave the set unchanged"
+).IsTrue();
+
+FOR i := 4 TO 6 DO
+	Assert.ThatBool(
+		actual := _Set.Contains(value := values[i]),
+		message := TOF_Core.WideStrings.Concat255("Removal must preserve the value at offset ", TO_WSTRING(i))
+	).IsTrue();
+END_FOR
+
+Assert.ThatBool(
+	actual := _Set.Contains(value := values[0]),
+	message := "Removal must preserve String0"
+).IsTrue();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="FB_init" Id="{7636faef-6a3f-49b0-b694-3aa5af592ab0}">
+      <Declaration><![CDATA[(*!
+<summary>Binds the unique set fixture for this case.</summary>
+<description>
+Stores a borrowed interface without invoking the fixture. The owning group keeps it alive and
+reserves it for this case. TestElement initializes the name and parent.
+</description>
+<param name="name">Display name of this case.</param>
+<param name="parent">Group that owns this case.</param>
+<param name="dataSet">Required live unique set reserved for this case.</param>
+*)
+METHOD FB_init : BOOL
+VAR_INPUT
+	bInitRetains: BOOL; // TRUE: the retain variables are initialized (reset warm / reset cold)
+	bInCopyCode: BOOL; // TRUE: the instance will be copied to the copy code afterward (online change)
+	name : WSTRING;
+	parent : TOF_Testing.ITestElement;
+	dataSet : TOF_Collections.IUniqueDataSet;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_Set := dataSet;
+FB_init := TRUE;]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="NamespaceName" Id="{bad3574d-246f-42b0-849e-c51f57f17a91}">
+      <Declaration><![CDATA[//! <summary>Borrows the compiler-initialized namespace name. Callers must not modify it.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{1575e34e-9a70-47d1-ad60-2d310e01f9c6}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[NamespaceName REF= CurrentNamespace.Name;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="SelfSize" Id="{ec10ebb0-23bb-4651-84bd-170e1ea62a57}">
+      <Declaration><![CDATA[//! <summary>Reports the concrete instance size in bytes.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY SelfSize : ULINT]]></Declaration>
+      <Get Name="Get" Id="{eb21c9c4-02d1-48b2-afc8-03ef2dc80c2c}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[SelfSize := XSIZEOF(THIS^);]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+  </POU>
+</TcPlcObject>

@@ -1,0 +1,193 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="LexicalPathValidationTest" Id="{98e3a94e-1606-42b6-ab48-c17697f03e90}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+SPDX-FileCopyrightText: © 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+SPDX-License-Identifier: MIT
+License: https://opensource.org/license/mit
+*)
+
+(*!
+<summary>Checks lexical path acceptance, rejection diagnostics and full-length path handling.</summary>
+<description>Uses fixed expectations and requires no filesystem I/O or shared test directory.</description>
+*)
+
+{attribute 'no_explicit_call' := 'do not call this function block directly'}
+FUNCTION_BLOCK LexicalPathValidationTest EXTENDS TOF_Testing.SingleCycleTest
+VAR CONSTANT
+	//! <summary>Lexical inputs and their independent expected directory and file results.</summary>
+	_PathCases : ARRAY [0..23] OF PATH_VALIDATION_TEST_CASE := [
+		(Path := '', DirectoryAccepted := FALSE, FileAccepted := FALSE),
+		(Path := 'C:\file.txt', DirectoryAccepted := TRUE, FileAccepted := TRUE),
+		(Path := 'C:\', DirectoryAccepted := TRUE, FileAccepted := FALSE),
+		(Path := '/', DirectoryAccepted := TRUE, FileAccepted := FALSE),
+		(Path := '\', DirectoryAccepted := TRUE, FileAccepted := FALSE),
+		(Path := 'file/', DirectoryAccepted := TRUE, FileAccepted := FALSE),
+		(Path := 'file\', DirectoryAccepted := TRUE, FileAccepted := FALSE),
+		(Path := '\\server\share\file', DirectoryAccepted := TRUE, FileAccepted := TRUE),
+		(Path := '//server/share/file', DirectoryAccepted := TRUE, FileAccepted := TRUE),
+		(Path := 'a//b', DirectoryAccepted := FALSE, FileAccepted := FALSE),
+		(Path := 'C:relative', DirectoryAccepted := FALSE, FileAccepted := FALSE),
+		(Path := '1:\file', DirectoryAccepted := FALSE, FileAccepted := FALSE),
+		(Path := 'file^name', DirectoryAccepted := FALSE, FileAccepted := FALSE),
+		(Path := '.', DirectoryAccepted := TRUE, FileAccepted := TRUE),
+		(Path := '..', DirectoryAccepted := TRUE, FileAccepted := TRUE),
+		(Path := 'CON', DirectoryAccepted := TRUE, FileAccepted := TRUE),
+		(Path := 'file ', DirectoryAccepted := TRUE, FileAccepted := TRUE),
+		(Path := 'file.', DirectoryAccepted := TRUE, FileAccepted := TRUE),
+		(Path := 'file?x', DirectoryAccepted := FALSE, FileAccepted := FALSE),
+		(Path := 'file$01', DirectoryAccepted := FALSE, FileAccepted := FALSE),
+		(Path := 'C:/file', DirectoryAccepted := TRUE, FileAccepted := TRUE),
+		(Path := '\\', DirectoryAccepted := TRUE, FileAccepted := FALSE),
+		(Path := 'a\\b', DirectoryAccepted := FALSE, FileAccepted := FALSE),
+		(Path := 'C:\123|456', DirectoryAccepted := FALSE, FileAccepted := FALSE)
+	];
+END_VAR
+VAR_STAT
+	{attribute 'hide'}
+	_ClassName : STRING := __POUNAME();
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[]]></ST>
+    </Implementation>
+    <Property Name="ClassName" Id="{3027f0a8-e919-46ee-af55-758ce0ddfe3e}">
+      <Declaration><![CDATA[(*!
+<summary>Borrows the concrete class name for the lifetime of this instance.</summary>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{4c328859-d17e-4f13-89a4-7bfcf001a83c}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ClassName REF= _ClassName;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="ExecuteTest" Id="{d4cec831-809e-41b4-ab46-4941d9de82e0}">
+      <Declaration><![CDATA[(*!
+<summary>Runs the path matrix and the full-length separator checks in a single cycle.</summary>
+*)
+METHOD PROTECTED ExecuteTest]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[checkPathMatrix();
+checkFullLengthPath();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="checkPathMatrix" Id="{b8931ce9-624d-4a10-ae4a-7626ce3a5672}">
+      <Declaration><![CDATA[(*!
+<summary>Checks both lexical outcomes and requires a fresh diagnostic on every rejection.</summary>
+<description>Reads fixed cases from the test fixture. Reserved names and dot components are checked only against the lexical filter.</description>
+*)
+METHOD PRIVATE checkPathMatrix
+VAR
+	accepted : BOOL;
+	errorMessage : WSTRING(255);
+	pathForDiagnostic : WSTRING(255);
+	i : DINT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[FOR i := LOWER_BOUND(_PathCases, 1) TO UPPER_BOUND(_PathCases, 1) DO
+	pathForDiagnostic := TO_WSTRING(_PathCases[i].Path);
+	errorMessage := TOF_Core.WideStrings.Empty;
+	accepted := TOF_FileSystem.PathHelper.IsValidDirectoryPath(
+		directoryPath := _PathCases[i].Path,
+		errorMessage => errorMessage
+	);
+	Assert.ThatBool(
+		actual := accepted,
+		message := TOF_Core.WideStrings.ConcatFit255("Directory path: [", pathForDiagnostic, "]")
+	).ToBe(expected := _PathCases[i].DirectoryAccepted);
+
+	IF NOT _PathCases[i].DirectoryAccepted THEN
+		Assert.ThatWideString(
+			actual := errorMessage,
+			message := TOF_Core.WideStrings.ConcatFit255("Missing directory rejection diagnostic: [", pathForDiagnostic, "]")
+		).NotToBe(expected := TOF_Core.WideStrings.Empty);
+	END_IF
+
+	errorMessage := TOF_Core.WideStrings.Empty;
+	accepted := TOF_FileSystem.PathHelper.IsValidFilePath(filePath := _PathCases[i].Path, errorMessage => errorMessage);
+	Assert.ThatBool(
+		actual := accepted,
+		message := TOF_Core.WideStrings.ConcatFit255("File path: [", pathForDiagnostic, "]")
+	).ToBe(expected := _PathCases[i].FileAccepted);
+
+	IF NOT _PathCases[i].FileAccepted THEN
+		Assert.ThatWideString(
+			actual := errorMessage,
+			message := TOF_Core.WideStrings.ConcatFit255("Missing file rejection diagnostic: [", pathForDiagnostic, "]")
+		).NotToBe(expected := TOF_Core.WideStrings.Empty);
+	END_IF
+END_FOR]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="checkFullLengthPath" Id="{f06f8fbe-22da-4c79-8e58-49a9de82eefc}">
+      <Declaration><![CDATA[(*!
+<summary>Checks the last payload byte of a full-length path for the file and directory rules.</summary>
+*)
+METHOD PRIVATE checkFullLengthPath
+VAR
+	path : Tc2_System.T_MaxString;
+	lastPayloadIndex : UDINT;
+	i : UDINT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[// The final byte of the IEC string is reserved for its terminator.
+lastPayloadIndex := SIZEOF(path) - 2;
+
+// SA0175: The boundary fixture is a byte string containing ASCII characters.
+{analysis -175}
+FOR i := 0 TO lastPayloadIndex DO
+	path[i] := Tc2_System.F_ToASC(str := 'a');
+END_FOR
+
+path[lastPayloadIndex + 1] := 0;
+{analysis +175}
+
+Assert.ThatBool(
+	actual := TOF_FileSystem.PathHelper.IsValidFilePath(filePath := path),
+	message := "A 255-byte lexical filename must pass"
+).IsTrue();
+
+{analysis -175}
+path[lastPayloadIndex] := Tc2_System.F_ToASC(str := '/');
+{analysis +175}
+
+Assert.ThatBool(
+	actual := TOF_FileSystem.PathHelper.IsValidFilePath(filePath := path),
+	message := "A separator at the last payload byte must be rejected for a file"
+).IsFalse();
+Assert.ThatBool(
+	actual := TOF_FileSystem.PathHelper.IsValidDirectoryPath(directoryPath := path),
+	message := "A trailing directory separator is permitted lexically"
+).IsTrue();]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="NamespaceName" Id="{27e1ac8a-d7de-466c-a8f3-66f693155094}">
+      <Declaration><![CDATA[(*!
+<summary>Borrows the compiler-initialized namespace for the lifetime of this instance.</summary>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{3cced243-422f-4f28-be13-89a62646ce2d}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[NamespaceName REF= CurrentNamespace.Name;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="SelfSize" Id="{f8ab2084-3307-42b3-96c4-8e5488586195}">
+      <Declaration><![CDATA[(*!
+<summary>Reports the complete concrete instance size in bytes.</summary>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY SelfSize : ULINT]]></Declaration>
+      <Get Name="Get" Id="{785f0540-c2b4-4d76-b33f-e4d1b5cf3e57}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[SelfSize := XSIZEOF(THIS^);]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+  </POU>
+</TcPlcObject>

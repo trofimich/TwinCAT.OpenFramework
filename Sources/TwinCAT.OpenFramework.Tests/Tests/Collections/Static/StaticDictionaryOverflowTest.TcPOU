@@ -1,0 +1,163 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="StaticDictionaryOverflowTest" Id="{97642ad9-a61c-4de1-8ac4-351d000b15e9}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+SPDX-FileCopyrightText: c 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+SPDX-License-Identifier: MIT
+License: https://opensource.org/license/mit
+*)
+
+(*!
+<summary>Checks rejection of a new key at capacity and reuse after removal.</summary>
+<description>
+Owns a fixed-capacity dictionary and copied pairs at a stable address. Run from one task.
+Teardown clears surviving entries before publication.
+</description>
+*)
+
+{attribute 'no_assign'}
+{attribute 'no_explicit_call' := 'do not call this function block directly'}
+FUNCTION_BLOCK StaticDictionaryOverflowTest EXTENDS TOF_Testing.SingleCycleTest
+VAR_STAT
+	{attribute 'hide'}
+	_ClassName : STRING := __POUNAME();
+END_VAR
+VAR
+	_Dictionary : TOF_Collections.Dictionary<7>(keyValidator := 0, valueValidator := 0, keyEqualityComparer := 0);
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[]]></ST>
+    </Implementation>
+    <Method Name="ExecuteTest" Id="{21953ab6-f5c0-4056-805c-f1e239af5767}">
+      <Declaration><![CDATA[(*!
+<summary>Checks rejection of a new key at capacity and reuse after removal.</summary>
+*)
+METHOD PROTECTED ExecuteTest
+VAR
+	keys : ARRAY [0..6] OF INT := [0, 1, 2, 3, 4, 5, 6];
+	values : ARRAY [0..6] OF STRING :=
+		['String0', 'String1', 'String2', 'String3', 'String4', 'String5', 'String6'];
+	i : DINT;
+	newKey : INT := 7;
+	newValue : STRING := 'String7';
+	found : BOOL;
+	removed : BOOL;
+	value : TOF_Core.GENERIC_VALUE;
+
+	exceptionCode : __SYSTEM.ExceptionCode;
+	caught : TOF_Core.IException;
+	fullException : TOF_Core.IStaticCollectionFullException;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[FOR i := 6 TO 0 BY -1 DO
+	_Dictionary.SetCopy(key := keys[i], value := values[i]);
+END_FOR
+
+Assert.ThatBool(
+	actual := _Dictionary.Full AND_THEN _Dictionary.Length = 7,
+	message := "The overflow fixture must start full"
+).IsTrue();
+
+__TRY
+	_Dictionary.SetCopy(key := newKey, value := newValue);
+__CATCH(exceptionCode)
+	caught := TOF_Core.ExceptionManager.GetLastException(
+		exceptionCode := exceptionCode,
+		catchPointNamespaceName := NamespaceName,
+		catchPointPOUName := __POUNAME(),
+		catchPointPosition := __POSITION()
+	);
+__ENDTRY
+
+Assert.ThatBool(
+	actual := __QUERYINTERFACE(caught, fullException),
+	message := "Adding a new key at capacity must raise StaticCollectionFullException"
+).IsTrue();
+
+Assert.ThatBool(
+	actual := _Dictionary.Full AND_THEN _Dictionary.Length = 7 AND_THEN _Dictionary.Capacity = 7,
+	message := "Rejected insertion must preserve full length and capacity"
+).IsTrue();
+
+Assert.ThatBool(
+	actual := _Dictionary.ContainsKey(key := newKey),
+	message := "The rejected key must remain absent"
+).IsFalse();
+
+FOR i := 0 TO 6 DO
+	found := _Dictionary.TryGetValueByKey(key := keys[i], value => value);
+
+	Assert.ThatBool(
+		actual := found AND_THEN value.AsString255() = values[i],
+		message := TOF_Core.WideStrings.Concat255("Overflow must preserve the original pair at key ", TO_WSTRING(i))
+	).IsTrue();
+END_FOR
+
+_Dictionary.TryRemoveByKey(key := keys[3], removed => removed);
+
+Assert.ThatBool(
+	actual := removed,
+	message := "Removing an existing key must free a slot"
+).IsTrue();
+
+_Dictionary.SetCopy(key := newKey, value := newValue);
+found := _Dictionary.TryGetValueByKey(key := newKey, value => value);
+
+Assert.ThatBool(
+	actual := _Dictionary.Full AND_THEN found AND_THEN value.AsString255() = newValue,
+	message := "Reusing a slot must make the new pair visible"
+).IsTrue();
+
+Assert.ThatBool(
+	actual := _Dictionary.ContainsKey(key := keys[3]),
+	message := "Reusing the slot must keep the removed key absent"
+).IsFalse();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="AfterTest" Id="{84dc0a1a-93ff-4fb5-83e7-50a275961ae0}">
+      <Declaration><![CDATA[(*!
+<summary>Clears the fixture before the runner publishes the result.</summary>
+<description>
+Also runs after an unexpected exception interrupts the case.
+</description>
+*)
+METHOD PROTECTED AfterTest]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_Dictionary.Clear();]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="ClassName" Id="{83cb3327-7179-4426-947f-d5b82c6c0ae0}">
+      <Declaration><![CDATA[//! <summary>Borrows the concrete class name. Callers must not modify it.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{7ba3866c-0ae3-4841-8a8a-964922d86bd2}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ClassName REF= _ClassName;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="NamespaceName" Id="{aec6819c-f458-4f55-a5f7-7ed82bdc87a7}">
+      <Declaration><![CDATA[//! <summary>Borrows the compiler-initialized namespace name. Callers must not modify it.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{1448d66a-f742-4102-9099-e4a02b90a7de}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[NamespaceName REF= CurrentNamespace.Name;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="SelfSize" Id="{4b478f78-8378-4eba-9932-bc39b9384ff9}">
+      <Declaration><![CDATA[//! <summary>Reports the concrete instance size in bytes.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY SelfSize : ULINT]]></Declaration>
+      <Get Name="Get" Id="{3b14f0e4-9795-401b-939f-1fb314f78f66}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[SelfSize := XSIZEOF(THIS^);]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+  </POU>
+</TcPlcObject>

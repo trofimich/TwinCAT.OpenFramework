@@ -1,0 +1,151 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1" ProductVersion="3.1.4026.21">
+  <POU Name="StackRemoveLastTest" Id="{3ce8da07-14c2-4a65-bf4e-e89471afa555}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+SPDX-FileCopyrightText: c 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+SPDX-License-Identifier: MIT
+License: https://opensource.org/license/mit
+*)
+
+(*!
+<summary>Checks LIFO removal through empty and reuse of retained storage.</summary>
+<description>
+Borrows a group-owned stack reserved for this case. Use from one task at a stable address.
+Teardown clears the stack and test-owned resources before publication.
+</description>
+*)
+
+{attribute 'no_assign'}
+{attribute 'no_explicit_call' := 'do not call this function block directly'}
+FUNCTION_BLOCK StackRemoveLastTest EXTENDS TOF_Testing.SingleCycleTest
+VAR_STAT
+	{attribute 'hide'}
+	_ClassName : STRING := __POUNAME();
+END_VAR
+VAR
+	_Stack : TOF_Collections.IStack;
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[]]></ST>
+    </Implementation>
+    <Method Name="AfterTest" Id="{0e3b0878-dbf5-40f0-885f-f4c630e191f2}">
+      <Declaration><![CDATA[(*!
+<summary>Clears the fixture before the runner publishes the result.</summary>
+<description>
+Also runs after an unexpected exception interrupts the case.
+</description>
+*)
+METHOD PROTECTED AfterTest]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_Stack.Clear();]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="ClassName" Id="{a674c2fe-f777-4dea-b23b-71769f41fe70}">
+      <Declaration><![CDATA[//! <summary>Borrows the concrete class name. Callers must not modify it.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{ef7a52c8-f562-48ae-a0fe-7467a2b78012}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ClassName REF= _ClassName;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="ExecuteTest" Id="{0c99a2e2-0216-4d03-bed3-d9ddde729f49}">
+      <Declaration><![CDATA[(*!
+<summary>Checks LIFO removal through empty and reuse of retained storage.</summary>
+*)
+METHOD PROTECTED ExecuteTest
+VAR
+	values : ARRAY [1..4] OF INT := [11, 22, 33, 44];
+	usedCapacity : DINT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_Stack.PushCopy(value := values[1]);
+_Stack.PushCopy(value := values[2]);
+_Stack.PushCopy(value := values[3]);
+
+usedCapacity := _Stack.Capacity;
+
+_Stack.RemoveLast();
+
+Assert.ThatInt(
+	actual := _Stack.Peek().AsInt(),
+	message := "Removing the top must reveal the second entry"
+).ToBe(expected := values[2]);
+
+Assert.ThatDInt(
+	actual := _Stack.Length,
+	message := "Removing one entry must leave two"
+).ToBe(expected := DINT#2);
+
+_Stack.RemoveLast();
+
+Assert.ThatInt(
+	actual := _Stack.Peek().AsInt(),
+	message := "Removing the next top must reveal the first entry"
+).ToBe(expected := values[1]);
+
+_Stack.RemoveLast();
+
+Assert.ThatBool(
+	actual := _Stack.Empty AND_THEN _Stack.Capacity = usedCapacity,
+	message := "Removing the last entry must leave empty storage available for reuse"
+).IsTrue();
+
+_Stack.PushCopy(value := values[4]);
+
+Assert.ThatInt(
+	actual := _Stack.Peek().AsInt(),
+	message := "Push after draining must expose the new top"
+).ToBe(expected := values[4]);]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="FB_init" Id="{f8465202-2e71-4468-bccc-0f416e0de57b}">
+      <Declaration><![CDATA[(*!
+<summary>Binds the stack fixture for this case.</summary>
+<description>
+Stores a borrowed interface without invoking the fixture. The owning group keeps it alive and
+reserves it for this case. TestElement initializes the name and parent.
+</description>
+<param name="name">Display name of this case.</param>
+<param name="parent">Group that owns this case.</param>
+<param name="stack">Required live stack reserved for this case.</param>
+*)
+METHOD FB_init : BOOL
+VAR_INPUT
+	bInitRetains: BOOL; // TRUE: the retain variables are initialized (reset warm / reset cold)
+	bInCopyCode: BOOL; // TRUE: the instance will be copied to the copy code afterward (online change)
+	name : WSTRING;
+	parent : TOF_Testing.ITestElement;
+	stack : TOF_Collections.IStack;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_Stack := stack;
+FB_init := TRUE;]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="NamespaceName" Id="{4275b59f-90fd-42c0-9bf1-c3461f5ce9a3}">
+      <Declaration><![CDATA[//! <summary>Borrows the compiler-initialized namespace name. Callers must not modify it.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{758b1357-049b-44a2-9129-692829d203a6}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[NamespaceName REF= CurrentNamespace.Name;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="SelfSize" Id="{dcef128c-66c2-4fa9-a834-0f6558afa21a}">
+      <Declaration><![CDATA[//! <summary>Reports the concrete instance size in bytes.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY SelfSize : ULINT]]></Declaration>
+      <Get Name="Get" Id="{9efdbf13-cadf-4a4d-ab9d-b4cc0c6cd852}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[SelfSize := XSIZEOF(THIS^);]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+  </POU>
+</TcPlcObject>

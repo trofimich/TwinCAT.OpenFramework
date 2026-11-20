@@ -15,7 +15,9 @@ external directory changes and drains every logger before Cleanup. Enumeration r
 loading or deleting files. Expected short records are matched exactly once, including number and category.
 Persistent native state and buffers remain alive during cleanup. Discovery is
 bounded to 32 generated files; byte readback is limited to files smaller than the 8192-byte buffer.
-Errors are retained for owner inspection; no recursive deletion, adoption or terminal OOM injection occurs.
+LargestFileRecordCount reports the largest number of complete records observed in one file.
+Reset rearms a fresh or successfully cleaned fixture. Errors are retained for owner inspection.
+Cleanup uses nonrecursive deletion and never adopts a pre-existing directory.
 </description>
 *)
 
@@ -41,6 +43,7 @@ VAR
 	_FileCount : UINT;
 	_FileIndex : UINT;
 	_RecordCount : UDINT;
+	_LargestFileRecordCount : UDINT;
 	_ExpectedText : ARRAY [0.._MaxExpectedRecords - 1] OF WSTRING(255);
 	_Matched : ARRAY [0.._MaxExpectedRecords - 1] OF BOOL;
 	_ExpectedCount : UINT;
@@ -76,6 +79,7 @@ PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
 Keeps incomplete native operations alive across calls. Searches only the exclusively owned directory,
 registers matching regular files, then reads and deletes only those registered paths. The final inherited
 cleanup attempts nonrecursive directory removal. CleanupComplete does not certify physical native release.
+Readback retains the largest record count across individual files.
 Matching uses exact prefix bytes and ASCII suffix/separators without computing Unicode character positions.
 </description>
 *)
@@ -85,6 +89,7 @@ VAR
 	prefix : STRING(33);
 	i : DINT;
 	recordStart : DINT;
+	fileRecordCount : UDINT;
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[IF _LogCleanupPhase = LOGGER_DIRECTORY_CLEANUP_PHASE.COMPLETE THEN
@@ -189,11 +194,13 @@ __TRY
 				ELSE
 
 					recordStart := 1;
+					fileRecordCount := 0;
 
 					FOR i := 1 TO TO_DINT(_Load.LoadedBytesCount / 2) - 1 DO
 
 						IF _ReadBuffer[i] = WORD#16#000D THEN
 							_RecordCount := _RecordCount + 1;
+							fileRecordCount := fileRecordCount + 1;
 
 							IF NOT matchExpectedRecord(startIndex := recordStart, characterCount := i - recordStart) THEN
 								_CleanupError := 'Readback record differs from the expected text, category or number';
@@ -203,6 +210,8 @@ __TRY
 						END_IF
 
 					END_FOR
+
+					_LargestFileRecordCount := MAX(_LargestFileRecordCount, fileRecordCount);
 
 					IF _ReadBuffer[_Load.LoadedBytesCount / 2 - 1] <> WORD#16#000D THEN
 						_CleanupError := 'Generated record must end with the current wide CR separator';
@@ -310,6 +319,42 @@ PROPERTY CleanupSucceeded : BOOL]]></Declaration>
         </Implementation>
       </Get>
     </Property>
+    <Method Name="Reset" Id="{4bc87e45-2203-4de6-834a-8b5e9f2f06b7}">
+      <Declaration><![CDATA[(*!
+<summary>Rearms a fresh or successfully cleaned logger directory for another complete readback.</summary>
+<description>
+Call with the logger idle. Pending or unsuccessful cleanup refuses reuse and preserves diagnostics.
+Success clears prior matches and discovery counts while retaining the configured path and prefix.
+</description>
+*)
+METHOD Reset : BOOL
+VAR
+	i : UINT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF CleanupComplete AND_THEN NOT CleanupSucceeded THEN
+	RETURN;
+END_IF
+
+IF NOT SUPER^.Reset() THEN
+	RETURN;
+END_IF
+
+FOR i := 0 TO _MaxExpectedRecords - 1 DO
+	_Matched[i] := FALSE;
+END_FOR
+
+_FileCount := 0;
+_FileIndex := 0;
+_RecordCount := 0;
+_LargestFileRecordCount := 0;
+_ExpectedCount := 0;
+_MatchedCount := 0;
+_CleanupError := TOF_Core.Strings.Empty;
+_LogCleanupPhase := LOGGER_DIRECTORY_CLEANUP_PHASE.ENUMERATE_FIRST;
+Reset := TRUE;]]></ST>
+      </Implementation>
+    </Method>
     <Method Name="ExpectRecord" Id="{18fee2ff-4cd2-4e0c-a7e6-63f64420e280}">
       <Declaration><![CDATA[(*!
 <summary>Registers one independently specified short record before the logger may write it.</summary>
@@ -428,6 +473,19 @@ PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
         <Declaration><![CDATA[]]></Declaration>
         <Implementation>
           <ST><![CDATA[NamespaceName REF= CurrentNamespace.Name;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="LargestFileRecordCount" Id="{dc6737af-cf8a-43b6-ab53-41b9df7766f0}">
+      <Declaration><![CDATA[(*!
+<summary>Reports the maximum count of wide-CR records read from a single generated file.</summary>
+<description>Accumulates during cleanup and returns to zero on successful Reset.</description>
+*)
+PROPERTY LargestFileRecordCount : UDINT]]></Declaration>
+      <Get Name="Get" Id="{c5f7d367-0957-40e6-93cd-519a3e4043ca}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[LargestFileRecordCount := _LargestFileRecordCount;]]></ST>
         </Implementation>
       </Get>
     </Property>

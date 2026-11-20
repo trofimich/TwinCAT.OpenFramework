@@ -1,0 +1,194 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="StringReplacementTest" Id="{af0ddb8e-ec98-499e-9740-c6e0504c8562}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+SPDX-FileCopyrightText: c 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+SPDX-License-Identifier: MIT
+License: https://opensource.org/license/mit
+*)
+
+(*!
+<summary>Checks in-place replacements, counts, limits and partial capacity failure.</summary>
+<description>
+Uses one task and stays at a stable address while assertions are bound to this instance.
+</description>
+*)
+
+{attribute 'no_assign'}
+{attribute 'no_explicit_call' := 'do not call this function block directly'}
+FUNCTION_BLOCK StringReplacementTest EXTENDS TOF_Testing.SingleCycleTest
+VAR_STAT
+	{attribute 'hide'}
+	_ClassName : STRING := __POUNAME();
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[]]></ST>
+    </Implementation>
+    <Method Name="ExecuteTest" Id="{b9d1c350-40c7-4fee-90fd-23c8fb0c2797}">
+      <Declaration><![CDATA[(*!
+<summary>Checks in-place replacements, counts, limits and partial capacity failure.</summary>
+<description>
+Uses caller-owned buffers with known capacities. A failed next replacement must leave earlier matches applied.
+</description>
+*)
+METHOD PROTECTED ExecuteTest
+VAR
+	text : STRING(18);
+	
+	replacementCount : UINT;
+	result : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[text := 'abcd_abcd_abcd';
+TOF_Core.Strings.ReplaceInSource(
+	sourceString := text,
+	oldSubstring := 'bc',
+	newSubstring := '0',
+	replacementCount => replacementCount
+);
+Assert.ThatBool(
+	actual := text = 'a0d_a0d_a0d',
+	message := "Shrink must produce the expected text"
+).IsTrue();
+Assert.ThatUInt(
+	actual := replacementCount,
+	message := "Shrink must produce the expected count"
+).ToBe(expected := 3);
+
+text := 'abcd_abcd_abcd';
+TOF_Core.Strings.ReplaceInSource(
+	sourceString := text,
+	oldSubstring := 'bc',
+	newSubstring := '123',
+	replacementCount => replacementCount
+);
+Assert.ThatBool(
+	actual := text = 'a123d_a123d_a123d',
+	message := "Grow must produce the expected text"
+).IsTrue();
+Assert.ThatUInt(
+	actual := replacementCount,
+	message := "Grow must produce the expected count"
+).ToBe(expected := 3);
+
+text := 'abcd_abcd_abcd';
+result := TOF_Core.Strings.TryReplaceInSource(
+	sourceString := text,
+	oldSubstring := 'bc',
+	newSubstring := '0',
+	replacementCount => replacementCount
+);
+Assert.ThatBool(
+	actual := result,
+	message := "Try shrink must produce the expected status"
+).IsTrue();
+Assert.ThatBool(
+	actual := text = 'a0d_a0d_a0d',
+	message := "Try shrink must produce the expected text"
+).IsTrue();
+Assert.ThatUInt(
+	actual := replacementCount,
+	message := "Try shrink must produce the expected count"
+).ToBe(expected := 3);
+
+text := 'abcd_abcd_abcd';
+result := TOF_Core.Strings.TryReplaceInSource(
+	sourceString := text,
+	oldSubstring := 'bc',
+	newSubstring := '123',
+	maxReplacements := 1,
+	skipReplacements := 1,
+	replacementCount => replacementCount
+);
+Assert.ThatBool(
+	actual := result,
+	message := "Try skip and limit must produce the expected status"
+).IsTrue();
+Assert.ThatBool(
+	actual := text = 'abcd_a123d_abcd',
+	message := "Try skip and limit must produce the expected text"
+).IsTrue();
+Assert.ThatUInt(
+	actual := replacementCount,
+	message := "Try skip and limit must produce the expected count"
+).ToBe(expected := 1);
+
+text := 'abcd_abcd_abcd';
+result := TOF_Core.Strings.TryReplaceInSource(
+	sourceString := text,
+	oldSubstring := 'bc',
+	newSubstring := '1234',
+	replacementCount => replacementCount
+);
+Assert.ThatBool(
+	actual := result,
+	message := "Growth must report failure when the next replacement exceeds capacity"
+).IsFalse();
+Assert.ThatBool(
+	actual := text = 'a1234d_a1234d_abcd',
+	message := "Capacity failure must preserve both completed replacements"
+).IsTrue();
+Assert.ThatUInt(
+	actual := replacementCount,
+	message := "Capacity failure must report both completed replacements"
+).ToBe(expected := UINT#2);
+
+text := 'abcd_abcd';
+result := TOF_Core.Strings.TryReplaceInSource(
+	sourceString := text,
+	oldSubstring := '',
+	newSubstring := 'ignore',
+	replacementCount => replacementCount
+);
+Assert.ThatBool(
+	actual := result AND_THEN text = 'abcd_abcd' AND_THEN replacementCount = 0,
+	message := "An empty search must succeed without modifying text or reporting replacements"
+).IsTrue();
+
+result := TOF_Core.Strings.TryReplaceInSource(
+	sourceString := text,
+	oldSubstring := 'bc',
+	newSubstring := '',
+	replacementCount => replacementCount
+);
+Assert.ThatBool(
+	actual := result AND_THEN text = 'ad_ad' AND_THEN replacementCount = 2,
+	message := "An empty replacement must delete both matching substrings"
+).IsTrue();]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="ClassName" Id="{9b46ae7c-d5a2-42df-aaf3-b0790b00e5b1}">
+      <Declaration><![CDATA[//! <summary>Borrows the concrete class name. Callers must not modify it.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{1ccce809-cb40-42e3-93e0-5ebfa4df572f}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ClassName REF= _ClassName;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="NamespaceName" Id="{c813cbb9-ed60-4e95-948a-b89a41dc3564}">
+      <Declaration><![CDATA[//! <summary>Borrows the compiler-initialized namespace name. Callers must not modify it.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{c38137d6-2566-42be-9019-016a6c5e5604}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[NamespaceName REF= CurrentNamespace.Name;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="SelfSize" Id="{24b10441-a64c-4d82-b8d7-c3780dd916b2}">
+      <Declaration><![CDATA[//! <summary>Reports the concrete instance size in bytes.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY SelfSize : ULINT]]></Declaration>
+      <Get Name="Get" Id="{a4e2e38c-3d54-4a51-a016-08c0cec159f5}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[SelfSize := XSIZEOF(THIS^);]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+  </POU>
+</TcPlcObject>

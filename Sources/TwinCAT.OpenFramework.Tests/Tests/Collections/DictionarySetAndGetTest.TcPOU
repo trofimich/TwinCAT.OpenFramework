@@ -1,0 +1,197 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="DictionarySetAndGetTest" Id="{f68d62ed-8df4-4bca-bc9d-87f05e257ecf}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+SPDX-FileCopyrightText: c 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+SPDX-License-Identifier: MIT
+License: https://opensource.org/license/mit
+*)
+
+(*!
+<summary>Checks updating a stored key, value lookup and indexed retrieval.</summary>
+<description>
+Borrows one group-owned dictionary reserved for this case. Use from one task at a stable address.
+Teardown clears entries owned by the dictionary before publication.
+</description>
+*)
+
+{attribute 'no_assign'}
+{attribute 'no_explicit_call' := 'do not call this function block directly'}
+FUNCTION_BLOCK DictionarySetAndGetTest EXTENDS TOF_Testing.SingleCycleTest
+VAR_STAT
+	{attribute 'hide'}
+	_ClassName : STRING := __POUNAME();
+END_VAR
+VAR
+	_Dictionary : TOF_Collections.IDictionary;
+	_ReplacementKey : INT := 5;
+	_ReplacementValue : STRING := 'Updated5';
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[]]></ST>
+    </Implementation>
+    <Method Name="FB_init" Id="{55d8e47a-06b8-42d6-a90e-62caea6b5b7e}">
+      <Declaration><![CDATA[(*!
+<summary>Binds the dictionary fixture for this case.</summary>
+<description>
+Stores a borrowed interface without invoking the fixture. The owning group keeps it alive and
+reserves it for this case. TestElement initializes the name and parent.
+</description>
+<param name="name">Display name of this case.</param>
+<param name="parent">Group that owns this case.</param>
+<param name="dictionary">Required live dictionary reserved for this case.</param>
+*)
+METHOD FB_init : BOOL
+VAR_INPUT
+	bInitRetains: BOOL; // TRUE: the retain variables are initialized (reset warm / reset cold)
+	bInCopyCode: BOOL; // TRUE: the instance will be copied to the copy code afterward (online change)
+	name : WSTRING;
+	parent : TOF_Testing.ITestElement;
+	dictionary : TOF_Collections.IDictionary;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_Dictionary := dictionary;
+FB_init := TRUE;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="ExecuteTest" Id="{a374f70a-8894-484c-91f9-f90282584a15}">
+      <Declaration><![CDATA[(*!
+<summary>Checks updating a stored key, value lookup and indexed retrieval.</summary>
+*)
+METHOD PROTECTED ExecuteTest
+VAR
+	keys : ARRAY [0..6] OF INT := [0, 1, 2, 3, 4, 5, 6];
+	values : ARRAY [0..6] OF STRING :=
+		['String0', 'String1', 'String2', 'String3', 'String4', 'String5', 'String6'];
+	i : DINT;
+	copyReplacement : STRING := 'Updated3';
+	position : DINT;
+	genericPosition : DINT;
+	found : BOOL;
+
+	query : TOF_Core.GENERIC_VALUE;
+	value : TOF_Core.GENERIC_VALUE;
+	pair : REFERENCE TO TOF_Core.GENERIC_KEY_VALUE_PAIR;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[FOR i := 6 TO 0 BY -1 DO
+	_Dictionary.SetCopy(key := keys[i], value := values[i]);
+END_FOR
+
+_Dictionary.SetCopy(key := keys[3], value := copyReplacement);
+
+query := TOF_Core.GenericValueFactory.FromIntReference(value := _ReplacementKey);
+value := TOF_Core.GenericValueFactory.FromStringReference(value := _ReplacementValue);
+_Dictionary.SetGeneric(key := query, value := value);
+
+Assert.ThatDInt(
+	actual := _Dictionary.Length,
+	message := "Updating existing keys must preserve length"
+).ToBe(expected := DINT#7);
+
+query := TOF_Core.GenericValueFactory.FromIntReference(value := keys[2]);
+position := _Dictionary.GetKeyPosition(key := keys[2]);
+genericPosition := _Dictionary.GetGenericKeyPosition(key := query, releaseKey := FALSE);
+
+Assert.ThatBool(
+	actual := position >= 0 AND_THEN position < _Dictionary.Length,
+	message := "Key 2 must have a valid current position"
+).IsTrue();
+
+Assert.ThatDInt(
+	actual := genericPosition,
+	message := "Both lookup forms must return the same position for key 2"
+).ToBe(expected := position);
+
+FOR i := 0 TO 6 DO
+	found := _Dictionary.TryGetValueByKey(key := keys[i], value => value);
+
+	IF i = 3 THEN
+		Assert.ThatBool(
+			actual := found AND_THEN value.AsString255() = copyReplacement,
+			message := "SetCopy must replace the value of key 3"
+		).IsTrue();
+	ELSIF i = 5 THEN
+		Assert.ThatBool(
+			actual := found AND_THEN value.AsString255() = _ReplacementValue,
+			message := "SetGeneric must replace the value of key 5"
+		).IsTrue();
+	ELSE
+		Assert.ThatBool(
+			actual := found AND_THEN value.AsString255() = values[i],
+			message := TOF_Core.WideStrings.Concat255("Expected original value at key ", TO_WSTRING(i))
+		).IsTrue();
+	END_IF
+END_FOR
+
+found := _Dictionary.TryGetValueByGenericKey(key := query, releaseKey := FALSE, value => value);
+
+Assert.ThatBool(
+	actual := found AND_THEN value.AsString255() = 'String2',
+	message := "Generic lookup must return the original value of key 2"
+).IsTrue();
+
+position := _Dictionary.GetKeyPosition(key := keys[3]);
+
+IF position < 0 OR_ELSE position >= _Dictionary.Length THEN
+	RecordFailure(message := "Updated key 3 must have a valid position");
+
+	RETURN;
+END_IF
+
+pair REF= _Dictionary.GetKeyValuePairByIndex(index := position);
+
+Assert.ThatBool(
+	actual := __ISVALIDREF(pair) AND_THEN pair.Key.AsInt() = INT#3
+		AND_THEN pair.Value.AsString255() = copyReplacement,
+	message := "The indexed pair must match both the queried key and its updated value"
+).IsTrue();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="AfterTest" Id="{ad3ed0a1-c0a4-4a29-96d2-e763497c6434}">
+      <Declaration><![CDATA[(*!
+<summary>Clears the fixture before the runner publishes the result.</summary>
+<description>
+Also runs after an unexpected exception interrupts the case.
+</description>
+*)
+METHOD PROTECTED AfterTest]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_Dictionary.Clear();]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="ClassName" Id="{4c8d6b7f-cd27-465d-a3ee-1dfdd59fd9be}">
+      <Declaration><![CDATA[//! <summary>Borrows the concrete class name. Callers must not modify it.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{c5f6cc10-c85d-4ab8-b06b-b9aaefcd6e8b}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ClassName REF= _ClassName;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="NamespaceName" Id="{a696e8b3-1e19-425a-89b9-8b8742740c31}">
+      <Declaration><![CDATA[//! <summary>Borrows the compiler-initialized namespace name. Callers must not modify it.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{3b789c22-0fb8-4147-931c-8b4b0159f833}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[NamespaceName REF= CurrentNamespace.Name;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="SelfSize" Id="{68323a7e-3ca7-46f7-9b51-db70a6088b7e}">
+      <Declaration><![CDATA[//! <summary>Reports the concrete instance size in bytes.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY SelfSize : ULINT]]></Declaration>
+      <Get Name="Get" Id="{40bbf674-28ec-4af9-b8a6-636a1cc2e94d}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[SelfSize := XSIZEOF(THIS^);]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+  </POU>
+</TcPlcObject>

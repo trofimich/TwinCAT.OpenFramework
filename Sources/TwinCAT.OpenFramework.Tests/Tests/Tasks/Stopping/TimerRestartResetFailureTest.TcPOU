@@ -1,0 +1,140 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="TimerRestartResetFailureTest" Id="{a6838d75-eb25-4fd2-8536-81df17941a1c}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+SPDX-FileCopyrightText: © 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+SPDX-License-Identifier: MIT
+License: https://opensource.org/license/mit
+*)
+
+(*!
+<summary>Checks interval and observations when the reset hook refuses restart.</summary>
+<description>
+The case executes in one PLC callback with a persistent restart probe and no external resources.
+AfterTest prepares the fixture for reuse by the runner.
+</description>
+*)
+
+{attribute 'no_assign'}
+{attribute 'no_explicit_call' := 'do not call this function block directly'}
+FUNCTION_BLOCK TimerRestartResetFailureTest EXTENDS TOF_Testing.SingleCycleTest
+VAR_STAT
+	{attribute 'hide'}
+	_ClassName : STRING := __POUNAME();
+END_VAR
+VAR CONSTANT
+	//! <summary>Keeps the old timer active until the scenario cancels or restarts it.</summary>
+	_ActiveInterval : TIME := T#1H;
+
+	//! <summary>Positive interval selected for the replacement run.</summary>
+	_PositiveInterval : TIME := T#30MS;
+END_VAR
+VAR
+	_Timer : TimerRestartProbe(name := "Reset refusal");
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[]]></ST>
+    </Implementation>
+    <Method Name="ExecuteTest" Id="{22620f27-44b8-4a9a-90e2-afb31db409c9}">
+      <Declaration><![CDATA[(*!
+<summary>Checks interval and observations when the reset hook refuses restart.</summary>
+*)
+METHOD PROTECTED ExecuteTest]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_Timer.Interval := TOF_Core.Times.MIN_VALUE;
+
+IF NOT _Timer.Start() THEN
+	RecordFailure(message := "Probe must accept initial Start");
+	RETURN;
+END_IF
+
+_Timer.Execute();
+Assert.ThatBool(actual := _Timer.Triggered, message := "Old run must complete before reset injection").IsTrue();
+_Timer.ThrowOnReset := TRUE;
+Assert.ThatBool(
+	actual := _Timer.SetIntervalAndRestart(interval := _PositiveInterval),
+	message := "Reset exception must be converted to restart refusal"
+).IsFalse();
+Assert.ThatBool(actual := _Timer.State.Stopped, message := "Reset refusal must preserve STOPPED").IsTrue();
+Assert.ThatBool(
+	actual := _Timer.Interval = TOF_Core.Times.MIN_VALUE,
+	message := "Failed preparation must preserve old PT"
+).IsTrue();
+Assert.ThatBool(actual := _Timer.Elapsed, message := "Failure before the base reset must retain old Q").IsTrue();
+_Timer.ThrowOnReset := FALSE;
+
+IF NOT _Timer.SetIntervalAndRestart(interval := _ActiveInterval) THEN
+	RecordFailure(message := "Restart must recover after removing reset injection");
+	RETURN;
+END_IF
+
+Assert.ThatBool(actual := _Timer.Elapsed, message := "Successful reset must clear old Q").IsFalse();
+Assert.ThatBool(actual := _Timer.Triggered, message := "Successful restart must clear the old pulse").IsFalse();
+
+IF NOT _Timer.Cancel() THEN
+	RecordFailure(message := "Scenario must cancel the recovered run");
+	RETURN;
+END_IF
+
+_Timer.Execute();
+Assert.ThatBool(
+	actual := _Timer.State.Stopped AND_THEN _Timer.FinalStopReason.ExternalCancel,
+	message := "The replacement run must finish cancellation"
+).IsTrue();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="AfterTest" Id="{ea2c21d5-7cca-4b9e-a5ee-2fba2fb9d4ba}">
+      <Declaration><![CDATA[(*!
+<summary>Returns the owned timer to READY before reporting the result.</summary>
+<description>
+Reopens the stopping gate and disables callback injections before cooperative cleanup.
+</description>
+*)
+METHOD PROTECTED AfterTest]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_Timer.AllowStopping := TRUE;
+_Timer.ThrowOnBeforeStart := FALSE;
+_Timer.ThrowOnReset := FALSE;
+_Timer.ResetOnAfterStop := FALSE;
+
+Assert.ThatBool(
+	actual := PrepareTimerTestForReuse(timer := _Timer),
+	message := "The timer must return to READY after cleanup"
+).IsTrue();]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="ClassName" Id="{fa824f15-af71-4030-9bca-55ad5cc1fc91}">
+      <Declaration><![CDATA[//! <summary>Borrows the concrete class name. Callers must not modify it.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{9553a6db-e618-46d8-9a03-133a74b954e2}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ClassName REF= _ClassName;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="NamespaceName" Id="{cab0cd60-0144-4dff-b216-a94245b6f9b0}">
+      <Declaration><![CDATA[//! <summary>Borrows the compiler-initialized namespace. Callers must not modify it.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{17737588-7382-47e0-a3a0-bc4e10f0b634}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[NamespaceName REF= CurrentNamespace.Name;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="SelfSize" Id="{ce3e4cfa-ed7b-42fe-9afc-9f1d2aaad901}">
+      <Declaration><![CDATA[//! <summary>Reports the concrete instance size in bytes.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY SelfSize : ULINT]]></Declaration>
+      <Get Name="Get" Id="{7e904b5d-8a70-4dc2-b901-bf0ee6d56724}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[SelfSize := XSIZEOF(THIS^);]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+  </POU>
+</TcPlcObject>

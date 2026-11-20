@@ -1,5 +1,7 @@
 # Making OpenFramework easier to use for engineers and AI
 
+- [ ] **Make `Core.Strings` reliable for UTF-8.** Preserve complete code points during truncation and trimming. Verify text at logging and serialization boundaries and fix confirmed encoding losses in the affected adapters.
+
 - [ ] **Explain where to start in the README.** Give three examples. Use `Automation` for a permanent part of the machine, such as a traffic light. Show `Tasks` for an operation that takes several PLC cycles, such as reading a file. Show `Workflow` for a sequence of steps defined by a recipe. Link to the relevant code for each example.
 
 - [ ] **Show how a command reaches an output.** At the start of the intersection guide, answer three questions. What calls `TrySetLight`? Where does the code check whether the color change is allowed? Where in the PLC cycle does the code write to the bound output variable? Give the file and method for each answer so readers can follow the code. [Intersection guide](Guides/SignalControlledIntersectionDemo.md)

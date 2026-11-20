@@ -106,7 +106,7 @@ __TRY
 __CATCH(errorCode)
     exception := TOF_Core.ExceptionManager.GetLastException(
         exceptionCode := errorCode,
-        catchPointNamespaceName := '',
+        catchPointNamespaceName := CurrentNamespace.Name, // constant with name of your project namespace
         catchPointPOUName := __POUNAME(),
         catchPointPosition := __POSITION()
     );

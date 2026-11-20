@@ -1,0 +1,3052 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="WorkflowContractTestFixture" Id="{c420144d-dae1-4264-b0c8-03a582be053e}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+SPDX-FileCopyrightText: © 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+SPDX-License-Identifier: MIT
+License: https://opensource.org/license/mit
+*)
+
+(*!
+<summary>Owns the state used by one workflow contract test scenario.</summary>
+<description>
+Each fixture starts with freshly constructed function blocks and stores no borrowed assertion context.
+Owns synthetic in-memory workflows and tasks. A dynamically loaded workflow is tracked until checked release.
+The case releases it before fixture destruction, including when a scenario reports an exception.
+</description>
+*)
+
+{attribute 'enable_dynamic_creation'}
+{attribute 'no_assign'}
+{attribute 'no_explicit_call' := 'do not call this function block directly'}
+FUNCTION_BLOCK WorkflowContractTestFixture
+	IMPLEMENTS TOF_Workflow.IWorkflowElementFactory,
+		TOF_Workflow.IWorkflowDependencyFactory,
+		TOF_Workflow.IWorkflowDependencyResolver,
+		TOF_Workflow.IWorkflowVariableBinder
+VAR_STAT
+	//! <summary>Initialized static metadata available during inherited base initialization.</summary>
+	_ClassName : STRING := __POUNAME();
+END_VAR
+VAR
+	_LoadSource : TOF_Workflow.Workflow;
+	_LoadIf : TOF_Workflow.IfElseActivity(workflow := _LoadSource);
+	_LoadCompare : TOF_Workflow.CompareVariableCondition(workflow := _LoadSource);
+	_LoadSequence : TOF_Workflow.SequenceActivity(workflow := _LoadSource);
+	_LoadEmbeddedInvoke : TOF_Workflow.InvokeTaskActivity(workflow := _LoadSource);
+	_LoadExternalInvoke : TOF_Workflow.InvokeTaskActivity(workflow := _LoadSource);
+	_LoadAssign : TOF_Workflow.AssignVariableActivity(workflow := _LoadSource);
+	_LoadReader : TOF_JSON.JsonConfigurationReader;
+	_LoadLoader : TOF_Workflow.WorkflowLoader;
+	//! <summary>Owns the loaded workflow until the release check or fixture teardown.</summary>
+	_Loaded : TOF_Workflow.IWorkflow;
+	_LoadExternal : UINT;
+	_BindLoadVariables : BOOL;
+
+	_BindingWorkflow : TOF_Workflow.Workflow;
+	_BindingFirst : TOF_Workflow.InvokeTaskActivity(workflow := _BindingWorkflow);
+	_BindingSecond : TOF_Workflow.InvokeTaskActivity(workflow := _BindingWorkflow);
+	_BindingComparer : TOF_Workflow.CompareVariableCondition(workflow := _BindingWorkflow);
+	_BindingExternal : WorkflowBindingTask(name := "External");
+
+	_WriteWorkflow : TOF_Workflow.Workflow;
+	_WriteSequence : TOF_Workflow.SequenceActivity(workflow := _WriteWorkflow);
+	_WriteDelay : TOF_Workflow.DelayActivity(workflow := _WriteWorkflow);
+	_ConfigWriter : TOF_JSON.JsonConfigurationWriter;
+	_ConfigDocument : TOF_Core.JSON_DOCUMENT;
+	_ConfigParser : Tc3_JsonXml.FB_JsonDomParser;
+	_NullContextSequence : TOF_Workflow.SequenceActivity(workflow := 0);
+	_NullContextDelay : TOF_Workflow.DelayActivity(workflow := 0);
+
+	_FactoryWorkflow : TOF_Workflow.Workflow;
+	_FactoryExits : DINT;
+	_ArrayValidation : TOF_Workflow.Workflow;
+
+	_DeclarationWorkflow : TOF_Workflow.Workflow;
+	_DeclarationLoop : TOF_Workflow.WhileActivity(workflow := _DeclarationWorkflow);
+	_DeclarationGuard : TOF_Workflow.TrueCondition(workflow := _DeclarationWorkflow);
+	_DeclarationBody : WorkflowContractActivity(workflow := _DeclarationWorkflow);
+	_DeclarationGroup : TOF_Workflow.NotCondition(workflow := _DeclarationWorkflow);
+	_DeclarationLeaf : TOF_Workflow.TrueCondition(workflow := _DeclarationWorkflow);
+	_DeclarationValidation : TOF_Workflow.Workflow;
+	_DeclarationInput : UINT;
+
+	_RootWorkflow : WorkflowContractWorkflow;
+	_ForeignWorkflow : TOF_Workflow.Workflow;
+	_RootValue : DINT;
+	_AssociatedRoot : WorkflowContractActivity(workflow := _RootWorkflow);
+	_UnassociatedRoot : WorkflowContractActivity(workflow := 0);
+	_ForeignRoot : WorkflowContractActivity(workflow := _ForeignWorkflow);
+	_RootPeer : TOF_Workflow.SequenceActivity(workflow := _RootWorkflow);
+
+	_TopologyWorkflow : TOF_Workflow.Workflow;
+	_Sequence : TOF_Workflow.SequenceActivity(workflow := _TopologyWorkflow);
+	_SequenceFirst : WorkflowContractActivity(workflow := _TopologyWorkflow);
+	_SequenceSecond : WorkflowContractActivity(workflow := _TopologyWorkflow);
+	_Ancestor : TOF_Workflow.SequenceActivity(workflow := _TopologyWorkflow);
+	_Descendant : TOF_Workflow.SequenceActivity(workflow := _TopologyWorkflow);
+	_Pick : TOF_Workflow.WaitAndPickActivity(workflow := _TopologyWorkflow);
+	_PickFirstCondition : TOF_Workflow.TrueCondition(workflow := _TopologyWorkflow);
+	_PickSecondCondition : TOF_Workflow.TrueCondition(workflow := _TopologyWorkflow);
+	_PickFirstActivity : WorkflowContractActivity(workflow := _TopologyWorkflow);
+	_PickSecondActivity : WorkflowContractActivity(workflow := _TopologyWorkflow);
+
+	_IsolationWorkflow : TOF_Workflow.Workflow;
+	_IsolationSequence : TOF_Workflow.SequenceActivity(workflow := _IsolationWorkflow);
+	_IsolationParallel : TOF_Workflow.ParallelActivity(workflow := _IsolationWorkflow);
+	_IsolationWait : TOF_Workflow.WaitConditionActivity(workflow := _IsolationWorkflow);
+	_IsolationWhile : TOF_Workflow.WhileActivity(workflow := _IsolationWorkflow);
+	_IsolationIf : TOF_Workflow.IfElseActivity(workflow := _IsolationWorkflow);
+	_IsolationNot : TOF_Workflow.NotCondition(workflow := _IsolationWorkflow);
+	_IsolationGroup : TOF_Workflow.CompositeCondition(workflow := _IsolationWorkflow);
+	_ForeignChild : WorkflowContractActivity(workflow := _ForeignWorkflow);
+	_ForeignCondition : TOF_Workflow.TrueCondition(workflow := _ForeignWorkflow);
+	_UnassociatedSequence : TOF_Workflow.SequenceActivity(workflow := 0);
+	_UnassociatedChild : WorkflowContractActivity(workflow := 0);
+
+	_ConditionWorkflow : TOF_Workflow.Workflow;
+	_ConditionGroup : TOF_Workflow.CompositeCondition(workflow := _ConditionWorkflow);
+	_ConditionLeaf : TOF_Workflow.TrueCondition(workflow := _ConditionWorkflow);
+	_ConditionNot : TOF_Workflow.NotCondition(workflow := _ConditionWorkflow);
+	_ConditionHost : TOF_Workflow.WaitConditionActivity(workflow := _ConditionWorkflow);
+	_FreeCondition : TOF_Workflow.TrueCondition(workflow := _ConditionWorkflow);
+
+	_ParentWorkflow : TOF_Workflow.Workflow;
+	_ParentSequence : TOF_Workflow.SequenceActivity(workflow := _ParentWorkflow);
+	_ParentChild : WorkflowContractActivity(workflow := _ParentWorkflow);
+	_OtherParent : TOF_Workflow.SequenceActivity(workflow := _ParentWorkflow);
+	_ParentCondition : TOF_Workflow.TrueCondition(workflow := _ParentWorkflow);
+
+	_BusyWorkflow : TOF_Workflow.Workflow;
+	_BusyRoot : TOF_Workflow.SequenceActivity(workflow := _BusyWorkflow);
+	_BusyRunning : WorkflowContractActivity(workflow := _BusyWorkflow);
+	_BusyDormant : TOF_Workflow.SequenceActivity(workflow := _BusyWorkflow);
+	_BusyCandidate : WorkflowContractActivity(workflow := _BusyWorkflow);
+
+	_RetryWorkflow : WorkflowContractWorkflow;
+	_RetryRoot : WorkflowContractActivity(workflow := _RetryWorkflow);
+	_ExternalValue : DINT;
+
+	_BoundaryWorkflow : WorkflowContractWorkflow;
+	_BoundaryActivity : WorkflowContractActivity(workflow := _BoundaryWorkflow);
+
+	_ConfigWorkflow : TOF_Workflow.Workflow;
+	_ConfigActivity : TOF_Workflow.InvokeTaskActivity(workflow := _ConfigWorkflow);
+	_ConfigTask : WorkflowContractTask(name := "Configuration task");
+	_ReplacementTask : WorkflowContractTask(name := "Replacement task");
+
+	_SuspendFailureWorkflow : TOF_Workflow.Workflow;
+	_SuspendFailureActivity : TOF_Workflow.InvokeTaskActivity(workflow := _SuspendFailureWorkflow);
+	_SuspendFailureTask : WorkflowContractTask(name := "Suspension failure task");
+	_SuspendDoneWorkflow : TOF_Workflow.Workflow;
+	_SuspendDoneActivity : TOF_Workflow.InvokeTaskActivity(workflow := _SuspendDoneWorkflow);
+	_SuspendDoneTask : WorkflowContractTask(name := "Suspension completion task");
+	_SuspendAbortWorkflow : TOF_Workflow.Workflow;
+	_SuspendAbortActivity : TOF_Workflow.InvokeTaskActivity(workflow := _SuspendAbortWorkflow);
+	_SuspendAbortTask : WorkflowContractTask(name := "Suspension abort task");
+
+	_ReleaseWorkflow : TOF_Workflow.Workflow;
+	_ReleaseActivity : TOF_Workflow.InvokeTaskActivity(workflow := _ReleaseWorkflow);
+	_ReleaseTask : WorkflowContractTask(name := "Release failure task");
+	_ReleaseReplacement : WorkflowContractTask(name := "Release replacement task");
+	_ReleaseResource : TaskStoppingResource;
+
+	_CleanupWorkflow : TOF_Workflow.Workflow;
+	_CleanupTryCatch : TOF_Workflow.TryCatchActivity(workflow := _CleanupWorkflow);
+	_CleanupParallel : TOF_Workflow.ParallelActivity(workflow := _CleanupWorkflow);
+	_CleanupInvoke : TOF_Workflow.InvokeTaskActivity(workflow := _CleanupWorkflow);
+	_CleanupTask : WorkflowContractTask(name := "Cleanup contract task");
+	_CleanupFault : WorkflowContractActivity(workflow := _CleanupWorkflow);
+	_CleanupCatch : RecoveryCatchTestActivity(workflow := _CleanupWorkflow);
+
+	_MetadataWorkflow : ComprehensiveTestWorkflow;
+	_MetadataBase : TOF_Workflow.Workflow;
+
+	_LookupWorkflow : TOF_Workflow.Workflow;
+	_LookupParent : TOF_Workflow.SequenceActivity(workflow := _LookupWorkflow);
+	_LookupChild : WorkflowContractActivity(workflow := 0);
+	_LookupCondition : TOF_Workflow.TrueCondition(workflow := 0);
+	_LookupWorkflowValue : DINT;
+	_LookupParentValue : DINT;
+	_LookupConditionValue : DINT;
+
+	_ScopeWorkflow : TOF_Workflow.Workflow;
+	_ScopeOtherWorkflow : TOF_Workflow.Workflow;
+	_ScopeContextParent : TOF_Workflow.SequenceActivity(workflow := _ScopeWorkflow);
+	_ScopeContext : WorkflowContractActivity(workflow := _ScopeWorkflow);
+	_ScopeAttached : WorkflowContractActivity(workflow := _ScopeWorkflow);
+	_ScopeForeignContext : WorkflowContractActivity(workflow := _ScopeOtherWorkflow);
+	_ScopeGroup : TOF_Workflow.CompositeCondition(workflow := _ScopeWorkflow);
+	_ScopeLeaf : TOF_Workflow.VariableHasValueCondition(workflow := 0);
+	_ScopeFree : TOF_Workflow.VariableHasValueCondition(workflow := _ScopeWorkflow);
+	_ScopeComparison : TOF_Workflow.CompareVariableCondition(workflow := _ScopeWorkflow);
+	_ScopePair : TOF_Workflow.CompareVariableCondition(workflow := _ScopeWorkflow);
+	_ScopeLocalValue : DINT := 5;
+	_ScopeContextValue : DINT := 20;
+	_ScopeAncestorValue : DINT := 30;
+	_ScopeConditionParentValue : DINT := 7;
+	_ScopeAttachedValue : DINT := 9;
+	_ScopeWorkflowValue : DINT := 100;
+	_ScopeWorkflowRight : DINT := 101;
+	_ScopeOtherValue : DINT := 88;
+
+	_WaitScopeWorkflow : TOF_Workflow.Workflow;
+	_WaitScopeActivity : TOF_Workflow.WaitVariableValueActivity(workflow := _WaitScopeWorkflow);
+
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[]]></ST>
+    </Implementation>
+    <Method Name="ExecuteScenario" Id="{6d02c419-d0c8-45cb-b367-0551d8d0f84d}">
+      <Declaration><![CDATA[(*!
+<summary>Dispatches one scenario against the fresh fixture.</summary>
+<description>Call once per fixture. Each method uses the assertions of the receiving case.</description>
+<param name="scenario">Scenario assigned to the caller.</param>
+<param name="assertions">Valid assertion context borrowed from the active case.</param>
+*)
+METHOD ExecuteScenario
+VAR_INPUT
+	scenario : WORKFLOW_CONTRACT_TEST_SCENARIO;
+	assertions : REFERENCE TO TOF_Testing.Assertions;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[CASE scenario OF
+	WORKFLOW_CONTRACT_TEST_SCENARIO.ROOT_ASSOCIATION:
+		testRootAssociation(assertions := assertions);
+
+	WORKFLOW_CONTRACT_TEST_SCENARIO.SEQUENCE_TOPOLOGY:
+		testSequenceTopology(assertions := assertions);
+
+	WORKFLOW_CONTRACT_TEST_SCENARIO.TRANSITION_DIAGNOSTICS:
+		testTransitionDiagnostics(assertions := assertions);
+
+	WORKFLOW_CONTRACT_TEST_SCENARIO.DEPENDENCY_BINDINGS:
+		testDependencyBindings(assertions := assertions);
+
+	WORKFLOW_CONTRACT_TEST_SCENARIO.WRITE_CONFIGURATION:
+		testWriteConfiguration(assertions := assertions);
+
+	WORKFLOW_CONTRACT_TEST_SCENARIO.LOAD_CONFIGURATION:
+		testLoadConfiguration(assertions := assertions);
+
+	WORKFLOW_CONTRACT_TEST_SCENARIO.OPERATOR_SERIALIZATION:
+		testOperatorSerialization(assertions := assertions);
+
+	WORKFLOW_CONTRACT_TEST_SCENARIO.DESERIALIZE_NULL_CONTEXT_REJECTION:
+		testDeserializeNullContextRejection(assertions := assertions);
+
+	WORKFLOW_CONTRACT_TEST_SCENARIO.FACTORY_DECLARATIONS:
+		testFactoryDeclarations(assertions := assertions);
+
+	WORKFLOW_CONTRACT_TEST_SCENARIO.ARRAY_VALIDATION:
+		testArrayValidation(assertions := assertions);
+
+	WORKFLOW_CONTRACT_TEST_SCENARIO.WORKFLOW_ISOLATION:
+		testWorkflowIsolation(assertions := assertions);
+
+	WORKFLOW_CONTRACT_TEST_SCENARIO.CONDITION_TOPOLOGY:
+		testConditionTopology(assertions := assertions);
+
+	WORKFLOW_CONTRACT_TEST_SCENARIO.PARENT_SETTERS:
+		testParentSetters(assertions := assertions);
+
+	WORKFLOW_CONTRACT_TEST_SCENARIO.INITIALIZATION_RETRY:
+		testInitializationRetry(assertions := assertions);
+
+	WORKFLOW_CONTRACT_TEST_SCENARIO.BOUNDARY_DIAGNOSTICS:
+		testBoundaryDiagnostics(assertions := assertions);
+
+	WORKFLOW_CONTRACT_TEST_SCENARIO.INVOKE_CONFIGURATION:
+		testInvokeConfiguration(assertions := assertions);
+
+	WORKFLOW_CONTRACT_TEST_SCENARIO.TASK_FAILURE_DURING_SUSPEND:
+		testTaskFailureDuringSuspend(assertions := assertions);
+
+	WORKFLOW_CONTRACT_TEST_SCENARIO.TASK_COMPLETION_DURING_SUSPEND:
+		testTaskCompletionDuringSuspend(assertions := assertions);
+
+	WORKFLOW_CONTRACT_TEST_SCENARIO.TASK_ABORT_DURING_SUSPEND:
+		testTaskAbortDuringSuspend(assertions := assertions);
+
+	WORKFLOW_CONTRACT_TEST_SCENARIO.TASK_RELEASE_FAILURE_DURING_CANCEL:
+		testTaskReleaseFailureDuringCancel(assertions := assertions);
+
+	WORKFLOW_CONTRACT_TEST_SCENARIO.CATCH_CLEANUP_BOUNDARY:
+		testCatchCleanupBoundary(assertions := assertions);
+
+	WORKFLOW_CONTRACT_TEST_SCENARIO.CONCRETE_METADATA:
+		testConcreteMetadata(assertions := assertions);
+
+	WORKFLOW_CONTRACT_TEST_SCENARIO.VARIABLE_LOOKUP:
+		testVariableLookup(assertions := assertions);
+
+	WORKFLOW_CONTRACT_TEST_SCENARIO.DECLARED_VARIABLE_RESET:
+		testDeclaredVariableReset(assertions := assertions);
+
+	WORKFLOW_CONTRACT_TEST_SCENARIO.DECLARED_VARIABLE_VALIDATION:
+		testDeclaredVariableValidation(assertions := assertions);
+
+	WORKFLOW_CONTRACT_TEST_SCENARIO.CONDITION_SCOPE_PRECEDENCE:
+		testConditionScopePrecedence(assertions := assertions);
+
+	WORKFLOW_CONTRACT_TEST_SCENARIO.DELAY_LIFECYCLE:
+		testDelayLifecycle(assertions := assertions);
+ELSE
+	assertions.ThatBool(actual := FALSE, message := "Unknown workflow contract scenario").IsTrue();
+END_CASE]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="ClassName" Id="{96eb901b-f5de-49b0-bbcc-736ee2909b9b}">
+      <Declaration><![CDATA[(*!
+<summary>Borrows the concrete class name. Callers must not modify it.</summary>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{682bf6bf-f8f2-4590-88ad-869259d5bca2}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ClassName REF= _ClassName;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="NamespaceName" Id="{00ea1253-3cad-4942-9392-0a19c1354af1}">
+      <Declaration><![CDATA[(*!
+<summary>Borrows the project namespace name. Callers must not modify it.</summary>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{256f3a94-281b-458b-bc8f-49bec55ef2d4}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[NamespaceName REF= CurrentNamespace.Name;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="SelfSize" Id="{7b82c98b-a45d-412e-82b9-f5d724c741d7}">
+      <Declaration><![CDATA[(*!
+<summary>Reports the complete instance size in bytes.</summary>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY SelfSize : ULINT]]></Declaration>
+      <Get Name="Get" Id="{29ae5c68-f508-4929-afab-5a9b493616ac}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[SelfSize := XSIZEOF(THIS^);]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="testBoundaryDiagnostics" Id="{adf9b6f6-08b7-404f-977b-06b3d4d5a22c}">
+      <Declaration><![CDATA[(*!
+<summary>Contains a throwing formatter, runs the after-hook once and permits reset and reuse.</summary>
+<description>
+Uses independently prepared persistent fixtures. Expected failures are checked by exception interface;
+ordinary unexpected exceptions leave fixture ownership with the suite.
+</description>
+<param name="assertions">Valid assertion context borrowed from the active case.</param>
+*)
+METHOD PRIVATE testBoundaryDiagnostics
+VAR_INPUT
+	assertions : REFERENCE TO TOF_Testing.Assertions;
+END_VAR
+VAR
+	escaped : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_BoundaryWorkflow.SetRootActivity(rootActivity := _BoundaryActivity);
+_BoundaryWorkflow.RequestStart();
+_BoundaryActivity.throwMessageFailure := TRUE;
+
+__TRY
+	_BoundaryWorkflow.Execute();
+__CATCH
+	escaped := TRUE;
+__ENDTRY
+
+assertions.ThatBool(
+	actual := escaped,
+	message := "Diagnostic conversion must not escape the workflow boundary"
+).IsFalse();
+assertions.ThatDInt(
+	actual := _BoundaryWorkflow.afterCount,
+	message := "The after-hook must run once"
+).ToBe(expected := 1);
+assertions.ThatBool(
+	actual := _BoundaryWorkflow.State = TOF_Workflow.WORKFLOW_ELEMENT_STATE.PASSIVE_FAILED,
+	message := "The original activity failure must remain visible"
+).IsTrue();
+assertions.ThatBool(
+	actual := _BoundaryWorkflow.FailError.HasError,
+	message := "Fallback must be a durable error"
+).IsTrue();
+assertions.ThatWideString(
+	actual := _BoundaryWorkflow.FailError.TopMessage,
+	message := "Workflow fallback must identify unavailable diagnostics"
+).ToBe(expected := "Workflow exception diagnostics are unavailable");
+assertions.ThatWideString(
+	actual := _BoundaryActivity.FailError.TopMessage,
+	message := "Activity fallback must not retain partial diagnostic output"
+).ToBe(expected := "Activity exception diagnostics are unavailable");
+
+assertions.ThatBool(
+	actual := _BoundaryWorkflow.FailError.LocalTimestamp = TOF_Core.LongDateAndTimes.EPOCH,
+	message := "Fallback must not claim an unavailable exception timestamp"
+).IsTrue();
+assertions.ThatBool(
+	actual := _BoundaryActivity.FailError.LocalTimestamp = TOF_Core.LongDateAndTimes.EPOCH,
+	message := "Activity fallback must clear partial timestamps"
+).IsTrue();
+
+_BoundaryWorkflow.RequestReset();
+assertions.ThatBool(
+	actual := _BoundaryWorkflow.FailError.HasError,
+	message := "Successful reset must clear fallback diagnostics"
+).IsFalse();
+_BoundaryActivity.throwMessageFailure := FALSE;
+_BoundaryActivity.completeRunning := TRUE;
+_BoundaryWorkflow.RequestStart();
+assertions.ThatBool(
+	actual := _BoundaryWorkflow.State = TOF_Workflow.WORKFLOW_ELEMENT_STATE.PASSIVE_COMPLETED,
+	message := "The reset workflow must support a subsequent successful run"
+).IsTrue();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="testCatchCleanupBoundary" Id="{15577c12-1b83-427f-a3c6-edb36a3b31ec}">
+      <Declaration><![CDATA[(*!
+<summary>Keeps synchronous catch startup separate from pending try-branch cleanup.</summary>
+<description>
+Uses independent synthetic recovery while a sibling task still stops. Explicit reset must then drive that
+remaining work to READY. No physical resource or terminal allocation failure is injected.
+</description>
+<param name="assertions">Valid assertion context borrowed from the active case.</param>
+*)
+METHOD PRIVATE testCatchCleanupBoundary
+VAR_INPUT
+	assertions : REFERENCE TO TOF_Testing.Assertions;
+END_VAR
+VAR
+	i : INT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_CleanupTask.requiredStopCalls := 3;
+_CleanupInvoke.Configure(task := _CleanupTask);
+_CleanupFault.throwOrdinaryFailure := TRUE;
+_CleanupParallel.AddChildActivity(activity := _CleanupInvoke);
+_CleanupParallel.AddChildActivity(activity := _CleanupFault);
+_CleanupTryCatch.Configure(tryActivity := _CleanupParallel, catchActivity := _CleanupCatch);
+_CleanupWorkflow.SetRootActivity(rootActivity := _CleanupTryCatch);
+_CleanupWorkflow.RequestStart();
+
+assertions.ThatBool(
+	actual := _CleanupWorkflow.State = TOF_Workflow.WORKFLOW_ELEMENT_STATE.PASSIVE_COMPLETED,
+	message := "Independent catch recovery may finish before asynchronous try cleanup"
+).IsTrue();
+assertions.ThatBool(actual := _CleanupCatch.Recovered, message := "The catch activity must actually run").IsTrue();
+assertions.ThatBool(
+	actual := _CleanupCatch.Error.HasError,
+	message := "Catch diagnostics must be captured synchronously"
+).IsTrue();
+assertions.ThatBool(
+	actual := _CleanupTask.State.Running,
+	message := "Failed-branch task cleanup must still be pending"
+).IsTrue();
+assertions.ThatBool(
+	actual := _CleanupWorkflow.Busy,
+	message := "Root Busy is not a nested cleanup-completion signal"
+).IsFalse();
+assertions.ThatDInt(
+	actual := _CleanupTask.stopCount,
+	message := "Catch startup must not silently drain extra task steps"
+).ToBe(expected := 1);
+
+_CleanupWorkflow.RequestReset();
+
+FOR i := 1 TO 8 DO
+	_CleanupWorkflow.Execute();
+
+	IF NOT _CleanupWorkflow.Busy THEN
+		EXIT;
+	END_IF
+END_FOR
+
+assertions.ThatBool(
+	actual := _CleanupWorkflow.State = TOF_Workflow.WORKFLOW_ELEMENT_STATE.PASSIVE_READY,
+	message := "Explicit reset must advance pending try-branch stopping and resetting"
+).IsTrue();
+assertions.ThatBool(
+	actual := _CleanupTask.State.Ready,
+	message := "The task must be ready after explicit cleanup"
+).IsTrue();
+assertions.ThatBool(
+	actual := _CleanupCatch.Error.HasError,
+	message := "Reset must clear the captured recovery snapshot"
+).IsFalse();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="testConcreteMetadata" Id="{19af6d1d-6adf-419a-abf8-378e1113f396}">
+      <Declaration><![CDATA[(*!
+<summary>Checks concrete workflow metadata without copying ownership-bearing instances.</summary>
+<description>
+Uses independently prepared persistent fixtures. Expected failures are checked by exception interface;
+ordinary unexpected exceptions leave fixture ownership with the suite.
+</description>
+<param name="assertions">Valid assertion context borrowed from the active case.</param>
+*)
+METHOD PRIVATE testConcreteMetadata
+VAR_INPUT
+	assertions : REFERENCE TO TOF_Testing.Assertions;
+END_VAR
+VAR
+	workflowInterface : TOF_Workflow.IWorkflow;
+	namedWorkflow : TOF_Core.INamed;
+	resetScopeOwner : TOF_Workflow.IVariableResetScopeProvider;
+	borrowedResetScope : TOF_Workflow.IVariableResetScope;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[assertions.ThatBool(
+	actual := _MetadataWorkflow.ClassName = _MetadataBase.ClassName,
+	message := "A concrete derived workflow must not report the base workflow class"
+).IsFalse();
+assertions.ThatString(
+	actual := _MetadataWorkflow.NamespaceName,
+	message := "The concrete workflow must report the test namespace"
+).ToBe(expected := CurrentNamespace.Name);
+assertions.ThatULInt(
+	actual := _MetadataWorkflow.SelfSize,
+	message := "Concrete workflow size must include derived fields"
+).ToBe(expected := XSIZEOF(_MetadataWorkflow));
+assertions.ThatBool(
+	actual := _MetadataWorkflow.SelfAddress = ADR(_MetadataWorkflow),
+	message := "Concrete metadata must refer to the original instance"
+).IsTrue();
+
+workflowInterface := _MetadataBase;
+assertions.ThatBool(
+	actual := __QUERYINTERFACE(workflowInterface, namedWorkflow),
+	message := "IWorkflow must expose INamed"
+).IsTrue();
+assertions.ThatBool(
+	actual := namedWorkflow.Name <> "",
+	message := "Workflow must initialize a default diagnostic name in FB_init"
+).IsTrue();
+namedWorkflow.Name := "Renamed workflow";
+assertions.ThatWideString(
+	actual := _MetadataBase.Name,
+	message := "Mutating Name through INamed must update the workflow name"
+).ToBe(expected := "Renamed workflow");
+
+resetScopeOwner := _AssociatedRoot;
+borrowedResetScope := resetScopeOwner.GetResetScope();
+assertions.ThatBool(
+	actual := borrowedResetScope <> 0,
+	message := "Activity must expose its embedded reset scope through IVariableResetScopeProvider"
+).IsTrue();
+
+assertions.ThatBool(
+	actual := TOF_Workflow.WorkflowExceptions.ClassName <> '',
+	message := "The exception helper program must expose its diagnostic name"
+).IsTrue();
+assertions.ThatBool(
+	actual := TOF_Workflow.WorkflowExceptions.ClassName = TOF_Workflow.Workflows.ClassName,
+	message := "Different helper programs must retain distinct class metadata"
+).IsFalse();
+assertions.ThatString(
+	actual := TOF_Workflow.WorkflowExceptions.NamespaceName,
+	message := "Exception helper namespace must match the workflow library"
+).ToBe(expected := _MetadataBase.NamespaceName);]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="testConditionScopePrecedence" Id="{d54cfd66-8e51-4e3b-8ef1-bcd56fa4e3ee}">
+      <Declaration><![CDATA[(*!
+<summary>Checks lexical variable precedence in value and relational conditions.</summary>
+<description>
+Persistent bindings deliberately reuse names with different values. Includes unattached conditions,
+condition parents, attached activities, alternate contexts, both comparison operands and workflow fallback.
+</description>
+<param name="assertions">Valid assertion context borrowed from the active case.</param>
+*)
+METHOD PRIVATE testConditionScopePrecedence
+VAR_INPUT
+	assertions : REFERENCE TO TOF_Testing.Assertions;
+END_VAR
+VAR
+	expectedValue : DINT;
+	found : BOOL;
+	resolved : TOF_Core.GENERIC_VALUE;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_ScopeWorkflow.BindPlcVariable(name := 'Target', plcVariable := _ScopeWorkflowValue);
+_ScopeWorkflow.BindPlcVariable(name := 'Right', plcVariable := _ScopeWorkflowRight);
+_ScopeWorkflow.BindPlcVariable(name := 'Attached', plcVariable := _ScopeWorkflowValue);
+_ScopeWorkflow.BindPlcVariable(name := 'Ancestor', plcVariable := _ScopeWorkflowValue);
+_ScopeWorkflow.BindPlcVariable(name := 'WorkflowOnly', plcVariable := _ScopeWorkflowValue);
+_ScopeOtherWorkflow.BindPlcVariable(name := 'WorkflowOnly', plcVariable := _ScopeOtherValue);
+_ScopeOtherWorkflow.BindPlcVariable(name := 'OtherOnly', plcVariable := _ScopeOtherValue);
+_ScopeContext.BindPlcVariable(name := 'Target', plcVariable := _ScopeContextValue);
+_ScopeContext.BindPlcVariable(name := 'Right', plcVariable := _ScopeContextValue);
+_ScopeContext.BindPlcVariable(name := 'Attached', plcVariable := _ScopeContextValue);
+_ScopeContextParent.BindPlcVariable(name := 'Ancestor', plcVariable := _ScopeAncestorValue);
+_ScopeContextParent.AddChildActivity(activity := _ScopeContext);
+
+expectedValue := _ScopeContextValue;
+_ScopeFree.Configure(monitoredVariableName := 'Target', referenceValue := expectedValue);
+assertions.ThatBool(
+	actual := _ScopeFree.Evaluate(activity := _ScopeContext),
+	message := "Unattached condition must use context local binding before its associated workflow"
+).IsTrue();
+
+_ScopeFree.BindPlcVariable(name := 'Target', plcVariable := _ScopeLocalValue);
+expectedValue := _ScopeLocalValue;
+_ScopeFree.Configure(monitoredVariableName := 'Target', referenceValue := expectedValue);
+assertions.ThatBool(
+	actual := _ScopeFree.Evaluate(activity := _ScopeContext),
+	message := "Condition local binding must shadow context and workflow bindings"
+).IsTrue();
+assertions.ThatBool(
+	actual := _ScopeFree.Evaluate(activity := 0),
+	message := "Local binding requires no activity context"
+).IsTrue();
+
+_ScopeGroup.BindPlcVariable(name := 'Target', plcVariable := _ScopeConditionParentValue);
+_ScopeGroup.AddChildCondition(condition := _ScopeLeaf);
+_ScopeGroup.ParentActivity := _ScopeAttached;
+_ScopeAttached.BindPlcVariable(name := 'Attached', plcVariable := _ScopeAttachedValue);
+expectedValue := _ScopeConditionParentValue;
+_ScopeLeaf.Configure(monitoredVariableName := 'Target', referenceValue := expectedValue);
+assertions.ThatBool(
+	actual := _ScopeLeaf.Evaluate(activity := _ScopeContext),
+	message := "Parent condition local binding must precede the evaluating activity"
+).IsTrue();
+
+expectedValue := _ScopeAttachedValue;
+_ScopeLeaf.Configure(monitoredVariableName := 'Attached', referenceValue := expectedValue);
+assertions.ThatBool(
+	actual := _ScopeLeaf.Evaluate(activity := _ScopeContext),
+	message := "Attached activity binding must precede an alternate evaluating activity"
+).IsTrue();
+
+expectedValue := _ScopeAncestorValue;
+_ScopeLeaf.Configure(monitoredVariableName := 'Ancestor', referenceValue := expectedValue);
+assertions.ThatBool(
+	actual := _ScopeLeaf.Evaluate(activity := _ScopeContext),
+	message := "Context ancestor binding must precede workflow fallback"
+).IsTrue();
+
+expectedValue := _ScopeWorkflowValue;
+_ScopeLeaf.Configure(monitoredVariableName := 'WorkflowOnly', referenceValue := expectedValue);
+assertions.ThatBool(
+	actual := _ScopeLeaf.Evaluate(activity := _ScopeForeignContext),
+	message := "Associated workflow fallback must precede a distinct context workflow"
+).IsTrue();
+assertions.ThatBool(
+	actual := _ScopeLeaf.Evaluate(activity := 0),
+	message := "Workflow fallback requires no context"
+).IsTrue();
+
+expectedValue := _ScopeOtherValue;
+_ScopeLeaf.Configure(monitoredVariableName := 'OtherOnly', referenceValue := expectedValue);
+assertions.ThatBool(
+	actual := _ScopeLeaf.Evaluate(activity := _ScopeForeignContext),
+	message := "A distinct context workflow is the last fallback"
+).IsTrue();
+
+expectedValue := _ScopeContextValue;
+_ScopeComparison.Configure(
+	firstVariableName := 'Target',
+	comparisonOperator := TOF_Workflow.COMPARISON_OPERATOR.EQUAL,
+	referenceValue := expectedValue
+);
+assertions.ThatBool(
+	actual := _ScopeComparison.Evaluate(activity := _ScopeContext),
+	message := "Reference comparison must use context locals before workflow fallback"
+).IsTrue();
+_ScopeComparison.BindPlcVariable(name := 'Target', plcVariable := _ScopeLocalValue);
+expectedValue := _ScopeLocalValue;
+_ScopeComparison.Configure(
+	firstVariableName := 'Target',
+	comparisonOperator := TOF_Workflow.COMPARISON_OPERATOR.EQUAL,
+	referenceValue := expectedValue
+);
+assertions.ThatBool(
+	actual := _ScopeComparison.Evaluate(activity := _ScopeContext),
+	message := "Reference comparison must retain condition-local precedence"
+).IsTrue();
+
+_ScopePair.ConfigureVariable(
+	firstVariableName := 'Target',
+	comparisonOperator := TOF_Workflow.COMPARISON_OPERATOR.EQUAL,
+	secondVariableName := 'Right'
+);
+assertions.ThatBool(
+	actual := _ScopePair.Evaluate(activity := _ScopeContext),
+	message := "Both comparison operands must resolve in context before workflow fallback"
+).IsTrue();
+
+found := _ScopeContext.TryGetLocalVariable(name := 'WorkflowOnly', variable => resolved);
+assertions.ThatBool(
+	actual := found,
+	message := "Local-only activity lookup must not include its workflow"
+).IsFalse();
+found := _ScopeLeaf.TryGetLocalVariable(name := 'Target', variable => resolved);
+assertions.ThatBool(actual := found, message := "Local-only condition lookup must not include its parent").IsFalse();
+found := _ScopeFree.TryGetLocalVariable(name := 'Target', variable => resolved);
+assertions.ThatBool(actual := found, message := "Direct condition binding must be discoverable").IsTrue();
+assertions.ThatBool(
+	actual := resolved.Address = ADR(_ScopeLocalValue),
+	message := "Local descriptor must remain borrowed"
+).IsTrue();
+
+_WaitScopeWorkflow.BindPlcVariable(name := 'Target', plcVariable := _ScopeWorkflowValue);
+_WaitScopeActivity.BindPlcVariable(name := 'Target', plcVariable := _ScopeContextValue);
+expectedValue := _ScopeContextValue;
+_WaitScopeActivity.Configure(monitoredVariableName := 'Target', referenceValue := expectedValue);
+_WaitScopeWorkflow.SetRootActivity(rootActivity := _WaitScopeActivity);
+_WaitScopeWorkflow.RequestStart();
+assertions.ThatBool(
+	actual := _WaitScopeWorkflow.State = TOF_Workflow.WORKFLOW_ELEMENT_STATE.PASSIVE_COMPLETED,
+	message := "WaitVariableValue internal condition must see the activity local binding before workflow"
+).IsTrue();
+_WaitScopeWorkflow.RequestReset();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="testConditionTopology" Id="{b1cbcc93-94b7-4d1f-aa83-86cf97d1f3c5}">
+      <Declaration><![CDATA[(*!
+<summary>Rejects duplicate and cyclic conditions and resolves activity context through the live chain.</summary>
+<description>
+Uses independently prepared persistent fixtures. Expected failures are checked by exception interface;
+ordinary unexpected exceptions leave fixture ownership with the suite.
+</description>
+<param name="assertions">Valid assertion context borrowed from the active case.</param>
+*)
+METHOD PRIVATE testConditionTopology
+VAR_INPUT
+	assertions : REFERENCE TO TOF_Testing.Assertions;
+END_VAR
+VAR
+	expectedActivity : TOF_Workflow.IActivity;
+	expectedCondition : TOF_Workflow.ICondition;
+	actualActivity : TOF_Workflow.IActivity;
+	actualCondition : TOF_Workflow.ICondition;
+	actualElement : TOF_Workflow.IWorkflowElement;
+	caught : BOOL;
+	exceptionCode : __SYSTEM.ExceptionCode;
+	exception : TOF_Core.IException;
+	attachmentException : TOF_Workflow.IWorkflowAttachmentException;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_ConditionGroup.AddChildCondition(condition := _ConditionLeaf);
+caught := FALSE;
+
+__TRY
+	_ConditionGroup.AddChildCondition(condition := _ConditionLeaf);
+__CATCH(exceptionCode)
+	exception := TOF_Core.ExceptionManager.GetLastException(
+		exceptionCode := exceptionCode,
+		catchPointNamespaceName := NamespaceName,
+		catchPointPOUName := __POUNAME(),
+		catchPointPosition := __POSITION()
+	);
+	caught := __QUERYINTERFACE(exception, attachmentException);
+__ENDTRY
+
+assertions.ThatBool(actual := caught, message := "Condition slots cannot share an instance").IsTrue();
+_ConditionNot.Configure(condition := _ConditionGroup);
+caught := FALSE;
+
+__TRY
+	_ConditionGroup.AddChildCondition(condition := _ConditionNot);
+__CATCH(exceptionCode)
+	exception := TOF_Core.ExceptionManager.GetLastException(
+		exceptionCode := exceptionCode,
+		catchPointNamespaceName := NamespaceName,
+		catchPointPOUName := __POUNAME(),
+		catchPointPosition := __POSITION()
+	);
+	caught := __QUERYINTERFACE(exception, attachmentException);
+__ENDTRY
+
+assertions.ThatBool(actual := caught, message := "A condition ancestor cannot become a child").IsTrue();
+expectedActivity := _ConditionHost;
+_ConditionHost.Configure(condition := _ConditionNot);
+_ConditionNot.Configure(condition := _ConditionGroup);
+actualActivity := _ConditionLeaf.EnclosingActivity;
+assertions.ThatBool(
+	actual := actualActivity = expectedActivity,
+	message := "Nested condition activity context must follow the parent chain"
+).IsTrue();
+actualActivity := _ConditionLeaf.ParentActivity;
+assertions.ThatBool(
+	actual := actualActivity = 0,
+	message := "Nested condition immediate parent activity must be zero when attached to a condition"
+).IsTrue();
+expectedCondition := _ConditionGroup;
+actualCondition := _ConditionLeaf.ParentCondition;
+assertions.ThatBool(
+	actual := actualCondition = expectedCondition,
+	message := "Nested condition immediate parent condition must be its direct composite"
+).IsTrue();
+caught := FALSE;
+
+__TRY
+	_ConditionLeaf.ParentCondition := _ConditionLeaf;
+__CATCH(exceptionCode)
+	exception := TOF_Core.ExceptionManager.GetLastException(
+		exceptionCode := exceptionCode,
+		catchPointNamespaceName := NamespaceName,
+		catchPointPOUName := __POUNAME(),
+		catchPointPosition := __POSITION()
+	);
+	caught := __QUERYINTERFACE(exception, attachmentException);
+__ENDTRY
+
+assertions.ThatBool(actual := caught, message := "A bound condition cannot replace its parent").IsTrue();
+caught := FALSE;
+
+__TRY
+	_FreeCondition.ParentCondition := _FreeCondition;
+__CATCH(exceptionCode)
+	exception := TOF_Core.ExceptionManager.GetLastException(
+		exceptionCode := exceptionCode,
+		catchPointNamespaceName := NamespaceName,
+		catchPointPOUName := __POUNAME(),
+		catchPointPosition := __POSITION()
+	);
+	caught := __QUERYINTERFACE(exception, attachmentException);
+__ENDTRY
+
+assertions.ThatBool(actual := caught, message := "A direct self-parent setter must be rejected").IsTrue();
+actualElement := _FreeCondition.Parent;
+assertions.ThatBool(
+	actual := actualElement = 0,
+	message := "Failed setter must preserve an unattached condition"
+).IsTrue();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="testDelayLifecycle" Id="{8a705608-0fe1-495e-a6d9-5e201d173db0}">
+      <Declaration><![CDATA[(*!
+<summary>Checks zero interval, same-cycle resume, cancellation and reset reuse.</summary>
+<description>
+Uses a persistent standalone activity. The positive interval prevents natural completion during synchronous
+lifecycle calls; cyclic remaining-time accuracy is covered separately by TestDelayPauseRemaining.
+</description>
+<param name="assertions">Valid assertion context borrowed from the active case.</param>
+*)
+METHOD PRIVATE testDelayLifecycle
+VAR_INPUT
+	assertions : REFERENCE TO TOF_Testing.Assertions;
+END_VAR
+VAR_INST
+	delay : TOF_Workflow.DelayActivity(workflow := 0);
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[delay.Interval := TOF_Core.Times.MIN_VALUE;
+delay.RequestStart();
+assertions.ThatBool(
+	actual := delay.State = TOF_Workflow.WORKFLOW_ELEMENT_STATE.PASSIVE_COMPLETED,
+	message := "Zero interval must complete on a fresh start"
+).IsTrue();
+delay.RequestReset();
+delay.Interval := T#1H;
+delay.RequestStart();
+delay.RequestSuspend();
+delay.RequestStart();
+assertions.ThatBool(
+	actual := delay.State = TOF_Workflow.WORKFLOW_ELEMENT_STATE.ACTIVE_RUNNING,
+	message := "Same-cycle suspension and resume must retain a positive interval"
+).IsTrue();
+delay.RequestSuspend();
+delay.RequestCancel(reason := "Lifecycle regression");
+assertions.ThatBool(
+	actual := delay.State = TOF_Workflow.WORKFLOW_ELEMENT_STATE.PASSIVE_CANCELLED,
+	message := "Cancellation from suspension must finish immediately"
+).IsTrue();
+assertions.ThatBool(
+	actual := delay.Interval = T#1H,
+	message := "Cancellation must retain nominal Interval"
+).IsTrue();
+delay.RequestReset();
+delay.RequestStart();
+assertions.ThatBool(
+	actual := delay.State = TOF_Workflow.WORKFLOW_ELEMENT_STATE.ACTIVE_RUNNING,
+	message := "Reset after cancellation must allow another positive run"
+).IsTrue();
+delay.RequestCancel(reason := "Lifecycle regression cleanup");
+delay.RequestReset();
+delay.Interval := TOF_Core.Times.MIN_VALUE;
+delay.RequestStart();
+assertions.ThatBool(
+	actual := delay.State = TOF_Workflow.WORKFLOW_ELEMENT_STATE.PASSIVE_COMPLETED,
+	message := "Reconfiguring the interval after reset must apply to the next run"
+).IsTrue();
+delay.RequestReset();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="testInitializationRetry" Id="{63f3bffc-b980-4de2-827d-f9b07c8a03d3}">
+      <Declaration><![CDATA[(*!
+<summary>Rolls back only hook-added bindings and retries without deleting caller-owned configuration.</summary>
+<description>
+Uses independently prepared persistent fixtures. Expected failures are checked by exception interface;
+ordinary unexpected exceptions leave fixture ownership with the suite.
+</description>
+<param name="assertions">Valid assertion context borrowed from the active case.</param>
+*)
+METHOD PRIVATE testInitializationRetry
+VAR_INPUT
+	assertions : REFERENCE TO TOF_Testing.Assertions;
+END_VAR
+VAR
+	expectedRoot : TOF_Workflow.IActivity;
+	actualActivity : TOF_Workflow.IActivity;
+	caught : BOOL;
+	exceptionCode : __SYSTEM.ExceptionCode;
+	exception : TOF_Core.IException;
+	standardException : TOF_Core.IStandardException;
+	found : BOOL;
+	resolved : TOF_Core.GENERIC_VALUE;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[expectedRoot := _RetryRoot;
+_RetryWorkflow.BindPlcVariable(name := 'External', plcVariable := _ExternalValue);
+_RetryWorkflow.throwInitialization := TRUE;
+caught := FALSE;
+
+__TRY
+	_RetryWorkflow.SetRootActivity(rootActivity := _RetryRoot);
+__CATCH(exceptionCode)
+	exception := TOF_Core.ExceptionManager.GetLastException(
+		exceptionCode := exceptionCode,
+		catchPointNamespaceName := NamespaceName,
+		catchPointPOUName := __POUNAME(),
+		catchPointPosition := __POSITION()
+	);
+	caught := __QUERYINTERFACE(exception, standardException);
+__ENDTRY
+
+assertions.ThatBool(actual := caught, message := "An ordinary initialization failure must propagate").IsTrue();
+actualActivity := _RetryWorkflow.RootActivity;
+assertions.ThatBool(
+	actual := actualActivity = 0,
+	message := "Failed initialization must not install the root"
+).IsTrue();
+found := _RetryWorkflow.TryGetVariable(name := 'External', variable => resolved);
+assertions.ThatBool(
+	actual := found,
+	message := "A preexisting binding must survive initialization rollback"
+).IsTrue();
+assertions.ThatBool(
+	actual := resolved.Address = ADR(_ExternalValue),
+	message := "Preexisting storage identity must survive"
+).IsTrue();
+found := _RetryWorkflow.TryGetVariable(name := 'Initialized', variable => resolved);
+assertions.ThatBool(actual := found, message := "The failed hook binding must be removed").IsFalse();
+
+_RetryWorkflow.SetRootActivity(rootActivity := _RetryRoot);
+actualActivity := _RetryWorkflow.RootActivity;
+assertions.ThatBool(
+	actual := actualActivity = expectedRoot,
+	message := "Retry must install the prepared root"
+).IsTrue();
+assertions.ThatDInt(
+	actual := _RetryWorkflow.initializationCount,
+	message := "Initialization must retry once"
+).ToBe(expected := 2);
+found := _RetryWorkflow.TryGetVariable(name := 'Initialized', variable => resolved);
+assertions.ThatBool(actual := found, message := "A successful retry must register the hook binding").IsTrue();
+_RetryWorkflow.SetRootActivity(rootActivity := _RetryRoot);
+assertions.ThatDInt(
+	actual := _RetryWorkflow.initializationCount,
+	message := "Success must not be initialized again"
+).ToBe(expected := 2);]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="testInvokeConfiguration" Id="{c00f8cc8-9765-4529-9eb8-6aaa22393e11}">
+      <Declaration><![CDATA[(*!
+<summary>Rejects task replacement while running, stopping and finished, then permits replacement after reset.</summary>
+<description>
+Uses independently prepared persistent fixtures. Expected failures are checked by exception interface;
+ordinary unexpected exceptions leave fixture ownership with the suite.
+</description>
+<param name="assertions">Valid assertion context borrowed from the active case.</param>
+*)
+METHOD PRIVATE testInvokeConfiguration
+VAR_INPUT
+	assertions : REFERENCE TO TOF_Testing.Assertions;
+END_VAR
+VAR
+	expectedTask : TOF_Tasks.ITask;
+	actualTask : TOF_Tasks.ITask;
+	caught : BOOL;
+	exceptionCode : __SYSTEM.ExceptionCode;
+	exception : TOF_Core.IException;
+	configurationException : TOF_Workflow.IWorkflowConfigurationException;
+	i : INT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[expectedTask := _ConfigTask;
+_ConfigTask.requiredStopCalls := 3;
+_ConfigActivity.Configure(task := _ConfigTask);
+_ConfigWorkflow.SetRootActivity(rootActivity := _ConfigActivity);
+_ConfigWorkflow.RequestStart();
+caught := FALSE;
+
+__TRY
+	_ConfigActivity.Configure(task := _ReplacementTask);
+__CATCH(exceptionCode)
+	exception := TOF_Core.ExceptionManager.GetLastException(
+		exceptionCode := exceptionCode,
+		catchPointNamespaceName := NamespaceName,
+		catchPointPOUName := __POUNAME(),
+		catchPointPosition := __POSITION()
+	);
+	caught := __QUERYINTERFACE(exception, configurationException);
+__ENDTRY
+
+assertions.ThatBool(actual := caught, message := "Running configuration must be rejected").IsTrue();
+actualTask := _ConfigActivity.Task;
+assertions.ThatBool(
+	actual := actualTask = expectedTask,
+	message := "Rejected replacement preserves the active dependency"
+).IsTrue();
+_ConfigWorkflow.RequestCancel(reason := "Configuration test");
+caught := FALSE;
+
+__TRY
+	_ConfigActivity.Configure(task := _ReplacementTask);
+__CATCH(exceptionCode)
+	exception := TOF_Core.ExceptionManager.GetLastException(
+		exceptionCode := exceptionCode,
+		catchPointNamespaceName := NamespaceName,
+		catchPointPOUName := __POUNAME(),
+		catchPointPosition := __POSITION()
+	);
+	caught := __QUERYINTERFACE(exception, configurationException);
+__ENDTRY
+
+assertions.ThatBool(actual := caught, message := "Stopping configuration must be rejected").IsTrue();
+
+FOR i := 1 TO 4 DO
+	_ConfigWorkflow.Execute();
+END_FOR
+
+assertions.ThatBool(
+	actual := _ConfigTask.State.Stopped,
+	message := "The original task must be serviced through stopping"
+).IsTrue();
+caught := FALSE;
+
+__TRY
+	_ConfigActivity.Configure(task := _ReplacementTask);
+__CATCH(exceptionCode)
+	exception := TOF_Core.ExceptionManager.GetLastException(
+		exceptionCode := exceptionCode,
+		catchPointNamespaceName := NamespaceName,
+		catchPointPOUName := __POUNAME(),
+		catchPointPosition := __POSITION()
+	);
+	caught := __QUERYINTERFACE(exception, configurationException);
+__ENDTRY
+
+assertions.ThatBool(actual := caught, message := "A finished activity requires reset before configuration").IsTrue();
+expectedTask := _ReplacementTask;
+_ConfigWorkflow.RequestReset();
+_ConfigActivity.Configure(task := _ReplacementTask);
+actualTask := _ConfigActivity.Task;
+assertions.ThatBool(
+	actual := actualTask = expectedTask,
+	message := "Ready configuration may replace the dependency"
+).IsTrue();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="testParentSetters" Id="{372e3208-2548-408e-85ab-4efe636a6d24}">
+      <Declaration><![CDATA[(*!
+<summary>Preserves direct parent links when self, ancestor, detach or replacement assignments are rejected.</summary>
+<description>
+Uses independently prepared persistent fixtures. Expected failures are checked by exception interface;
+ordinary unexpected exceptions leave fixture ownership with the suite.
+</description>
+<param name="assertions">Valid assertion context borrowed from the active case.</param>
+*)
+METHOD PRIVATE testParentSetters
+VAR_INPUT
+	assertions : REFERENCE TO TOF_Testing.Assertions;
+END_VAR
+VAR
+	expectedParent : TOF_Workflow.IActivity;
+	actualActivity : TOF_Workflow.IActivity;
+	actualElement : TOF_Workflow.IWorkflowElement;
+	caught : BOOL;
+	exceptionCode : __SYSTEM.ExceptionCode;
+	exception : TOF_Core.IException;
+	attachmentException : TOF_Workflow.IWorkflowAttachmentException;
+	configurationException : TOF_Workflow.IWorkflowConfigurationException;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[expectedParent := _ParentSequence;
+_ParentSequence.AddChildActivity(activity := _ParentChild);
+_ParentChild.ParentActivity := _ParentSequence;
+caught := FALSE;
+
+__TRY
+	_ParentChild.ParentActivity := _OtherParent;
+__CATCH(exceptionCode)
+	exception := TOF_Core.ExceptionManager.GetLastException(
+		exceptionCode := exceptionCode,
+		catchPointNamespaceName := NamespaceName,
+		catchPointPOUName := __POUNAME(),
+		catchPointPosition := __POSITION()
+	);
+	caught := __QUERYINTERFACE(exception, attachmentException);
+__ENDTRY
+
+assertions.ThatBool(actual := caught, message := "An existing activity parent cannot be replaced").IsTrue();
+caught := FALSE;
+
+__TRY
+	_ParentChild.ParentActivity := 0;
+__CATCH(exceptionCode)
+	exception := TOF_Core.ExceptionManager.GetLastException(
+		exceptionCode := exceptionCode,
+		catchPointNamespaceName := NamespaceName,
+		catchPointPOUName := __POUNAME(),
+		catchPointPosition := __POSITION()
+	);
+	caught := __QUERYINTERFACE(exception, attachmentException);
+__ENDTRY
+
+assertions.ThatBool(actual := caught, message := "An existing activity parent cannot be detached").IsTrue();
+caught := FALSE;
+
+__TRY
+	_ParentSequence.ParentActivity := _ParentChild;
+__CATCH(exceptionCode)
+	exception := TOF_Core.ExceptionManager.GetLastException(
+		exceptionCode := exceptionCode,
+		catchPointNamespaceName := NamespaceName,
+		catchPointPOUName := __POUNAME(),
+		catchPointPosition := __POSITION()
+	);
+	caught := __QUERYINTERFACE(exception, attachmentException);
+__ENDTRY
+
+assertions.ThatBool(actual := caught, message := "A direct parent setter cannot create an ancestor cycle").IsTrue();
+actualActivity := _ParentChild.ParentActivity;
+assertions.ThatBool(
+	actual := actualActivity = expectedParent,
+	message := "The original parent must be preserved"
+).IsTrue();
+actualElement := _ParentSequence.Parent;
+assertions.ThatBool(actual := actualElement = 0, message := "The ancestor must remain unattached").IsTrue();
+
+_ParentCondition.ParentActivity := _ParentSequence;
+caught := FALSE;
+
+__TRY
+	_ParentCondition.ParentActivity := _OtherParent;
+__CATCH(exceptionCode)
+	exception := TOF_Core.ExceptionManager.GetLastException(
+		exceptionCode := exceptionCode,
+		catchPointNamespaceName := NamespaceName,
+		catchPointPOUName := __POUNAME(),
+		catchPointPosition := __POSITION()
+	);
+	caught := __QUERYINTERFACE(exception, attachmentException);
+__ENDTRY
+
+assertions.ThatBool(actual := caught, message := "An existing condition parent cannot be replaced").IsTrue();
+caught := FALSE;
+
+__TRY
+	_ParentCondition.ParentActivity := 0;
+__CATCH(exceptionCode)
+	exception := TOF_Core.ExceptionManager.GetLastException(
+		exceptionCode := exceptionCode,
+		catchPointNamespaceName := NamespaceName,
+		catchPointPOUName := __POUNAME(),
+		catchPointPosition := __POSITION()
+	);
+	caught := __QUERYINTERFACE(exception, attachmentException);
+__ENDTRY
+
+assertions.ThatBool(actual := caught, message := "An existing condition parent cannot be detached").IsTrue();
+actualActivity := _ParentCondition.ParentActivity;
+assertions.ThatBool(
+	actual := actualActivity = expectedParent,
+	message := "A condition keeps its original activity parent"
+).IsTrue();
+
+_BusyRoot.AddChildActivity(activity := _BusyRunning);
+_BusyRoot.AddChildActivity(activity := _BusyDormant);
+_BusyWorkflow.SetRootActivity(rootActivity := _BusyRoot);
+_BusyWorkflow.RequestStart();
+caught := FALSE;
+
+__TRY
+	_BusyDormant.AddChildActivity(activity := _BusyCandidate);
+__CATCH(exceptionCode)
+	exception := TOF_Core.ExceptionManager.GetLastException(
+		exceptionCode := exceptionCode,
+		catchPointNamespaceName := NamespaceName,
+		catchPointPOUName := __POUNAME(),
+		catchPointPosition := __POSITION()
+	);
+	caught := __QUERYINTERFACE(exception, configurationException);
+__ENDTRY
+
+assertions.ThatBool(actual := caught, message := "A ready branch in a running tree cannot accept a child").IsTrue();
+caught := FALSE;
+
+__TRY
+	_BusyCandidate.ParentActivity := _BusyDormant;
+__CATCH(exceptionCode)
+	exception := TOF_Core.ExceptionManager.GetLastException(
+		exceptionCode := exceptionCode,
+		catchPointNamespaceName := NamespaceName,
+		catchPointPOUName := __POUNAME(),
+		catchPointPosition := __POSITION()
+	);
+	caught := __QUERYINTERFACE(exception, configurationException);
+__ENDTRY
+
+assertions.ThatBool(actual := caught, message := "A direct setter cannot mutate a running ancestor tree").IsTrue();
+actualElement := _BusyCandidate.Parent;
+assertions.ThatBool(
+	actual := actualElement = 0,
+	message := "Rejected active-tree mutation must preserve the candidate"
+).IsTrue();
+_BusyWorkflow.RequestCancel(reason := "Topology test complete");
+_BusyWorkflow.RequestReset();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="testRootAssociation" Id="{114a78e6-e29d-4e2f-9898-e5660c5c4f60}">
+      <Declaration><![CDATA[(*!
+<summary>Checks explicit root ownership, rejection before mutation and root-child exclusion.</summary>
+<description>
+Uses independently prepared persistent fixtures. Expected failures are checked by exception interface;
+ordinary unexpected exceptions leave fixture ownership with the suite.
+</description>
+<param name="assertions">Valid assertion context borrowed from the active case.</param>
+*)
+METHOD PRIVATE testRootAssociation
+VAR_INPUT
+	assertions : REFERENCE TO TOF_Testing.Assertions;
+END_VAR
+VAR
+	actualActivity : TOF_Workflow.IActivity;
+	actualElement : TOF_Workflow.IWorkflowElement;
+	caught : BOOL;
+	exceptionCode : __SYSTEM.ExceptionCode;
+	exception : TOF_Core.IException;
+	attachmentException : TOF_Workflow.IWorkflowAttachmentException;
+	found : BOOL;
+	resolved : TOF_Core.GENERIC_VALUE;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[caught := FALSE;
+
+__TRY
+	_RootWorkflow.SetRootActivity(rootActivity := _UnassociatedRoot);
+__CATCH(exceptionCode)
+	exception := TOF_Core.ExceptionManager.GetLastException(
+		exceptionCode := exceptionCode,
+		catchPointNamespaceName := NamespaceName,
+		catchPointPOUName := __POUNAME(),
+		catchPointPosition := __POSITION()
+	);
+	caught := __QUERYINTERFACE(exception, attachmentException);
+__ENDTRY
+
+assertions.ThatBool(actual := caught, message := "An unassociated root must be rejected").IsTrue();
+actualActivity := _RootWorkflow.RootActivity;
+assertions.ThatBool(actual := actualActivity = 0, message := "Rejected root must not be installed").IsTrue();
+assertions.ThatDInt(
+	actual := _RootWorkflow.initializationCount,
+	message := "Validation precedes hooks"
+).ToBe(expected := 0);
+
+caught := FALSE;
+
+__TRY
+	_RootWorkflow.SetRootActivity(rootActivity := _ForeignRoot);
+__CATCH(exceptionCode)
+	exception := TOF_Core.ExceptionManager.GetLastException(
+		exceptionCode := exceptionCode,
+		catchPointNamespaceName := NamespaceName,
+		catchPointPOUName := __POUNAME(),
+		catchPointPosition := __POSITION()
+	);
+	caught := __QUERYINTERFACE(exception, attachmentException);
+__ENDTRY
+
+assertions.ThatBool(actual := caught, message := "A foreign root must be rejected").IsTrue();
+
+_RootWorkflow.BindPlcVariable(name := 'RootValue', plcVariable := _RootValue);
+_RootWorkflow.SetRootActivity(rootActivity := _AssociatedRoot);
+_RootWorkflow.SetRootActivity(rootActivity := _AssociatedRoot);
+assertions.ThatDInt(
+	actual := _RootWorkflow.initializationCount,
+	message := "Repeated assignment is a no-op"
+).ToBe(expected := 1);
+found := _AssociatedRoot.TryGetVariable(name := 'RootValue', variable => resolved);
+assertions.ThatBool(actual := found, message := "Associated root must resolve its workflow binding").IsTrue();
+assertions.ThatBool(
+	actual := resolved.Address = ADR(_RootValue),
+	message := "Lookup must retain the borrowed storage"
+).IsTrue();
+
+caught := FALSE;
+
+__TRY
+	_RootPeer.AddChildActivity(activity := _AssociatedRoot);
+__CATCH(exceptionCode)
+	exception := TOF_Core.ExceptionManager.GetLastException(
+		exceptionCode := exceptionCode,
+		catchPointNamespaceName := NamespaceName,
+		catchPointPOUName := __POUNAME(),
+		catchPointPosition := __POSITION()
+	);
+	caught := __QUERYINTERFACE(exception, attachmentException);
+__ENDTRY
+
+assertions.ThatBool(actual := caught, message := "A registered root must not become a child").IsTrue();
+actualElement := _AssociatedRoot.Parent;
+assertions.ThatBool(
+	actual := actualElement = 0,
+	message := "Rejected root attachment must preserve parent"
+).IsTrue();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="testSequenceTopology" Id="{dd172252-0707-47a8-b182-7f7e89931c3a}">
+      <Declaration><![CDATA[(*!
+<summary>Rejects duplicate, null and cyclic slots and preserves branch-pair ordering after rejection.</summary>
+<description>
+Uses independently prepared persistent fixtures. Expected failures are checked by exception interface;
+ordinary unexpected exceptions leave fixture ownership with the suite.
+</description>
+<param name="assertions">Valid assertion context borrowed from the active case.</param>
+*)
+METHOD PRIVATE testSequenceTopology
+VAR_INPUT
+	assertions : REFERENCE TO TOF_Testing.Assertions;
+END_VAR
+VAR
+	actualElement : TOF_Workflow.IWorkflowElement;
+	caught : BOOL;
+	exceptionCode : __SYSTEM.ExceptionCode;
+	exception : TOF_Core.IException;
+	argumentException : TOF_Core.IArgumentNotSpecifiedException;
+	attachmentException : TOF_Workflow.IWorkflowAttachmentException;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[caught := FALSE;
+
+__TRY
+	_Sequence.AddChildActivity(activity := 0);
+__CATCH(exceptionCode)
+	exception := TOF_Core.ExceptionManager.GetLastException(
+		exceptionCode := exceptionCode,
+		catchPointNamespaceName := NamespaceName,
+		catchPointPOUName := __POUNAME(),
+		catchPointPosition := __POSITION()
+	);
+	caught := __QUERYINTERFACE(exception, argumentException);
+__ENDTRY
+
+assertions.ThatBool(actual := caught, message := "Null sequence child must retain its argument exception").IsTrue();
+_Sequence.AddChildActivity(activity := _SequenceFirst);
+caught := FALSE;
+
+__TRY
+	_Sequence.AddChildActivity(activity := _SequenceFirst);
+__CATCH(exceptionCode)
+	exception := TOF_Core.ExceptionManager.GetLastException(
+		exceptionCode := exceptionCode,
+		catchPointNamespaceName := NamespaceName,
+		catchPointPOUName := __POUNAME(),
+		catchPointPosition := __POSITION()
+	);
+	caught := __QUERYINTERFACE(exception, attachmentException);
+__ENDTRY
+
+assertions.ThatBool(actual := caught, message := "An instance may occupy only one sequence slot").IsTrue();
+_Sequence.AddChildActivity(activity := _SequenceSecond);
+
+caught := FALSE;
+
+__TRY
+	_Ancestor.AddChildActivity(activity := _Ancestor);
+__CATCH(exceptionCode)
+	exception := TOF_Core.ExceptionManager.GetLastException(
+		exceptionCode := exceptionCode,
+		catchPointNamespaceName := NamespaceName,
+		catchPointPOUName := __POUNAME(),
+		catchPointPosition := __POSITION()
+	);
+	caught := __QUERYINTERFACE(exception, attachmentException);
+__ENDTRY
+
+assertions.ThatBool(actual := caught, message := "Self attachment must be rejected").IsTrue();
+_Ancestor.AddChildActivity(activity := _Descendant);
+caught := FALSE;
+
+__TRY
+	_Descendant.AddChildActivity(activity := _Ancestor);
+__CATCH(exceptionCode)
+	exception := TOF_Core.ExceptionManager.GetLastException(
+		exceptionCode := exceptionCode,
+		catchPointNamespaceName := NamespaceName,
+		catchPointPOUName := __POUNAME(),
+		catchPointPosition := __POSITION()
+	);
+	caught := __QUERYINTERFACE(exception, attachmentException);
+__ENDTRY
+
+assertions.ThatBool(actual := caught, message := "Ancestor attachment must be rejected").IsTrue();
+
+_Pick.AddBranch(condition := _PickFirstCondition, activity := _PickFirstActivity);
+caught := FALSE;
+
+__TRY
+	_Pick.AddBranch(condition := _PickFirstCondition, activity := _PickSecondActivity);
+__CATCH(exceptionCode)
+	exception := TOF_Core.ExceptionManager.GetLastException(
+		exceptionCode := exceptionCode,
+		catchPointNamespaceName := NamespaceName,
+		catchPointPOUName := __POUNAME(),
+		catchPointPosition := __POSITION()
+	);
+	caught := __QUERYINTERFACE(exception, attachmentException);
+__ENDTRY
+
+assertions.ThatBool(actual := caught, message := "A condition cannot occupy two branch slots").IsTrue();
+caught := FALSE;
+
+__TRY
+	_Pick.AddBranch(condition := _PickSecondCondition, activity := _PickFirstActivity);
+__CATCH(exceptionCode)
+	exception := TOF_Core.ExceptionManager.GetLastException(
+		exceptionCode := exceptionCode,
+		catchPointNamespaceName := NamespaceName,
+		catchPointPOUName := __POUNAME(),
+		catchPointPosition := __POSITION()
+	);
+	caught := __QUERYINTERFACE(exception, attachmentException);
+__ENDTRY
+
+assertions.ThatBool(actual := caught, message := "An activity cannot occupy two branch slots").IsTrue();
+actualElement := _PickSecondCondition.Parent;
+assertions.ThatBool(
+	actual := actualElement = 0,
+	message := "Rejected pairs must not attach the unused condition"
+).IsTrue();
+actualElement := _PickSecondActivity.Parent;
+assertions.ThatBool(
+	actual := actualElement = 0,
+	message := "Rejected pairs must not attach the unused activity"
+).IsTrue();
+_Pick.AddBranch(condition := _PickSecondCondition, activity := _PickSecondActivity);
+_PickFirstActivity.completeRunning := TRUE;
+_Pick.RequestStart();
+assertions.ThatDInt(
+	actual := _Pick.CurrentBranchIndex,
+	message := "The original first pair must retain priority"
+).ToBe(expected := 0);
+assertions.ThatDInt(
+	actual := _PickFirstActivity.startCount,
+	message := "The first branch activity must start"
+).ToBe(expected := 1);
+assertions.ThatDInt(
+	actual := _PickSecondActivity.startCount,
+	message := "The second branch must remain unstarted"
+).ToBe(expected := 0);
+
+_SequenceFirst.completeRunning := TRUE;
+_SequenceSecond.completeRunning := TRUE;
+_Sequence.RequestStart();
+_Sequence.Execute();
+assertions.ThatBool(
+	actual := _Sequence.State = TOF_Workflow.WORKFLOW_ELEMENT_STATE.PASSIVE_COMPLETED,
+	message := "The original two valid slots must complete"
+).IsTrue();
+assertions.ThatDInt(
+	actual := _SequenceFirst.startCount,
+	message := "First child must start once"
+).ToBe(expected := 1);
+assertions.ThatDInt(
+	actual := _SequenceSecond.startCount,
+	message := "Second child must start once"
+).ToBe(expected := 1);
+
+_Sequence.RequestReset();
+_Pick.RequestReset();
+assertions.ThatBool(
+	actual := _Sequence.CurrentActivityIndex = TOF_Workflow.Workflows.NO_SELECTED_ACTIVITY_INDEX,
+	message := "Reset sequence must expose the documented absent-selection sentinel"
+).IsTrue();
+assertions.ThatBool(
+	actual := _Pick.CurrentBranchIndex = TOF_Workflow.Workflows.NO_SELECTED_ACTIVITY_INDEX,
+	message := "Reset branch selection must expose the same absent-selection sentinel"
+).IsTrue();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="testTaskAbortDuringSuspend" Id="{51cb9f83-b866-4ad0-b866-bd3c07c2169b}">
+      <Declaration><![CDATA[(*!
+<summary>Preserves task internal-abort diagnostics while stopping.</summary>
+<description>
+Uses independently prepared persistent fixtures. Expected failures are checked by exception interface;
+ordinary unexpected exceptions leave fixture ownership with the suite.
+</description>
+<param name="assertions">Valid assertion context borrowed from the active case.</param>
+*)
+METHOD PRIVATE testTaskAbortDuringSuspend
+VAR_INPUT
+	assertions : REFERENCE TO TOF_Testing.Assertions;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_SuspendAbortActivity.Configure(task := _SuspendAbortTask);
+_SuspendAbortWorkflow.SetRootActivity(rootActivity := _SuspendAbortActivity);
+_SuspendAbortWorkflow.RequestStart();
+_SuspendAbortTask.processingResult := TOF_Tasks.TASK_PROCESSING_STATE.ABORTED;
+_SuspendAbortWorkflow.RequestSuspend();
+assertions.ThatBool(
+	actual := _SuspendAbortActivity.State = TOF_Workflow.WORKFLOW_ELEMENT_STATE.PASSIVE_HALTED,
+	message := "An internal abort while suspending must remain HALTED"
+).IsTrue();
+assertions.ThatWideString(
+	actual := _SuspendAbortActivity.HaltReason,
+	message := "The task abort reason must survive adapter translation"
+).ToBe(expected := "Controlled task internal abort");
+_SuspendAbortWorkflow.RequestReset();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="testTaskCompletionDuringSuspend" Id="{61c087d0-ad3f-4074-9944-38a066a82671}">
+      <Declaration><![CDATA[(*!
+<summary>Preserves successful task completion when work finishes during suspension.</summary>
+<description>
+Uses independently prepared persistent fixtures. Expected failures are checked by exception interface;
+ordinary unexpected exceptions leave fixture ownership with the suite.
+</description>
+<param name="assertions">Valid assertion context borrowed from the active case.</param>
+*)
+METHOD PRIVATE testTaskCompletionDuringSuspend
+VAR_INPUT
+	assertions : REFERENCE TO TOF_Testing.Assertions;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_SuspendDoneActivity.Configure(task := _SuspendDoneTask);
+_SuspendDoneWorkflow.SetRootActivity(rootActivity := _SuspendDoneActivity);
+_SuspendDoneWorkflow.RequestStart();
+_SuspendDoneTask.processingResult := TOF_Tasks.TASK_PROCESSING_STATE.DONE;
+_SuspendDoneWorkflow.RequestSuspend();
+assertions.ThatBool(
+	actual := _SuspendDoneActivity.State = TOF_Workflow.WORKFLOW_ELEMENT_STATE.PASSIVE_COMPLETED,
+	message := "Work completed during suspension must retain its completion outcome"
+).IsTrue();
+_SuspendDoneWorkflow.RequestReset();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="testTaskFailureDuringSuspend" Id="{d4e3be94-3fa0-40cf-a203-fe128a3485be}">
+      <Declaration><![CDATA[(*!
+<summary>Reports a task processing failure during suspension as an activity failure.</summary>
+<description>
+Uses independently prepared persistent fixtures. Expected failures are checked by exception interface;
+ordinary unexpected exceptions leave fixture ownership with the suite.
+</description>
+<param name="assertions">Valid assertion context borrowed from the active case.</param>
+*)
+METHOD PRIVATE testTaskFailureDuringSuspend
+VAR_INPUT
+	assertions : REFERENCE TO TOF_Testing.Assertions;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_SuspendFailureActivity.Configure(task := _SuspendFailureTask);
+_SuspendFailureWorkflow.SetRootActivity(rootActivity := _SuspendFailureActivity);
+_SuspendFailureWorkflow.RequestStart();
+_SuspendFailureTask.processingResult := TOF_Tasks.TASK_PROCESSING_STATE.ERROR;
+_SuspendFailureWorkflow.RequestSuspend();
+
+assertions.ThatBool(
+	actual := _SuspendFailureTask.State.Stopped,
+	message := "The failed task must reach STOPPED"
+).IsTrue();
+assertions.ThatBool(
+	actual := _SuspendFailureActivity.State = TOF_Workflow.WORKFLOW_ELEMENT_STATE.PASSIVE_FAILED,
+	message := "Task failure while suspending must not be reported as SUSPENDED"
+).IsTrue();
+assertions.ThatBool(
+	actual := _SuspendFailureWorkflow.FailError.HasError,
+	message := "Failure diagnostics must be retained"
+).IsTrue();
+_SuspendFailureWorkflow.RequestReset();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="testTaskReleaseFailureDuringCancel" Id="{d8bd19e1-fb81-4153-aa67-873b0badd418}">
+      <Declaration><![CDATA[(*!
+<summary>
+Keeps servicing cancellation through release and exposes a release failure with explicit resource recovery.
+</summary>
+<description>
+Uses independently prepared persistent fixtures. Expected failures are checked by exception interface;
+ordinary unexpected exceptions leave fixture ownership with the suite.
+</description>
+<param name="assertions">Valid assertion context borrowed from the active case.</param>
+*)
+METHOD PRIVATE testTaskReleaseFailureDuringCancel
+VAR_INPUT
+	assertions : REFERENCE TO TOF_Testing.Assertions;
+END_VAR
+VAR
+	caught : BOOL;
+	exceptionCode : __SYSTEM.ExceptionCode;
+	exception : TOF_Core.IException;
+	configurationException : TOF_Workflow.IWorkflowConfigurationException;
+	i : INT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_ReleaseTask.resource := _ReleaseResource;
+_ReleaseActivity.Configure(task := _ReleaseTask);
+_ReleaseWorkflow.SetRootActivity(rootActivity := _ReleaseActivity);
+_ReleaseWorkflow.RequestStart();
+
+FOR i := 1 TO 8 DO
+	_ReleaseWorkflow.Execute();
+
+	IF _ReleaseResource.ResourceAcquired THEN
+		EXIT;
+	END_IF
+END_FOR
+
+assertions.ThatBool(
+	actual := _ReleaseResource.ResourceAcquired,
+	message := "Synthetic acquisition must finish before cancellation"
+).IsTrue();
+_ReleaseResource.ThrowOnStartRelease := TRUE;
+_ReleaseWorkflow.RequestCancel(reason := "Release failure test");
+caught := FALSE;
+
+__TRY
+	_ReleaseActivity.Configure(task := _ReleaseReplacement);
+__CATCH(exceptionCode)
+	exception := TOF_Core.ExceptionManager.GetLastException(
+		exceptionCode := exceptionCode,
+		catchPointNamespaceName := NamespaceName,
+		catchPointPOUName := __POUNAME(),
+		catchPointPosition := __POSITION()
+	);
+	caught := __QUERYINTERFACE(exception, configurationException);
+__ENDTRY
+
+assertions.ThatBool(actual := caught, message := "Resource release must still block task replacement").IsTrue();
+_ReleaseWorkflow.Execute();
+assertions.ThatBool(
+	actual := _ReleaseActivity.State = TOF_Workflow.WORKFLOW_ELEMENT_STATE.PASSIVE_FAILED,
+	message := "Release failure must not become a successful cancellation"
+).IsTrue();
+assertions.ThatBool(
+	actual := _ReleaseWorkflow.FailError.HasError,
+	message := "Release failure diagnostics must remain visible"
+).IsTrue();
+
+// The synthetic manager intentionally retains ownership on failed release; recover it explicitly.
+_ReleaseResource.ThrowOnStartRelease := FALSE;
+_ReleaseResource.StartRelease();
+
+FOR i := 1 TO 3 DO
+	_ReleaseResource.Execute();
+END_FOR
+
+assertions.ThatBool(
+	actual := _ReleaseResource.ResourceAcquired,
+	message := "The test must release its synthetic resource"
+).IsFalse();
+_ReleaseWorkflow.RequestReset();
+assertions.ThatBool(
+	actual := _ReleaseActivity.State = TOF_Workflow.WORKFLOW_ELEMENT_STATE.PASSIVE_READY,
+	message := "Explicit resource recovery must permit adapter reset"
+).IsTrue();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="testVariableLookup" Id="{a0945ab8-8ea1-4142-a5cf-84119b851dfb}">
+      <Declaration><![CDATA[(*!
+<summary>Resolves borrowed local and ancestor bindings and reports absence without changing storage.</summary>
+<description>
+Uses independently prepared persistent fixtures. Expected failures are checked by exception interface;
+ordinary unexpected exceptions leave fixture ownership with the suite.
+</description>
+<param name="assertions">Valid assertion context borrowed from the active case.</param>
+*)
+METHOD PRIVATE testVariableLookup
+VAR_INPUT
+	assertions : REFERENCE TO TOF_Testing.Assertions;
+END_VAR
+VAR
+	found : BOOL;
+	resolved : TOF_Core.GENERIC_VALUE;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_LookupWorkflow.BindPlcVariable(name := 'Shared', plcVariable := _LookupWorkflowValue);
+_LookupParent.BindPlcVariable(name := 'Shared', plcVariable := _LookupParentValue);
+_LookupParent.AddChildActivity(activity := _LookupChild);
+_LookupCondition.ParentActivity := _LookupChild;
+_LookupCondition.BindPlcVariable(name := 'Local', plcVariable := _LookupConditionValue);
+
+found := _LookupChild.TryGetVariable(name := 'Shared', variable => resolved);
+assertions.ThatBool(actual := found, message := "A child must resolve its parent binding").IsTrue();
+assertions.ThatBool(
+	actual := resolved.Address = ADR(_LookupParentValue),
+	message := "Parent binding precedes workflow fallback"
+).IsTrue();
+found := _LookupCondition.TryGetVariable(name := 'Shared', variable => resolved);
+assertions.ThatBool(actual := found, message := "A condition must resolve its activity hierarchy").IsTrue();
+assertions.ThatBool(
+	actual := resolved.Address = ADR(_LookupParentValue),
+	message := "Condition lookup must retain parent storage"
+).IsTrue();
+found := _LookupCondition.TryGetVariable(name := 'Local', variable => resolved);
+assertions.ThatBool(actual := found, message := "A condition must resolve its own binding").IsTrue();
+assertions.ThatBool(
+	actual := resolved.Address = ADR(_LookupConditionValue),
+	message := "Local lookup must retain condition storage"
+).IsTrue();
+found := _LookupCondition.TryGetVariable(name := 'Missing', variable => resolved);
+assertions.ThatBool(actual := found, message := "Missing variables are a normal Try failure").IsFalse();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="testWorkflowIsolation" Id="{b23d391b-b15f-4c8c-97eb-27107f3a5ab5}">
+      <Declaration><![CDATA[(*!
+<summary>Rejects foreign activities and conditions through every construction family.</summary>
+<description>
+Uses independently prepared persistent fixtures. Expected failures are checked by exception interface;
+ordinary unexpected exceptions leave fixture ownership with the suite.
+</description>
+<param name="assertions">Valid assertion context borrowed from the active case.</param>
+*)
+METHOD PRIVATE testWorkflowIsolation
+VAR_INPUT
+	assertions : REFERENCE TO TOF_Testing.Assertions;
+END_VAR
+VAR
+	expectedWorkflow : TOF_Workflow.IWorkflow;
+	actualElement : TOF_Workflow.IWorkflowElement;
+	actualWorkflow : TOF_Workflow.IWorkflow;
+	caught : BOOL;
+	exceptionCode : __SYSTEM.ExceptionCode;
+	exception : TOF_Core.IException;
+	attachmentException : TOF_Workflow.IWorkflowAttachmentException;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[caught := FALSE;
+
+__TRY
+	_IsolationSequence.AddChildActivity(activity := _ForeignChild);
+__CATCH(exceptionCode)
+	exception := TOF_Core.ExceptionManager.GetLastException(
+		exceptionCode := exceptionCode,
+		catchPointNamespaceName := NamespaceName,
+		catchPointPOUName := __POUNAME(),
+		catchPointPosition := __POSITION()
+	);
+	caught := __QUERYINTERFACE(exception, attachmentException);
+__ENDTRY
+
+assertions.ThatBool(actual := caught, message := "Sequence must reject a foreign child").IsTrue();
+caught := FALSE;
+
+__TRY
+	_IsolationParallel.AddChildActivity(activity := _ForeignChild);
+__CATCH(exceptionCode)
+	exception := TOF_Core.ExceptionManager.GetLastException(
+		exceptionCode := exceptionCode,
+		catchPointNamespaceName := NamespaceName,
+		catchPointPOUName := __POUNAME(),
+		catchPointPosition := __POSITION()
+	);
+	caught := __QUERYINTERFACE(exception, attachmentException);
+__ENDTRY
+
+assertions.ThatBool(actual := caught, message := "Parallel must reject a foreign child").IsTrue();
+caught := FALSE;
+
+__TRY
+	_IsolationWait.Configure(condition := _ForeignCondition);
+__CATCH(exceptionCode)
+	exception := TOF_Core.ExceptionManager.GetLastException(
+		exceptionCode := exceptionCode,
+		catchPointNamespaceName := NamespaceName,
+		catchPointPOUName := __POUNAME(),
+		catchPointPosition := __POSITION()
+	);
+	caught := __QUERYINTERFACE(exception, attachmentException);
+__ENDTRY
+
+assertions.ThatBool(actual := caught, message := "WaitCondition must reject a foreign condition").IsTrue();
+caught := FALSE;
+
+__TRY
+	_IsolationWhile.Configure(condition := _ForeignCondition, body := 0);
+__CATCH(exceptionCode)
+	exception := TOF_Core.ExceptionManager.GetLastException(
+		exceptionCode := exceptionCode,
+		catchPointNamespaceName := NamespaceName,
+		catchPointPOUName := __POUNAME(),
+		catchPointPosition := __POSITION()
+	);
+	caught := __QUERYINTERFACE(exception, attachmentException);
+__ENDTRY
+
+assertions.ThatBool(actual := caught, message := "While must reject a foreign condition").IsTrue();
+caught := FALSE;
+
+__TRY
+	_IsolationIf.Configure(condition := _ForeignCondition, trueActivity := 0, falseActivity := 0);
+__CATCH(exceptionCode)
+	exception := TOF_Core.ExceptionManager.GetLastException(
+		exceptionCode := exceptionCode,
+		catchPointNamespaceName := NamespaceName,
+		catchPointPOUName := __POUNAME(),
+		catchPointPosition := __POSITION()
+	);
+	caught := __QUERYINTERFACE(exception, attachmentException);
+__ENDTRY
+
+assertions.ThatBool(actual := caught, message := "IfElse must reject a foreign condition").IsTrue();
+caught := FALSE;
+
+__TRY
+	_IsolationNot.Configure(condition := _ForeignCondition);
+__CATCH(exceptionCode)
+	exception := TOF_Core.ExceptionManager.GetLastException(
+		exceptionCode := exceptionCode,
+		catchPointNamespaceName := NamespaceName,
+		catchPointPOUName := __POUNAME(),
+		catchPointPosition := __POSITION()
+	);
+	caught := __QUERYINTERFACE(exception, attachmentException);
+__ENDTRY
+
+assertions.ThatBool(actual := caught, message := "Not must reject a foreign condition").IsTrue();
+caught := FALSE;
+
+__TRY
+	_IsolationGroup.AddChildCondition(condition := _ForeignCondition);
+__CATCH(exceptionCode)
+	exception := TOF_Core.ExceptionManager.GetLastException(
+		exceptionCode := exceptionCode,
+		catchPointNamespaceName := NamespaceName,
+		catchPointPOUName := __POUNAME(),
+		catchPointPosition := __POSITION()
+	);
+	caught := __QUERYINTERFACE(exception, attachmentException);
+__ENDTRY
+
+assertions.ThatBool(actual := caught, message := "CompositeCondition must reject a foreign condition").IsTrue();
+caught := FALSE;
+
+__TRY
+	_UnassociatedSequence.AddChildActivity(activity := _ForeignChild);
+__CATCH(exceptionCode)
+	exception := TOF_Core.ExceptionManager.GetLastException(
+		exceptionCode := exceptionCode,
+		catchPointNamespaceName := NamespaceName,
+		catchPointPOUName := __POUNAME(),
+		catchPointPosition := __POSITION()
+	);
+	caught := __QUERYINTERFACE(exception, attachmentException);
+__ENDTRY
+
+assertions.ThatBool(
+	actual := caught,
+	message := "An unassociated subtree cannot hide an explicitly owned child"
+).IsTrue();
+actualElement := _ForeignChild.Parent;
+assertions.ThatBool(actual := actualElement = 0, message := "Foreign activity must remain unattached").IsTrue();
+actualElement := _ForeignCondition.Parent;
+assertions.ThatBool(actual := actualElement = 0, message := "Foreign condition must remain unattached").IsTrue();
+
+expectedWorkflow := _IsolationWorkflow;
+_UnassociatedSequence.AddChildActivity(activity := _UnassociatedChild);
+_IsolationSequence.AddChildActivity(activity := _UnassociatedSequence);
+actualWorkflow := _UnassociatedChild.Workflow;
+assertions.ThatBool(
+	actual := actualWorkflow = expectedWorkflow,
+	message := "An entirely unassociated subtree must inherit its attached parent owner"
+).IsTrue();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="testDeclaredVariableReset" Id="{88fce0b7-1178-4ac8-8f15-1fcf2375221d}">
+      <Declaration><![CDATA[(*!
+<summary>Checks owned values through two loop iterations, a nested condition and a workflow reset.</summary>
+<description>Advances the loop through body completion and the next iteration before checking restored values.</description>
+<param name="assertions">Valid assertion context borrowed from the active case.</param>
+*)
+METHOD PRIVATE testDeclaredVariableReset
+VAR_INPUT
+	assertions : REFERENCE TO TOF_Testing.Assertions;
+END_VAR
+VAR
+	initial : UINT := 7;
+	changed : UINT := 23;
+	initialText : WSTRING(24) := "Start";
+	workflowCount : TOF_Core.GENERIC_VALUE;
+	loopCount : TOF_Core.GENERIC_VALUE;
+	bodyCount : TOF_Core.GENERIC_VALUE;
+	textValue : TOF_Core.GENERIC_VALUE;
+	found : BOOL;
+	i : DINT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_DeclarationLoop.Configure(condition := _DeclarationGuard, body := _DeclarationBody);
+_DeclarationBody.completeRunning := TRUE;
+_DeclarationGroup.Configure(condition := _DeclarationLeaf);
+_DeclarationGroup.ParentActivity := _DeclarationBody;
+
+_DeclarationWorkflow.DeclareVariable(name := 'Count', initialValue := initial);
+_DeclarationLoop.DeclareVariable(name := 'Count', initialValue := initial);
+_DeclarationBody.DeclareVariable(name := 'Count', initialValue := initial);
+_DeclarationLeaf.DeclareVariable(name := 'Text', initialValue := initialText);
+_DeclarationBody.BindPlcVariable(name := 'Input', plcVariable := _DeclarationInput);
+_DeclarationWorkflow.SetRootActivity(rootActivity := _DeclarationLoop);
+initial := 99;
+initialText := "Changed";
+
+found := _DeclarationWorkflow.TryGetVariable(name := 'Count', variable => workflowCount)
+	AND_THEN _DeclarationLoop.TryGetLocalVariable(name := 'Count', variable => loopCount)
+	AND_THEN _DeclarationGroup.TryGetVariable(name := 'Count', variable => bodyCount)
+	AND_THEN _DeclarationLeaf.TryGetLocalVariable(name := 'Text', variable => textValue);
+assertions.ThatBool(
+	actual := found,
+	message := "All declarations must resolve from their configured scopes"
+).IsTrue();
+
+IF found THEN
+	assertions.ThatBool(
+		actual := workflowCount.Address <> loopCount.Address AND_THEN loopCount.Address <> bodyCount.Address
+			AND_THEN bodyCount.Address <> workflowCount.Address AND_THEN bodyCount.Address <> ADR(initial),
+		message := "Equal names in separate scopes must keep independent storage"
+	).IsTrue();
+	assertions.ThatBool(
+		actual := NOT workflowCount.IsMemoryOwner AND_THEN NOT loopCount.IsMemoryOwner
+			AND_THEN NOT bodyCount.IsMemoryOwner AND_THEN NOT textValue.IsMemoryOwner,
+		message := "Resolved declarations must be borrowed"
+	).IsTrue();
+	assertions.ThatBool(
+		actual := textValue.Size = XSIZEOF(initialText) AND_THEN textValue.AsWStringReference() = "Start",
+		message := "Owned strings must preserve initial contents and full declared capacity"
+	).IsTrue();
+
+	_DeclarationWorkflow.RequestStart();
+	workflowCount.ChangeValueByAny(value := changed);
+	loopCount.ChangeValueByAny(value := changed);
+	bodyCount.ChangeValueByAny(value := changed);
+	textValue.ChangeValueByAny(value := initialText);
+	_DeclarationInput := changed;
+
+	_DeclarationWorkflow.Execute();
+	_DeclarationWorkflow.Execute();
+	assertions.ThatBool(
+		actual := _DeclarationBody.startCount = 2,
+		message := "The loop must restart its body"
+	).IsTrue();
+	assertions.ThatBool(
+		actual := bodyCount.AsUInt() = 7 AND_THEN textValue.AsWStringReference() = "Start",
+		message := "Body and nested condition must restore in place between iterations"
+	).IsTrue();
+	assertions.ThatBool(
+		actual := loopCount.AsUInt() = changed AND_THEN workflowCount.AsUInt() = changed,
+		message := "Resetting the body must preserve the loop and workflow variables"
+	).IsTrue();
+
+	_DeclarationWorkflow.RequestCancel(reason := "End declaration test");
+
+	FOR i := 1 TO 4 DO
+		IF _DeclarationWorkflow.Busy THEN
+			_DeclarationWorkflow.Execute();
+		END_IF
+	END_FOR
+
+	_DeclarationBody.deferFirstResetStep := TRUE;
+	bodyCount.ChangeValueByAny(value := changed);
+	_DeclarationWorkflow.RequestReset();
+
+	assertions.ThatBool(
+		actual := _DeclarationWorkflow.State = TOF_Workflow.WORKFLOW_ELEMENT_STATE.ACTIVE_RESETTING
+			AND_THEN workflowCount.AsUInt() = changed AND_THEN bodyCount.AsUInt() = changed,
+		message := "A pending reset must preserve current values until its owner completes"
+	).IsTrue();
+
+	FOR i := 1 TO 4 DO
+		IF _DeclarationWorkflow.Busy THEN
+			_DeclarationWorkflow.Execute();
+		END_IF
+	END_FOR
+
+	assertions.ThatBool(
+		actual := _DeclarationWorkflow.State = TOF_Workflow.WORKFLOW_ELEMENT_STATE.PASSIVE_READY
+			AND_THEN workflowCount.AsUInt() = 7 AND_THEN loopCount.AsUInt() = 7 AND_THEN bodyCount.AsUInt() = 7,
+		message := "Successful workflow reset must restore workflow and loop declarations"
+	).IsTrue();
+	assertions.ThatBool(
+		actual := _DeclarationInput = changed,
+		message := "Reset must preserve borrowed PLC storage"
+	).IsTrue();
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="testDeclaredVariableValidation" Id="{e7938411-1f9d-427d-b002-9a332b8ba8f1}">
+      <Declaration><![CDATA[(*!
+<summary>Checks duplicate, empty and composite declarations without replacing existing local storage.</summary>
+<param name="assertions">Valid assertion context borrowed from the active case.</param>
+*)
+METHOD PRIVATE testDeclaredVariableValidation
+VAR_INPUT
+	assertions : REFERENCE TO TOF_Testing.Assertions;
+END_VAR
+VAR
+	initial : UINT := 4;
+	recordValue : TOF_Core.GENERIC_KEY_VALUE_PAIR;
+	workflow : TOF_Workflow.IWorkflow;
+	declarations : TOF_Workflow.IDeclaredVariableContainer;
+	resolved : TOF_Core.GENERIC_VALUE;
+	found : BOOL;
+	caught : BOOL;
+	exceptionCode : __SYSTEM.ExceptionCode;
+	exception : TOF_Core.IException;
+	configurationError : TOF_Workflow.IWorkflowConfigurationException;
+	i : DINT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[workflow := _DeclarationValidation;
+found := __QUERYINTERFACE(workflow, declarations);
+assertions.ThatBool(actual := found, message := "Standard workflow must expose the declaration capability").IsTrue();
+
+IF NOT found THEN
+	RETURN;
+END_IF
+
+_DeclarationValidation.BindPlcVariable(name := 'Borrowed', plcVariable := _DeclarationInput);
+declarations.DeclareVariable(name := 'Owned', initialValue := initial);
+
+FOR i := 1 TO 5 DO
+	caught := FALSE;
+
+	__TRY
+		CASE i OF
+			1:
+				_DeclarationValidation.DeclareVariable(name := 'Borrowed', initialValue := initial);
+			2:
+				_DeclarationValidation.BindPlcVariable(name := 'Owned', plcVariable := _DeclarationInput);
+			3:
+				_DeclarationValidation.DeclareVariable(name := 'Owned', initialValue := initial);
+			4:
+				_DeclarationValidation.DeclareVariable(name := '', initialValue := initial);
+			5:
+				_DeclarationValidation.DeclareVariable(name := 'Invalid', initialValue := recordValue);
+		END_CASE
+	__CATCH(exceptionCode)
+		exception := TOF_Core.ExceptionManager.GetLastException(
+			exceptionCode := exceptionCode,
+			catchPointNamespaceName := NamespaceName,
+			catchPointPOUName := __POUNAME(),
+			catchPointPosition := __POSITION()
+		);
+		caught := __QUERYINTERFACE(exception, configurationError);
+	__ENDTRY
+
+	assertions.ThatBool(
+		actual := caught,
+		message := "Each invalid declaration must raise a configuration error"
+	).IsTrue();
+END_FOR
+
+found := _DeclarationValidation.TryGetVariable(name := 'Owned', variable => resolved);
+assertions.ThatBool(
+	actual := found AND_THEN resolved.AsUInt() = initial,
+	message := "Rejected replacement preserves value"
+).IsTrue();
+found := _DeclarationValidation.TryGetVariable(name := 'Borrowed', variable => resolved);
+assertions.ThatBool(
+	actual := found AND_THEN resolved.Address = ADR(_DeclarationInput),
+	message := "Borrowed binding survives"
+).IsTrue();
+found := _DeclarationValidation.TryGetVariable(name := 'Invalid', variable => resolved);
+assertions.ThatBool(actual := found, message := "Rejected type must leave the scope unchanged").IsFalse();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="testTransitionDiagnostics" Id="{fbcb0ede-daec-44f8-b076-0b6e0b28e502}">
+      <Declaration><![CDATA[(*!
+<summary>Checks the diagnostic target order and the transition predicate for every lifecycle state pair.</summary>
+<description>Uses independent expected lists and passes each candidate as the compatibility argument.</description>
+<param name="assertions">Valid assertion context borrowed from the active case.</param>
+*)
+METHOD PRIVATE testTransitionDiagnostics
+VAR_INPUT
+	assertions : REFERENCE TO TOF_Testing.Assertions;
+END_VAR
+VAR CONSTANT
+	states : ARRAY [0..9] OF TOF_Workflow.WORKFLOW_ELEMENT_STATE := [
+		TOF_Workflow.WORKFLOW_ELEMENT_STATE.PASSIVE_READY,
+		TOF_Workflow.WORKFLOW_ELEMENT_STATE.PASSIVE_COMPLETED,
+		TOF_Workflow.WORKFLOW_ELEMENT_STATE.PASSIVE_HALTED,
+		TOF_Workflow.WORKFLOW_ELEMENT_STATE.PASSIVE_CANCELLED,
+		TOF_Workflow.WORKFLOW_ELEMENT_STATE.PASSIVE_FAILED,
+		TOF_Workflow.WORKFLOW_ELEMENT_STATE.PASSIVE_SUSPENDED,
+		TOF_Workflow.WORKFLOW_ELEMENT_STATE.ACTIVE_RUNNING,
+		TOF_Workflow.WORKFLOW_ELEMENT_STATE.ACTIVE_CANCELLING,
+		TOF_Workflow.WORKFLOW_ELEMENT_STATE.ACTIVE_SUSPENDING,
+		TOF_Workflow.WORKFLOW_ELEMENT_STATE.ACTIVE_RESETTING
+	];
+	expectedNames : ARRAY [0..9] OF STRING(255) := [
+		'ACTIVE_RUNNING',
+		'ACTIVE_RESETTING',
+		'ACTIVE_RESETTING',
+		'ACTIVE_RESETTING',
+		'ACTIVE_RESETTING',
+		'ACTIVE_RUNNING,ACTIVE_CANCELLING',
+		'PASSIVE_COMPLETED,ACTIVE_SUSPENDING,ACTIVE_CANCELLING,PASSIVE_HALTED,PASSIVE_FAILED',
+		'PASSIVE_CANCELLED,PASSIVE_COMPLETED,PASSIVE_HALTED,PASSIVE_FAILED',
+		'PASSIVE_SUSPENDED,PASSIVE_COMPLETED,PASSIVE_HALTED,PASSIVE_FAILED',
+		'PASSIVE_READY,PASSIVE_FAILED'
+	];
+END_VAR
+VAR
+	i : DINT;
+	j : DINT;
+	actualNames : STRING(255);
+	expectedList : STRING(255);
+	targetToken : STRING;
+	permitted : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[FOR i := LOWER_BOUND(states, 1) TO UPPER_BOUND(states, 1) DO
+	expectedList := TOF_Core.Strings.Concat255(',', expectedNames[i], ',');
+
+	FOR j := LOWER_BOUND(states, 1) TO UPPER_BOUND(states, 1) DO
+		actualNames := TOF_Workflow.Workflows.GetAllowedTransitionNames(currentState := states[i]);
+		assertions.ThatBool(
+			actual := actualNames = expectedNames[i],
+			message := TO_WSTRING(TOF_Core.Strings.Concat255('Diagnostic order for ', TO_STRING(states[i])))
+		).IsTrue();
+		targetToken := TOF_Core.Strings.Concat255(',', TO_STRING(states[j]), ',');
+		permitted := TOF_Workflow.Workflows.ValidateTransition(currentState := states[i], newState := states[j]);
+		// SA0175: Exact ASCII token search within the comma-delimited diagnostic transition list.
+		{analysis -175}
+		assertions.ThatBool(
+			actual := permitted = (Tc2_Standard.FIND(STR1 := expectedList, STR2 := targetToken) > 0),
+			message := TO_WSTRING(TOF_Core.Strings.Concat255('Transition from ', TO_STRING(states[i]), ' to ', TO_STRING(states[j])))
+		).IsTrue();
+		{analysis +175}
+	END_FOR
+END_FOR]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="CreateElement" Id="{b350a52f-ef28-4138-84f4-fe6c914ab79a}">
+      <Declaration><![CDATA[(*!
+<summary>Provides the application-specific test activity to the workflow factory.</summary>
+<description>Returns zero for unknown names. The suite owns the disposal counter until the registered child exits.</description>
+<param name="typeName">Requested type.</param>
+<param name="workflow">Prospective owner.</param>
+*)
+METHOD CreateElement : TOF_Workflow.IWorkflowElement
+VAR_INPUT
+	typeName : STRING(255);
+	workflow : TOF_Workflow.IWorkflow;
+END_VAR
+VAR
+	created : POINTER TO WorkflowContractActivity;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF typeName <> TOF_Core.Strings.Concat255(CurrentNamespace.Name, '.WorkflowContractActivity') THEN
+	RETURN;
+END_IF
+
+created := __NEW(WorkflowContractActivity(workflow := workflow));
+
+IF created = 0 THEN
+	TOF_Core.DynamicMemoryManager.RaiseAllocationFailure();
+END_IF
+
+created^.exitCount REF= _FactoryExits;
+created^.completeRunning := TRUE;
+CreateElement := created^;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="testFactoryDeclarations" Id="{96c2d6be-c9ed-4710-b132-79636718eda7}">
+      <Declaration><![CDATA[(*!
+<summary>Builds a mixed factory tree and observes array declaration, mutation, reset and disposal.</summary>
+<description>Uses persistent workflow ownership and synthetic values in one task.</description>
+<param name="assertions">Valid assertion context borrowed from the active case.</param>
+*)
+METHOD PRIVATE testFactoryDeclarations
+VAR_INPUT
+	assertions : REFERENCE TO TOF_Testing.Assertions;
+END_VAR
+VAR
+	element : TOF_Workflow.IWorkflowElement;
+	sequence : TOF_Workflow.ISequenceActivity;
+	child : TOF_Workflow.IActivity;
+	scope : TOF_Workflow.IDeclaredVariableContainer;
+	binder : TOF_Workflow.IVariableBinder;
+	initials : ARRAY [3..4] OF __SYSTEM.AnyType;
+	firstValue : BYTE := BYTE#2;
+	secondValue : BYTE := BYTE#5;
+	initialCopy : BYTE;
+	position : DINT;
+	declarationCount : DINT;
+	bindingName : STRING;
+	declaration : TOF_Workflow.VARIABLE_DECLARATION;
+	live : TOF_Core.GENERIC_VALUE;
+	found : BOOL;
+	ready : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[__TRY
+	element := TOF_Workflow.Workflows.CreateElement(
+		typeName := 'TOF_Workflow.SequenceActivity',
+		workflow := _FactoryWorkflow
+	);
+	ready := __QUERYINTERFACE(element, sequence);
+	element := TOF_Workflow.Workflows.CreateElement(
+		typeName := TOF_Core.Strings.Concat255(CurrentNamespace.Name, '.WorkflowContractActivity'),
+		workflow := _FactoryWorkflow,
+		factory := THIS^
+	);
+	ready := ready
+		AND_THEN __QUERYINTERFACE(element, child)
+		AND_THEN __QUERYINTERFACE(element, scope)
+		AND_THEN __QUERYINTERFACE(element, binder);
+	assertions.ThatBool(
+		actual := ready,
+		message := "Built-in and custom factories must return the requested node capabilities"
+	).IsTrue();
+
+	IF ready THEN
+		sequence.AddChildActivity(activity := child);
+		_FactoryWorkflow.SetRootActivity(rootActivity := sequence);
+		binder.BindPlcVariable(name := 'Input', plcVariable := _DeclarationInput);
+		initials[3] := TOF_Workflow.Workflows.GetValueDescriptor(value := firstValue);
+		initials[4] := TOF_Workflow.Workflows.GetValueDescriptor(value := secondValue);
+		scope.DeclareArray(name := 'Limits', initialValues := ADR(initials[3]), elementCount := 2);
+		scope.DeclareVariable(name := 'Flags', initialValue := firstValue);
+		firstValue := BYTE#255;
+		found := FALSE;
+
+		WHILE scope.NextDeclaration(position := position, name => bindingName, declaration => declaration) DO
+			declarationCount := declarationCount + 1;
+			assertions.ThatBool(
+				actual := declaration.ElementType = __SYSTEM.TYPE_CLASS.TYPE_BYTE AND_THEN declaration.ElementSize = 1,
+				message := "BYTE must preserve its exact IEC type"
+			).IsTrue();
+
+			IF bindingName = 'Limits' THEN
+				found := declaration.IsArray AND_THEN declaration.ElementCount = 2;
+			ELSE
+				assertions.ThatBool(
+					actual := bindingName = 'Flags' AND_THEN NOT declaration.IsArray AND_THEN declaration.ElementCount = 1,
+					message := "Only local declarations must be enumerated"
+				).IsTrue();
+			END_IF
+		END_WHILE
+
+		assertions.ThatBool(
+			actual := found AND_THEN declarationCount = 2,
+			message := "Enumeration must include the array and scalar"
+		).IsTrue();
+		live := scope.GetDeclaredElement(name := 'Limits', index := 1);
+		live.ChangeValueByAny(value := firstValue);
+		scope.CopyInitialElement(
+			name := 'Limits',
+			index := 1,
+			destination := TOF_Workflow.Workflows.GetValueDescriptor(value := initialCopy)
+		);
+		assertions.ThatBool(
+			actual := initialCopy = BYTE#5 AND_THEN live.AsByte() = BYTE#255 AND_THEN NOT live.IsMemoryOwner,
+			message := "Initial value and writable current element must be independent"
+		).IsTrue();
+		_FactoryWorkflow.RequestStart();
+		_FactoryWorkflow.RequestReset();
+		assertions.ThatBool(
+			actual := live.AsByte() = BYTE#5,
+			message := "Workflow reset must restore an owned array in place"
+		).IsTrue();
+		live := scope.GetDeclaredElement(name := 'Limits', index := 0);
+		assertions.ThatBool(
+			actual := live.AsByte() = BYTE#2,
+			message := "Source bounds must map to zero-based declaration indices"
+		).IsTrue();
+	END_IF
+__CATCH
+	assertions.ThatBool(
+		actual := FALSE,
+		message := "Unexpected exception while building or exercising factory graph"
+	).IsTrue();
+__ENDTRY
+
+_FactoryWorkflow.DisposeDynamicChildren();
+TOF_Core.DynamicMemoryManager.RaiseIfAllocationFailed();
+assertions.ThatBool(
+	actual := _FactoryExits = 1,
+	message := "Workflow disposal must invoke the custom child destructor once"
+).IsTrue();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="testArrayValidation" Id="{c0b67d55-8aff-4a4a-b740-76f409bc9946}">
+      <Declaration><![CDATA[(*!
+<summary>Checks singleton shape and rejects invalid declarations, indices, destinations and unknown factory types.</summary>
+<description>Uses persistent workflow ownership and synthetic values in one task.</description>
+<param name="assertions">Valid assertion context borrowed from the active case.</param>
+*)
+METHOD PRIVATE testArrayValidation
+VAR_INPUT
+	assertions : REFERENCE TO TOF_Testing.Assertions;
+END_VAR
+VAR
+	single : ARRAY [0..0] OF __SYSTEM.AnyType;
+	mixed : ARRAY [0..1] OF __SYSTEM.AnyType;
+	flag : BYTE := BYTE#1;
+	number : USINT := USINT#42;
+	element : TOF_Core.GENERIC_VALUE;
+	node : TOF_Workflow.IWorkflowElement;
+	position : DINT;
+	bindingName : STRING;
+	declaration : TOF_Workflow.VARIABLE_DECLARATION;
+	more : BOOL;
+	caught : BOOL;
+	exceptionCode : __SYSTEM.ExceptionCode;
+	exception : TOF_Core.IException;
+	configurationError : TOF_Workflow.IWorkflowConfigurationException;
+	i : DINT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[single[0] := TOF_Workflow.Workflows.GetValueDescriptor(value := flag);
+_ArrayValidation.DeclareArray(name := 'One', initialValues := ADR(single[0]), elementCount := 1);
+more := _ArrayValidation.NextDeclaration(position := position, name => bindingName, declaration => declaration);
+assertions.ThatBool(
+	actual := more AND_THEN declaration.IsArray AND_THEN declaration.ElementCount = 1,
+	message := "A one-element array must preserve its shape"
+).IsTrue();
+mixed[0] := single[0];
+mixed[1] := TOF_Workflow.Workflows.GetValueDescriptor(value := number);
+
+FOR i := 1 TO 7 DO
+	caught := FALSE;
+
+	__TRY
+		CASE i OF
+			1:
+				_ArrayValidation.DeclareArray(name := 'Bad', initialValues := ADR(mixed[0]), elementCount := 2);
+			2:
+				_ArrayValidation.DeclareArray(name := 'Bad', initialValues := 0, elementCount := 0);
+			3:
+				element := _ArrayValidation.GetDeclaredElement(name := 'One', index := -1);
+			4:
+				element := _ArrayValidation.GetDeclaredElement(name := 'One', index := 1);
+			5:
+				_ArrayValidation.CopyInitialElement(
+					name := 'One',
+					index := 0,
+					destination := TOF_Workflow.Workflows.GetValueDescriptor(value := number)
+				);
+			6:
+				node := TOF_Workflow.Workflows.CreateElement(
+					typeName := 'Missing.Type',
+					workflow := _ArrayValidation,
+					factory := THIS^
+				);
+			7:
+				_ArrayValidation.DeclareVariable(name := 'One', initialValue := number);
+		END_CASE
+	__CATCH(exceptionCode)
+		exception := TOF_Core.ExceptionManager.GetLastException(
+			exceptionCode := exceptionCode,
+			catchPointNamespaceName := NamespaceName,
+			catchPointPOUName := __POUNAME(),
+			catchPointPosition := __POSITION()
+		);
+		caught := __QUERYINTERFACE(exception, configurationError);
+	__ENDTRY
+
+	assertions.ThatBool(
+		actual := caught,
+		message := "Invalid declaration, element access or factory name must raise"
+	).IsTrue();
+END_FOR
+
+more := _ArrayValidation.NextDeclaration(position := position, name => bindingName, declaration => declaration);
+assertions.ThatBool(actual := more, message := "Invalid definitions must not add dictionary entries").IsFalse();
+assertions.ThatBool(
+	actual := number = USINT#42,
+	message := "Incorrect destination type must leave its bytes unchanged"
+).IsTrue();
+_ArrayValidation.DisposeDynamicChildren();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="testWriteConfiguration" Id="{c20c2bfa-8c1e-4a82-a125-8f08bdad54b0}">
+      <Declaration><![CDATA[(*!
+<summary>Checks nested workflow serialization and the shape of a singleton array.</summary>
+<description>Parses the actual output and checks the original value after modifying the live declaration.</description>
+<param name="assertions">Valid assertion context borrowed from the active case.</param>
+*)
+METHOD PRIVATE testWriteConfiguration
+VAR_INPUT
+	assertions : REFERENCE TO TOF_Testing.Assertions;
+END_VAR
+VAR
+	initial : UINT := 5;
+	element : __SYSTEM.AnyType;
+	live : TOF_Core.GENERIC_VALUE;
+	number : POINTER TO UINT;
+	document : Tc3_JsonXml.SJsonValue;
+	field : Tc3_JsonXml.SJsonValue;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_WriteSequence.AddChildActivity(activity := _WriteDelay);
+_WriteWorkflow.SetRootActivity(rootActivity := _WriteSequence);
+element := TOF_Workflow.Workflows.GetValueDescriptor(value := initial);
+_WriteDelay.DeclareArray(name := 'Limits', initialValues := ADR(element), elementCount := 1);
+live := _WriteDelay.GetDeclaredElement(name := 'Limits', index := 0);
+number := live.Address;
+number^ := 9;
+_ConfigWriter.Serialize(source := _WriteWorkflow, document := _ConfigDocument);
+document := _ConfigParser.ParseDocument(sJson := _ConfigDocument);
+field := _ConfigParser.FindMember(v := document, member := 'root');
+field := _ConfigParser.FindMember(v := field, member := 'children');
+assertions.ThatBool(
+	actual := _ConfigParser.IsArray(v := field),
+	message := "Sequence children must be an array"
+).IsTrue();
+field := _ConfigParser.GetArrayValueByIdx(v := field, idx := 0);
+field := _ConfigParser.FindMember(v := field, member := 'variables');
+field := _ConfigParser.GetArrayValueByIdx(v := field, idx := 0);
+field := _ConfigParser.FindMember(v := field, member := 'initialValue');
+assertions.ThatBool(
+	actual := _ConfigParser.GetArraySize(v := field) = 1,
+	message := "Preserve singleton array shape"
+).IsTrue();
+field := _ConfigParser.GetArrayValueByIdx(v := field, idx := 0);
+assertions.ThatBool(
+	actual := _ConfigParser.GetUint(v := field) = 5,
+	message := "Serialize the reset image"
+).IsTrue();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="testDependencyBindings" Id="{4f68a902-c396-448e-8518-ecdb48a31599}">
+      <Declaration><![CDATA[(*!
+<summary>Checks exclusive embedded ownership and shared external serialization.</summary>
+<description>Uses a dual-interface object to verify that duplicate detection uses object identity.</description>
+<param name="assertions">Valid assertion context borrowed from the active case.</param>
+*)
+METHOD PRIVATE testDependencyBindings
+VAR_INPUT
+	assertions : REFERENCE TO TOF_Testing.Assertions;
+END_VAR
+VAR
+	instance : POINTER TO WorkflowBindingTask;
+	otherInstance : POINTER TO WorkflowBindingTask;
+	expectedComparer : TOF_Core.IComparer;
+	actualComparer : TOF_Core.IComparer;
+	exceptionCode : __SYSTEM.ExceptionCode;
+	exception : TOF_Core.IException;
+	configurationError : TOF_Workflow.IWorkflowConfigurationException;
+	rejected : BOOL;
+	document : Tc3_JsonXml.SJsonValue;
+	binding : Tc3_JsonXml.SJsonValue;
+	keyField : Tc3_JsonXml.SJsonValue;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_BindingFirst.ConfigureExternalTask(task := _BindingExternal, key := 'axis');
+_BindingSecond.ConfigureExternalTask(task := _BindingExternal, key := 'axis');
+_BindingComparer.ConfigureExternalComparer(comparer := _BindingExternal, key := 'axis');
+_ConfigWriter.Serialize(source := _BindingSecond, document := _ConfigDocument);
+document := _ConfigParser.ParseDocument(sJson := _ConfigDocument);
+binding := _ConfigParser.FindMember(v := document, member := 'task');
+keyField := _ConfigParser.FindMember(v := binding, member := 'key');
+assertions.ThatBool(
+	actual := _ConfigParser.GetString(v := keyField) = 'axis',
+	message := "Keep the external key"
+).IsTrue();
+assertions.ThatBool(
+	actual := _ConfigParser.FindMember(v := binding, member := 'type') = 0,
+	message := "External task is borrowed"
+).IsTrue();
+
+instance := __NEW(WorkflowBindingTask(name := "Embedded"));
+
+IF instance = 0 THEN
+	TOF_Core.DynamicMemoryManager.RaiseAllocationFailure();
+END_IF
+
+_BindingFirst.ConfigureEmbeddedTask(task := instance^);
+
+__TRY
+	_BindingComparer.ConfigureEmbeddedComparer(comparer := instance^);
+__CATCH(exceptionCode)
+	exception := TOF_Core.ExceptionManager.GetLastException(
+		exceptionCode := exceptionCode,
+		catchPointNamespaceName := NamespaceName,
+		catchPointPOUName := __POUNAME(),
+		catchPointPosition := __POSITION()
+	);
+	rejected := __QUERYINTERFACE(exception, configurationError);
+__ENDTRY
+
+expectedComparer := _BindingExternal;
+assertions.ThatBool(actual := rejected, message := "Reject second slot even through another interface").IsTrue();
+actualComparer := _BindingComparer.Comparer;
+assertions.ThatBool(
+	actual := actualComparer = expectedComparer,
+	message := "Keep previous external comparer"
+).IsTrue();
+
+otherInstance := __NEW(WorkflowBindingTask(name := "Another instance"));
+
+IF otherInstance = 0 THEN
+	TOF_Core.DynamicMemoryManager.RaiseAllocationFailure();
+END_IF
+
+_BindingComparer.ConfigureEmbeddedComparer(comparer := otherInstance^);
+expectedComparer := otherInstance^;
+actualComparer := _BindingComparer.Comparer;
+assertions.ThatBool(
+	actual := actualComparer = expectedComparer,
+	message := "Allow another instance of the same type"
+).IsTrue();
+
+_ConfigWriter.Serialize(source := _BindingFirst, document := _ConfigDocument);
+document := _ConfigParser.ParseDocument(sJson := _ConfigDocument);
+binding := _ConfigParser.FindMember(v := document, member := 'task');
+assertions.ThatBool(
+	actual := _ConfigParser.FindMember(v := binding, member := 'configuration') <> 0,
+	message := "Embed configuration"
+).IsTrue();
+assertions.ThatBool(
+	actual := _ConfigParser.FindMember(v := binding, member := 'key') = 0,
+	message := "Embedded task has no key"
+).IsTrue();
+_BindingWorkflow.DisposeDynamicChildren();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="CreateDependency" Id="{e8bcc63f-b77a-44fc-a5cf-2712acf9b5ce}">
+      <Declaration><![CDATA[(*!
+<summary>Creates a fresh unowned dynamic embedded dependency for configuration loading.</summary>
+<description>Returns zero for unknown type names.</description>
+<param name="typeName">Requested qualified type name.</param>
+*)
+METHOD CreateDependency : TOF_Core.IObject
+VAR_INPUT
+	typeName : STRING(255);
+END_VAR
+VAR
+	created : POINTER TO WorkflowBindingTask;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF typeName <> TOF_Core.Strings.Concat255(CurrentNamespace.Name, '.WorkflowBindingTask') THEN
+	RETURN;
+END_IF
+
+created := __NEW(WorkflowBindingTask(name := ""));
+
+IF created = 0 THEN
+	TOF_Core.DynamicMemoryManager.RaiseAllocationFailure();
+END_IF
+
+CreateDependency := created^;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="ResolveExternal" Id="{486c7ba3-eb9c-4d1e-90f9-49250a5b16d2}">
+      <Declaration><![CDATA[(*!
+<summary>Resolves the shared external test dependency by its stable key.</summary>
+<description>Returns zero for unknown keys.</description>
+<param name="key">Requested external dependency key.</param>
+*)
+METHOD ResolveExternal : TOF_Core.IObject
+VAR_INPUT
+	key : STRING;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF key = 'axis' THEN
+	ResolveExternal := _BindingExternal;
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="BindVariables" Id="{2256e760-cfa4-4f34-be80-fcd785ebbc1e}">
+      <Declaration><![CDATA[(*!
+<summary>Registers the external PLC variable on the freshly loaded workflow when enabled.</summary>
+<description>Used to test both unresolved-variable rollback and successful binding.</description>
+<param name="workflow">Fresh workflow being loaded.</param>
+*)
+METHOD BindVariables
+VAR_INPUT
+	workflow : TOF_Workflow.IWorkflow;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF _BindLoadVariables THEN
+	workflow.BindPlcVariable(name := 'External', plcVariable := _LoadExternal);
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="testLoadConfiguration" Id="{846b9dc0-e206-4ab5-b87c-42169368526e}">
+      <Declaration><![CDATA[(*!
+<summary>Checks workflow round-trip deserialization, rollback on missing PLC bindings, execution and reset.</summary>
+<description>Exercises embedded and external dependencies, activity and condition declarations, and dynamic disposal.
+Reports a failed bound load before fixture cleanup and test completion.</description>
+<param name="assertions">Valid assertion context borrowed from the active case.</param>
+*)
+METHOD PRIVATE testLoadConfiguration
+VAR_INPUT
+	assertions : REFERENCE TO TOF_Testing.Assertions;
+END_VAR
+VAR
+	initialStep : UINT := 3;
+	firstLimit : UINT := 4;
+	secondLimit : UINT := 8;
+	mutated : UINT := 77;
+	limits : ARRAY [0..1] OF __SYSTEM.AnyType;
+	embeddedTask : POINTER TO WorkflowBindingTask;
+	embeddedComparer : POINTER TO WorkflowBindingTask;
+	ifElse : TOF_Workflow.IIfElseActivity;
+	rootScope : TOF_Workflow.IDeclaredVariableContainer;
+	conditionScope : TOF_Workflow.IDeclaredVariableContainer;
+	localStep : TOF_Core.GENERIC_VALUE;
+	limitElement : TOF_Core.GENERIC_VALUE;
+	thresholdElement : TOF_Core.GENERIC_VALUE;
+	exceptionCode : __SYSTEM.ExceptionCode;
+	exception : TOF_Core.IException;
+	configurationError : TOF_Workflow.IWorkflowConfigurationException;
+	caught : BOOL;
+	ready : BOOL;
+	i : DINT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_LoadSource.DeclareVariable(name := 'Step', initialValue := initialStep);
+_LoadSource.BindPlcVariable(name := 'External', plcVariable := _LoadExternal);
+limits[0] := TOF_Workflow.Workflows.GetValueDescriptor(value := firstLimit);
+limits[1] := TOF_Workflow.Workflows.GetValueDescriptor(value := secondLimit);
+_LoadIf.DeclareArray(name := 'Limits', initialValues := ADR(limits[0]), elementCount := 2);
+_LoadIf.DeclareVariable(name := 'LocalStep', initialValue := initialStep);
+
+_LoadCompare.DeclareVariable(name := 'Threshold', initialValue := initialStep);
+_LoadCompare.ConfigureVariable(
+	firstVariableName := 'LocalStep',
+	comparisonOperator := TOF_Workflow.COMPARISON_OPERATOR.EQUAL,
+	secondVariableName := 'Threshold'
+);
+embeddedComparer := __NEW(WorkflowBindingTask(name := "Embedded comparer"));
+
+IF embeddedComparer = 0 THEN
+	TOF_Core.DynamicMemoryManager.RaiseAllocationFailure();
+END_IF
+
+_LoadCompare.ConfigureEmbeddedComparer(comparer := embeddedComparer^);
+embeddedTask := __NEW(WorkflowBindingTask(name := "Embedded task"));
+
+IF embeddedTask = 0 THEN
+	TOF_Core.DynamicMemoryManager.RaiseAllocationFailure();
+END_IF
+
+_LoadEmbeddedInvoke.ConfigureEmbeddedTask(task := embeddedTask^);
+_LoadExternalInvoke.ConfigureExternalTask(task := _BindingExternal, key := 'axis');
+_LoadAssign.ConfigureFromVariable(targetVariableName := 'LocalStep', sourceVariableName := 'External');
+
+_LoadSequence.AddChildActivity(activity := _LoadEmbeddedInvoke);
+_LoadSequence.AddChildActivity(activity := _LoadExternalInvoke);
+_LoadSequence.AddChildActivity(activity := _LoadAssign);
+_LoadIf.Configure(condition := _LoadCompare, trueActivity := _LoadSequence, falseActivity := 0);
+_LoadSource.SetRootActivity(rootActivity := _LoadIf);
+
+_ConfigWriter.Serialize(source := _LoadSource, document := _ConfigDocument);
+_BindLoadVariables := FALSE;
+
+__TRY
+	_Loaded := _LoadLoader.Load(
+		reader := _LoadReader,
+		root := _LoadReader.Parse(document := _ConfigDocument),
+		factory := THIS^,
+		dependencyFactory := THIS^,
+		resolver := THIS^,
+		binder := THIS^
+	);
+__CATCH(exceptionCode)
+	exception := TOF_Core.ExceptionManager.GetLastException(
+		exceptionCode := exceptionCode,
+		catchPointNamespaceName := NamespaceName,
+		catchPointPOUName := __POUNAME(),
+		catchPointPosition := __POSITION()
+	);
+	caught := exception <> 0 AND_THEN __QUERYINTERFACE(exception, configurationError);
+__ENDTRY
+
+IF NOT caught AND_THEN exception <> 0 THEN
+	assertions.ThatBool(
+		actual := FALSE,
+		message := TO_WSTRING(TOF_Core.Strings.Concat255('Unbound workflow load: ', TO_STRING(exception.GetMessage())))
+	).IsTrue();
+ELSE
+	assertions.ThatBool(
+		actual := caught AND_THEN _Loaded = 0,
+		message := "Unresolved required PLC variable must abort and roll back load"
+	).IsTrue();
+END_IF
+
+IF _Loaded <> 0 THEN
+	assertions.ThatBool(
+		actual := TryReleaseLoadedWorkflow(),
+		message := "Release any unexpected workflow after the unbound load"
+	).IsTrue();
+END_IF
+
+TOF_Core.DynamicMemoryManager.RaiseIfAllocationFailed();
+
+_BindLoadVariables := TRUE;
+_LoadExternal := 11;
+caught := FALSE;
+__TRY
+	_Loaded := _LoadLoader.Load(
+		reader := _LoadReader,
+		root := _LoadReader.Parse(document := _ConfigDocument),
+		factory := THIS^,
+		dependencyFactory := THIS^,
+		resolver := THIS^,
+		binder := THIS^
+	);
+__CATCH(exceptionCode)
+	caught := TRUE;
+	exception := TOF_Core.ExceptionManager.GetLastException(
+		exceptionCode := exceptionCode,
+		catchPointNamespaceName := NamespaceName,
+		catchPointPOUName := __POUNAME(),
+		catchPointPosition := __POSITION()
+	);
+
+	IF exception <> 0 THEN
+		assertions.ThatBool(
+			actual := FALSE,
+			message := TO_WSTRING(TOF_Core.Strings.Concat255('Bound workflow load: ', TO_STRING(exception.GetMessage())))
+		).IsTrue();
+	ELSE
+		assertions.ThatBool(
+			actual := FALSE,
+			message := TO_WSTRING(TOF_Core.Strings.Concat255('Bound workflow load raised PLC exception ', TO_STRING(exceptionCode)))
+		).IsTrue();
+	END_IF
+__ENDTRY
+
+IF NOT caught THEN
+	assertions.ThatBool(
+		actual := _Loaded <> 0 AND_THEN _Loaded.State = TOF_Workflow.WORKFLOW_ELEMENT_STATE.PASSIVE_READY,
+		message := "Loaded workflow must be ready without auto-starting"
+	).IsTrue();
+END_IF
+
+IF _Loaded <> 0 THEN
+	_Loaded.RequestStart();
+
+	FOR i := 1 TO 6 DO
+		IF _Loaded.Busy THEN
+			_Loaded.Execute();
+		END_IF
+	END_FOR
+
+	assertions.ThatBool(
+		actual := _Loaded.State = TOF_Workflow.WORKFLOW_ELEMENT_STATE.PASSIVE_COMPLETED,
+		message := "Loaded workflow must execute embedded and external tasks and branch assignment"
+	).IsTrue();
+
+	ready := __QUERYINTERFACE(_Loaded.RootActivity, ifElse)
+		AND_THEN __QUERYINTERFACE(_Loaded.RootActivity, rootScope)
+		AND_THEN __QUERYINTERFACE(ifElse.Condition, conditionScope);
+	assertions.ThatBool(
+		actual := ready,
+		message := "Loaded root and condition must expose declaration containers"
+	).IsTrue();
+
+	IF ready THEN
+		localStep := rootScope.GetDeclaredElement(name := 'LocalStep', index := 0);
+		limitElement := rootScope.GetDeclaredElement(name := 'Limits', index := 1);
+		thresholdElement := conditionScope.GetDeclaredElement(name := 'Threshold', index := 0);
+		assertions.ThatBool(
+			actual := localStep.AsUInt() = 11 AND_THEN limitElement.AsUInt() = 8 AND_THEN thresholdElement.AsUInt() = 3,
+			message := "Loaded execution must update target declaration and preserve array and condition values"
+		).IsTrue();
+
+		limitElement.ChangeValueByAny(value := mutated);
+		thresholdElement.ChangeValueByAny(value := mutated);
+		_Loaded.RequestReset();
+
+		assertions.ThatBool(
+			actual := _Loaded.State = TOF_Workflow.WORKFLOW_ELEMENT_STATE.PASSIVE_READY
+				AND_THEN localStep.AsUInt() = 3
+				AND_THEN limitElement.AsUInt() = 8
+				AND_THEN thresholdElement.AsUInt() = 3,
+			message := "Resetting a loaded workflow must restore activity and condition declarations in place"
+		).IsTrue();
+	END_IF
+
+	assertions.ThatBool(
+		actual := TryReleaseLoadedWorkflow(),
+		message := "Release the dynamically loaded workflow"
+	).IsTrue();
+END_IF
+
+_LoadSource.DisposeDynamicChildren();
+TOF_Core.DynamicMemoryManager.RaiseIfAllocationFailed();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="testDeserializeNullContextRejection" Id="{f28d6d68-5863-49f9-9dc3-cdffc37a855f}">
+      <Declaration><![CDATA[(*!
+<summary>Verifies that workflow element deserialization rejects null context and context-free succeeds.</summary>
+<description>
+A workflow element requiring a loader raises WorkflowConfiguration when deserialized with context = 0.
+A context-free element (DelayActivity) succeeds when deserialized with context = 0.
+</description>
+<param name="assertions">Valid assertion context borrowed from the active case.</param>
+*)
+METHOD PRIVATE testDeserializeNullContextRejection
+VAR_INPUT
+	assertions : REFERENCE TO TOF_Testing.Assertions;
+END_VAR
+VAR
+	workflowNode : TOF_Core.CONFIGURATION_NODE;
+	delayNode : TOF_Core.CONFIGURATION_NODE;
+	caught : BOOL;
+	exceptionCode : __SYSTEM.ExceptionCode;
+	exception : TOF_Core.IException;
+	configurationError : TOF_Workflow.IWorkflowConfigurationException;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_ConfigWriter.Serialize(source := _NullContextSequence, document := _ConfigDocument);
+workflowNode := _LoadReader.Parse(document := _ConfigDocument);
+
+caught := FALSE;
+__TRY
+	_NullContextSequence.Deserialize(reader := _LoadReader, node := workflowNode, context := 0);
+__CATCH(exceptionCode)
+	exception := TOF_Core.ExceptionManager.GetLastException(
+		exceptionCode := exceptionCode,
+		catchPointNamespaceName := NamespaceName,
+		catchPointPOUName := __POUNAME(),
+		catchPointPosition := __POSITION()
+	);
+	caught := __QUERYINTERFACE(exception, configurationError);
+__ENDTRY
+
+assertions.ThatBool(
+	actual := caught,
+	message := "Workflow element requiring loader must reject null deserialization context"
+).IsTrue();
+
+_NullContextDelay.Interval := T#5S;
+_ConfigWriter.Serialize(source := _NullContextDelay, document := _ConfigDocument);
+delayNode := _LoadReader.Parse(document := _ConfigDocument);
+
+caught := FALSE;
+__TRY
+	_NullContextDelay.Deserialize(reader := _LoadReader, node := delayNode, context := 0);
+__CATCH(exceptionCode)
+	caught := TRUE;
+__ENDTRY
+
+assertions.ThatBool(
+	actual := caught,
+	message := "Context-free workflow element must succeed with null deserialization context"
+).IsFalse();
+assertions.ThatTime(
+	actual := _NullContextDelay.Interval,
+	message := "Delay interval must be restored"
+).ToBe(expected := T#5S);
+
+TOF_Core.DynamicMemoryManager.RaiseIfAllocationFailed();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="testOperatorSerialization" Id="{76631bbb-6383-45e4-a2fc-c6d60459c699}">
+      <Declaration><![CDATA[(*!
+<summary>Verifies formatting and parsing of logical and comparison operators.</summary>
+<param name="assertions">Valid assertion context borrowed from the active case.</param>
+*)
+METHOD PRIVATE testOperatorSerialization
+VAR_INPUT
+	assertions : REFERENCE TO TOF_Testing.Assertions;
+END_VAR
+VAR
+	caught : BOOL;
+	exceptionCode : __SYSTEM.ExceptionCode;
+	exception : TOF_Core.IException;
+	configurationError : TOF_Workflow.IWorkflowConfigurationException;
+	parsedComp : TOF_Workflow.COMPARISON_OPERATOR;
+	parsedLog : TOF_Workflow.LOGICAL_OPERATOR;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[// Format comparison operators
+assertions.ThatString(
+	actual := TOF_Workflow.Workflows.FormatComparisonOperator(comparisonOperator := TOF_Workflow.COMPARISON_OPERATOR.EQUAL),
+	message := "Format EQUAL"
+).ToBe(expected := '=');
+assertions.ThatString(
+	actual := TOF_Workflow.Workflows.FormatComparisonOperator(comparisonOperator := TOF_Workflow.COMPARISON_OPERATOR.NOT_EQUAL),
+	message := "Format NOT_EQUAL"
+).ToBe(expected := '<>');
+assertions.ThatString(
+	actual := TOF_Workflow.Workflows.FormatComparisonOperator(comparisonOperator := TOF_Workflow.COMPARISON_OPERATOR.LESS_THAN),
+	message := "Format LESS_THAN"
+).ToBe(expected := '<');
+assertions.ThatString(
+	actual := TOF_Workflow.Workflows.FormatComparisonOperator(comparisonOperator := TOF_Workflow.COMPARISON_OPERATOR.LESS_THAN_OR_EQUAL),
+	message := "Format LESS_THAN_OR_EQUAL"
+).ToBe(expected := '<=');
+assertions.ThatString(
+	actual := TOF_Workflow.Workflows.FormatComparisonOperator(comparisonOperator := TOF_Workflow.COMPARISON_OPERATOR.GREATER_THAN),
+	message := "Format GREATER_THAN"
+).ToBe(expected := '>');
+assertions.ThatString(
+	actual := TOF_Workflow.Workflows.FormatComparisonOperator(comparisonOperator := TOF_Workflow.COMPARISON_OPERATOR.GREATER_THAN_OR_EQUAL),
+	message := "Format GREATER_THAN_OR_EQUAL"
+).ToBe(expected := '>=');
+
+// Parse comparison operators and synonyms
+parsedComp := TOF_Workflow.Workflows.ParseComparisonOperator(rawOperator := '=');
+assertions.ThatBool(actual := parsedComp = TOF_Workflow.COMPARISON_OPERATOR.EQUAL, message := "Parse =").IsTrue();
+
+parsedComp := TOF_Workflow.Workflows.ParseComparisonOperator(rawOperator := '==');
+assertions.ThatBool(actual := parsedComp = TOF_Workflow.COMPARISON_OPERATOR.EQUAL, message := "Parse ==").IsTrue();
+
+parsedComp := TOF_Workflow.Workflows.ParseComparisonOperator(rawOperator := '<>');
+assertions.ThatBool(
+	actual := parsedComp = TOF_Workflow.COMPARISON_OPERATOR.NOT_EQUAL,
+	message := "Parse <>"
+).IsTrue();
+
+parsedComp := TOF_Workflow.Workflows.ParseComparisonOperator(rawOperator := '!=');
+assertions.ThatBool(
+	actual := parsedComp = TOF_Workflow.COMPARISON_OPERATOR.NOT_EQUAL,
+	message := "Parse !="
+).IsTrue();
+
+parsedComp := TOF_Workflow.Workflows.ParseComparisonOperator(rawOperator := '<');
+assertions.ThatBool(
+	actual := parsedComp = TOF_Workflow.COMPARISON_OPERATOR.LESS_THAN,
+	message := "Parse <"
+).IsTrue();
+
+parsedComp := TOF_Workflow.Workflows.ParseComparisonOperator(rawOperator := '<=');
+assertions.ThatBool(
+	actual := parsedComp = TOF_Workflow.COMPARISON_OPERATOR.LESS_THAN_OR_EQUAL,
+	message := "Parse <="
+).IsTrue();
+
+parsedComp := TOF_Workflow.Workflows.ParseComparisonOperator(rawOperator := '>');
+assertions.ThatBool(
+	actual := parsedComp = TOF_Workflow.COMPARISON_OPERATOR.GREATER_THAN,
+	message := "Parse >"
+).IsTrue();
+
+parsedComp := TOF_Workflow.Workflows.ParseComparisonOperator(rawOperator := '>=');
+assertions.ThatBool(
+	actual := parsedComp = TOF_Workflow.COMPARISON_OPERATOR.GREATER_THAN_OR_EQUAL,
+	message := "Parse >="
+).IsTrue();
+
+// Invalid comparison operator
+caught := FALSE;
+__TRY
+	parsedComp := TOF_Workflow.Workflows.ParseComparisonOperator(rawOperator := 'INVALID');
+__CATCH(exceptionCode)
+	exception := TOF_Core.ExceptionManager.GetLastException(
+		exceptionCode := exceptionCode,
+		catchPointNamespaceName := NamespaceName,
+		catchPointPOUName := __POUNAME(),
+		catchPointPosition := __POSITION()
+	);
+	caught := __QUERYINTERFACE(exception, configurationError);
+__ENDTRY
+assertions.ThatBool(actual := caught, message := "Unknown comparison operator must raise").IsTrue();
+
+// Format logical operators
+assertions.ThatString(
+	actual := TOF_Workflow.Workflows.FormatLogicalOperator(logicalOperator := TOF_Workflow.LOGICAL_OPERATOR.AND_),
+	message := "Format AND_"
+).ToBe(expected := 'AND');
+assertions.ThatString(
+	actual := TOF_Workflow.Workflows.FormatLogicalOperator(logicalOperator := TOF_Workflow.LOGICAL_OPERATOR.OR_),
+	message := "Format OR_"
+).ToBe(expected := 'OR');
+
+// Parse logical operators
+parsedLog := TOF_Workflow.Workflows.ParseLogicalOperator(rawOperator := 'AND');
+assertions.ThatBool(actual := parsedLog = TOF_Workflow.LOGICAL_OPERATOR.AND_, message := "Parse AND").IsTrue();
+
+parsedLog := TOF_Workflow.Workflows.ParseLogicalOperator(rawOperator := 'and');
+assertions.ThatBool(
+	actual := parsedLog = TOF_Workflow.LOGICAL_OPERATOR.AND_,
+	message := "Parse and lowercase"
+).IsTrue();
+
+parsedLog := TOF_Workflow.Workflows.ParseLogicalOperator(rawOperator := 'AND_');
+assertions.ThatBool(actual := parsedLog = TOF_Workflow.LOGICAL_OPERATOR.AND_, message := "Parse AND_").IsTrue();
+
+parsedLog := TOF_Workflow.Workflows.ParseLogicalOperator(rawOperator := 'OR');
+assertions.ThatBool(actual := parsedLog = TOF_Workflow.LOGICAL_OPERATOR.OR_, message := "Parse OR").IsTrue();
+
+parsedLog := TOF_Workflow.Workflows.ParseLogicalOperator(rawOperator := 'or');
+assertions.ThatBool(
+	actual := parsedLog = TOF_Workflow.LOGICAL_OPERATOR.OR_,
+	message := "Parse or lowercase"
+).IsTrue();
+
+parsedLog := TOF_Workflow.Workflows.ParseLogicalOperator(rawOperator := 'OR_');
+assertions.ThatBool(actual := parsedLog = TOF_Workflow.LOGICAL_OPERATOR.OR_, message := "Parse OR_").IsTrue();
+
+// Invalid logical operator
+caught := FALSE;
+__TRY
+	parsedLog := TOF_Workflow.Workflows.ParseLogicalOperator(rawOperator := 'XOR');
+__CATCH(exceptionCode)
+	exception := TOF_Core.ExceptionManager.GetLastException(
+		exceptionCode := exceptionCode,
+		catchPointNamespaceName := NamespaceName,
+		catchPointPOUName := __POUNAME(),
+		catchPointPosition := __POSITION()
+	);
+	caught := __QUERYINTERFACE(exception, configurationError);
+__ENDTRY
+assertions.ThatBool(actual := caught, message := "Unknown logical operator must raise").IsTrue();
+
+TOF_Core.DynamicMemoryManager.RaiseIfAllocationFailed();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="TryReleaseLoadedWorkflow" Id="{e3970f7b-166e-4eae-afff-a7fa7068e7d1}">
+      <Declaration><![CDATA[(*!
+<summary>Attempts to release the owned result of a configuration load.</summary>
+<description>Clears the stored alias before release. Succeeds if no workflow is owned.</description>
+*)
+METHOD TryReleaseLoadedWorkflow : BOOL
+VAR
+	instance : TOF_Core.IObject;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF _Loaded = 0 THEN
+	TryReleaseLoadedWorkflow := TRUE;
+
+	RETURN;
+END_IF
+
+instance := _Loaded;
+_Loaded := 0;
+TryReleaseLoadedWorkflow := TOF_Core.Memory.TryReleaseDynamicObject(instance := instance);]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="FB_exit" Id="{b63d2f44-d576-41b8-abef-9c96db90411b}">
+      <Declaration><![CDATA[(*!
+<summary>Clears a still-owned loaded workflow if the fixture is unloaded before case teardown.</summary>
+<param name="bInCopyCode">TwinCAT copy-code exit marker. Leave copied ownership with the new instance.</param>
+*)
+METHOD FB_exit : BOOL
+VAR_INPUT
+	bInCopyCode : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF NOT bInCopyCode THEN
+	TryReleaseLoadedWorkflow();
+END_IF
+
+FB_exit := TRUE;]]></ST>
+      </Implementation>
+    </Method>
+  </POU>
+</TcPlcObject>

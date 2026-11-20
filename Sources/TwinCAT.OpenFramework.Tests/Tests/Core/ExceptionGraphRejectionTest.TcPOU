@@ -1,0 +1,186 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="ExceptionGraphRejectionTest" Id="{3aa0e593-1c06-4421-83a8-38a7067629bf}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+SPDX-FileCopyrightText: c 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+SPDX-License-Identifier: MIT
+License: https://opensource.org/license/mit
+*)
+
+(*!
+<summary>Checks that aggregate and standard exceptions reject a direct self-reference before mutation.</summary>
+<description>
+Uses one task and stays at a stable address while assertions are bound to this instance.
+</description>
+*)
+
+{attribute 'no_assign'}
+{attribute 'no_explicit_call' := 'do not call this function block directly'}
+FUNCTION_BLOCK ExceptionGraphRejectionTest EXTENDS TOF_Testing.SingleCycleTest
+VAR_STAT
+	{attribute 'hide'}
+	_ClassName : STRING := __POUNAME();
+END_VAR
+VAR
+	_Aggregate : TOF_Core.AggregateException;
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[]]></ST>
+    </Implementation>
+    <Method Name="ExecuteTest" Id="{670f1836-2793-4761-afbb-d5cc9cc42c94}">
+      <Declaration><![CDATA[(*!
+<summary>Checks that aggregate and standard exceptions reject a direct self-reference before mutation.</summary>
+<description>
+Uses caller-owned objects and captures each expected rejection in the same PLC cycle.
+</description>
+*)
+METHOD PROTECTED ExecuteTest
+VAR
+	exceptionCode : __SYSTEM.ExceptionCode;
+	caught : TOF_Core.IException;
+	typed : TOF_Core.IStandardException;
+	source : TOF_Core.StandardException;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[// This insertion would introduce a cycle. The test only reads the count after the attempted insertion.
+__TRY
+	_Aggregate.AddInnerException(innerException := _Aggregate);
+__CATCH(exceptionCode)
+	caught := TOF_Core.ExceptionManager.GetLastException(
+		exceptionCode := exceptionCode,
+		catchPointNamespaceName := NamespaceName,
+		catchPointPOUName := __POUNAME(),
+		catchPointPosition := __POSITION()
+	);
+__ENDTRY
+
+IF NOT __QUERYINTERFACE(caught, typed) THEN
+	RecordFailure(message := "Attaching an aggregate to itself must raise StandardException");
+	RETURN;
+END_IF
+
+Assert.ThatBool(
+	actual := typed.SourceMessage = "Cannot attach an exception graph containing its prospective owner."
+	AND_THEN typed.InnerException = 0,
+	message := "Aggregate cycle rejection must report the graph error without an inner cause"
+).IsTrue();
+Assert.ThatBool(
+	actual := _Aggregate.InnerExceptionCount = 0,
+	message := "Rejected attachment must preserve the empty aggregate"
+).IsTrue();
+
+caught := 0;
+
+// Populate a standard template so a failed self-attachment can be checked for partial mutation.
+__TRY
+	source.Throw(
+		sourceNamespaceName := NamespaceName,
+		sourceClassName := ClassName,
+		sourcePOUName := __POUNAME(),
+		sourcePosition := 'ExistingPosition',
+		message := "Existing message"
+	);
+__CATCH(exceptionCode)
+	caught := TOF_Core.ExceptionManager.GetLastException(
+		exceptionCode := exceptionCode,
+		catchPointNamespaceName := NamespaceName,
+		catchPointPOUName := __POUNAME(),
+		catchPointPosition := __POSITION()
+	);
+__ENDTRY
+
+IF NOT __QUERYINTERFACE(caught, typed) THEN
+	RecordFailure(message := "The standard template must be initialized by the deliberate throw");
+	RETURN;
+END_IF
+Assert.ThatBool(
+	actual := source.SourceMessage = "Existing message",
+	message := "The standard template must start with the expected message"
+).IsTrue();
+
+caught := 0;
+
+// Attempt to attach the caller-owned template to itself.
+__TRY
+	source.Throw(
+		sourceNamespaceName := NamespaceName,
+		sourceClassName := ClassName,
+		sourcePOUName := __POUNAME(),
+		sourcePosition := 'ReplacementPosition',
+		message := "Replacement message",
+		innerException := source
+	);
+__CATCH(exceptionCode)
+	caught := TOF_Core.ExceptionManager.GetLastException(
+		exceptionCode := exceptionCode,
+		catchPointNamespaceName := NamespaceName,
+		catchPointPOUName := __POUNAME(),
+		catchPointPosition := __POSITION()
+	);
+__ENDTRY
+
+IF NOT __QUERYINTERFACE(caught, typed) THEN
+	RecordFailure(message := "Attaching a standard exception to itself must raise StandardException");
+	RETURN;
+END_IF
+
+Assert.ThatBool(
+	actual := typed.SourceMessage = "Cannot attach an exception graph containing its prospective owner."
+	AND_THEN typed.InnerException = 0,
+	message := "Standard cycle rejection must report the graph error without an inner cause"
+).IsTrue();
+Assert.ThatBool(
+	actual := source.SourceMessage = "Existing message"
+	AND_THEN source.SourcePosition = 'ExistingPosition'
+	AND_THEN source.InnerException = 0,
+	message := "Rejected attachment must preserve the original standard exception fields"
+).IsTrue();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="AfterTest" Id="{05685a58-4d8b-41ed-955d-12b18fc67caf}">
+      <Declaration><![CDATA[(*!
+<summary>Clears the caller-owned aggregate storage before the result is reported.</summary>
+<description>
+Safe after partial setup or repeated Clear. The task memory manager retains ownership of dynamic causes.
+</description>
+*)
+METHOD PROTECTED AfterTest]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_Aggregate.Clear();]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="ClassName" Id="{afae9236-8713-40fa-877c-69ebb4120656}">
+      <Declaration><![CDATA[//! <summary>Borrows the concrete class name. Callers must not modify it.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{54ea6212-5628-4fc9-ac4d-f31b8c94369a}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ClassName REF= _ClassName;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="NamespaceName" Id="{ea2fb190-b744-4ed0-aa6b-7a87306faada}">
+      <Declaration><![CDATA[//! <summary>Borrows the compiler-initialized namespace name. Callers must not modify it.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{0d041b8a-12aa-4f5b-9c96-2f654f372589}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[NamespaceName REF= CurrentNamespace.Name;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="SelfSize" Id="{af298633-8d7c-43f2-ae76-b36cf3efb333}">
+      <Declaration><![CDATA[//! <summary>Reports the concrete instance size in bytes.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY SelfSize : ULINT]]></Declaration>
+      <Get Name="Get" Id="{9208af68-7926-40b0-9697-9fc2c84b01f8}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[SelfSize := XSIZEOF(THIS^);]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+  </POU>
+</TcPlcObject>

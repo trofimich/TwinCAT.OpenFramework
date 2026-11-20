@@ -1,0 +1,154 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="WorkflowComprehensiveTestCase" Id="{575f09cc-0114-405b-a2f0-6da6519f8cd5}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+SPDX-FileCopyrightText: © 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+SPDX-License-Identifier: MIT
+License: https://opensource.org/license/mit
+*)
+
+(*!
+<summary>Runs one workflow integration scenario in an isolated fixture.</summary>
+<description>
+Owns a freshly allocated fixture for the active run. AfterTest releases it after success or a reported
+exception. A concrete pointer preserves FB_exit for the fixture and its nested resource owners.
+Use one task. Do not copy the test case while it owns a fixture.
+</description>
+*)
+
+{attribute 'no_assign'}
+{attribute 'no_explicit_call' := 'do not call this function block directly'}
+FUNCTION_BLOCK WorkflowComprehensiveTestCase EXTENDS TOF_Testing.SingleCycleTest
+VAR_STAT
+	{attribute 'hide'}
+	_ClassName : STRING := __POUNAME();
+END_VAR
+VAR
+	_Scenario : WORKFLOW_COMPREHENSIVE_TEST_SCENARIO;
+	_Fixture : POINTER TO WorkflowComprehensiveTestFixture;
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[]]></ST>
+    </Implementation>
+    <Method Name="FB_init" Id="{d6013bbb-6203-4715-bc9b-0c223168a07d}">
+      <Declaration><![CDATA[(*!
+<summary>Selects the scenario without allocating its fixture.</summary>
+<param name="name">Name reported for this case.</param>
+<param name="parent">Group that owns this case.</param>
+<param name="scenario">Scenario selected for the case.</param>
+*)
+METHOD FB_init : BOOL
+VAR_INPUT
+	bInitRetains: BOOL; // TRUE: the retain variables are initialized (reset warm / reset cold)
+	bInCopyCode: BOOL; // TRUE: the instance will be copied to the copy code afterward (online change)
+	name : WSTRING;
+	parent : TOF_Testing.ITestElement;
+	scenario : WORKFLOW_COMPREHENSIVE_TEST_SCENARIO;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF NOT bInCopyCode THEN
+	_Scenario := scenario;
+END_IF
+
+FB_init := TRUE;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="ExecuteTest" Id="{b0f76e3d-6bd5-43d8-ac6f-7b2dc92b9a58}">
+      <Declaration><![CDATA[(*!
+<summary>Allocates a fresh fixture and runs the selected scenario.</summary>
+<description>Terminal allocation failure is raised at the task boundary after case handling.</description>
+*)
+METHOD PROTECTED ExecuteTest
+VAR
+	assertions : REFERENCE TO TOF_Testing.Assertions;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_Fixture := __NEW(WorkflowComprehensiveTestFixture);
+
+IF _Fixture = 0 THEN
+	TOF_Core.DynamicMemoryManager.RaiseAllocationFailure();
+
+	RETURN;
+END_IF
+
+assertions REF= Assert;
+_Fixture^.ExecuteScenario(scenario := _Scenario, assertions := assertions);]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="AfterTest" Id="{228afd15-6149-4657-bae5-4b3b6bf22dc8}">
+      <Declaration><![CDATA[(*!
+<summary>Releases the fixture before the case outcome is published.</summary>
+<description>The framework records an exception from teardown. Clear the stored alias before releasing.</description>
+*)
+METHOD PROTECTED AfterTest
+VAR
+	fixture : POINTER TO WorkflowComprehensiveTestFixture;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[fixture := _Fixture;
+_Fixture := 0;
+
+IF fixture <> 0 THEN
+	__DELETE(fixture);
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="FB_exit" Id="{c463f6ac-0848-4b81-80e1-867c70d455d3}">
+      <Declaration><![CDATA[(*!
+<summary>Releases an active fixture if the case is unloaded before its teardown.</summary>
+<description>The fixture and its nested FB_exit paths complete without exceptions.</description>
+<param name="bInCopyCode">TwinCAT copy-code exit marker. The previous instance leaves copied storage alive.</param>
+*)
+METHOD FB_exit : BOOL
+VAR_INPUT
+	bInCopyCode : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF NOT bInCopyCode AND_THEN _Fixture <> 0 THEN
+	__DELETE(_Fixture);
+END_IF
+
+FB_exit := TRUE;]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="ClassName" Id="{45d678f0-a475-43a0-aad4-35ccbfc1e2c4}">
+      <Declaration><![CDATA[(*!
+<summary>Borrows the concrete class name. Callers must not modify it.</summary>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{1edca7af-4c52-49db-8c35-097de22468c9}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ClassName REF= _ClassName;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="NamespaceName" Id="{3795ded1-5b27-4696-8468-852a82e71786}">
+      <Declaration><![CDATA[(*!
+<summary>Borrows the project namespace name. Callers must not modify it.</summary>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{6bbaa3b7-65e1-46e9-a93c-0b2fa914e726}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[NamespaceName REF= CurrentNamespace.Name;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="SelfSize" Id="{a1c279e4-2c84-4ee1-a455-0257dd78adc5}">
+      <Declaration><![CDATA[(*!
+<summary>Reports the complete instance size in bytes.</summary>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY SelfSize : ULINT]]></Declaration>
+      <Get Name="Get" Id="{d8eb26fa-b1e5-40b3-8298-4d60cd8e31df}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[SelfSize := XSIZEOF(THIS^);]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+  </POU>
+</TcPlcObject>

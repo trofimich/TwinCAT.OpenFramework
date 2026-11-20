@@ -1,0 +1,195 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="GenericConversionPairsTest" Id="{6f428169-e64e-42c8-b6a4-44c017b7833b}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+SPDX-FileCopyrightText: c 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+SPDX-License-Identifier: MIT
+License: https://opensource.org/license/mit
+*)
+
+(*!
+<summary>Checks generic conversion availability and typed accessor behavior.</summary>
+<description>
+Uses run-local fixtures and references that are used only within the executing PLC task.
+The runner binds assertions to the instance address. Keep the instance at that address for its run.
+</description>
+*)
+
+{attribute 'no_assign'}
+{attribute 'no_explicit_call' := 'do not call this function block directly'}
+FUNCTION_BLOCK GenericConversionPairsTest EXTENDS TOF_Testing.SingleCycleTest
+VAR_STAT
+	{attribute 'hide'}
+	_ClassName : STRING := __POUNAME();
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[]]></ST>
+    </Implementation>
+    <Method Name="ExecuteTest" Id="{db0be428-a5e1-41d8-b9e9-7a486afb58c7}">
+      <Declaration><![CDATA[(*!
+<summary>Checks supported pairs without dereferencing payload and keeps range checks in the accessors.</summary>
+<description>
+Uses non-owning descriptors over passive storage for category queries and typed numeric descriptors for
+selected conversions. Query-only descriptors are never read through typed accessors. Covers former false
+positives, numeric-to-calendar false negatives, asymmetric date pairs and unsupported identity targets.
+A deliberate range error checks the accessor separately.
+</description>
+*)
+METHOD PROTECTED ExecuteTest
+VAR
+	value : TOF_Core.GENERIC_VALUE;
+	queryStorage : LWORD;
+	duration : TIME := T#1MS;
+	integer : LINT := 0;
+	convertedDate : DATE;
+	exceptionCode : __SYSTEM.ExceptionCode;
+	caughtException : TOF_Core.IException;
+	conversionException : TOF_Core.IGenericConversionNotSupportedException;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[value := TOF_Core.GenericValueFactory.FromParts(
+	genericTypeClass := TOF_Core.GENERIC_TYPE_CLASS.OBJECT,
+	address := ADR(queryStorage),
+	size := XSIZEOF(queryStorage),
+	memoryManagementBehavior :=
+		TOF_Core.GENERIC_MEMORY_MANAGEMENT_BEHAVIOR.STORE_ORIGINAL_REFERENCE_AND_NOT_OWNS_MEMORY
+);
+Assert.ThatBool(
+	actual := value.IsConvertibleTo(targetTypeClass := TOF_Core.GENERIC_TYPE_CLASS.STRING_16),
+	message := "OBJECT has no text accessor conversion"
+).IsFalse();
+
+value := TOF_Core.GenericValueFactory.FromParts(
+	genericTypeClass := TOF_Core.GENERIC_TYPE_CLASS.REAL_64,
+	address := ADR(queryStorage),
+	size := XSIZEOF(queryStorage),
+	memoryManagementBehavior :=
+		TOF_Core.GENERIC_MEMORY_MANAGEMENT_BEHAVIOR.STORE_ORIGINAL_REFERENCE_AND_NOT_OWNS_MEMORY
+);
+Assert.ThatBool(
+	actual := value.IsConvertibleTo(targetTypeClass := TOF_Core.GENERIC_TYPE_CLASS.INT_32),
+	message := "Floating-point to integer is not an accessor conversion"
+).IsFalse();
+Assert.ThatBool(
+	actual := value.IsConvertibleTo(targetTypeClass := TOF_Core.GENERIC_TYPE_CLASS.REAL_32),
+	message := "A query inspects the category without interpreting the borrowed payload"
+).IsTrue();
+
+value := TOF_Core.GenericValueFactory.FromParts(
+	genericTypeClass := TOF_Core.GENERIC_TYPE_CLASS.DATE_AND_TIME_64,
+	address := ADR(queryStorage),
+	size := XSIZEOF(queryStorage),
+	memoryManagementBehavior :=
+		TOF_Core.GENERIC_MEMORY_MANAGEMENT_BEHAVIOR.STORE_ORIGINAL_REFERENCE_AND_NOT_OWNS_MEMORY
+);
+Assert.ThatBool(
+	actual := value.IsConvertibleTo(targetTypeClass := TOF_Core.GENERIC_TYPE_CLASS.DATE_32),
+	message := "AsDate does not provide an LDT input branch"
+).IsFalse();
+Assert.ThatBool(
+	actual := value.IsConvertibleTo(targetTypeClass := TOF_Core.GENERIC_TYPE_CLASS.DATE_64),
+	message := "AsLDate supports LDT input"
+).IsTrue();
+
+value := TOF_Core.GenericValueFactory.FromParts(
+	genericTypeClass := TOF_Core.GENERIC_TYPE_CLASS.POINTER_TO,
+	address := ADR(queryStorage),
+	size := XSIZEOF(queryStorage),
+	memoryManagementBehavior :=
+		TOF_Core.GENERIC_MEMORY_MANAGEMENT_BEHAVIOR.STORE_ORIGINAL_REFERENCE_AND_NOT_OWNS_MEMORY
+);
+Assert.ThatBool(
+	actual := value.IsConvertibleTo(targetTypeClass := TOF_Core.GENERIC_TYPE_CLASS.POINTER_TO),
+	message := "A pointer identity tag has no As* accessor"
+).IsFalse();
+value := TOF_Core.GenericValueFactory.FromParts(
+	genericTypeClass := TOF_Core.GENERIC_TYPE_CLASS.USER_DEFINED,
+	address := ADR(queryStorage),
+	size := XSIZEOF(queryStorage),
+	memoryManagementBehavior :=
+		TOF_Core.GENERIC_MEMORY_MANAGEMENT_BEHAVIOR.STORE_ORIGINAL_REFERENCE_AND_NOT_OWNS_MEMORY
+);
+Assert.ThatBool(
+	actual := value.IsConvertibleTo(targetTypeClass := TOF_Core.GENERIC_TYPE_CLASS.USER_DEFINED),
+	message := "A user-defined identity tag has no As* accessor"
+).IsFalse();
+
+value := TOF_Core.GenericValueFactory.FromLIntReference(value := integer);
+Assert.ThatBool(
+	actual := value.IsConvertibleTo(targetTypeClass := TOF_Core.GENERIC_TYPE_CLASS.DATE_32),
+	message := "Integer seconds have a DATE conversion branch"
+).IsTrue();
+convertedDate := value.AsDate();
+Assert.ThatDate(
+	actual := convertedDate,
+	message := "Zero seconds must convert to the epoch"
+).ToBe(expected := DATE#1970-01-01);
+integer := TOF_Core.SignedInt64.MAX_VALUE;
+Assert.ThatBool(
+	actual := value.IsConvertibleTo(targetTypeClass := TOF_Core.GENERIC_TYPE_CLASS.DATE_32),
+	message := "A pair query must not become a value range check"
+).IsTrue();
+
+// Catch the deliberate out-of-range conversion to verify that the accessor rejects it.
+__TRY
+	convertedDate := value.AsDate(allowTypeCastWithDataLoss := TRUE);
+__CATCH(exceptionCode)
+	caughtException := TOF_Core.ExceptionManager.GetLastException(
+		exceptionCode := exceptionCode,
+		catchPointNamespaceName := NamespaceName,
+		catchPointPOUName := __POUNAME(),
+		catchPointPosition := __POSITION()
+	);
+__ENDTRY
+
+Assert.ThatBool(
+	actual := __QUERYINTERFACE(caughtException, conversionException),
+	message := "An out-of-range integer must fail AsDate even when truncating time of day is allowed"
+).IsTrue();
+
+value := TOF_Core.GenericValueFactory.FromTimeReference(value := duration);
+Assert.ThatBool(
+	actual := value.IsConvertibleTo(targetTypeClass := TOF_Core.GENERIC_TYPE_CLASS.DATE_AND_TIME_64),
+	message := "TIME has a conversion to LDT"
+).IsTrue();
+Assert.ThatLongDateTime(
+	actual := value.AsLDateAndTime(),
+	message := "TIME must add one millisecond to the epoch"
+).ToBe(expected := LDT#1970-01-01-00:00:00.001);]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="ClassName" Id="{33d99c3f-7f51-4455-a2ac-7507a94f40b7}">
+      <Declaration><![CDATA[//! <summary>Borrows the concrete class name. Callers must not modify it.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{ae43cf33-ea9f-4768-a78a-b3cc1cbc4b6f}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ClassName REF= _ClassName;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="NamespaceName" Id="{33bd5117-da5c-4026-a6df-1baf9db5f390}">
+      <Declaration><![CDATA[//! <summary>Borrows the compiler-initialized namespace name. Callers must not modify it.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{5a348a9f-ef24-4229-98ce-77cca92ad43f}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[NamespaceName REF= CurrentNamespace.Name;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="SelfSize" Id="{5939370c-e164-43b5-a74a-e60bd9e76e1f}">
+      <Declaration><![CDATA[//! <summary>Reports the concrete instance size in bytes.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY SelfSize : ULINT]]></Declaration>
+      <Get Name="Get" Id="{7bfc8273-82aa-463a-9cff-83c2701b23d3}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[SelfSize := XSIZEOF(THIS^);]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+  </POU>
+</TcPlcObject>

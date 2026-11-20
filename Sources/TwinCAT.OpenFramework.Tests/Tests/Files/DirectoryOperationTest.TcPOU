@@ -1,0 +1,574 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="DirectoryOperationTest" Id="{6f13bdd8-d74f-409a-83de-7baae43e2639}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+SPDX-FileCopyrightText: © 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+SPDX-License-Identifier: MIT
+License: https://opensource.org/license/mit
+*)
+
+(*!
+<summary>Runs one native directory lifecycle scenario.</summary>
+<description>
+The caller reserves a fixed directory under FileTestRoot and drives this leaf in one task without reentry.
+Ordinary creation establishes ownership. A refusal, collision or interrupted create grants no ownership.
+The scenario retains ownership until a successful existence query confirms removal. Pending operations
+are drained and owned paths are removed nonrecursively before reporting. A failed cleanup can require
+inspection before reuse. The scenario deadline includes root preparation. Do not copy the instance.
+</description>
+*)
+
+{attribute 'no_assign'}
+{attribute 'no_explicit_call' := 'do not call this function block directly'}
+FUNCTION_BLOCK DirectoryOperationTest EXTENDS TOF_Testing.MultiCycleTest
+VAR_STAT
+	{attribute 'hide'}
+	_ClassName : STRING := __POUNAME();
+END_VAR
+VAR CONSTANT
+	//! <summary>Timeout passed to each native directory operation.</summary>
+	_NativeTimeout : TIME := T#2S;
+	//! <summary>Time allowed for preparation and work before requesting cleanup.</summary>
+	_ScenarioTimeout : TIME := T#10S;
+END_VAR
+VAR
+	_DirectoryPath : STRING(255);
+	_ChildPath : STRING(255);
+	_FirstStep : DIRECTORY_TEST_STEP;
+	_Step : DIRECTORY_TEST_STEP;
+	_Lifecycle : FILE_TEST_LIFECYCLE;
+	_ScenarioDeadline : Tc2_Standard.TON;
+	_ActiveOperation : TOF_Tasks.ITask;
+	_OwnsDirectory : BOOL;
+	_OwnsChildDirectory : BOOL;
+	_ChildCleanupFinished : BOOL;
+	_ScenarioFailure : TOF_Core.ERROR_MESSAGE;
+	_CleanupFailure : TOF_Core.ERROR_MESSAGE;
+
+	_CreateDirectory : TOF_FileSystem.CreateDirectory(name := "CreateDirectory");
+	_CheckDirectory : TOF_FileSystem.CheckDirectoryExists(name := "CheckDirectoryExists");
+	_RemoveDirectory : TOF_FileSystem.RemoveEmptyDirectory(name := "RemoveEmptyDirectory");
+	_CreateChild : TOF_FileSystem.CreateDirectoryIfNotExists(name := "CreateDirectoryIfNotExists");
+	_RemoveChild : TOF_FileSystem.RemoveEmptyDirectoryIfExists(name := "RemoveEmptyDirectoryIfExists");
+	_CleanupChild : TOF_FileSystem.RemoveEmptyDirectoryIfExists(name := "Remove owned child directory");
+	_CleanupDirectory : TOF_FileSystem.RemoveEmptyDirectoryIfExists(name := "Remove owned scenario directory");
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[]]></ST>
+    </Implementation>
+    <Method Name="FB_init" Id="{b14bf239-4d1d-4961-b4ea-2ed44ef96e79}">
+      <Declaration><![CDATA[(*!
+<summary>Stores the fixed scenario path and selects its first check after creation.</summary>
+<description>
+Initialization performs no I/O. The inherited initializer stores name and parent. Use CHECK_DIRECTORY_PRESENT,
+CHECK_CHILD_DIRECTORY_ABSENT or CREATE_CHILD_DIRECTORY for firstStep. The scenario deadline excludes cleanup.
+</description>
+<param name="name">Name used in the test report.</param>
+<param name="parent">Group that owns this test.</param>
+<param name="directoryPath">Reserved scenario path below the shared filesystem test root.</param>
+<param name="firstStep">First step after ordinary creation.</param>
+*)
+METHOD FB_init : BOOL
+VAR_INPUT
+	bInitRetains: BOOL; // TRUE: the retain variables are initialized (reset warm / reset cold)
+	bInCopyCode: BOOL; // TRUE: the instance will be copied to the copy code afterward (online change)
+	name : WSTRING;
+	parent : TOF_Testing.ITestElement;
+	directoryPath : STRING(255);
+	firstStep : DIRECTORY_TEST_STEP;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_DirectoryPath := directoryPath;
+_FirstStep := firstStep;
+
+// Keep the test alive while cyclic cleanup is pending after the scenario deadline.
+_Timeout := T#0S;
+FB_init := TRUE;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="BeforeTest" Id="{3566d392-c942-4025-8c6f-b0738e5402b9}">
+      <Declaration><![CDATA[(*!
+<summary>Rearms the directory fixture without submitting native operations.</summary>
+<description>
+Unresolved ownership or pending operations from a previous run fail this leaf before another path is touched.
+</description>
+*)
+METHOD PROTECTED BeforeTest]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF _ActiveOperation <> 0 OR_ELSE _OwnsDirectory OR_ELSE _OwnsChildDirectory THEN
+	RecordFailure(message := "The previous run left unresolved directory ownership or a pending task");
+	RETURN;
+END_IF
+
+IF NOT _CleanupChild.Reset() OR_ELSE NOT _CleanupDirectory.Reset() THEN
+	RecordFailure(message := "Directory cleanup tasks refused Reset");
+	RETURN;
+END_IF
+
+_ChildPath := TOF_Core.Strings.Concat255(_DirectoryPath, '\Child');
+_CreateDirectory.DirectoryPath := _DirectoryPath;
+_RemoveDirectory.DirectoryPath := _DirectoryPath;
+_CreateChild.DirectoryPath := _ChildPath;
+_RemoveChild.DirectoryPath := _ChildPath;
+_CleanupChild.DirectoryPath := _ChildPath;
+_CleanupDirectory.DirectoryPath := _DirectoryPath;
+
+_CreateDirectory.Timeout := _NativeTimeout;
+_CheckDirectory.Timeout := _NativeTimeout;
+_RemoveDirectory.Timeout := _NativeTimeout;
+_CreateChild.Timeout := _NativeTimeout;
+_RemoveChild.Timeout := _NativeTimeout;
+_CleanupChild.Timeout := _NativeTimeout;
+_CleanupDirectory.Timeout := _NativeTimeout;
+
+_CreateDirectory.PathType := Tc2_System.E_OpenPath.PATH_GENERIC;
+_CheckDirectory.PathType := Tc2_System.E_OpenPath.PATH_GENERIC;
+_RemoveDirectory.PathType := Tc2_System.E_OpenPath.PATH_GENERIC;
+_CreateChild.PathType := Tc2_System.E_OpenPath.PATH_GENERIC;
+_RemoveChild.PathType := Tc2_System.E_OpenPath.PATH_GENERIC;
+_CleanupChild.PathType := Tc2_System.E_OpenPath.PATH_GENERIC;
+_CleanupDirectory.PathType := Tc2_System.E_OpenPath.PATH_GENERIC;
+
+_ScenarioDeadline(IN := FALSE, PT := _ScenarioTimeout);
+_ScenarioFailure := "";
+_CleanupFailure := "";
+_ChildCleanupFinished := FALSE;
+_Step := DIRECTORY_TEST_STEP.CREATE_DIRECTORY;
+_Lifecycle := FILE_TEST_LIFECYCLE.RUNNING_SCENARIO;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="ExecuteTest" Id="{02e3d1ac-66a5-4d6f-8c1e-7e55516ce9d6}">
+      <Declaration><![CDATA[(*!
+<summary>Advances scenario work or cleanup and reports the final outcome.</summary>
+<description>
+An assertion failure would terminate the leaf immediately. Retain the first scenario failure in instance storage
+and publish it with any cleanup diagnostic only after cooperative stopping and removal attempts finish.
+</description>
+*)
+METHOD PROTECTED ExecuteTest : TOF_Testing.TEST_CYCLE_RESULT]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[ExecuteTest := TOF_Testing.TEST_CYCLE_RESULT.BUSY;
+
+IF _Lifecycle = FILE_TEST_LIFECYCLE.RUNNING_SCENARIO THEN
+	__TRY
+		runScenario();
+	__CATCH
+		_ScenarioFailure := "Exception interrupted the directory operation; inspect any unfinished creation";
+	__ENDTRY
+
+	IF _ScenarioFailure <> "" OR_ELSE _Step = DIRECTORY_TEST_STEP.COMPLETED THEN
+		_Lifecycle := FILE_TEST_LIFECYCLE.CLEANING_UP;
+	END_IF
+
+	RETURN;
+END_IF
+
+__TRY
+	IF NOT runCleanup() THEN
+		RETURN;
+	END_IF
+__CATCH
+	IF _CleanupFailure = "" THEN
+		_CleanupFailure := "An exception interrupted cleanup; inspect the directory if artifacts remain";
+	END_IF
+
+	RETURN;
+__ENDTRY
+
+_Lifecycle := FILE_TEST_LIFECYCLE.FINISHED;
+ExecuteTest := TOF_Testing.TEST_CYCLE_RESULT.DONE;
+
+IF _ScenarioFailure <> "" OR_ELSE _CleanupFailure <> "" THEN
+	reportFailure();
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="runScenario" Id="{1a79c7bf-5962-40b1-8fb6-d02f5341d00e}">
+      <Declaration><![CDATA[(*!
+<summary>Advances one step of the chosen directory scenario.</summary>
+<description>
+The same deadline covers waiting for the shared root and advancing native operations. A failure is
+copied to _ScenarioFailure for later reporting. The conditional scenario also checks native refusal to remove
+a nonempty parent and confirms the child survived. Ownership is retained until absence is observed.
+</description>
+*)
+METHOD PRIVATE runScenario
+VAR
+	removalMessage : STRING(255);
+	expectedDiagnostic : STRING(255);
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_ScenarioDeadline(IN := TRUE, PT := _ScenarioTimeout);
+
+IF FileTestRoot.FailureMessage <> TOF_Core.Strings.Empty THEN
+	_ScenarioFailure := TO_WSTRING(FileTestRoot.FailureMessage);
+	RETURN;
+END_IF
+
+IF _ScenarioDeadline.Q THEN
+	_ScenarioFailure := "Scenario exceeded 10 seconds; inspect any directory whose creation was interrupted";
+	RETURN;
+END_IF
+
+IF NOT FileTestRoot.Prepared THEN
+	RETURN;
+END_IF
+
+CASE _Step OF
+	DIRECTORY_TEST_STEP.CREATE_DIRECTORY:
+		IF advanceOperation(operation := _CreateDirectory) THEN
+			_OwnsDirectory := TRUE;
+			_Step := _FirstStep;
+		END_IF
+
+	DIRECTORY_TEST_STEP.CHECK_DIRECTORY_PRESENT:
+		IF verifyDirectory(directoryPath := _DirectoryPath, expectedExists := TRUE) THEN
+			_Step := DIRECTORY_TEST_STEP.REMOVE_DIRECTORY;
+		END_IF
+
+	DIRECTORY_TEST_STEP.CREATE_CHILD_DIRECTORY:
+		IF advanceOperation(operation := _CreateChild) THEN
+			_OwnsChildDirectory := TRUE;
+			_Step := DIRECTORY_TEST_STEP.CHECK_CHILD_DIRECTORY_PRESENT;
+		END_IF
+
+	DIRECTORY_TEST_STEP.CHECK_CHILD_DIRECTORY_PRESENT:
+		IF verifyDirectory(directoryPath := _ChildPath, expectedExists := TRUE) THEN
+			_Step := DIRECTORY_TEST_STEP.CREATE_CHILD_DIRECTORY_AGAIN;
+		END_IF
+
+	DIRECTORY_TEST_STEP.CREATE_CHILD_DIRECTORY_AGAIN:
+		IF advanceOperation(operation := _CreateChild) THEN
+			_Step := DIRECTORY_TEST_STEP.CHECK_CHILD_DIRECTORY_PRESENT_AGAIN;
+		END_IF
+
+	DIRECTORY_TEST_STEP.CHECK_CHILD_DIRECTORY_PRESENT_AGAIN:
+		IF verifyDirectory(directoryPath := _ChildPath, expectedExists := TRUE) THEN
+			_Step := DIRECTORY_TEST_STEP.REJECT_NONEMPTY_DIRECTORY_REMOVAL;
+		END_IF
+
+	DIRECTORY_TEST_STEP.REJECT_NONEMPTY_DIRECTORY_REMOVAL:
+		IF advanceOperation(operation := _RemoveDirectory, expectedReason := TOF_Tasks.TASK_STOP_REASON.FAILURE) THEN
+			removalMessage := TO_STRING(_RemoveDirectory.FinalStopReason.Message);
+			expectedDiagnostic := TOF_Core.Strings.Concat255('while removing directory $27', _DirectoryPath, '$27');
+
+			IF NOT TOF_Core.Strings.Contains(stringToSearchIn := removalMessage, stringToFind := expectedDiagnostic) THEN
+				_ScenarioFailure := TOF_Core.WideStrings.ConcatFit255(
+					"Expected a native failure removing the nonempty directory: ",
+					TO_WSTRING(removalMessage)
+				);
+			ELSE
+				_Step := DIRECTORY_TEST_STEP.CHECK_CHILD_DIRECTORY_RETAINED;
+			END_IF
+		END_IF
+
+	DIRECTORY_TEST_STEP.CHECK_CHILD_DIRECTORY_RETAINED:
+		IF verifyDirectory(directoryPath := _ChildPath, expectedExists := TRUE) THEN
+			_Step := DIRECTORY_TEST_STEP.REMOVE_CHILD_DIRECTORY;
+		END_IF
+
+	DIRECTORY_TEST_STEP.REMOVE_CHILD_DIRECTORY:
+		IF advanceOperation(operation := _RemoveChild) THEN
+			_Step := DIRECTORY_TEST_STEP.CHECK_CHILD_DIRECTORY_ABSENT;
+		END_IF
+
+	DIRECTORY_TEST_STEP.CHECK_CHILD_DIRECTORY_ABSENT:
+		IF verifyDirectory(directoryPath := _ChildPath, expectedExists := FALSE) THEN
+			IF _FirstStep = DIRECTORY_TEST_STEP.CHECK_CHILD_DIRECTORY_ABSENT THEN
+				_Step := DIRECTORY_TEST_STEP.REMOVE_DIRECTORY;
+			ELSE
+				_Step := DIRECTORY_TEST_STEP.REMOVE_CHILD_DIRECTORY_AGAIN;
+			END_IF
+		END_IF
+
+	DIRECTORY_TEST_STEP.REMOVE_CHILD_DIRECTORY_AGAIN:
+		IF advanceOperation(operation := _RemoveChild) THEN
+			_Step := DIRECTORY_TEST_STEP.CHECK_CHILD_DIRECTORY_ABSENT_AGAIN;
+		END_IF
+
+	DIRECTORY_TEST_STEP.CHECK_CHILD_DIRECTORY_ABSENT_AGAIN:
+		IF verifyDirectory(directoryPath := _ChildPath, expectedExists := FALSE) THEN
+			_OwnsChildDirectory := FALSE;
+			_Step := DIRECTORY_TEST_STEP.REMOVE_DIRECTORY;
+		END_IF
+
+	DIRECTORY_TEST_STEP.REMOVE_DIRECTORY:
+		IF advanceOperation(operation := _RemoveDirectory) THEN
+			_Step := DIRECTORY_TEST_STEP.CHECK_DIRECTORY_ABSENT;
+		END_IF
+
+	DIRECTORY_TEST_STEP.CHECK_DIRECTORY_ABSENT:
+		IF verifyDirectory(directoryPath := _DirectoryPath, expectedExists := FALSE) THEN
+			_OwnsDirectory := FALSE;
+			_Step := DIRECTORY_TEST_STEP.COMPLETED;
+		END_IF
+
+	ELSE
+		_ScenarioFailure := "Unexpected directory scenario step";
+END_CASE]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="advanceOperation" Id="{5e09a3c3-f363-43da-831a-3774bee0c126}">
+      <Declaration><![CDATA[(*!
+<summary>Starts or advances the specified scenario task for one PLC cycle.</summary>
+<description>
+Pass the same task and expected reason until the step finishes. TRUE requires STOPPED with the expected final
+reason. A refusal or unexpected reason is copied for the test result. Cleanup may cancel the active task.
+</description>
+<param name="operation">Persistent task belonging to this scenario.</param>
+<param name="expectedReason">Final stop reason required to advance to the next verification step.</param>
+*)
+METHOD PRIVATE advanceOperation : BOOL
+VAR_INPUT
+	operation : TOF_Tasks.ITask;
+	expectedReason : TOF_Tasks.TASK_STOP_REASON := TOF_Tasks.TASK_STOP_REASON.WORK_DONE;
+END_VAR
+VAR
+	operationMessage : TOF_Core.ERROR_MESSAGE;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF _ActiveOperation = 0 THEN
+	_ActiveOperation := operation;
+
+	IF NOT operation.Reset(refuseReason => operationMessage) THEN
+		_ScenarioFailure := "Reset refused: ";
+		TOF_Core.WideStrings.AppendFit(targetString := _ScenarioFailure, sourceString := operationMessage);
+		RETURN;
+	END_IF
+
+	IF NOT operation.Start(refuseReason => operationMessage) THEN
+		_ScenarioFailure := "Start refused: ";
+		TOF_Core.WideStrings.AppendFit(targetString := _ScenarioFailure, sourceString := operationMessage);
+		RETURN;
+	END_IF
+END_IF
+
+operation.Execute();
+
+IF NOT operation.State.Stopped THEN
+	RETURN;
+END_IF
+
+_ActiveOperation := 0;
+advanceOperation := operation.FinalStopReason.Value = expectedReason;
+
+IF NOT advanceOperation THEN
+	_ScenarioFailure := TOF_Core.WideStrings.ConcatFit255(
+		operation.Name,
+		" stopped with ",
+		TO_WSTRING(operation.FinalStopReason.Value),
+		", expected ",
+		TO_WSTRING(expectedReason),
+		": "
+	);
+	operationMessage := operation.FinalStopReason.Message;
+	TOF_Core.WideStrings.AppendFit(targetString := _ScenarioFailure, sourceString := operationMessage);
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="verifyDirectory" Id="{532f4337-ae41-41f5-95a0-9451037eb9b5}">
+      <Declaration><![CDATA[(*!
+<summary>Checks the result of a native existence query against the expected state.</summary>
+<description>
+TRUE requires both a successful native task and a matching observation. Pending queries retain their path.
+</description>
+<param name="directoryPath">Fixed path to query for this step.</param>
+<param name="expectedExists">Required value of DirectoryExists.</param>
+*)
+METHOD PRIVATE verifyDirectory : BOOL
+VAR_INPUT
+	directoryPath : STRING(255);
+	expectedExists : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF _ActiveOperation = 0 THEN
+	_CheckDirectory.DirectoryPath := directoryPath;
+END_IF
+
+IF NOT advanceOperation(operation := _CheckDirectory) THEN
+	RETURN;
+END_IF
+
+verifyDirectory := _CheckDirectory.DirectoryExists = expectedExists;
+
+IF NOT verifyDirectory THEN
+	_ScenarioFailure := TOF_Core.WideStrings.ConcatFit255(
+		"DirectoryExists expected ", TO_WSTRING(expectedExists), " for ", TO_WSTRING(directoryPath)
+	);
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="runCleanup" Id="{d614c298-61e4-44cd-b6d1-c50ab558e460}">
+      <Declaration><![CDATA[(*!
+<summary>Drains in-flight work and advances removal of owned directories.</summary>
+<description>
+Cleanup removes the child before the parent. It never adopts a pre-existing path, uses no recursive
+deletion and is allowed to outlive the scenario deadline. TRUE reports finished attempts.
+</description>
+*)
+METHOD PRIVATE runCleanup : BOOL
+VAR
+	removed : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF FileTestRoot.Running THEN
+	RETURN;
+END_IF
+
+IF _ActiveOperation <> 0 THEN
+	IF _ActiveOperation.State.Running THEN
+		IF NOT _ActiveOperation.OriginalStopReason.ExternalCancel THEN
+			_ActiveOperation.Cancel();
+		END_IF
+
+		_ActiveOperation.Execute();
+
+		IF _ActiveOperation.State.Running THEN
+			RETURN;
+		END_IF
+	END_IF
+
+	_ActiveOperation := 0;
+END_IF
+
+IF _OwnsChildDirectory AND_THEN NOT _ChildCleanupFinished THEN
+	IF NOT advanceCleanupRemoval(operation := _CleanupChild, removed => removed) THEN
+		RETURN;
+	END_IF
+
+	_ChildCleanupFinished := TRUE;
+	_OwnsChildDirectory := NOT removed;
+END_IF
+
+IF _OwnsDirectory THEN
+	IF NOT advanceCleanupRemoval(operation := _CleanupDirectory, removed => removed) THEN
+		RETURN;
+	END_IF
+
+	_OwnsDirectory := NOT removed;
+END_IF
+
+runCleanup := TRUE;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="advanceCleanupRemoval" Id="{740771cf-c8e2-4982-9a6e-e27573407bf9}">
+      <Declaration><![CDATA[(*!
+<summary>Advances one nonrecursive removal and copies its diagnostic.</summary>
+<description>
+Returns TRUE after a failed Start or a stopped task. If the task is still running, the next cycle advances it.
+</description>
+<param name="operation">Persistent removal task configured for a path owned by this scenario.</param>
+<param name="removed">TRUE only when the removal task stopped with WORK_DONE.</param>
+*)
+METHOD PRIVATE advanceCleanupRemoval : BOOL
+VAR_INPUT
+	operation : TOF_Tasks.ITask;
+END_VAR
+VAR_OUTPUT
+	removed : BOOL;
+END_VAR
+VAR
+	failure : TOF_Core.ERROR_MESSAGE;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[removed := FALSE;
+
+IF operation.State.Ready AND_THEN NOT operation.Start(refuseReason => failure) THEN
+	IF failure = "" THEN
+		failure := "Start refused";
+	END_IF
+ELSE
+	operation.Execute();
+
+	IF NOT operation.State.Stopped THEN
+		RETURN;
+	END_IF
+
+	removed := operation.FinalStopReason.WorkDone;
+
+	IF NOT removed THEN
+		failure := operation.FinalStopReason.Message;
+
+		IF failure = "" THEN
+			failure := "Stopped without WORK_DONE";
+		END_IF
+	END_IF
+END_IF
+
+IF NOT removed THEN
+	IF _CleanupFailure <> "" THEN
+		TOF_Core.WideStrings.AppendFit(targetString := _CleanupFailure, sourceString := " | ");
+	END_IF
+
+	TOF_Core.WideStrings.AppendFit255(_CleanupFailure, operation.Name, ": ");
+	TOF_Core.WideStrings.AppendFit(targetString := _CleanupFailure, sourceString := failure);
+END_IF
+
+advanceCleanupRemoval := TRUE;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="reportFailure" Id="{5470fddd-ef2d-4bc4-9cab-c282a91f307c}">
+      <Declaration><![CDATA[(*!
+<summary>Reports the failing path and step after cleanup.</summary>
+<description>
+Preserves the original diagnostic and adds cleanup information within the available result capacity.
+</description>
+*)
+METHOD PRIVATE reportFailure
+VAR
+	message : TOF_Core.ERROR_MESSAGE;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[message := TOF_Core.WideStrings.ConcatFit255(TO_WSTRING(_DirectoryPath), " [", TO_WSTRING(_Step), "]: ");
+
+IF _ScenarioFailure <> "" THEN
+	TOF_Core.WideStrings.AppendFit(targetString := message, sourceString := _ScenarioFailure);
+END_IF
+
+IF _CleanupFailure <> "" THEN
+	IF _ScenarioFailure <> "" THEN
+		TOF_Core.WideStrings.AppendFit(targetString := message, sourceString := " | ");
+	END_IF
+
+	TOF_Core.WideStrings.AppendFit255(message, "Cleanup: ");
+	TOF_Core.WideStrings.AppendFit(targetString := message, sourceString := _CleanupFailure);
+END_IF
+
+RecordFailure(message := message);]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="ClassName" Id="{7dfe69d4-1069-49f2-8394-33f3c83e47f1}">
+      <Declaration><![CDATA[//! <summary>Borrows the concrete class name for the lifetime of this instance; callers must not modify it.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{68dedf89-3651-4656-8902-9a8e1ac67d8f}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ClassName REF= _ClassName;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="NamespaceName" Id="{d21a662f-143a-4cb6-9f85-31c900223877}">
+      <Declaration><![CDATA[//! <summary>Borrows the compiler-initialized namespace; callers must not modify the returned reference.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{2d279bef-2fe7-409c-9673-e6b1ad0102c5}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[NamespaceName REF= CurrentNamespace.Name;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="SelfSize" Id="{44898db2-c864-4069-b279-d5d0d54fbe58}">
+      <Declaration><![CDATA[//! <summary>Reports the complete concrete instance size, excluding separately allocated storage.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY SelfSize : ULINT]]></Declaration>
+      <Get Name="Get" Id="{db9d2a14-a281-415b-b491-a122492326bc}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[SelfSize := XSIZEOF(THIS^);]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+  </POU>
+</TcPlcObject>

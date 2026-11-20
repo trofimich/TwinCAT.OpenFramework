@@ -1,0 +1,587 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="TaskQueueCleanupScenarioTest" Id="{0bc5662b-9397-4907-a97d-d77f664f51ce}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+SPDX-FileCopyrightText: © 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+SPDX-License-Identifier: MIT
+License: https://opensource.org/license/mit
+*)
+
+(*!
+<summary>Exercises cooperative queue cleanup under one fault configuration.</summary>
+<description>
+Owns independent static fixtures. The queue borrows its resource and children and is advanced once per
+scenario cycle. The resource is synthetic. AfterTest uses bounded cooperative cancellation before clearing
+fixture state. Instances belong to one PLC task and must stay at a stable address.
+</description>
+*)
+
+{attribute 'no_assign'}
+{attribute 'no_explicit_call' := 'do not call this function block directly'}
+FUNCTION_BLOCK TaskQueueCleanupScenarioTest EXTENDS TOF_Testing.MultiCycleTest
+VAR_STAT
+	{attribute 'hide'}
+	_ClassName : STRING := __POUNAME();
+END_VAR
+VAR CONSTANT
+	//! <summary>Maximum queue calls per failure or reuse run, including acquisition and release.</summary>
+	_MaxRunCycles : UDINT := 32;
+	//! <summary>Number of queue calls to observe after the first failure while cleanup is held.</summary>
+	_HeldObservationCycles : UINT := 8;
+	//! <summary>Allows all remaining synthetic cancellation failures, three child steps and two release steps.</summary>
+	_DrainBudget : INT := 16;
+END_VAR
+VAR
+	_Scenario : QUEUE_CLEANUP_TEST_SCENARIO;
+	_Phase : QUEUE_CLEANUP_TEST_PHASE;
+	_Queue : QueueCleanupQueue(name := "queue");
+	_Resource : QueueCleanupResource;
+	_Child : QueueCleanupChild;
+	_Waiting : CounterTask(name := "waiting");
+
+	_RunStartCycle : UDINT;
+	_FirstFailureObserved : BOOL;
+	_HeldCycles : UINT;
+	_ExpectedExecuteFailures : UINT;
+	_ExpectedCancelFailures : UINT;
+	_RequestExternalCancel : BOOL;
+	_InjectReleaseFailure : BOOL;
+	_ExpectedFailureMessage : WSTRING(255);
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[]]></ST>
+    </Implementation>
+    <Method Name="FB_init" Id="{c780bfc3-c22d-4124-9201-a7ce58788206}">
+      <Declaration><![CDATA[(*!
+<summary>Stores the scenario and selects a cycle budget for both runs.</summary>
+<param name="name">Display name of this case.</param>
+<param name="parent">Group that owns this test.</param>
+<param name="scenario">Independent fault configuration.</param>
+*)
+METHOD FB_init : BOOL
+VAR_INPUT
+	bInitRetains: BOOL; // TRUE: the retain variables are initialized (reset warm / reset cold)
+	bInCopyCode: BOOL; // TRUE: the instance will be copied to the copy code afterward (online change)
+	name : WSTRING;
+	parent : TOF_Testing.ITestElement;
+	scenario : QUEUE_CLEANUP_TEST_SCENARIO;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_Scenario := scenario;
+_Timeout := T#0S;
+FB_init := TRUE;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="BeforeTest" Id="{e1d52781-7086-4eef-a90b-d741c86a0711}">
+      <Declaration><![CDATA[(*!
+<summary>Prepares two borrowed children, configures faults and starts the queue.</summary>
+*)
+METHOD PROTECTED BeforeTest]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_Phase := QUEUE_CLEANUP_TEST_PHASE.FAILURE_RUN;
+_RunStartCycle := 0;
+_FirstFailureObserved := FALSE;
+_HeldCycles := 0;
+
+IF NOT _Queue.State.Ready
+	OR_ELSE _Queue.PendingTaskCount <> 0
+	OR_ELSE NOT _Child.State.Ready
+	OR_ELSE NOT _Waiting.State.Ready
+	OR_ELSE _Resource.ResourceAcquired
+	OR_ELSE _Resource.ReleaseCalls <> 0
+	OR_ELSE _Resource.EarlyRelease
+THEN
+	RecordFailure(message := "Queue, children and resource must be ready for a new failure run");
+	RETURN;
+END_IF
+
+_Child.ThrowOnFirstExecute := TRUE;
+_Child.ThrowOnGetMessage := _Scenario = QUEUE_CLEANUP_TEST_SCENARIO.MESSAGE_FORMATTING_FAILURE;
+_Child.HoldCleanup := _Scenario = QUEUE_CLEANUP_TEST_SCENARIO.HELD_CLEANUP;
+_Child.CleanupFailures := 0;
+_Child.CancelFailures := 0;
+_ExpectedFailureMessage := "First child failure";
+_ExpectedExecuteFailures := 1;
+_ExpectedCancelFailures := 0;
+_InjectReleaseFailure := _Scenario = QUEUE_CLEANUP_TEST_SCENARIO.EXTERNAL_CANCEL_WITH_RELEASE_FAILURE;
+_RequestExternalCancel := _InjectReleaseFailure
+	OR_ELSE _Scenario = QUEUE_CLEANUP_TEST_SCENARIO.EXTERNAL_CANCEL_DURING_CLEANUP;
+
+CASE _Scenario OF
+	QUEUE_CLEANUP_TEST_SCENARIO.REPEATED_EXECUTE_FAILURE:
+		_Child.CleanupFailures := 2;
+		_ExpectedExecuteFailures := 3;
+
+	QUEUE_CLEANUP_TEST_SCENARIO.CANCEL_REQUEST_FAILURE:
+		_Child.CancelFailures := 2;
+		_ExpectedCancelFailures := 2;
+
+	QUEUE_CLEANUP_TEST_SCENARIO.MESSAGE_FORMATTING_FAILURE:
+		_ExpectedFailureMessage := "Task 'queue' processing failed";
+END_CASE
+
+_Resource.SetChild(child := _Child);
+_Resource.SetThrowOnStartRelease(throwOnStartRelease := _InjectReleaseFailure);
+_Queue.SetResourceManager(resourceManager := _Resource);
+_Queue.StopWhenNoPendingTasks := TRUE;
+_Queue.Enqueue(task := _Child);
+_Queue.Enqueue(task := _Waiting);
+Assert.ThatBool(actual := _Queue.Start(), message := "Prepared queue must accept Start").IsTrue();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="ExecuteTest" Id="{211e9755-b98f-4537-9da9-f850d3ef885e}">
+      <Declaration><![CDATA[(*!
+<summary>Advances one queue call and observes the selected failure or reuse case.</summary>
+<description>
+An escaping exception uses the framework's ExecuteTest diagnostic and proceeds to AfterTest.
+</description>
+*)
+METHOD PROTECTED ExecuteTest : TOF_Testing.TEST_CYCLE_RESULT]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[ExecuteTest := TOF_Testing.TEST_CYCLE_RESULT.DONE;
+
+IF CycleCount - _RunStartCycle > _MaxRunCycles THEN
+	RecordFailure(message := "Queue cleanup or reuse exceeded its cycle budget");
+	RETURN;
+END_IF
+
+_Queue.Execute();
+
+CASE _Phase OF
+	QUEUE_CLEANUP_TEST_PHASE.REUSE_RUN:
+		IF _Queue.State.Stopped THEN
+			checkSuccessfulReuse();
+		ELSE
+			ExecuteTest := TOF_Testing.TEST_CYCLE_RESULT.BUSY;
+		END_IF
+
+	QUEUE_CLEANUP_TEST_PHASE.OBSERVE_FAILED_RELEASE:
+		Assert.ThatBool(
+			actual := _Queue.State.Stopped AND_THEN _Queue.FinalStopReason.Failure,
+			message := "Failed release must leave the queue stopped"
+		).IsTrue();
+		Assert.ThatUInt(
+			actual := _Resource.ReleaseCalls,
+			message := "A stopped queue must not retry a failed release"
+		).ToBe(expected := 1);
+		Assert.ThatBool(
+			actual := _Resource.ResourceAcquired,
+			message := "The failed release must leave the synthetic resource held"
+		).IsTrue();
+
+	QUEUE_CLEANUP_TEST_PHASE.FAILURE_RUN:
+		IF NOT _Queue.State.Stopped THEN
+			IF _Child.ExecuteFailuresRaised > 0 THEN
+				observePendingFailure();
+			END_IF
+
+			ExecuteTest := TOF_Testing.TEST_CYCLE_RESULT.BUSY;
+			RETURN;
+		END_IF
+
+		checkFailedRun();
+
+		IF Outcome = TOF_Testing.TEST_OUTCOME.FAILED THEN
+			RETURN;
+		END_IF
+
+		IF _Scenario = QUEUE_CLEANUP_TEST_SCENARIO.DELAYED_CLEANUP_AND_REUSE THEN
+			IF startReuse() THEN
+				_Phase := QUEUE_CLEANUP_TEST_PHASE.REUSE_RUN;
+				_RunStartCycle := CycleCount;
+				ExecuteTest := TOF_Testing.TEST_CYCLE_RESULT.BUSY;
+			END_IF
+		ELSIF _InjectReleaseFailure THEN
+			_Phase := QUEUE_CLEANUP_TEST_PHASE.OBSERVE_FAILED_RELEASE;
+			ExecuteTest := TOF_Testing.TEST_CYCLE_RESULT.BUSY;
+		END_IF
+END_CASE]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="observePendingFailure" Id="{a9191ba1-7936-4bb1-8c12-1f046aa56c64}">
+      <Declaration><![CDATA[(*!
+<summary>Checks ownership while the failed current child is still running.</summary>
+<description>
+On the initial failure call, confirms cleanup was deferred and optionally requests owner cancellation.
+For held cleanup, counts subsequent queue calls before allowing the child to finish.
+</description>
+*)
+METHOD PRIVATE observePendingFailure]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF NOT _Child.State.Running THEN
+	RETURN;
+END_IF
+
+Assert.ThatBool(
+	actual := _Queue.State.Running AND_THEN _Queue.RunningSubstate.Stopping,
+	message := "The queue must wait in STOPPING for the child"
+).IsTrue();
+Assert.ThatBool(
+	actual := _Resource.ResourceAcquired,
+	message := "The queue must retain its resource during child cleanup"
+).IsTrue();
+Assert.ThatUInt(
+	actual := _Resource.ReleaseCalls,
+	message := "Release must wait for child cleanup"
+).ToBe(expected := 0);
+Assert.ThatBool(
+	actual := _Waiting.State.Ready,
+	message := "Waiting child must remain READY during cleanup"
+).IsTrue();
+
+IF NOT _FirstFailureObserved THEN
+	_FirstFailureObserved := TRUE;
+	Assert.ThatBool(
+		actual := _Queue.OriginalStopReason.Failure,
+		message := "The initial Execute exception must set the original result to FAILURE"
+	).IsTrue();
+	Assert.ThatUInt(
+		actual := _Child.CompletedCleanupSteps,
+		message := "The call that failed must not advance child cleanup"
+	).ToBe(expected := 0);
+
+	IF _RequestExternalCancel THEN
+		Assert.ThatWideString(
+			actual := _Queue.OriginalStopReason.Message,
+			message := "Observe the first child failure before owner cancellation"
+		).ToBe(expected := _ExpectedFailureMessage);
+		Assert.ThatBool(
+			actual := _Queue.Cancel(),
+			message := "Owner Cancel must be accepted while failure cleanup is pending"
+		).IsTrue();
+		Assert.ThatBool(
+			actual := _Queue.OriginalStopReason.ExternalCancel,
+			message := "Accepted Cancel must replace the original failure reason"
+		).IsTrue();
+	END_IF
+
+	RETURN;
+END_IF
+
+IF _Child.HoldCleanup THEN
+	_HeldCycles := _HeldCycles + 1;
+	Assert.ThatUInt(
+		actual := _Child.CompletedCleanupSteps,
+		message := "Held cleanup must not advance"
+	).ToBe(expected := 0);
+
+	IF _HeldCycles = _HeldObservationCycles THEN
+		_Child.HoldCleanup := FALSE;
+	END_IF
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="checkFailedRun" Id="{86ac3598-eafc-41f9-af28-6e584a3bd858}">
+      <Declaration><![CDATA[(*!
+<summary>Checks the stopped queue, fault counts, entry ownership and release ordering.</summary>
+*)
+METHOD PRIVATE checkFailedRun]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[Assert.ThatBool(
+	actual := _FirstFailureObserved,
+	message := "Observe the initial failure while the child is RUNNING"
+).IsTrue();
+Assert.ThatBool(
+	actual := _Child.State.Stopped,
+	message := "Parent must not stop ahead of the failed child"
+).IsTrue();
+Assert.ThatUInt(
+	actual := _Child.ExecuteFailuresRaised,
+	message := "The configured Execute faults must occur"
+).ToBe(expected := _ExpectedExecuteFailures);
+Assert.ThatUInt(
+	actual := _Child.CancelFailuresRaised,
+	message := "The configured Cancel faults must occur"
+).ToBe(expected := _ExpectedCancelFailures);
+Assert.ThatUInt(
+	actual := _Child.CompletedCleanupSteps,
+	message := "Child must perform all cooperative cleanup steps"
+).ToBe(expected := 3);
+Assert.ThatBool(
+	actual := _Child.FinalStopReason.ExternalCancel,
+	message := "Failed child must finish through cooperative cancellation"
+).IsTrue();
+Assert.ThatBool(actual := _Waiting.State.Ready, message := "Waiting child must remain READY").IsTrue();
+Assert.ThatInt(
+	actual := _Waiting.Counter,
+	message := "Waiting child must never execute"
+).ToBe(expected := TOF_Core.SignedInt16.ZERO);
+Assert.ThatDInt(
+	actual := _Queue.PendingTaskCount,
+	message := "Failed current and waiting entries must remain queued"
+).ToBe(expected := 2);
+Assert.ThatUInt(
+	actual := _Resource.ReleaseCalls,
+	message := "Queue must request parent release exactly once"
+).ToBe(expected := 1);
+Assert.ThatBool(
+	actual := _Resource.EarlyRelease,
+	message := "Parent release must follow child cleanup"
+).IsFalse();
+
+IF _Scenario = QUEUE_CLEANUP_TEST_SCENARIO.HELD_CLEANUP THEN
+	Assert.ThatUInt(
+		actual := _HeldCycles,
+		message := "Every held queue call must be observed before unblocking cleanup"
+	).ToBe(expected := _HeldObservationCycles);
+END_IF
+
+IF _RequestExternalCancel THEN
+	Assert.ThatBool(
+		actual := _Queue.OriginalStopReason.ExternalCancel,
+		message := "Owner cancellation must remain the original reason"
+	).IsTrue();
+	Assert.ThatWideString(
+		actual := _Queue.OriginalStopReason.Message,
+		message := "Original diagnostic must describe owner cancellation"
+	).ToBe(expected := "Cancelled by external logic");
+ELSE
+	Assert.ThatBool(
+		actual := _Queue.OriginalStopReason.Failure,
+		message := "The first failure must remain the original reason"
+	).IsTrue();
+	Assert.ThatWideString(
+		actual := _Queue.OriginalStopReason.Message,
+		message := "Original diagnostic must retain the first failure"
+	).ToBe(expected := _ExpectedFailureMessage);
+END_IF
+
+IF _InjectReleaseFailure THEN
+	Assert.ThatBool(
+		actual := _Queue.FinalStopReason.Failure,
+		message := "Release failure must determine the final reason"
+	).IsTrue();
+	Assert.ThatWideString(
+		actual := _Queue.FinalStopReason.Message,
+		message := "Final diagnostic must identify the failed release"
+	).ToBe(expected := "Parent release failure");
+	Assert.ThatBool(
+		actual := _Resource.ResourceAcquired,
+		message := "Failed release must leave the synthetic resource held"
+	).IsTrue();
+ELSIF _RequestExternalCancel THEN
+	Assert.ThatBool(
+		actual := _Queue.FinalStopReason.ExternalCancel,
+		message := "Successful release must preserve the owner cancellation"
+	).IsTrue();
+	Assert.ThatWideString(
+		actual := _Queue.FinalStopReason.Message,
+		message := "Final diagnostic must retain the owner cancellation"
+	).ToBe(expected := "Cancelled by external logic");
+ELSE
+	Assert.ThatBool(
+		actual := _Queue.FinalStopReason.Failure,
+		message := "Successful release must preserve the first failure"
+	).IsTrue();
+	Assert.ThatWideString(
+		actual := _Queue.FinalStopReason.Message,
+		message := "Later cleanup must not replace the first diagnostic"
+	).ToBe(expected := _ExpectedFailureMessage);
+END_IF
+
+IF NOT _InjectReleaseFailure THEN
+	Assert.ThatBool(actual := _Resource.ResourceAcquired, message := "Parent release must finish").IsFalse();
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="startReuse" Id="{0e047027-8c98-4022-991d-d8fc9c421ce3}">
+      <Declaration><![CDATA[(*!
+<summary>Resets the stopped queue and requeues its former failed child without fault injection.</summary>
+*)
+METHOD PRIVATE startReuse : BOOL]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF NOT _Queue.Reset() THEN
+	RecordFailure(message := "Stopped queue must accept Reset before reuse");
+	RETURN;
+END_IF
+
+Assert.ThatBool(actual := _Queue.State.Ready, message := "Reset must return the queue to READY").IsTrue();
+Assert.ThatDInt(
+	actual := _Queue.PendingTaskCount,
+	message := "Reset must remove both retained entries"
+).ToBe(expected := 0);
+Assert.ThatWideString(
+	actual := _Queue.OriginalStopReason.Message,
+	message := "Reset must clear the original diagnostic"
+).ToBe(expected := "");
+Assert.ThatWideString(
+	actual := _Queue.FinalStopReason.Message,
+	message := "Reset must clear the final diagnostic"
+).ToBe(expected := "");
+Assert.ThatBool(
+	actual := _Child.State.Stopped,
+	message := "Queue Reset must not reset its borrowed child"
+).IsTrue();
+
+IF NOT _Queue.State.Ready OR_ELSE _Queue.PendingTaskCount <> 0 OR_ELSE NOT _Child.Reset() THEN
+	RecordFailure(message := "Queue and child must be prepared before re-enqueueing");
+	RETURN;
+END_IF
+
+_Child.ThrowOnFirstExecute := FALSE;
+_Queue.Enqueue(task := _Child);
+startReuse := _Queue.Start();
+Assert.ThatBool(actual := startReuse, message := "Reset queue must accept a second Start").IsTrue();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="checkSuccessfulReuse" Id="{555250e2-d686-4c65-937e-12dbd1219979}">
+      <Declaration><![CDATA[(*!
+<summary>Verifies normal queue and child completion after resetting the failure run.</summary>
+*)
+METHOD PRIVATE checkSuccessfulReuse]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[Assert.ThatBool(
+	actual := _Child.State.Stopped AND_THEN _Child.FinalStopReason.WorkDone,
+	message := "Reused child must finish normally"
+).IsTrue();
+Assert.ThatBool(
+	actual := _Queue.OriginalStopReason.WorkDone AND_THEN _Queue.FinalStopReason.WorkDone,
+	message := "Reused queue must finish normally"
+).IsTrue();
+Assert.ThatUInt(
+	actual := _Child.ExecuteFailuresRaised,
+	message := "The reused child must have no Execute faults"
+).ToBe(expected := 0);
+Assert.ThatDInt(
+	actual := _Queue.PendingTaskCount,
+	message := "The successful reused queue must be empty"
+).ToBe(expected := 0);
+Assert.ThatUInt(
+	actual := _Resource.ReleaseCalls,
+	message := "Each run must request release once"
+).ToBe(expected := 2);
+Assert.ThatBool(
+	actual := _Resource.EarlyRelease,
+	message := "Reuse must also release after child completion"
+).IsFalse();
+Assert.ThatBool(actual := _Resource.ResourceAcquired, message := "Reuse must finish release").IsFalse();
+Assert.ThatWideString(
+	actual := _Queue.OriginalStopReason.Message,
+	message := "Original diagnostics must not remain after reuse"
+).ToBe(expected := "");]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="AfterTest" Id="{252c2083-8811-4bd7-ab34-3bc50009c393}">
+      <Declaration><![CDATA[(*!
+<summary>Drains active synthetic work and clears the stopped fixtures before reporting.</summary>
+<description>
+Releases a deliberate child hold, then performs bounded cancellation using only synchronous synthetic fixtures.
+Does not reset children or discard synthetic resource state while work remains active.
+</description>
+*)
+METHOD PROTECTED AfterTest
+VAR
+	i : INT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_Child.HoldCleanup := FALSE;
+
+__TRY
+	IF _Queue.State.Running THEN
+		IF NOT _Queue.OriginalStopReason.ExternalCancel AND_THEN NOT _Queue.RunningSubstate.ResourceReleasing THEN
+			_Queue.Cancel();
+		END_IF
+
+		FOR i := 1 TO _DrainBudget DO
+			IF NOT _Queue.State.Running THEN
+				EXIT;
+			END_IF
+
+			_Queue.Execute();
+		END_FOR
+	END_IF
+__CATCH
+	reportCleanupFailure(message := "An exception interrupted synthetic queue cancellation or drain");
+__ENDTRY
+
+IF _Queue.State.Running OR_ELSE _Child.State.Running OR_ELSE _Waiting.State.Running THEN
+	reportCleanupFailure(message := "Synthetic queue cleanup left active work");
+	RETURN;
+END_IF
+
+IF _Queue.State.Stopped THEN
+	IF NOT _Queue.Reset() THEN
+		reportCleanupFailure(message := "Stopped queue refused cleanup Reset");
+		RETURN;
+	END_IF
+ELSE
+	_Queue.ClearWaitingTasks();
+END_IF
+
+IF NOT _Queue.State.Ready OR_ELSE _Queue.PendingTaskCount <> 0 THEN
+	reportCleanupFailure(message := "Queue must be READY and empty before resetting its former children");
+	RETURN;
+END_IF
+
+IF NOT _Child.Reset() THEN
+	reportCleanupFailure(message := "Synthetic current child refused cleanup Reset");
+END_IF
+
+IF NOT _Waiting.Reset() THEN
+	reportCleanupFailure(message := "Synthetic waiting child refused cleanup Reset");
+END_IF
+
+_Resource.ResetFixture();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="reportCleanupFailure" Id="{4c8c1826-c9f1-407b-b719-b297fd60eebd}">
+      <Declaration><![CDATA[(*!
+<summary>Records a cleanup failure while preserving any earlier scenario diagnostic.</summary>
+<description>Writes a separate ADS error when the test already has a recorded failure.</description>
+<param name="message">Cleanup diagnostic copied during the call.</param>
+*)
+METHOD PRIVATE reportCleanupFailure
+VAR_IN_OUT CONSTANT
+	message : TOF_Core.ERROR_MESSAGE;
+END_VAR
+VAR
+	logText : STRING(255);
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF Outcome = TOF_Testing.TEST_OUTCOME.FAILED THEN
+	logText := TO_STRING(TOF_Core.WideStrings.ConcatFit255(Name, " cleanup: ", TO_WSTRING(message)));
+	Tc2_System.ADSLOGSTR(
+		msgCtrlMask := Tc2_System.Global_Variables.ADSLOG_MSGTYPE_ERROR,
+		msgFmtStr := '%s',
+		strArg := logText
+	);
+ELSE
+	RecordFailure(message := message);
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="ClassName" Id="{3441404f-cb88-496d-920d-240aa36406a0}">
+      <Declaration><![CDATA[//! <summary>Borrows the concrete class name. Callers must not modify it.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{fa1f45cc-e237-46a1-a098-53bc91a4d74b}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ClassName REF= _ClassName;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="NamespaceName" Id="{7db15e83-49f3-4498-b8c9-689b42be7140}">
+      <Declaration><![CDATA[//! <summary>Borrows the compiler-initialized namespace name. Callers must not modify it.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{ca618af5-01dd-47d2-962c-60838486c8a1}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[NamespaceName REF= CurrentNamespace.Name;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="SelfSize" Id="{d642879c-938c-4f30-b62f-cc0ad669bf8c}">
+      <Declaration><![CDATA[//! <summary>Reports the complete concrete instance size in bytes.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY SelfSize : ULINT]]></Declaration>
+      <Get Name="Get" Id="{d3753407-2b59-46e2-931d-34f5a41c017f}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[SelfSize := XSIZEOF(THIS^);]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+  </POU>
+</TcPlcObject>

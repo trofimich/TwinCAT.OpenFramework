@@ -1,0 +1,168 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="TimerRestartWhileRunningTest" Id="{c73d8750-924e-4867-b786-6c74a3f03db8}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+SPDX-FileCopyrightText: © 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+SPDX-License-Identifier: MIT
+License: https://opensource.org/license/mit
+*)
+
+(*!
+<summary>Checks a zero-interval restart of a running timer across two consecutive task cycles.</summary>
+<description>
+The first body call starts and restarts the timer. The next call observes completion.
+Use in one cyclic task. Teardown prepares the owned timer for another run.
+</description>
+*)
+
+{attribute 'no_explicit_call' := 'do not call this function block directly'}
+FUNCTION_BLOCK TimerRestartWhileRunningTest EXTENDS TOF_Testing.MultiCycleTest
+VAR
+	_Timer : TOF_Timers.Timer(name := "timer");
+END_VAR
+VAR CONSTANT
+	//! <summary>Keeps the first run active until the explicit restart.</summary>
+	_ActiveInterval : TIME := T#1H;
+END_VAR
+VAR_STAT
+	//! <summary>Class name shared by all instances of this function block.</summary>
+	{attribute 'hide'}
+	_ClassName : STRING := __POUNAME();
+END_VAR
+VAR
+	{attribute 'hide'}
+	{attribute 'init_namespace'}
+	_NamespaceName : STRING;
+END_VAR
+]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[]]></ST>
+    </Implementation>
+    <Method Name="AfterTest" Id="{4b87205b-c47b-4ca2-8fdd-a2f54d577a6e}">
+      <Declaration><![CDATA[(*!
+<summary>Resets the timer after completion or failure.</summary>
+*)
+METHOD PROTECTED AfterTest]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF _Timer.State.Running THEN
+	Assert.ThatBool(actual := _Timer.Cancel(), message := "Timer cleanup must accept cancellation").IsTrue();
+	_Timer.Execute();
+END_IF
+
+IF _Timer.State.Stopped THEN
+	Assert.ThatBool(actual := _Timer.Reset(), message := "Timer cleanup must accept Reset").IsTrue();
+END_IF
+
+Assert.ThatBool(actual := _Timer.State.Ready, message := "Timer must be ready for another run").IsTrue();]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="ClassName" Id="{ccd0e677-6b37-4e0e-8efc-1d4f5f9aa6c1}">
+      <Declaration><![CDATA[//! <summary>Borrows the concrete class name for the lifetime of this instance; callers must not modify it.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{7015eaeb-ff5d-4a29-a2d7-cf90312c69a1}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ClassName REF= _ClassName;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="ExecuteTest" Id="{134cdb57-20dc-4cc1-9f6f-c39f9ac13c5e}">
+      <Declaration><![CDATA[(*!
+<summary>Restarts the active timer in the first cycle and checks the completion pulse in the next.</summary>
+<description>A refused start ends the scenario immediately. The framework invokes AfterTest even after failure.</description>
+*)
+METHOD PROTECTED ExecuteTest : TOF_Testing.TEST_CYCLE_RESULT
+VAR
+	restartAccepted : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF CycleCount = 1 THEN
+	_Timer.Interval := _ActiveInterval;
+
+	IF NOT _Timer.Start() THEN
+		RecordFailure(message := "Prepared timer must accept Start");
+
+		ExecuteTest := TOF_Testing.TEST_CYCLE_RESULT.DONE;
+		RETURN;
+	END_IF
+
+	_Timer.Execute();
+	Assert.ThatBool(
+		actual := _Timer.State.Running,
+		message := "Long interval must still be running before restart"
+	).IsTrue();
+
+	restartAccepted := _Timer.SetIntervalAndRestart(interval := TOF_Core.Times.MIN_VALUE);
+	Assert.ThatBool(
+		actual := restartAccepted,
+		message := "Active restart must complete in the same cycle"
+	).IsTrue();
+
+	IF NOT restartAccepted THEN
+		ExecuteTest := TOF_Testing.TEST_CYCLE_RESULT.DONE;
+		RETURN;
+	END_IF
+
+	Assert.ThatBool(
+		actual := _Timer.State.Running,
+		message := "New zero interval must already be started"
+	).IsTrue();
+	Assert.ThatBool(
+		actual := _Timer.Elapsed,
+		message := "Zero interval first evaluates TON in Execute"
+	).IsFalse();
+	Assert.ThatBool(
+		actual := _Timer.Triggered,
+		message := "Restart itself must not retain a pulse"
+	).IsFalse();
+
+	ExecuteTest := TOF_Testing.TEST_CYCLE_RESULT.BUSY;
+	RETURN;
+END_IF
+
+_Timer.Execute();
+Assert.ThatBool(
+	actual := _Timer.Elapsed,
+	message := "Zero interval must immediately set TON.Q"
+).IsTrue();
+Assert.ThatBool(
+	actual := _Timer.Triggered,
+	message := "Restarted zero interval must trigger without another cycle"
+).IsTrue();
+Assert.ThatBool(
+	actual := _Timer.State.Stopped,
+	message := "Restarted timer must complete in that same Execute"
+).IsTrue();
+Assert.ThatBool(
+	actual := _Timer.FinalStopReason.WorkDone,
+	message := "Restarted timer must complete normally"
+).IsTrue();
+
+ExecuteTest := TOF_Testing.TEST_CYCLE_RESULT.DONE;]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="NamespaceName" Id="{8d6b3b8d-78af-47de-83e5-3830f10eba86}">
+      <Declaration><![CDATA[//! <summary>Borrows the compiler-initialized namespace; callers must not modify the returned reference.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{a98157f7-2194-49e2-a228-205b087e84d8}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[NamespaceName REF= CurrentNamespace.Name;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="SelfSize" Id="{478e2b12-faad-4648-ac29-7772e74d0236}">
+      <Declaration><![CDATA[//! <summary>Reports the complete concrete instance size, excluding separately allocated storage.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY SelfSize : ULINT]]></Declaration>
+      <Get Name="Get" Id="{4fbf11f7-c779-4db5-ba96-5309e72051cf}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[SelfSize := XSIZEOF(THIS^);]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+  </POU>
+</TcPlcObject>

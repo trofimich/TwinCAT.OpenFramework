@@ -1,0 +1,211 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="AutomaticJsonCapacityOverflowAndReuseTest" Id="{58c9cefa-398d-400d-be40-0de922cb145e}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+SPDX-FileCopyrightText: c 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+SPDX-License-Identifier: MIT
+License: https://opensource.org/license/mit
+*)
+
+(*!
+<summary>Checks the full 25000-byte text boundary, overflow refusal and subsequent reset.</summary>
+<description>
+Owns persistent native serializer state and any payload buffers used by this case.
+Run from one task at a stable address. The caller provides task-boundary exception cleanup.
+</description>
+*)
+
+{attribute 'no_assign'}
+{attribute 'no_explicit_call' := 'do not call this function block directly'}
+FUNCTION_BLOCK AutomaticJsonCapacityOverflowAndReuseTest EXTENDS TOF_Testing.SingleCycleTest
+VAR_STAT
+	{attribute 'hide'}
+	_ClassName : STRING := __POUNAME();
+END_VAR
+VAR
+	_Serializer : TOF_JSON.AutomaticJsonSerializer;
+	_Source : JSON_TEST_VALUE;
+	_LargeSource : JSON_TEST_LARGE_VALUE;
+	_Json : TOF_Core.JSON_DOCUMENT;
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[]]></ST>
+    </Implementation>
+    <Method Name="ExecuteTest" Id="{5e25f6d7-d379-47ca-bf50-b79ed5c2a030}">
+      <Declaration><![CDATA[(*!
+<summary>Checks the full 25000-byte text boundary, overflow refusal and subsequent reset.</summary>
+*)
+METHOD PROTECTED ExecuteTest
+VAR
+	caught : BOOL;
+	exceptionCode : __SYSTEM.ExceptionCode;
+	caughtException : TOF_Core.IException;
+	standard : TOF_Core.IStandardException;
+	jsonSize : UDINT;
+	success : BOOL;
+	payloadLength : DINT;
+	i : DINT;
+	expectedJson : STRING(40) := '{"Number":42,"Ready":true}';
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_Source.Number := 42;
+_Source.Ready := TRUE;
+
+_Json := '';
+
+_LargeSource.Text := '';
+_LargeSource.Marker := 7;
+
+success := _Serializer.TrySerialize(
+	sourceStructure := _LargeSource,
+	extender := 0,
+	targetJson := _Json,
+	jsonSize => jsonSize
+);
+Assert.ThatBool(
+	actual := success,
+	message := "Empty large structure must serialize"
+).IsTrue();
+
+Assert.ThatBool(
+	actual := jsonSize > 1 AND_THEN jsonSize < TO_UDINT(SIZEOF(_Json)),
+	message := "Reported baseline byte count must allow an exact-capacity payload"
+).IsTrue();
+
+IF NOT success OR_ELSE jsonSize <= 1 OR_ELSE jsonSize >= TO_UDINT(SIZEOF(_Json)) THEN
+	RETURN;
+END_IF
+
+payloadLength := TO_DINT(TO_UDINT(SIZEOF(_Json)) - jsonSize);
+
+IF payloadLength + 1 >= TO_DINT(SIZEOF(_LargeSource.Text)) THEN
+	RecordFailure(message := "The boundary fixture must hold the overflow byte and terminator");
+
+	RETURN;
+END_IF
+
+// SA0175: Fill an exact ASCII byte count before testing the capacity boundary.
+{analysis -175}
+FOR i := 0 TO payloadLength - 1 DO
+	_LargeSource.Text[i] := BYTE#16#61;
+END_FOR
+
+_LargeSource.Text[payloadLength] := BYTE#0;
+{analysis +175}
+
+success := _Serializer.TrySerialize(
+	sourceStructure := _LargeSource,
+	extender := 0,
+	targetJson := _Json,
+	jsonSize => jsonSize
+);
+Assert.ThatBool(
+	actual := success,
+	message := "Exact-capacity document must fit with its terminator"
+).IsTrue();
+Assert.ThatUDInt(
+	actual := jsonSize,
+	message := "Exact-capacity copy must include all 25001 bytes"
+).ToBe(expected := UDINT#25001);
+
+// SA0175: Inspect the final byte of the destination buffer at the exact-capacity boundary.
+{analysis -175}
+Assert.ThatByte(
+	actual := _Json[TO_DINT(SIZEOF(_Json)) - 1],
+	message := "The exact-capacity output must end with a terminator"
+).ToBe(expected := BYTE#0);
+{analysis +175}
+
+// SA0175: Append exactly one ASCII byte and its terminator within the large source buffer.
+{analysis -175}
+_LargeSource.Text[payloadLength] := BYTE#16#61;
+_LargeSource.Text[payloadLength + 1] := BYTE#0;
+{analysis +175}
+success := _Serializer.TrySerialize(
+	sourceStructure := _LargeSource,
+	extender := 0,
+	targetJson := _Json,
+	jsonSize => jsonSize
+);
+Assert.ThatBool(
+	actual := success,
+	message := "One byte beyond capacity must fail Try"
+).IsFalse();
+
+__TRY
+	_Serializer.Serialize(
+		sourceStructure := _LargeSource,
+		extender := 0,
+		targetJson := _Json,
+		jsonSize => jsonSize
+	);
+__CATCH(exceptionCode)
+	caught := TRUE;
+	caughtException := TOF_Core.ExceptionManager.GetLastException(
+		exceptionCode := exceptionCode,
+		catchPointNamespaceName := CurrentNamespace.Name,
+		catchPointPOUName := __POUNAME(),
+		catchPointPosition := __POSITION()
+	);
+	Assert.ThatBool(
+		actual := __QUERYINTERFACE(caughtException, standard),
+		message := "Overflow must report StandardException"
+	).IsTrue();
+__ENDTRY
+
+Assert.ThatBool(
+	actual := caught,
+	message := "Throwing Create must reject overflow"
+).IsTrue();
+
+success := _Serializer.TrySerialize(
+	sourceStructure := _Source,
+	extender := 0,
+	targetJson := _Json,
+	jsonSize => jsonSize
+);
+Assert.ThatBool(
+	actual := success,
+	message := "A small document must succeed after overflow"
+).IsTrue();
+Assert.That(
+	actual := _Json,
+	message := "Overflow reuse must contain only the new document"
+).ToBe(expected := expectedJson);]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="ClassName" Id="{1346f71d-c8cc-4208-a6e3-dee4c005b40e}">
+      <Declaration><![CDATA[//! <summary>Borrows the concrete class name. Callers must not modify it.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{7206bb56-a1ea-45b8-aa79-c7e4c2a05fc9}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ClassName REF= _ClassName;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="NamespaceName" Id="{63b85358-574b-4e38-b9b8-91952757a72e}">
+      <Declaration><![CDATA[//! <summary>Borrows the compiler-initialized namespace name. Callers must not modify it.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{c9ef2237-c118-4b39-b04b-f3c2c22e4640}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[NamespaceName REF= CurrentNamespace.Name;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="SelfSize" Id="{181a995f-fe97-4aec-bfe2-b67dd016e1ba}">
+      <Declaration><![CDATA[//! <summary>Reports the concrete instance size in bytes.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY SelfSize : ULINT]]></Declaration>
+      <Get Name="Get" Id="{7f3fa1c4-aef1-4ee9-ad92-4c139b014873}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[SelfSize := XSIZEOF(THIS^);]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+  </POU>
+</TcPlcObject>

@@ -1,0 +1,219 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="FileTextReadWriteTest" Id="{cf3abc55-ba05-485a-b9ce-f060a199e9eb}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+SPDX-FileCopyrightText: c 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+SPDX-License-Identifier: MIT
+License: https://opensource.org/license/mit
+*)
+
+(*!
+<summary>Checks queued text writes, seek and exact readback, followed by string and EOF result guards.</summary>
+<description>
+Uses a freshly created file inside the owned fixture. Two writes must read back in order.
+A separate read past the data establishes a positive EOF result before checking Reset and pre-submission cancellation.
+The address check compares buffer identities without reading a result past its documented lifetime.
+</description>
+*)
+
+{attribute 'no_assign'}
+{attribute 'no_explicit_call' := 'do not call this function block directly'}
+FUNCTION_BLOCK FileTextReadWriteTest EXTENDS FileContentScenarioTest
+VAR_STAT
+	//! <summary>Class name shared by instances of this concrete function block.</summary>
+	{attribute 'hide'}
+	_ClassName : STRING := __POUNAME();
+END_VAR
+VAR
+	_WriteFirst : TOF_FileSystem.WriteString255ToFile(name := "Write first text");
+	_WriteSecond : TOF_FileSystem.WriteString255ToFile(name := "Write second text");
+	_SeekStart : TOF_FileSystem.SetPositionInFile(name := "Seek to start");
+	_ReadText : TOF_FileSystem.ReadString255FromFile(name := "Read text");
+	_ReadEof : TOF_FileSystem.ReadString255FromFile(name := "Read after text");
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[]]></ST>
+    </Implementation>
+    <Method Name="ResetScenario" Id="{ce39c4c4-d6ba-49b5-9b1a-9994942aec91}">
+      <Declaration><![CDATA[//! <summary>Rearms the borrowed queue children before a new text-file run.</summary>
+METHOD PROTECTED ResetScenario : BOOL]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[ResetScenario := _WriteFirst.Reset()
+	AND_THEN _WriteSecond.Reset()
+	AND_THEN _SeekStart.Reset()
+	AND_THEN _ReadText.Reset()
+	AND_THEN _ReadEof.Reset();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="AdvanceScenario" Id="{4bc9a823-a559-467e-86f4-9c353d5b2b0c}">
+      <Declaration><![CDATA[(*!
+<summary>Starts or advances the text queue, then verifies read results and their lifetime guards.</summary>
+<description>Returns TRUE after all checks pass. The base handles failure reporting and fixture cleanup.</description>
+*)
+METHOD PROTECTED AdvanceScenario : BOOL]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF _Manager.State.Ready THEN
+	_Directory.ExpectFirstFile();
+	ConfigureFile(filePath := _Directory.FirstFilePath, modeFlags := _UpdateTextMode);
+
+	_WriteFirst.StringToWrite := 'Test string...';
+	_WriteSecond.StringToWrite := 'Another test string...';
+	_WriteFirst.Timeout := _NativeTimeout;
+	_WriteSecond.Timeout := _NativeTimeout;
+	_SeekStart.Position := TOF_Core.SignedInt32.ZERO;
+	_SeekStart.Origin := Tc2_System.E_SeekOrigin.SEEK_SET;
+	_SeekStart.Timeout := _NativeTimeout;
+	_ReadText.Timeout := _NativeTimeout;
+	_ReadEof.Timeout := _NativeTimeout;
+
+	_Manager.Enqueue(fileHandleTask := _WriteFirst);
+	_Manager.Enqueue(fileHandleTask := _WriteSecond);
+	_Manager.Enqueue(fileHandleTask := _SeekStart);
+	_Manager.Enqueue(fileHandleTask := _ReadText);
+	_Manager.Enqueue(fileHandleTask := _ReadEof);
+
+	IF NOT _Manager.Start() THEN
+		_ScenarioFailure := "Prepared text file manager refused Start";
+		RETURN;
+	END_IF
+END_IF
+
+_Manager.Execute();
+
+IF NOT _Manager.State.Stopped THEN
+	RETURN;
+END_IF
+
+IF NOT _Manager.FinalStopReason.WorkDone THEN
+	_ScenarioFailure := "Text file queue did not finish with WorkDone: ";
+	TOF_Core.WideStrings.AppendFit(targetString := _ScenarioFailure, sourceString := _Manager.FinalStopReason.Message);
+	RETURN;
+END_IF
+
+IF _Manager.ResourceManager.ResourceAcquired THEN
+	_ScenarioFailure := "File resource remained acquired after the text queue stopped";
+	RETURN;
+END_IF
+
+AdvanceScenario := checkReadResults();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="checkReadResults" Id="{26aa1384-e666-4c16-80aa-ef2f32dbe9ca}">
+      <Declaration><![CDATA[(*!
+<summary>Checks exact text, a positive EOF, and guarded results after Reset and cancellation.</summary>
+<description>Call after all queued operations have stopped and the manager has released its resource.</description>
+*)
+METHOD PRIVATE checkReadResults : BOOL
+VAR
+	readAlias : REFERENCE TO STRING(255);
+	emptyAlias : REFERENCE TO STRING(255);
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF _ReadText.ReadString <> 'Test string...Another test string...' THEN
+	_ScenarioFailure := "Readback did not contain both written strings in order";
+	RETURN;
+END_IF
+
+IF _ReadEof.ReadString <> '' OR_ELSE NOT _ReadEof.IsEndOfFile THEN
+	_ScenarioFailure := "Reading after the written text must return an empty string and EOF";
+	RETURN;
+END_IF
+
+readAlias REF= _ReadText.ReadString;
+
+IF NOT _ReadText.Reset() OR_ELSE NOT _ReadEof.Reset() THEN
+	_ScenarioFailure := "Successful text or EOF read refused Reset";
+	RETURN;
+END_IF
+
+emptyAlias REF= _ReadText.ReadString;
+
+IF emptyAlias <> '' OR_ELSE _ReadEof.IsEndOfFile THEN
+	_ScenarioFailure := "READY read results must expose an empty string and hide previous EOF";
+	RETURN;
+END_IF
+
+// SA0175: Compare only address identities; the old result contents are no longer borrowed.
+{analysis -175}
+IF ADR(readAlias) = ADR(emptyAlias) THEN
+	_ScenarioFailure := "READY string read must return a separate empty result buffer";
+	RETURN;
+END_IF
+{analysis +175}
+
+IF NOT checkCancelledRead(readTask := _ReadText) THEN
+	_ScenarioFailure := "Pre-submission cancellation must hide the old text result";
+	RETURN;
+END_IF
+
+IF NOT checkCancelledRead(readTask := _ReadEof) THEN
+	_ScenarioFailure := "Pre-submission cancellation must hide the old EOF result";
+	RETURN;
+END_IF
+
+checkReadResults := TRUE;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="checkCancelledRead" Id="{5a6d8558-b434-49d3-bc1a-4eed27d9cba3}">
+      <Declaration><![CDATA[(*!
+<summary>Verifies cancellation and neutral results for a reset, unbound reader.</summary>
+<description>Start and cancel before Execute, with no acquired handle or pending native request.</description>
+<param name="readTask">The reset reader from the completed text queue.</param>
+*)
+METHOD PRIVATE checkCancelledRead : BOOL
+VAR_INPUT
+	readTask : REFERENCE TO TOF_FileSystem.ReadString255FromFile;
+END_VAR
+VAR
+	cancelAccepted : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF NOT readTask.Start() THEN
+	RETURN;
+END_IF
+
+cancelAccepted := readTask.Cancel();
+readTask.Execute();
+
+checkCancelledRead := cancelAccepted
+	AND_THEN readTask.State.Stopped
+	AND_THEN readTask.FinalStopReason.ExternalCancel
+	AND_THEN readTask.ReadString = ''
+	AND_THEN NOT readTask.IsEndOfFile;]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="ClassName" Id="{16accf81-6daa-4f19-b495-beaf6d2a49a1}">
+      <Declaration><![CDATA[//! <summary>Borrows this concrete type name; callers must not modify the referenced storage.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{2273211f-49e9-495c-adf2-033e57ab2ac6}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ClassName REF= _ClassName;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="NamespaceName" Id="{0034322f-8d76-4397-b376-608130ba012d}">
+      <Declaration><![CDATA[//! <summary>Borrows the compiler-initialized namespace; callers must not modify the returned reference.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{5525a5cf-c7cc-44fa-9502-760e496bd485}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[NamespaceName REF= CurrentNamespace.Name;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="SelfSize" Id="{d0b24535-349d-4f63-be35-4e547d902898}">
+      <Declaration><![CDATA[//! <summary>Reports this concrete instance size, excluding separately allocated storage.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY SelfSize : ULINT]]></Declaration>
+      <Get Name="Get" Id="{9c695959-a321-4bc2-b40b-c20b98799062}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[SelfSize := XSIZEOF(THIS^);]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+  </POU>
+</TcPlcObject>

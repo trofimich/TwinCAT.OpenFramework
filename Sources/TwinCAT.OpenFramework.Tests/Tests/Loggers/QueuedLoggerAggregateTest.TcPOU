@@ -1,0 +1,243 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="QueuedLoggerAggregateTest" Id="{94aff688-f018-4f8f-b228-caeb31d56463}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+SPDX-FileCopyrightText: c 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+SPDX-License-Identifier: MIT
+License: https://opensource.org/license/mit
+*)
+
+(*!
+<summary>Checks aggregate ordering, copied diagnostic text and partial admission when the queue fills.</summary>
+<description>
+The queue and capture belong to the runner task. Clears borrowed exception references before leaving the call.
+</description>
+*)
+
+{attribute 'no_assign'}
+{attribute 'no_explicit_call' := 'do not call this function block directly'}
+FUNCTION_BLOCK QueuedLoggerAggregateTest EXTENDS TOF_Testing.SingleCycleTest
+VAR_STAT
+	{attribute 'hide'}
+	_ClassName : STRING := __POUNAME();
+END_VAR
+VAR
+	_Queue : TOF_Loggers.QueuedLogger;
+	_Backend : LoggerCaptureBackend;
+	_Aggregate : TOF_Core.AggregateException;
+	_QueueConfigured : BOOL;
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[]]></ST>
+    </Implementation>
+    <Method Name="ExecuteTest" Id="{a077e86d-1507-4a27-9c6d-1a3a1f7672ea}">
+      <Declaration><![CDATA[(*!
+<summary>Checks aggregate ordering, copied diagnostic text and partial admission when the queue fills.</summary>
+<description>
+The queue and capture belong to the runner task. Clears borrowed exception references before leaving the call.
+</description>
+*)
+METHOD PROTECTED ExecuteTest
+VAR
+	firstCause : TOF_Core.IException;
+	secondCause : TOF_Core.IException;
+	exceptionCode : __SYSTEM.ExceptionCode;
+	record : LOGGER_CAPTURED_MESSAGE;
+	firstMessage : TOF_Core.ERROR_MESSAGE;
+	secondMessage : TOF_Core.ERROR_MESSAGE;
+	escaped : BOOL;
+	number : ULINT;
+	i : DINT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF NOT _QueueConfigured THEN
+	_QueueConfigured := _Queue.Configure(backend := _Backend);
+END_IF
+
+Assert.ThatBool(actual := _QueueConfigured, message := "Queue must bind to its capture backend").IsTrue();
+
+IF NOT _QueueConfigured THEN
+	RETURN;
+END_IF
+
+Assert.ThatBool(
+	actual := _Queue.PendingMessageCount = 0,
+	message := "Scenario must start with an empty queue"
+).IsTrue();
+
+__TRY
+
+	__TRY
+		TOF_Core.Exceptions.ThrowStandard(
+			sourceNamespaceName := NamespaceName,
+			sourceClassName := ClassName,
+			sourcePOUName := __POUNAME(),
+			sourcePosition := __POSITION(),
+			message := "first aggregate cause"
+		);
+	__CATCH(exceptionCode)
+		firstCause := TOF_Core.ExceptionManager.GetLastException(
+			exceptionCode := exceptionCode,
+			catchPointNamespaceName := NamespaceName,
+			catchPointPOUName := __POUNAME(),
+			catchPointPosition := __POSITION()
+		);
+	__ENDTRY
+
+	__TRY
+		TOF_Core.Exceptions.ThrowStandard(
+			sourceNamespaceName := NamespaceName,
+			sourceClassName := ClassName,
+			sourcePOUName := __POUNAME(),
+			sourcePosition := __POSITION(),
+			message := "second aggregate cause"
+		);
+	__CATCH(exceptionCode)
+		secondCause := TOF_Core.ExceptionManager.GetLastException(
+			exceptionCode := exceptionCode,
+			catchPointNamespaceName := NamespaceName,
+			catchPointPOUName := __POUNAME(),
+			catchPointPosition := __POSITION()
+		);
+	__ENDTRY
+
+	Assert.ThatBool(
+		actual := firstCause <> 0 AND_THEN secondCause <> 0 AND_THEN firstCause <> secondCause,
+		message := "The two injected failures must provide distinct live cause objects"
+	).IsTrue();
+
+	IF firstCause = 0 OR_ELSE secondCause = 0 THEN
+		RETURN;
+	END_IF
+
+	_Aggregate.AddInnerException(innerException := firstCause);
+	_Aggregate.AddInnerException(innerException := secondCause);
+	firstMessage := firstCause.GetMessage(
+		showSource := TRUE,
+		timestampDisplayMode := TOF_Core.TIMESTAMP_DISPLAY_MODE.LOCAL
+	);
+	secondMessage := secondCause.GetMessage(
+		showSource := TRUE,
+		timestampDisplayMode := TOF_Core.TIMESTAMP_DISPLAY_MODE.LOCAL
+	);
+	Assert.ThatBool(actual := firstMessage <> secondMessage, message := "Cause texts must be distinct").IsTrue();
+
+	number := 73;
+	Assert.ThatBool(
+		actual := _Queue.TryLogException(
+			exception := _Aggregate,
+			severity := TOF_Core.ERROR_SEVERITY.ERROR,
+			messageNumber := number
+		),
+		message := "Both aggregate causes must be accepted in order"
+	).IsTrue();
+
+	number := 99;
+	_Queue.Execute();
+	Assert.ThatUInt(actual := _Backend.CapturedCount, message := "Aggregate must deliver two records").ToBe(expected := 2);
+	record := _Backend.RecordAt(index := 0);
+	Assert.ThatBool(actual := record.Message = firstMessage, message := "First cause must be delivered first").IsTrue();
+	Assert.ThatBool(
+		actual := record.Category = TOF_Core.LOG_CATEGORY.ERROR AND_THEN record.HasMessageNumber
+			AND_THEN record.MessageNumber = 73,
+		message := "First cause must retain its category and copied request number"
+	).IsTrue();
+
+	record := _Backend.RecordAt(index := 1);
+	Assert.ThatBool(
+		actual := record.Message = secondMessage,
+		message := "Second cause must be delivered second"
+	).IsTrue();
+	Assert.ThatBool(
+		actual := record.Category = TOF_Core.LOG_CATEGORY.ERROR AND_THEN record.HasMessageNumber
+			AND_THEN record.MessageNumber = 73,
+		message := "Second cause must retain its category and copied request number"
+	).IsTrue();
+
+	FOR i := 1 TO TO_DINT(TOF_Loggers.Parameters.QUEUED_LOGGER_CAPACITY) - 1 DO
+		Assert.ThatBool(
+			actual := _Queue.TryLogMessage(category := TOF_Core.LOG_CATEGORY.DEBUG, message := "reserved queue slot"),
+			message := "The reserved slot must be filled"
+		).IsTrue();
+	END_FOR
+
+	number := 74;
+	Assert.ThatBool(
+		actual := _Queue.TryLogException(
+			exception := _Aggregate,
+			severity := TOF_Core.ERROR_SEVERITY.ERROR,
+			messageNumber := number
+		),
+		message := "An aggregate with only one free slot must report partial admission"
+	).IsFalse();
+
+	_Aggregate.Clear();
+	_Queue.Execute();
+	Assert.ThatUInt(actual := _Backend.CapturedCount, message := "Exactly one additional cause must be delivered").ToBe(
+		expected := TOF_Loggers.Parameters.QUEUED_LOGGER_CAPACITY + 2
+	);
+	record := _Backend.RecordAt(index := TOF_Loggers.Parameters.QUEUED_LOGGER_CAPACITY + 1);
+	Assert.ThatBool(
+		actual := record.Message = firstMessage,
+		message := "Accepted text must survive aggregate Clear"
+	).IsTrue();
+	Assert.ThatBool(
+		actual := record.HasMessageNumber AND_THEN record.MessageNumber = 74,
+		message := "The partially admitted cause must retain this request number"
+	).IsTrue();
+	Assert.ThatBool(
+		actual := _Queue.PendingMessageCount = 0,
+		message := "All partially admitted entries must drain"
+	).IsTrue();
+__CATCH
+	escaped := TRUE;
+__ENDTRY
+
+_Aggregate.Clear();
+Assert.ThatBool(actual := escaped, message := "The aggregate scenario must return normally").IsFalse();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="BeforeTest" Id="{c7fe2b51-6f6e-45bf-9709-0e628cde6c1e}">
+      <Declaration><![CDATA[(*!
+<summary>Clears capture observations and injected faults before each run.</summary>
+*)
+METHOD PROTECTED BeforeTest]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_Backend.ResetCapture();]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="ClassName" Id="{1cc16cba-bca9-4c84-a165-065adfca33c4}">
+      <Declaration><![CDATA[//! <summary>Borrows the concrete class name for the instance lifetime. Callers must not modify it.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{fc9b746a-6043-4098-a08a-e4edeb3f96e7}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ClassName REF= _ClassName;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="NamespaceName" Id="{761d949f-d44e-4c23-bbed-ceb266fce5d4}">
+      <Declaration><![CDATA[//! <summary>Borrows the compiler-initialized namespace. Callers must not modify it.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{c0a75b3c-6e86-454d-8fd3-6be99c5d8221}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[NamespaceName REF= CurrentNamespace.Name;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="SelfSize" Id="{79bc18c3-fb15-4bec-bfa3-fc68a378292a}">
+      <Declaration><![CDATA[//! <summary>Reports the complete instance size in bytes, excluding separately allocated storage.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY SelfSize : ULINT]]></Declaration>
+      <Get Name="Get" Id="{12cfcf0e-2f83-4fb6-bcef-7b413d4e3059}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[SelfSize := XSIZEOF(THIS^);]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+  </POU>
+</TcPlcObject>

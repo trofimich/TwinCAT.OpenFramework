@@ -6,8 +6,11 @@
 
 It improves on TwinCAT's built-in `__SYSTEM.AnyType` by:
 1. Combining duplicate type names into clean categories (for example, `UINT_16` instead of overlapping aliases).
-2. Covering 25 well-defined categories in `GENERIC_TYPE_CLASS` (`UNSPECIFIED`, `BOOLEAN`, signed/unsigned 8/16/32/64-bit integers, `REAL_32`, `REAL_64`, `STRING_ASCII`, `STRING_UTF16`, 32/64-bit `TIME`/`DATE`/`DATE_AND_TIME`/`TIME_OF_DAY`, `POINTER_TO`, `USER_DEFINED`, `OBJECT`).
+2. Covering 25 well-defined categories in `GENERIC_TYPE_CLASS` (`UNSPECIFIED`, `BOOLEAN`, signed/unsigned 8/16/32/64-bit integers, `REAL_32`, `REAL_64`, `STRING_8`, `STRING_16`, 32/64-bit `TIME`/`DATE`/`DATE_AND_TIME`/`TIME_OF_DAY`, `POINTER_TO`, `USER_DEFINED`, `OBJECT`).
 3. Tracking memory ownership (`IsMemoryOwner`) so collections and variables know when to free memory automatically.
+
+`STRING_8` represents IEC `STRING` with 8-bit code units. `STRING_16` represents IEC `WSTRING` with 16-bit code units.
+These tags describe the storage representation. Text conversions use the encoding documented by the corresponding operation.
 
 ---
 

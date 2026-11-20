@@ -1,0 +1,212 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="FileSystemUnboundContentTest" Id="{81ca1ee7-672d-433b-b53b-f5dab959679c}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+SPDX-FileCopyrightText: © 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+SPDX-License-Identifier: MIT
+License: https://opensource.org/license/mit
+*)
+
+(*!
+<summary>Checks all seven unbound content operations and their guarded failure/reset results.</summary>
+<description>
+The fixture belongs to the runner task and is kept between runs. The test drives no native file requests.
+</description>
+*)
+
+{attribute 'no_assign'}
+{attribute 'no_explicit_call' := 'do not call this function block directly'}
+FUNCTION_BLOCK FileSystemUnboundContentTest EXTENDS TOF_Testing.SingleCycleTest
+VAR_STAT
+	{attribute 'hide'}
+	_ClassName : STRING := __POUNAME();
+END_VAR
+VAR
+	_CheckEof : TOF_FileSystem.CheckEndOfFile(name := "unbound CheckEndOfFile");
+	_GetPosition : TOF_FileSystem.GetPositionInFile(name := "unbound GetPositionInFile");
+	_SetPosition : TOF_FileSystem.SetPositionInFile(name := "unbound SetPositionInFile");
+	_ReadBytes : TOF_FileSystem.ReadBytesFromFile(name := "unbound ReadBytesFromFile");
+	_ReadString : TOF_FileSystem.ReadString255FromFile(name := "unbound ReadString255FromFile");
+	_WriteBytes : TOF_FileSystem.WriteBytesToFile(name := "unbound WriteBytesToFile");
+	_WriteString : TOF_FileSystem.WriteString255ToFile(name := "unbound WriteString255ToFile");
+
+	_Tasks : ARRAY [0..6] OF TOF_Tasks.ITask :=
+	[
+		_CheckEof,
+		_GetPosition,
+		_SetPosition,
+		_ReadBytes,
+		_ReadString,
+		_WriteBytes,
+		_WriteString
+	];
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[]]></ST>
+    </Implementation>
+    <Method Name="ExecuteTest" Id="{ba2a941f-a452-4310-b12b-ac919219d14f}">
+      <Declaration><![CDATA[(*!
+<summary>Checks all seven unbound content operations and their guarded failure/reset results.</summary>
+<description>Requires the missing-member diagnostic and checks guarded results in each lifecycle phase.</description>
+*)
+METHOD PROTECTED ExecuteTest
+VAR
+	i : DINT;
+	message : STRING(255);
+	caseName : WSTRING;
+	started : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[checkGuardedResults(phase := "Before Start");
+
+FOR i := LOWER_BOUND(_Tasks, 1) TO UPPER_BOUND(_Tasks, 1) DO
+	caseName := _Tasks[i].Name;
+	started := _Tasks[i].Start();
+	Assert.ThatBool(
+		actual := started,
+		message := TOF_Core.WideStrings.Concat255(caseName, ": ", "Start must precede validation")
+	).IsTrue();
+
+	IF NOT started THEN
+		CONTINUE;
+	END_IF
+
+	_Tasks[i].Execute();
+	_Tasks[i].Execute();
+	Assert.ThatBool(
+		actual := _Tasks[i].State.Stopped,
+		message := TOF_Core.WideStrings.Concat255(caseName, ": ", "Unbound operation must finish failure cleanup")
+	).IsTrue();
+	Assert.ThatBool(
+		actual := _Tasks[i].FinalStopReason.Failure,
+		message := TOF_Core.WideStrings.Concat255(caseName, ": ", "Unbound operation must fail")
+	).IsTrue();
+	message := TO_STRING(_Tasks[i].FinalStopReason.Message);
+	Assert.ThatBool(
+		actual := TOF_Core.Strings.Contains(
+			stringToSearchIn := message,
+			stringToFind := '$27FileHandleResource$27'
+		),
+		message := TOF_Core.WideStrings.Concat255(caseName, ": ", "Unbound failure must identify the missing resource")
+	).IsTrue();
+END_FOR
+
+checkGuardedResults(phase := "After failure");
+
+FOR i := LOWER_BOUND(_Tasks, 1) TO UPPER_BOUND(_Tasks, 1) DO
+	Assert.ThatBool(
+		actual := _Tasks[i].Reset(),
+		message := TOF_Core.WideStrings.Concat255(_Tasks[i].Name, " must accept Reset")
+	).IsTrue();
+	Assert.ThatBool(
+		actual := _Tasks[i].State.Ready,
+		message := TOF_Core.WideStrings.Concat255(_Tasks[i].Name, " must return to READY")
+	).IsTrue();
+END_FOR
+
+checkGuardedResults(phase := "After Reset");]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="checkGuardedResults" Id="{84071d05-9762-4fe3-a53c-a466674838df}">
+      <Declaration><![CDATA[(*!
+<summary>Checks result defaults when no successful file operation is available.</summary>
+<param name="phase">Identifies the observed lifecycle phase in assertion messages.</param>
+*)
+METHOD PRIVATE checkGuardedResults
+VAR_INPUT
+	phase : WSTRING;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[Assert.ThatBool(
+	actual := _CheckEof.IsEndOfFile,
+	message := TOF_Core.WideStrings.Concat255(phase, ": CheckEndOfFile.IsEndOfFile")
+).IsFalse();
+Assert.ThatBool(
+	actual := _GetPosition.Position = TOF_Core.SignedInt32.ZERO,
+	message := TOF_Core.WideStrings.Concat255(phase, ": ", "Unsuccessful tell must expose zero")
+).IsTrue();
+Assert.ThatBool(
+	actual := _ReadBytes.ActuallyReadBytes = TOF_Core.UnsignedInt32.ZERO,
+	message := TOF_Core.WideStrings.Concat255(phase, ": ", "Unsuccessful read count must be zero")
+).IsTrue();
+Assert.ThatBool(
+	actual := _ReadBytes.IsEndOfFile,
+	message := TOF_Core.WideStrings.Concat255(phase, ": ", "Unsuccessful read must not expose EOF")
+).IsFalse();
+Assert.ThatBool(
+	actual := _ReadString.ReadString = '',
+	message := TOF_Core.WideStrings.Concat255(phase, ": ", "Unsuccessful string read must expose an empty buffer")
+).IsTrue();
+Assert.ThatBool(
+	actual := _ReadString.IsEndOfFile,
+	message := TOF_Core.WideStrings.Concat255(phase, ": ", "Unsuccessful string read must not expose EOF")
+).IsFalse();
+Assert.ThatBool(
+	actual := _WriteBytes.ActuallyWrittenBytes = TOF_Core.UnsignedInt32.ZERO,
+	message := TOF_Core.WideStrings.Concat255(phase, ": ", "Unsuccessful write count must be zero")
+).IsTrue();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="AfterTest" Id="{8a1d9cd6-fed1-4dbb-8882-4843a5925abb}">
+      <Declaration><![CDATA[(*!
+<summary>Restores the fixtures after a completed or interrupted test.</summary>
+<description>
+Advances a running task only after cancellation is recorded. Resets fixtures only when they are not already READY.
+</description>
+*)
+METHOD PROTECTED AfterTest
+VAR
+	i : DINT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[FOR i := LOWER_BOUND(_Tasks, 1) TO UPPER_BOUND(_Tasks, 1) DO
+	IF _Tasks[i].State.Running THEN
+		IF _Tasks[i].OriginalStopReason.ExternalCancel OR_ELSE _Tasks[i].Cancel() THEN
+			_Tasks[i].Execute();
+		END_IF
+	END_IF
+
+	IF NOT _Tasks[i].State.Ready THEN
+		Assert.ThatBool(
+			actual := _Tasks[i].Reset(),
+			message := TOF_Core.WideStrings.Concat255(_Tasks[i].Name, " must accept Reset during cleanup")
+		).IsTrue();
+	END_IF
+END_FOR]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="ClassName" Id="{677382bf-404e-4000-9c0d-9d252b4f79d7}">
+      <Declaration><![CDATA[//! <summary>Borrows the concrete class name for the lifetime of this instance; callers must not modify it.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{e41372e6-890a-4d11-9fef-958455af9c32}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ClassName REF= _ClassName;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="NamespaceName" Id="{efe7dcf6-b28c-484e-8281-a8dce010669d}">
+      <Declaration><![CDATA[//! <summary>Borrows the compiler-initialized namespace; callers must not modify the returned reference.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{cbb0bcac-16b9-4781-be66-181ce1c20917}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[NamespaceName REF= CurrentNamespace.Name;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="SelfSize" Id="{39719c17-9b4f-4cd5-9ba2-78dd03448c0b}">
+      <Declaration><![CDATA[//! <summary>Reports the complete concrete instance size, excluding separately allocated storage.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY SelfSize : ULINT]]></Declaration>
+      <Get Name="Get" Id="{7a3d6d78-27d4-4fbd-a432-69dbea22774b}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[SelfSize := XSIZEOF(THIS^);]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+  </POU>
+</TcPlcObject>

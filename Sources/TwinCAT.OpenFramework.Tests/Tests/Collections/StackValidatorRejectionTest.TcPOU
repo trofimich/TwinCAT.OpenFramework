@@ -1,0 +1,178 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1" ProductVersion="3.1.4026.21">
+  <POU Name="StackValidatorRejectionTest" Id="{1c6b842f-c5a3-4768-b08e-becab597e3fc}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+SPDX-FileCopyrightText: c 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+SPDX-License-Identifier: MIT
+License: https://opensource.org/license/mit
+*)
+
+(*!
+<summary>Checks rejected ownership, unchanged storage and caller disposal.</summary>
+<description>
+Borrows a group-owned stack reserved for this case. Use from one task at a stable address.
+Teardown clears the stack and test-owned resources before publication.
+</description>
+*)
+
+{attribute 'no_assign'}
+{attribute 'no_explicit_call' := 'do not call this function block directly'}
+FUNCTION_BLOCK StackValidatorRejectionTest EXTENDS TOF_Testing.SingleCycleTest
+VAR_STAT
+	{attribute 'hide'}
+	_ClassName : STRING := __POUNAME();
+END_VAR
+VAR
+	_Stack : TOF_Collections.IStack;
+	_Probe : POINTER TO ObjectExitProbe;
+	_ExitCount : UDINT;
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[]]></ST>
+    </Implementation>
+    <Method Name="AfterTest" Id="{26567ea5-ac60-48eb-ab64-2f738c940e15}">
+      <Declaration><![CDATA[(*!
+<summary>Clears the fixture before the runner publishes the result.</summary>
+<description>
+Also runs after an unexpected exception interrupts the case.
+</description>
+*)
+METHOD PROTECTED AfterTest]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_Stack.Clear();
+
+IF _Probe <> TOF_Core.Memory.NULL_ADDRESS THEN
+	__DELETE(_Probe);
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="ClassName" Id="{b0b07098-c469-47d8-bc33-ee82081b674a}">
+      <Declaration><![CDATA[//! <summary>Borrows the concrete class name. Callers must not modify it.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{10534982-f40b-45d5-bc6d-9d87a870708a}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ClassName REF= _ClassName;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="ExecuteTest" Id="{ce8fab9e-e9cc-44a3-881e-49625fa914e7}">
+      <Declaration><![CDATA[(*!
+<summary>Checks rejected ownership, unchanged storage and caller disposal.</summary>
+*)
+METHOD PROTECTED ExecuteTest
+VAR
+	entry : TOF_Core.GENERIC_VALUE;
+	originalCapacity : DINT;
+
+	exceptionCode : __SYSTEM.ExceptionCode;
+	caught : TOF_Core.IException;
+	typeException : TOF_Core.IIncompatibleGenericValueTypeException;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_ExitCount := TOF_Core.UnsignedInt32.ZERO;
+originalCapacity := _Stack.Capacity;
+
+_Probe := __NEW(ObjectExitProbe);
+
+IF _Probe = TOF_Core.Memory.NULL_ADDRESS THEN
+	TOF_Core.DynamicMemoryManager.RaiseAllocationFailure();
+
+	RETURN;
+END_IF
+
+_Probe^.ObserveExit(counter := _ExitCount);
+entry := TOF_Core.GenericValueFactory.FromAnyType(
+	value := _Probe^,
+	isObject := TRUE,
+	memoryManagementBehavior := TOF_Core.GENERIC_MEMORY_MANAGEMENT_BEHAVIOR.STORE_ORIGINAL_REFERENCE_AND_OWNS_MEMORY
+);
+
+__TRY
+	_Stack.PushGeneric(value := entry);
+	_Probe := 0;
+	entry.Reset();
+__CATCH(exceptionCode)
+	caught := TOF_Core.ExceptionManager.GetLastException(
+		exceptionCode := exceptionCode,
+		catchPointNamespaceName := NamespaceName,
+		catchPointPOUName := __POUNAME(),
+		catchPointPosition := __POSITION()
+	);
+__ENDTRY
+
+Assert.ThatBool(
+	actual := __QUERYINTERFACE(caught, typeException),
+	message := "INT validator must reject owned OBJECT with the expected type"
+).IsTrue();
+
+Assert.ThatBool(
+	actual := _Stack.Empty AND_THEN _Stack.Capacity = originalCapacity,
+	message := "Rejection must precede insertion or growth"
+).IsTrue();
+
+Assert.ThatUDInt(
+	actual := _ExitCount,
+	message := "A rejected object must remain alive"
+).ToBe(expected := UDINT#0);
+
+IF _Probe <> TOF_Core.Memory.NULL_ADDRESS THEN
+	__DELETE(_Probe);
+	entry.Reset();
+END_IF
+
+Assert.ThatUDInt(
+	actual := _ExitCount,
+	message := "The caller must be able to destroy the rejected object once"
+).ToBe(expected := UDINT#1);]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="FB_init" Id="{3bf3af89-5e77-4de5-ab33-de43d7282b00}">
+      <Declaration><![CDATA[(*!
+<summary>Binds the stack fixture for this case.</summary>
+<description>
+Stores a borrowed interface without invoking the fixture. The owning group keeps it alive and
+reserves it for this case. TestElement initializes the name and parent.
+</description>
+<param name="name">Display name of this case.</param>
+<param name="parent">Group that owns this case.</param>
+<param name="stack">Required live stack reserved for this case.</param>
+*)
+METHOD FB_init : BOOL
+VAR_INPUT
+	bInitRetains: BOOL; // TRUE: the retain variables are initialized (reset warm / reset cold)
+	bInCopyCode: BOOL; // TRUE: the instance will be copied to the copy code afterward (online change)
+	name : WSTRING;
+	parent : TOF_Testing.ITestElement;
+	stack : TOF_Collections.IStack;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_Stack := stack;
+FB_init := TRUE;]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="NamespaceName" Id="{5d293ae9-36a2-4b8e-8710-5657b818c6bc}">
+      <Declaration><![CDATA[//! <summary>Borrows the compiler-initialized namespace name. Callers must not modify it.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{15708b04-0596-4d88-b5b7-e5a11c3809c9}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[NamespaceName REF= CurrentNamespace.Name;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="SelfSize" Id="{91ca9fa2-d984-4905-bca7-36d7f29cc374}">
+      <Declaration><![CDATA[//! <summary>Reports the concrete instance size in bytes.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY SelfSize : ULINT]]></Declaration>
+      <Get Name="Get" Id="{0cabbdde-3173-4822-91bf-5a2bcd01f7c6}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[SelfSize := XSIZEOF(THIS^);]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+  </POU>
+</TcPlcObject>

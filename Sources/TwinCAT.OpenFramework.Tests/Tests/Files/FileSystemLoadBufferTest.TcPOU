@@ -1,0 +1,225 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="FileSystemLoadBufferTest" Id="{f2425f25-0da8-4334-8f08-c3e4cba4dc39}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+SPDX-FileCopyrightText: © 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+SPDX-License-Identifier: MIT
+License: https://opensource.org/license/mit
+*)
+
+(*!
+<summary>Checks null/zero load buffers and the corrected TargetBufferSize diagnostic without native I/O.</summary>
+<description>
+The fixture belongs to the runner task and is kept between runs. The test drives no native file requests.
+</description>
+*)
+
+{attribute 'no_assign'}
+{attribute 'no_explicit_call' := 'do not call this function block directly'}
+FUNCTION_BLOCK FileSystemLoadBufferTest EXTENDS TOF_Testing.SingleCycleTest
+VAR_STAT
+	{attribute 'hide'}
+	_ClassName : STRING := __POUNAME();
+END_VAR
+VAR
+	_Load : TOF_FileSystem.LoadFile(name := "load preconditions");
+	_Buffer : BYTE;
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[]]></ST>
+    </Implementation>
+    <Method Name="ExecuteTest" Id="{31edded6-9ba3-45d3-ab78-1ae741d18bef}">
+      <Declaration><![CDATA[(*!
+<summary>Checks null/zero load buffers and the corrected TargetBufferSize diagnostic without native I/O.</summary>
+<description>Checks the buffer guard order and confirms the fixture can be reconfigured before native submission.</description>
+*)
+METHOD PROTECTED ExecuteTest
+VAR
+	started : BOOL;
+	cancelled : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_Buffer := BYTE#16#A5;
+_Load.FilePath := 'unused.bin';
+
+IF NOT checkInvalidBuffer(
+	targetBuffer := TOF_Core.Memory.NULL_ADDRESS,
+	size := 1,
+	propertyToken := '$27TargetBuffer$27',
+	caseName := "Null buffer"
+)
+	OR_ELSE NOT checkInvalidBuffer(
+		targetBuffer := ADR(_Buffer),
+		size := TOF_Core.UnsignedInt32.ZERO,
+		propertyToken := '$27TargetBufferSize$27',
+		caseName := "Zero buffer size"
+	)
+	OR_ELSE NOT checkInvalidBuffer(
+		targetBuffer := TOF_Core.Memory.NULL_ADDRESS,
+		size := TOF_Core.UnsignedInt32.ZERO,
+		propertyToken := '$27TargetBuffer$27',
+		caseName := "Null buffer and zero size"
+	)
+THEN
+	RETURN;
+END_IF
+
+_Load.TargetBuffer := ADR(_Buffer);
+_Load.TargetBufferSize := 1;
+started := _Load.Start();
+Assert.ThatBool(actual := started, message := "Reconfigured load must accept Start").IsTrue();
+
+IF NOT started THEN
+	RETURN;
+END_IF
+
+cancelled := _Load.Cancel();
+Assert.ThatBool(actual := cancelled, message := "Reconfigured load must accept pre-submission cancellation").IsTrue();
+
+IF NOT cancelled THEN
+	RETURN;
+END_IF
+
+_Load.Execute();
+Assert.ThatBool(actual := _Load.State.Stopped, message := "Cancelled load must stop before submission").IsTrue();
+Assert.ThatBool(
+	actual := _Load.FinalStopReason.ExternalCancel,
+	message := "Pre-submission load cancellation must preserve its reason"
+).IsTrue();
+Assert.ThatUDInt(actual := _Load.LoadedBytesCount, message := "Cancelled load byte count").ToBe(
+	expected := TOF_Core.UnsignedInt32.ZERO
+);
+Assert.ThatByte(actual := _Buffer, message := "Cancelled load must preserve the caller buffer").ToBe(
+	expected := BYTE#16#A5
+);]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="checkInvalidBuffer" Id="{00124766-134f-421e-b3cf-432435938255}">
+      <Declaration><![CDATA[(*!
+<summary>Checks one invalid buffer configuration and resets the stopped task.</summary>
+<description>
+The reason must identify the exact rejected member before any native request. The caller buffer keeps its sentinel.
+Returns TRUE only after the task has accepted Reset and is READY for the next configuration.
+</description>
+<param name="targetBuffer">Buffer address to pass to LoadFile.</param>
+<param name="size">Configured buffer size in bytes.</param>
+<param name="propertyToken">Expected member name including the diagnostic quotes.</param>
+<param name="caseName">Identifies the buffer configuration in the assertion messages.</param>
+*)
+METHOD PRIVATE checkInvalidBuffer : BOOL
+VAR_INPUT
+	targetBuffer : POINTER TO BYTE;
+	size : UDINT;
+	propertyToken : STRING(32);
+	caseName : WSTRING;
+END_VAR
+VAR
+	started : BOOL;
+	message : STRING(255);
+	resetAccepted : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_Load.TargetBuffer := targetBuffer;
+_Load.TargetBufferSize := size;
+started := _Load.Start();
+Assert.ThatBool(
+	actual := started,
+	message := TOF_Core.WideStrings.Concat255(caseName, ": Start must precede buffer validation")
+).IsTrue();
+
+IF NOT started THEN
+	RETURN;
+END_IF
+
+_Load.Execute();
+_Load.Execute();
+Assert.ThatBool(
+	actual := _Load.State.Stopped,
+	message := TOF_Core.WideStrings.Concat255(caseName, ": must finish stopping")
+).IsTrue();
+Assert.ThatBool(
+	actual := _Load.FinalStopReason.Failure,
+	message := TOF_Core.WideStrings.Concat255(caseName, ": must fail")
+).IsTrue();
+message := TO_STRING(_Load.FinalStopReason.Message);
+Assert.ThatBool(
+	actual := TOF_Core.Strings.Contains(stringToSearchIn := message, stringToFind := propertyToken),
+	message := TOF_Core.WideStrings.Concat255(caseName, ": expected diagnostic for ", TO_WSTRING(propertyToken))
+).IsTrue();
+Assert.ThatUDInt(
+	actual := _Load.LoadedBytesCount,
+	message := TOF_Core.WideStrings.Concat255(caseName, ": loaded byte count")
+).ToBe(expected := TOF_Core.UnsignedInt32.ZERO);
+Assert.ThatByte(
+	actual := _Buffer,
+	message := TOF_Core.WideStrings.Concat255(caseName, ": caller buffer sentinel")
+).ToBe(expected := BYTE#16#A5);
+
+resetAccepted := _Load.Reset();
+Assert.ThatBool(
+	actual := resetAccepted,
+	message := TOF_Core.WideStrings.Concat255(caseName, ": must accept Reset")
+).IsTrue();
+Assert.ThatBool(
+	actual := _Load.State.Ready,
+	message := TOF_Core.WideStrings.Concat255(caseName, ": Reset must restore READY")
+).IsTrue();
+checkInvalidBuffer := resetAccepted AND_THEN _Load.State.Ready;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="AfterTest" Id="{05bd0ac8-0a49-42f0-8b21-6026c2578abf}">
+      <Declaration><![CDATA[(*!
+<summary>Resets the load task after cancellation, including after an interrupted assertion sequence.</summary>
+<description>
+Advances a running task only on its cancellation path and reports a task that cannot be reset.
+</description>
+*)
+METHOD PROTECTED AfterTest]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF _Load.State.Running THEN
+	IF _Load.OriginalStopReason.ExternalCancel OR_ELSE _Load.Cancel() THEN
+		_Load.Execute();
+	END_IF
+END_IF
+
+Assert.ThatBool(
+	actual := _Load.Reset(),
+	message := "Load task must be ready after cleanup"
+).IsTrue();]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="ClassName" Id="{1951f015-8e29-4322-b86f-6447f12dc06c}">
+      <Declaration><![CDATA[//! <summary>Borrows the concrete class name for the lifetime of this instance; callers must not modify it.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{bd756f9b-d31d-4248-bbbf-df9f78047c30}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ClassName REF= _ClassName;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="NamespaceName" Id="{55130955-387d-4a4f-b20d-557db260d1de}">
+      <Declaration><![CDATA[//! <summary>Borrows the compiler-initialized namespace; callers must not modify the returned reference.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{5352c49c-7879-4e3f-989a-c808712544b6}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[NamespaceName REF= CurrentNamespace.Name;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="SelfSize" Id="{41a81b54-b579-4816-bf5a-64d62d637cef}">
+      <Declaration><![CDATA[//! <summary>Reports the complete concrete instance size, excluding separately allocated storage.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY SelfSize : ULINT]]></Declaration>
+      <Get Name="Get" Id="{8398ba67-8cab-45e7-ac9c-84c90d48cd23}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[SelfSize := XSIZEOF(THIS^);]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+  </POU>
+</TcPlcObject>

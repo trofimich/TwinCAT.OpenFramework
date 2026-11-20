@@ -1,0 +1,159 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="LoggerMetadataAndRecordLimitTest" Id="{e8ce9e5f-63e6-465a-8b19-b5cce8a1bec4}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+SPDX-FileCopyrightText: c 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+SPDX-License-Identifier: MIT
+License: https://opensource.org/license/mit
+*)
+
+(*!
+<summary>Checks logger metadata and rejection of a zero file record limit.</summary>
+<description>
+Use in the runner task. The first run exercises INITIAL to FAILED; later runs check the retained terminal state.
+</description>
+*)
+
+{attribute 'no_assign'}
+{attribute 'no_explicit_call' := 'do not call this function block directly'}
+FUNCTION_BLOCK LoggerMetadataAndRecordLimitTest EXTENDS TOF_Testing.SingleCycleTest
+VAR_STAT
+	{attribute 'hide'}
+	_ClassName : STRING := __POUNAME();
+END_VAR
+VAR
+	_Queue : TOF_Loggers.QueuedLogger;
+	_EventLogger : TOF_Loggers.EventLogger(
+		debugEventType := TC_EVENTS.OpenFrameworkLoggerEventClass.DebugEvent,
+		informationEventType := TC_EVENTS.OpenFrameworkLoggerEventClass.InformationEvent,
+		warningEventType := TC_EVENTS.OpenFrameworkLoggerEventClass.WarningEvent,
+		errorEventType := TC_EVENTS.OpenFrameworkLoggerEventClass.ErrorEvent,
+		criticalErrorEventType := TC_EVENTS.OpenFrameworkLoggerEventClass.CriticalErrorEvent
+	);
+	_FileLogger : TOF_Loggers.SimpleTextFileLogger(
+		directoryPath := '',
+		logFilePrefix := 'Log',
+		maxRecordsPerFile := 0,
+		directoryPathType := Tc2_System.E_OpenPath.PATH_GENERIC,
+		timeout := T#2S,
+		amsNetId := ''
+	);
+	_Formatter : ThrowingGetMessageException;
+	_InitialConfigurationChecked : BOOL;
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[]]></ST>
+    </Implementation>
+    <Method Name="ExecuteTest" Id="{ceddd4cb-7336-47ff-adc3-8665d7cfe03f}">
+      <Declaration><![CDATA[(*!
+<summary>Checks logger metadata and rejection of a zero file record limit.</summary>
+<description>
+Use in the runner task. The first run exercises INITIAL to FAILED; later runs check the retained terminal state.
+</description>
+*)
+METHOD PROTECTED ExecuteTest
+VAR
+	error : TOF_Core.ERROR;
+	message : TOF_Core.ERROR_MESSAGE := "must be refused";
+	formatCallsBefore : UDINT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[Assert.ThatBool(
+	actual := _Queue.ClassName = 'QueuedLogger',
+	message := "Queue metadata must identify its concrete type"
+).IsTrue();
+Assert.ThatBool(
+	actual := _EventLogger.ClassName = 'EventLogger',
+	message := "Event metadata must identify its concrete type"
+).IsTrue();
+Assert.ThatBool(
+	actual := _FileLogger.ClassName = 'SimpleTextFileLogger',
+	message := "File metadata must identify its concrete type"
+).IsTrue();
+Assert.ThatBool(
+	actual := _FileLogger.NamespaceName = 'TOF_Loggers',
+	message := "File namespace must remain unchanged"
+).IsTrue();
+Assert.ThatBool(
+	actual := _FileLogger.SelfSize = XSIZEOF(_FileLogger),
+	message := "Size must describe the concrete instance"
+).IsTrue();
+Assert.ThatBool(actual := _FileLogger.Timeout = T#2S, message := "Configured native timeout must be retained").IsTrue();
+IF NOT _InitialConfigurationChecked THEN
+	Assert.ThatBool(
+		actual := _FileLogger.State = TOF_Loggers.SIMPLE_TEXT_FILE_LOGGER_STATE.INITIAL,
+		message := "The invalid configuration must be tested before the first Execute"
+	).IsTrue();
+END_IF
+
+error.SetMessage(message := "invalid limit error");
+formatCallsBefore := _Formatter.MessageReadCount;
+Assert.ThatBool(
+	actual := _FileLogger.TryLogMessage(category := TOF_Core.LOG_CATEGORY.INFORMATION, message := message),
+	message := "Zero record limit must refuse plain admission"
+).IsFalse();
+Assert.ThatBool(
+	actual := _FileLogger.TryLogError(error := error),
+	message := "Zero record limit must refuse errors"
+).IsFalse();
+Assert.ThatBool(
+	actual := _FileLogger.TryLogException(exception := _Formatter, severity := TOF_Core.ERROR_SEVERITY.ERROR),
+	message := "Zero record limit must refuse before formatting"
+).IsFalse();
+Assert.ThatUDInt(
+	actual := _Formatter.MessageReadCount,
+	message := "The invalid configuration must refuse before reading the exception"
+).ToBe(expected := formatCallsBefore);
+
+_FileLogger.Execute();
+_InitialConfigurationChecked := TRUE;
+Assert.ThatBool(
+	actual := _FileLogger.State = TOF_Loggers.SIMPLE_TEXT_FILE_LOGGER_STATE.FAILED,
+	message := "Zero record limit must fail before attempting the deliberately empty directory"
+).IsTrue();
+Assert.ThatBool(
+	actual := _FileLogger.ErrorMessage = "MaxRecordsPerFile must be greater than zero.",
+	message := "Configuration diagnostic must explain the invalid record limit"
+).IsTrue();
+Assert.ThatBool(
+	actual := _FileLogger.Busy,
+	message := "No native cleanup may remain after the configuration failure"
+).IsFalse();
+Assert.ThatBool(actual := _FileLogger.Start(), message := "FAILED must remain terminal").IsFalse();]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="ClassName" Id="{ed85d70b-7226-46e3-9a6a-08917a8eac82}">
+      <Declaration><![CDATA[//! <summary>Borrows the concrete class name for the instance lifetime. Callers must not modify it.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{0e3b63b4-9b65-49da-a9cc-78d76a1647a6}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ClassName REF= _ClassName;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="NamespaceName" Id="{076a4cbf-bde2-48a5-92fc-8fa7e3470b2d}">
+      <Declaration><![CDATA[//! <summary>Borrows the compiler-initialized namespace. Callers must not modify it.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{10e42466-94eb-46d4-b7ae-91716d067ced}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[NamespaceName REF= CurrentNamespace.Name;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="SelfSize" Id="{eec9a9cc-f36d-4a77-8a3a-b848069a2ecc}">
+      <Declaration><![CDATA[//! <summary>Reports the complete instance size in bytes, excluding separately allocated storage.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY SelfSize : ULINT]]></Declaration>
+      <Get Name="Get" Id="{3871437b-ba24-46f1-a7be-99a753b21fa5}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[SelfSize := XSIZEOF(THIS^);]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+  </POU>
+</TcPlcObject>

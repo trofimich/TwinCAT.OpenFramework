@@ -1,0 +1,213 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="FileManagerReuseTest" Id="{15f4d393-5396-4ec5-956b-6b17c7117789}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+SPDX-FileCopyrightText: c 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+SPDX-License-Identifier: MIT
+License: https://opensource.org/license/mit
+*)
+
+(*!
+<summary>Checks manager Reset and child reuse after cancellation between queued file operations.</summary>
+<description>
+The first write succeeds and one read remains queued when the manager stops. Reset must remove that
+entry and clear the file path. The second queue uses the same manager and write task on a different file.
+It must read back the second text and leave the removed read unstarted.
+</description>
+*)
+
+{attribute 'no_assign'}
+{attribute 'no_explicit_call' := 'do not call this function block directly'}
+FUNCTION_BLOCK FileManagerReuseTest EXTENDS FileContentScenarioTest
+VAR_STAT
+	//! <summary>Class name shared by instances of this concrete function block.</summary>
+	{attribute 'hide'}
+	_ClassName : STRING := __POUNAME();
+END_VAR
+VAR CONSTANT
+	//! <summary>Text written and expected back exclusively in the second run.</summary>
+	_SecondFileText : STRING := 'FileContentManager reused after Reset';
+END_VAR
+VAR
+	_Step : FILE_MANAGER_REUSE_TEST_STEP;
+	_WriteText : TOF_FileSystem.WriteString255ToFile(name := "Write on each run");
+	_WaitingRead : TOF_FileSystem.ReadString255FromFile(name := "Read removed by Reset");
+	_SeekStart : TOF_FileSystem.SetPositionInFile(name := "Seek on second run");
+	_ReadText : TOF_FileSystem.ReadString255FromFile(name := "Read on second run");
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[]]></ST>
+    </Implementation>
+    <Method Name="ResetScenario" Id="{6e7218c9-8180-49e8-a2ce-84604368567e}">
+      <Declaration><![CDATA[//! <summary>Restores the first-run phase and rearms the children for a new test-runner pass.</summary>
+METHOD PROTECTED ResetScenario : BOOL]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_Step := FILE_MANAGER_REUSE_TEST_STEP.START_FIRST_WRITE;
+ResetScenario := _WriteText.Reset()
+	AND_THEN _WaitingRead.Reset()
+	AND_THEN _SeekStart.Reset()
+	AND_THEN _ReadText.Reset();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="AdvanceScenario" Id="{b968c791-79d8-4369-a6fb-2be594a89f34}">
+      <Declaration><![CDATA[(*!
+<summary>Advances the cancelled first queue and the reconfigured second queue.</summary>
+<description>Returns TRUE after the exact second readback and the unused successor have been verified.</description>
+*)
+METHOD PROTECTED AdvanceScenario : BOOL]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[CASE _Step OF
+	FILE_MANAGER_REUSE_TEST_STEP.START_FIRST_WRITE:
+		_Directory.ExpectFirstFile();
+		ConfigureFile(filePath := _Directory.FirstFilePath, modeFlags := _UpdateTextMode);
+
+		_WriteText.StringToWrite := 'First run before Reset';
+		_WriteText.Timeout := _NativeTimeout;
+		_WaitingRead.Timeout := _NativeTimeout;
+		_SeekStart.Timeout := _NativeTimeout;
+		_ReadText.Timeout := _NativeTimeout;
+		_Manager.Enqueue(fileHandleTask := _WriteText);
+		_Manager.Enqueue(fileHandleTask := _WaitingRead);
+
+		IF NOT _Manager.Start() THEN
+			_ScenarioFailure := "File manager refused Start before the first write";
+			RETURN;
+		END_IF
+
+		_Step := FILE_MANAGER_REUSE_TEST_STEP.CANCEL_AFTER_WRITE;
+
+	FILE_MANAGER_REUSE_TEST_STEP.CANCEL_AFTER_WRITE:
+		_Manager.Execute();
+
+		IF _Manager.State.Stopped THEN
+			_ScenarioFailure := "First queue stopped before cancellation between tasks";
+			RETURN;
+		END_IF
+
+		IF _WriteText.State.Stopped THEN
+			IF NOT _WriteText.FinalStopReason.WorkDone OR_ELSE NOT _WaitingRead.State.Ready THEN
+				_ScenarioFailure := "First write must finish with WorkDone while its successor is still READY";
+				RETURN;
+			END_IF
+
+			IF NOT _Manager.Cancel() THEN
+				_ScenarioFailure := "File manager refused Cancel between the completed write and the waiting read";
+				RETURN;
+			END_IF
+
+			_Step := FILE_MANAGER_REUSE_TEST_STEP.RESET_AND_START_SECOND_FILE;
+		END_IF
+
+	FILE_MANAGER_REUSE_TEST_STEP.RESET_AND_START_SECOND_FILE:
+		_Manager.Execute();
+
+		IF _Manager.State.Stopped AND_THEN resetAndStartSecondFile() THEN
+			_Step := FILE_MANAGER_REUSE_TEST_STEP.CHECK_SECOND_FILE;
+		END_IF
+
+	FILE_MANAGER_REUSE_TEST_STEP.CHECK_SECOND_FILE:
+		_Manager.Execute();
+
+		IF NOT _Manager.State.Stopped THEN
+			RETURN;
+		END_IF
+
+		IF NOT _Manager.FinalStopReason.WorkDone THEN
+			_ScenarioFailure := "Second queue did not finish with WorkDone: ";
+			TOF_Core.WideStrings.AppendFit(
+				targetString := _ScenarioFailure,
+				sourceString := _Manager.FinalStopReason.Message
+			);
+		ELSIF _ReadText.ReadString <> _SecondFileText THEN
+			_ScenarioFailure := "Second queue did not read back the new text written after Reset";
+		ELSIF NOT _WaitingRead.State.Ready THEN
+			_ScenarioFailure := "The waiting read removed by Reset ran during the second queue";
+		ELSE
+			AdvanceScenario := TRUE;
+		END_IF
+END_CASE]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="resetAndStartSecondFile" Id="{7f218bab-5f76-4082-a2fd-bd4de05c0f47}">
+      <Declaration><![CDATA[(*!
+<summary>Verifies cancellation and Reset before configuring the same manager and write task for the second file.</summary>
+<description>Called when the first queue is STOPPED. Returns TRUE only after the second queue accepts Start.</description>
+*)
+METHOD PRIVATE resetAndStartSecondFile : BOOL]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF NOT _Manager.FinalStopReason.ExternalCancel OR_ELSE _Manager.ResourceManager.ResourceAcquired THEN
+	_ScenarioFailure := "First queue must finish with ExternalCancel and release its file before Reset";
+	RETURN;
+END_IF
+
+IF _Manager.PendingTaskCount <> 1 OR_ELSE NOT _WaitingRead.State.Ready THEN
+	_ScenarioFailure := "Exactly one READY read must remain in the queue before Reset";
+	RETURN;
+END_IF
+
+IF NOT _Manager.Reset() THEN
+	_ScenarioFailure := "Stopped file manager refused Reset before the second run";
+	RETURN;
+END_IF
+
+IF NOT _Manager.State.Ready OR_ELSE _Manager.PendingTaskCount <> 0 OR_ELSE _Manager.FilePath <> '' THEN
+	_ScenarioFailure := "Reset must return the file manager to READY, clear its queue and clear its path";
+	RETURN;
+END_IF
+
+IF NOT _WriteText.Reset() THEN
+	_ScenarioFailure := "Completed write refused Reset before reuse";
+	RETURN;
+END_IF
+
+_Directory.ExpectSecondFile();
+ConfigureFile(filePath := _Directory.SecondFilePath, modeFlags := _UpdateTextMode);
+_WriteText.StringToWrite := _SecondFileText;
+_SeekStart.Position := TOF_Core.SignedInt32.ZERO;
+_SeekStart.Origin := Tc2_System.E_SeekOrigin.SEEK_SET;
+_Manager.Enqueue(fileHandleTask := _WriteText);
+_Manager.Enqueue(fileHandleTask := _SeekStart);
+_Manager.Enqueue(fileHandleTask := _ReadText);
+
+resetAndStartSecondFile := _Manager.Start();
+
+IF NOT resetAndStartSecondFile THEN
+	_ScenarioFailure := "File manager refused Start for the reconfigured second queue";
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="ClassName" Id="{cffe04d7-7ecf-4344-9deb-58c98c2dfa03}">
+      <Declaration><![CDATA[//! <summary>Borrows this concrete type name; callers must not modify the referenced storage.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{60cd9eb3-aa67-4d7c-b325-3ffad1a4353e}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ClassName REF= _ClassName;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="NamespaceName" Id="{e4e6a58b-a78c-4ce2-bee4-bb0220e7258e}">
+      <Declaration><![CDATA[//! <summary>Borrows the compiler-initialized namespace; callers must not modify the returned reference.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{d563c1c1-d6ca-4441-a142-d472fbc13b9c}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[NamespaceName REF= CurrentNamespace.Name;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="SelfSize" Id="{f8dff975-ecaf-4412-a0d4-53d1a56976b8}">
+      <Declaration><![CDATA[//! <summary>Reports this concrete instance size, excluding separately allocated storage.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY SelfSize : ULINT]]></Declaration>
+      <Get Name="Get" Id="{0490ca76-dd1b-4275-b9a0-cf5fc2f3735c}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[SelfSize := XSIZEOF(THIS^);]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+  </POU>
+</TcPlcObject>

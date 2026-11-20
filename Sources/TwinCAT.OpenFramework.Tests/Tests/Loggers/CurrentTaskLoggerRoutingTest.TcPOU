@@ -1,0 +1,289 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="CurrentTaskLoggerRoutingTest" Id="{59905dbc-0556-495b-af5f-57a809b219e7}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+SPDX-FileCopyrightText: c 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+SPDX-License-Identifier: MIT
+License: https://opensource.org/license/mit
+*)
+
+(*!
+<summary>Checks task destination assignment, default reset, queued diagnostics and service failure containment.</summary>
+<description>
+Owns the queue and captures in the runner task. The task destination, shared filter and numbering are restored
+within the same call. No other task may log while the shared settings are temporarily changed.
+</description>
+*)
+
+{attribute 'no_assign'}
+{attribute 'no_explicit_call' := 'do not call this function block directly'}
+FUNCTION_BLOCK CurrentTaskLoggerRoutingTest EXTENDS TOF_Testing.SingleCycleTest
+VAR_STAT
+	{attribute 'hide'}
+	_ClassName : STRING := __POUNAME();
+END_VAR
+VAR
+	_Backend : LoggerCaptureBackend;
+	_Queue : TOF_Loggers.QueuedLogger;
+	_QueueConfigured : BOOL;
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[]]></ST>
+    </Implementation>
+    <Method Name="ExecuteTest" Id="{7246b48b-eb45-4528-90ec-9da0e3dca94a}">
+      <Declaration><![CDATA[(*!
+<summary>Checks task destination assignment, default reset, queued diagnostics and service failure containment.</summary>
+<description>
+Owns the queue and captures in the runner task. The task destination, shared filter and numbering are restored
+within the same call. No other task may log while the shared settings are temporarily changed.
+</description>
+*)
+METHOD PROTECTED ExecuteTest
+VAR
+	backendLogger : TOF_Core.ILogger;
+	savedLogger : TOF_Core.ILogger;
+	defaultLogger : TOF_Core.ILogger;
+	selectedLogger : TOF_Core.ILogger;
+	savedFilter : TOF_Core.ILogFilter;
+	savedFormat : TOF_Core.LOG_MESSAGE_NUMBER_FORMAT;
+	error : TOF_Core.ERROR;
+	message : TOF_Core.ERROR_MESSAGE := "current task destination";
+	expectedError : TOF_Core.ERROR_MESSAGE;
+	expectedException : TOF_Core.ERROR_MESSAGE;
+	record : LOGGER_CAPTURED_MESSAGE;
+	escaped : BOOL;
+	exceptionCode : __SYSTEM.ExceptionCode;
+	routedException : TOF_Core.IException;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF NOT _QueueConfigured THEN
+	_QueueConfigured := _Queue.Configure(backend := _Backend);
+END_IF
+
+Assert.ThatBool(actual := _QueueConfigured, message := "Queue must bind to its capture backend").IsTrue();
+
+IF NOT _QueueConfigured THEN
+	RETURN;
+END_IF
+
+Assert.ThatBool(
+	actual := _Queue.PendingMessageCount = 0,
+	message := "Scenario must start with an empty queue"
+).IsTrue();
+
+__TRY
+	TOF_Core.Exceptions.ThrowStandard(
+		sourceNamespaceName := NamespaceName,
+		sourceClassName := ClassName,
+		sourcePOUName := __POUNAME(),
+		sourcePosition := __POSITION(),
+		message := "current task exception"
+	);
+__CATCH(exceptionCode)
+	routedException := TOF_Core.ExceptionManager.GetLastException(
+		exceptionCode := exceptionCode,
+		catchPointNamespaceName := NamespaceName,
+		catchPointPOUName := __POUNAME(),
+		catchPointPosition := __POSITION()
+	);
+__ENDTRY
+
+Assert.ThatBool(actual := routedException <> 0, message := "The routing probe needs a live exception").IsTrue();
+
+IF routedException = 0 THEN
+	RETURN;
+END_IF
+
+savedLogger := TOF_Core.LogManager.CurrentTaskLogger;
+savedFilter := TOF_Core.LogManager.Filter;
+savedFormat := TOF_Core.LogManager.MessageNumberFormat;
+
+__TRY
+	TOF_Core.LogManager.Filter := 0;
+	TOF_Core.LogManager.MessageNumberFormat := TOF_Core.LOG_MESSAGE_NUMBER_FORMAT.NONE;
+	TOF_Core.LogManager.CurrentTaskLogger := 0;
+	defaultLogger := TOF_Core.LogManager.CurrentTaskLogger;
+	Assert.ThatBool(
+		actual := defaultLogger <> 0,
+		message := "Cyclic task must have a standard ADS destination"
+	).IsTrue();
+	TOF_Core.LogManager.CurrentTaskLogger := _Backend;
+	selectedLogger := TOF_Core.LogManager.CurrentTaskLogger;
+	backendLogger := _Backend;
+	Assert.ThatBool(
+		actual := selectedLogger = backendLogger,
+		message := "Getter must return the task assignment"
+	).IsTrue();
+	Assert.ThatBool(
+		actual := TOF_Core.LogManager.TryLogMessage(
+			message := message,
+			category := TOF_Core.LOG_CATEGORY.INFORMATION
+		),
+		message := "Manager must route text to the assigned backend"
+	).IsTrue();
+	TOF_Core.LogManager.ExecuteCurrentTaskLogger();
+	Assert.ThatBool(
+		actual := _Backend.CapturedCount = 1,
+		message := "Assigned backend must receive the message"
+	).IsTrue();
+	Assert.ThatBool(
+		actual := _Backend.ExecuteCount = 1,
+		message := "Service must use the same task destination"
+	).IsTrue();
+	record := _Backend.RecordAt(index := 0);
+	Assert.ThatBool(actual := record.Message = message, message := "Manager must preserve routed text").IsTrue();
+	Assert.ThatBool(actual := record.HasMessageNumber, message := "NONE must omit the request number").IsFalse();
+
+	TOF_Core.LogManager.CurrentTaskLogger := _Queue;
+	error.SetMessage(message := "current task error");
+	expectedError := error.ToString(
+		sourceDisplayMode := TOF_Core.ERROR_SOURCE_DISPLAY_MODE.TOP_AND_ROOT,
+		timestampDisplayMode := TOF_Core.TIMESTAMP_DISPLAY_MODE.LOCAL
+	);
+	expectedException := routedException.GetMessage(
+		showSource := TRUE,
+		timestampDisplayMode := TOF_Core.TIMESTAMP_DISPLAY_MODE.LOCAL
+	);
+	Assert.ThatBool(
+		actual := TOF_Core.LogManager.TryLogMessage(
+			message := message,
+			category := TOF_Core.LOG_CATEGORY.INFORMATION
+		),
+		message := "Replacement queue must accept the manager message"
+	).IsTrue();
+	Assert.ThatBool(
+		actual := TOF_Core.LogManager.TryLogError(error := error),
+		message := "Manager must route errors to the replacement queue"
+	).IsTrue();
+	Assert.ThatBool(
+		actual := TOF_Core.LogManager.TryLogException(
+			exception := routedException,
+			severity := TOF_Core.ERROR_SEVERITY.ERROR
+		),
+		message := "Manager must route exceptions to the replacement queue"
+	).IsTrue();
+	Assert.ThatBool(actual := _Backend.CapturedCount = 1, message := "Admission must not bypass the queue").IsTrue();
+	Assert.ThatBool(
+		actual := _Queue.PendingMessageCount = 3,
+		message := "All three manager methods must use the queue"
+	).IsTrue();
+	TOF_Core.LogManager.ExecuteCurrentTaskLogger();
+	Assert.ThatBool(
+		actual := _Backend.ExecuteCount = 2,
+		message := "Manager service must advance the queue backend once"
+	).IsTrue();
+	Assert.ThatBool(
+		actual := _Backend.CapturedCount = 4,
+		message := "Service must deliver all queued manager records"
+	).IsTrue();
+	Assert.ThatBool(
+		actual := _Queue.PendingMessageCount = 0,
+		message := "Owner service must drain the queued records"
+	).IsTrue();
+	record := _Backend.RecordAt(index := 1);
+	Assert.ThatBool(actual := record.Message = message, message := "Queue must preserve the routed message").IsTrue();
+	Assert.ThatBool(
+		actual := record.HasMessageNumber,
+		message := "Queue must preserve the absent request number"
+	).IsFalse();
+
+	record := _Backend.RecordAt(index := 2);
+	Assert.ThatBool(
+		actual := record.Message = expectedError,
+		message := "Error delivery must preserve formatted text"
+	).IsTrue();
+	record := _Backend.RecordAt(index := 3);
+	Assert.ThatBool(
+		actual := record.Message = expectedException,
+		message := "Exception delivery must preserve formatted text"
+	).IsTrue();
+	TOF_Core.LogManager.CurrentTaskLogger := 0;
+	selectedLogger := TOF_Core.LogManager.CurrentTaskLogger;
+	Assert.ThatBool(
+		actual := selectedLogger = defaultLogger,
+		message := "Zero must restore the same task ADS instance"
+	).IsTrue();
+	TOF_Core.LogManager.ExecuteCurrentTaskLogger();
+	Assert.ThatBool(
+		actual := _Backend.ExecuteCount = 2,
+		message := "Reset must stop servicing the replaced backend"
+	).IsTrue();
+	TOF_Core.LogManager.CurrentTaskLogger := _Backend;
+	_Backend.ThrowOnExecute := TRUE;
+	TOF_Core.LogManager.ExecuteCurrentTaskLogger();
+	Assert.ThatBool(
+		actual := _Backend.ExecuteCount = 3,
+		message := "A hostile Execute must be attempted once"
+	).IsTrue();
+	Assert.ThatBool(
+		actual := _Backend.CapturedCount = 4,
+		message := "Execute failure diagnostics must bypass the task route"
+	).IsTrue();
+	_Backend.ThrowOnExecute := FALSE;
+	_Backend.DeliveryBehavior := LOGGER_DELIVERY_BEHAVIOR.THROW_EXCEPTION;
+	Assert.ThatBool(
+		actual := TOF_Core.LogManager.TryLogMessage(
+			message := message,
+			category := TOF_Core.LOG_CATEGORY.INFORMATION
+		),
+		message := "Manager must contain a hostile task logger TryLog exception"
+	).IsFalse();
+	Assert.ThatUInt(actual := _Backend.AttemptCount, message := "Hostile TryLog must reach the backend once").ToBe(
+		expected := 5
+	);
+__CATCH
+	escaped := TRUE;
+__ENDTRY
+
+_Backend.ThrowOnExecute := FALSE;
+_Backend.DeliveryBehavior := LOGGER_DELIVERY_BEHAVIOR.ACCEPT;
+TOF_Core.LogManager.CurrentTaskLogger := savedLogger;
+TOF_Core.LogManager.Filter := savedFilter;
+TOF_Core.LogManager.MessageNumberFormat := savedFormat;
+Assert.ThatBool(actual := escaped, message := "The task routing scenario must return normally").IsFalse();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="BeforeTest" Id="{1bccf1a1-1423-4823-b1c2-a340d85fda80}">
+      <Declaration><![CDATA[(*!
+<summary>Clears capture observations and injected faults before each run.</summary>
+*)
+METHOD PROTECTED BeforeTest]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_Backend.ResetCapture();]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="ClassName" Id="{28ff2752-474e-4a0a-a195-b48afef45102}">
+      <Declaration><![CDATA[//! <summary>Borrows the concrete class name for the instance lifetime. Callers must not modify it.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{7c2c1cb2-d187-4a7b-92ce-0b6beb3d53d4}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ClassName REF= _ClassName;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="NamespaceName" Id="{fd3604a3-a6af-4c6a-bad5-dc713dafc691}">
+      <Declaration><![CDATA[//! <summary>Borrows the compiler-initialized namespace. Callers must not modify it.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{3cc0f3f9-c0b4-4d89-964c-a2f917380603}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[NamespaceName REF= CurrentNamespace.Name;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="SelfSize" Id="{8fe6d2c3-43e7-4688-9985-b76cb57fe7bf}">
+      <Declaration><![CDATA[//! <summary>Reports the complete instance size in bytes, excluding separately allocated storage.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY SelfSize : ULINT]]></Declaration>
+      <Get Name="Get" Id="{3328d5f9-2483-471a-908d-aca8db816d6f}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[SelfSize := XSIZEOF(THIS^);]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+  </POU>
+</TcPlcObject>

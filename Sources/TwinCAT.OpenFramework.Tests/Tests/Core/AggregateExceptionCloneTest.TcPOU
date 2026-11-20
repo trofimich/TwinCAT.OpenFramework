@@ -1,0 +1,185 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="AggregateExceptionCloneTest" Id="{74050b86-4d12-4690-ad3e-a5dcec24ad32}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+SPDX-FileCopyrightText: c 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+SPDX-License-Identifier: MIT
+License: https://opensource.org/license/mit
+*)
+
+(*!
+<summary>Checks that an aggregate clone owns its array and shares its prepared dynamic causes.</summary>
+<description>
+Uses one task and stays at a stable address while assertions are bound to this instance.
+</description>
+*)
+
+{attribute 'no_assign'}
+{attribute 'no_explicit_call' := 'do not call this function block directly'}
+FUNCTION_BLOCK AggregateExceptionCloneTest EXTENDS TOF_Testing.SingleCycleTest
+VAR_STAT
+	{attribute 'hide'}
+	_ClassName : STRING := __POUNAME();
+END_VAR
+VAR
+	_Aggregate : TOF_Core.AggregateException;
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[]]></ST>
+    </Implementation>
+    <Method Name="ExecuteTest" Id="{fb34b870-936d-47f4-bf89-275f9d1c9b1e}">
+      <Declaration><![CDATA[(*!
+<summary>Checks that an aggregate clone owns its array and shares its prepared dynamic causes.</summary>
+<description>
+The source is persistent so AfterTest can release its array after an unexpected hook exception.
+Checks identity through borrowed read-only interfaces during the current task cycle.
+</description>
+*)
+METHOD PROTECTED ExecuteTest
+VAR
+	exceptionCode : __SYSTEM.ExceptionCode;
+	caught : TOF_Core.IException;
+	source : TOF_Core.StandardException;
+	dynamicInner : TOF_Core.IReadOnlyException;
+	staticSource : TOF_Core.IReadOnlyException;
+	firstInner : TOF_Core.IReadOnlyException;
+	observedInner : TOF_Core.IReadOnlyException;
+	clonedObject : TOF_Core.IObject;
+	clonedAggregate : TOF_Core.IAggregateException;
+	message : TOF_Core.ERROR_MESSAGE;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[// Throwing the static template provides a dynamic cause with the same initial message.
+__TRY
+	source.Throw(
+		sourceNamespaceName := NamespaceName,
+		sourceClassName := ClassName,
+		sourcePOUName := __POUNAME(),
+		sourcePosition := __POSITION(),
+		message := "Original inner"
+	);
+__CATCH(exceptionCode)
+	caught := TOF_Core.ExceptionManager.GetLastException(
+		exceptionCode := exceptionCode,
+		catchPointNamespaceName := NamespaceName,
+		catchPointPOUName := __POUNAME(),
+		catchPointPosition := __POSITION()
+	);
+__ENDTRY
+
+IF caught = 0 THEN
+	RecordFailure(message := "Throw must provide a dynamic cause for the clone test");
+	RETURN;
+END_IF
+
+Assert.ThatBool(
+	actual := caught.IsDynamicInstance,
+	message := "The thrown cause must belong to task cleanup"
+).IsTrue();
+
+staticSource := source;
+dynamicInner := caught;
+_Aggregate.AddInnerException(innerException := staticSource);
+_Aggregate.AddInnerException(innerException := dynamicInner);
+source.Clear();
+
+firstInner := _Aggregate.GetInnerException(index := 0);
+
+IF firstInner = 0 THEN
+	RecordFailure(message := "The aggregate must store the prepared clone of the static cause");
+	RETURN;
+END_IF
+
+message := firstInner.GetMessage();
+Assert.ThatBool(
+	actual := firstInner <> staticSource AND_THEN message = "Original inner",
+	message := "The static cause must be cloned before its template is cleared"
+).IsTrue();
+observedInner := _Aggregate.GetInnerException(index := 1);
+Assert.ThatBool(
+	actual := observedInner = dynamicInner,
+	message := "The dynamic cause must retain its identity"
+).IsTrue();
+
+clonedObject := _Aggregate.Clone();
+_Aggregate.Clear();
+_Aggregate.Clear();
+Assert.ThatBool(
+	actual := _Aggregate.Empty AND_THEN _Aggregate.InnerExceptionCount = 0,
+	message := "Repeated Clear must leave the original aggregate empty"
+).IsTrue();
+
+IF NOT __QUERYINTERFACE(clonedObject, clonedAggregate) THEN
+	RecordFailure(message := "Aggregate clone must preserve its concrete interface");
+	RETURN;
+END_IF
+
+Assert.ThatBool(
+	actual := clonedAggregate.IsDynamicInstance AND_THEN clonedAggregate.SelfAddress <> _Aggregate.SelfAddress,
+	message := "The aggregate clone must be a distinct task-managed instance"
+).IsTrue();
+Assert.ThatUInt(
+	actual := clonedAggregate.InnerExceptionCount,
+	message := "Clearing the original must preserve the clone's array"
+).ToBe(expected := UINT#2);
+
+observedInner := clonedAggregate.GetInnerException(index := 0);
+Assert.ThatBool(
+	actual := observedInner = firstInner,
+	message := "The clone must share the prepared first cause"
+).IsTrue();
+
+observedInner := clonedAggregate.GetInnerException(index := 1);
+Assert.ThatBool(
+	actual := observedInner = dynamicInner,
+	message := "The clone must share the second dynamic cause"
+).IsTrue();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="AfterTest" Id="{de4afc6d-8e3f-4a0f-946b-c3eb00036b53}">
+      <Declaration><![CDATA[(*!
+<summary>Clears the caller-owned aggregate storage before the result is reported.</summary>
+<description>
+Safe after partial setup or repeated Clear. The task memory manager retains ownership of dynamic causes.
+</description>
+*)
+METHOD PROTECTED AfterTest]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_Aggregate.Clear();]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="ClassName" Id="{72544a01-da75-46c1-bc71-bc3f0c20f393}">
+      <Declaration><![CDATA[//! <summary>Borrows the concrete class name. Callers must not modify it.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{9e080a8e-c911-4544-982b-563c895dda43}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ClassName REF= _ClassName;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="NamespaceName" Id="{1199cb6e-e137-4e3c-a302-a8b8e8763139}">
+      <Declaration><![CDATA[//! <summary>Borrows the compiler-initialized namespace name. Callers must not modify it.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{444f3912-4bb7-4dc7-b608-c25179764ada}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[NamespaceName REF= CurrentNamespace.Name;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="SelfSize" Id="{1def1e25-19fa-4910-9972-f23ac00645f1}">
+      <Declaration><![CDATA[//! <summary>Reports the concrete instance size in bytes.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY SelfSize : ULINT]]></Declaration>
+      <Get Name="Get" Id="{5d57084d-4e47-4ba3-b1c6-d20ff4212bea}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[SelfSize := XSIZEOF(THIS^);]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+  </POU>
+</TcPlcObject>

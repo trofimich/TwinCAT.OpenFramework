@@ -1,0 +1,145 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="SavedFrameworkExceptionRethrowTest" Id="{7619c425-aa1b-4109-9d6f-69a34781c00e}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+SPDX-FileCopyrightText: c 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+SPDX-License-Identifier: MIT
+License: https://opensource.org/license/mit
+*)
+
+(*!
+<summary>Checks rethrow of a saved framework payload after a different nested exception.</summary>
+<description>
+Uses one task and stays at a stable address while assertions are bound to this instance.
+</description>
+*)
+
+{attribute 'no_assign'}
+{attribute 'no_explicit_call' := 'do not call this function block directly'}
+FUNCTION_BLOCK SavedFrameworkExceptionRethrowTest EXTENDS TOF_Testing.SingleCycleTest
+VAR_STAT
+	{attribute 'hide'}
+	_ClassName : STRING := __POUNAME();
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[]]></ST>
+    </Implementation>
+    <Method Name="ExecuteTest" Id="{a803dd01-00f6-4e10-b496-9f1ed78e8842}">
+      <Declaration><![CDATA[(*!
+<summary>Checks rethrow of a saved framework payload after a different nested exception.</summary>
+<description>
+The nested handler must capture its own payload. All caught references are used only in the current task cycle.
+</description>
+*)
+METHOD PROTECTED ExecuteTest
+VAR
+	exceptionCode : __SYSTEM.ExceptionCode;
+	saved : TOF_Core.IException;
+	outerCode : __SYSTEM.ExceptionCode;
+	nestedCode : __SYSTEM.ExceptionCode;
+	nested : TOF_Core.IException;
+	received : TOF_Core.IException;
+	nestedMessage : TOF_Core.ERROR_MESSAGE;
+	receivedMessage : TOF_Core.ERROR_MESSAGE;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[// Catch the original, let a nested handler replace the active payload, then rethrow the saved object.
+__TRY
+	__TRY
+		TOF_Core.Exceptions.ThrowStandard(
+			sourceNamespaceName := NamespaceName,
+			sourceClassName := ClassName,
+			sourcePOUName := __POUNAME(),
+			sourcePosition := __POSITION(),
+			message := "Original"
+		);
+	__CATCH(exceptionCode)
+		saved := TOF_Core.ExceptionManager.GetLastException(
+			exceptionCode := exceptionCode,
+			catchPointNamespaceName := NamespaceName,
+			catchPointPOUName := __POUNAME(),
+			catchPointPosition := __POSITION()
+		);
+
+		__TRY
+			TOF_Core.Exceptions.ThrowStandard(
+				sourceNamespaceName := NamespaceName,
+				sourceClassName := ClassName,
+				sourcePOUName := __POUNAME(),
+				sourcePosition := __POSITION(),
+				message := "Nested"
+			);
+		__CATCH(nestedCode)
+			nested := TOF_Core.ExceptionManager.GetLastException(
+				exceptionCode := nestedCode,
+				catchPointNamespaceName := NamespaceName,
+				catchPointPOUName := __POUNAME(),
+				catchPointPosition := __POSITION()
+			);
+		__ENDTRY
+
+		IF saved <> 0 THEN
+			TOF_Core.ExceptionManager.Throw(exception := saved);
+		END_IF
+	__ENDTRY
+__CATCH(outerCode)
+	received := TOF_Core.ExceptionManager.GetLastException(
+		exceptionCode := outerCode,
+		catchPointNamespaceName := NamespaceName,
+		catchPointPOUName := __POUNAME(),
+		catchPointPosition := __POSITION()
+	);
+__ENDTRY
+
+IF nested = 0 OR_ELSE received = 0 THEN
+	RecordFailure(message := "The nested throw and the saved rethrow must both reach their handlers");
+	RETURN;
+END_IF
+
+nestedMessage := nested.GetMessage();
+receivedMessage := received.GetMessage();
+Assert.ThatBool(
+	actual := nested <> saved AND_THEN nestedMessage = "Nested",
+	message := "The nested catch must observe a distinct payload"
+).IsTrue();
+Assert.ThatBool(
+	actual := received = saved AND_THEN receivedMessage = "Original",
+	message := "Rethrow must preserve the saved payload and text"
+).IsTrue();]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="ClassName" Id="{165c0a46-5864-4130-ac9e-04e3a37134fd}">
+      <Declaration><![CDATA[//! <summary>Borrows the concrete class name. Callers must not modify it.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{5b0de2b8-5afd-46a1-b618-989e34a29adb}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ClassName REF= _ClassName;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="NamespaceName" Id="{44fab885-a06e-4d0c-a106-b30ae334d25c}">
+      <Declaration><![CDATA[//! <summary>Borrows the compiler-initialized namespace name. Callers must not modify it.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{7ff855f5-d388-4e59-adf9-728461be38e8}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[NamespaceName REF= CurrentNamespace.Name;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="SelfSize" Id="{cc504cbe-6404-4e4f-af3e-58578fa503a4}">
+      <Declaration><![CDATA[//! <summary>Reports the concrete instance size in bytes.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY SelfSize : ULINT]]></Declaration>
+      <Get Name="Get" Id="{05146dd4-9fb4-49a5-a9f2-5008320630fe}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[SelfSize := XSIZEOF(THIS^);]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+  </POU>
+</TcPlcObject>

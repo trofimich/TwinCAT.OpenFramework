@@ -12,7 +12,11 @@ License: https://opensource.org/license/mit
 <description>
 Use in one task without reentry. The ADS backend has no established concurrent-call guarantee, even for
 separate reporter instances. For multiple tasks use per-task in-memory reports or a synchronized backend.
-Diagnostic transport may truncate long text; each result callback emits at most one ADS record.
+Each callback submits at most one record. The ADS completion record includes counts and the first failed leaf name.
+LastRunSummary includes the first failed leaf name and a bounded
+version of its diagnostic. The summary and failed log writes are observable after the run. A failed
+write does not change the test outcome. Individual ADS failure records are capped at 200 wide characters.
+ReportRunStart clears all observations before attempting the start message.
 </description>
 *)
 
@@ -23,6 +27,11 @@ VAR_STAT
 END_VAR
 VAR
 	_AdsLogger : TOF_Core.AdsLogger;
+	_FirstFailureName : WSTRING;
+	_FirstFailureDiagnostic : WSTRING(255);
+	_LastRunSummary : TOF_Core.ERROR_MESSAGE;
+	_FailedLogWriteCount : UDINT;
+	_LastLogFailureMessage : TOF_Core.ERROR_MESSAGE;
 END_VAR]]></Declaration>
     <Implementation>
       <ST><![CDATA[]]></ST>
@@ -40,6 +49,72 @@ PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
         </Implementation>
       </Get>
     </Property>
+    <Property Name="FailedLogWriteCount" Id="{159f9331-db53-4e73-ac02-b64bded2227f}">
+      <Declaration><![CDATA[(*!
+<summary>Counts start, result and summary writes for which TryLogMessage returned FALSE.</summary>
+<description>The count resets at ReportRunStart. A successful write does not confirm display in XAE.</description>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY FailedLogWriteCount : UDINT]]></Declaration>
+      <Get Name="Get" Id="{c4093a24-5413-407f-ba52-31524df72870}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[FailedLogWriteCount := _FailedLogWriteCount;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="LastLogFailureMessage" Id="{96074640-3b0f-4b76-8958-405da4a01905}">
+      <Declaration><![CDATA[(*!
+<summary>Borrows the last message whose ADS logger call returned FALSE.</summary>
+<description>Empty until a write fails in the current run. Callers must not modify the returned storage.</description>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY LastLogFailureMessage : REFERENCE TO TOF_Core.ERROR_MESSAGE]]></Declaration>
+      <Get Name="Get" Id="{449ad356-f869-475c-b791-fe4802f56fac}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[LastLogFailureMessage REF= _LastLogFailureMessage;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="LastRunSummary" Id="{ac0e566d-a009-46ba-96e7-29baf150e0a0}">
+      <Declaration><![CDATA[(*!
+<summary>Borrows the summary created at ReportRunEnd regardless of its ADS write status.</summary>
+<description>Empty after ReportRunStart until ReportRunEnd. Callers must not modify the returned storage.</description>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY LastRunSummary : REFERENCE TO TOF_Core.ERROR_MESSAGE]]></Declaration>
+      <Get Name="Get" Id="{3facb692-cf29-48f1-8262-90eea45ab450}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[LastRunSummary REF= _LastRunSummary;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="logMessage" Id="{c6cc75ab-d14a-43ed-82d8-6172cf95d6d4}">
+      <Declaration><![CDATA[(*!
+<summary>Submits one ADS message and records a FALSE result from the logger.</summary>
+<description>The count saturates at the largest UDINT. The copied text remains available until the next start.</description>
+*)
+METHOD PRIVATE logMessage
+VAR_INPUT
+	category : TOF_Core.LOG_CATEGORY;
+END_VAR
+VAR_IN_OUT CONSTANT
+	message : TOF_Core.ERROR_MESSAGE;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF TryWriteMessage(category := category, message := message) THEN
+	RETURN;
+END_IF
+
+IF _FailedLogWriteCount < TOF_Core.UnsignedInt32.MAX_VALUE THEN
+	_FailedLogWriteCount := _FailedLogWriteCount + 1;
+END_IF
+
+_LastLogFailureMessage := message;]]></ST>
+      </Implementation>
+    </Method>
     <Property Name="NamespaceName" Id="{307044c2-62a4-4bee-b8de-9823fa86f60c}">
       <Declaration><![CDATA[(*!
 <summary>Provides the library namespace.</summary>
@@ -55,50 +130,73 @@ PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
     </Property>
     <Method Name="ReportRunEnd" Id="{f342d4f8-6bd1-4885-9c6d-263d40c86dfe}">
       <Declaration><![CDATA[(*!
-<summary>Logs aggregated leaf counts.</summary>
+<summary>Logs leaf counts and the first failed leaf name and retains its diagnostic for online inspection.</summary>
+<description>The retained summary also includes a bounded first-failure diagnostic and survives a rejected ADS write.</description>
 *)
 METHOD ReportRunEnd
 VAR_INPUT
-	totalTests : UDINT;
-	passedTests : UDINT;
-	failedTests : UDINT;
-	skippedTests : UDINT;
+	totalTests : TOF_Core.DINT_LENGTH;
+	passedTests : TOF_Core.DINT_LENGTH;
+	failedTests : TOF_Core.DINT_LENGTH;
+	skippedTests : TOF_Core.DINT_LENGTH;
 	duration : TIME;
 END_VAR
 VAR
-	diagnostic : TOF_Core.ERROR_MESSAGE;
+	logSummary : WSTRING(255);
+	logRecord : TOF_Core.ERROR_MESSAGE;
+	summary : WSTRING(255);
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[diagnostic := TOF_Core.WideStrings.Concat255(
+        <ST><![CDATA[summary := TOF_Core.WideStrings.Concat255(
 	"[TOF_Testing] Finished: ", TO_WSTRING(passedTests), " passed, ",
 	TO_WSTRING(failedTests), " failed, ", TO_WSTRING(skippedTests), " skipped"
 );
 
-_AdsLogger.TryLogMessage(category := TOF_Core.LOG_CATEGORY.INFORMATION, message := diagnostic);]]></ST>
+logSummary := summary;
+
+IF failedTests > 0 AND_THEN _FirstFailureDiagnostic <> "" THEN
+	TOF_Core.WideStrings.AppendFit255(logSummary, " | First failed test: ", _FirstFailureName);
+	TOF_Core.WideStrings.AppendFit255(summary, " | First failure: ", _FirstFailureDiagnostic);
+END_IF
+
+_LastRunSummary := summary;
+logRecord := logSummary;
+logMessage(category := TOF_Core.LOG_CATEGORY.INFORMATION, message := logRecord);]]></ST>
       </Implementation>
     </Method>
     <Method Name="ReportRunStart" Id="{e33e2cad-cdc4-4f26-9afe-7859394471ba}">
       <Declaration><![CDATA[(*!
-<summary>Logs the number of root elements.</summary>
+<summary>Resets per-run observations and logs the number of configured leaf tests.</summary>
+<description>A failed start-message write counts toward the new run.</description>
 *)
 METHOD ReportRunStart
 VAR_INPUT
-	totalElements : UDINT;
+	testCount : TOF_Core.DINT_LENGTH;
 END_VAR
 VAR
 	diagnostic : TOF_Core.ERROR_MESSAGE;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[diagnostic := TOF_Core.WideStrings.Concat255(
-	"[TOF_Testing] Starting ", TO_WSTRING(totalElements), " root elements"
+        <ST><![CDATA[_FirstFailureName := "";
+_FirstFailureDiagnostic := "";
+_LastRunSummary := "";
+_FailedLogWriteCount := 0;
+_LastLogFailureMessage := "";
+
+diagnostic := TOF_Core.WideStrings.Concat255(
+	"[TOF_Testing] Starting ", TO_WSTRING(testCount), " tests"
 );
 
-_AdsLogger.TryLogMessage(category := TOF_Core.LOG_CATEGORY.INFORMATION, message := diagnostic);]]></ST>
+logMessage(category := TOF_Core.LOG_CATEGORY.INFORMATION, message := diagnostic);]]></ST>
       </Implementation>
     </Method>
     <Method Name="ReportTestCaseResult" Id="{fef23984-ca74-4077-b47a-ac9e1f01e9b5}">
       <Declaration><![CDATA[(*!
-<summary>Logs a failed leaf with its group path and copied diagnostic.</summary>
+<summary>Logs a failed leaf with its group path and caches the first failure for the summary.</summary>
+<description>
+The individual ADS record uses up to 200 wide characters to leave room below the native ADS text limit.
+The retained summary includes the leaf name and the beginning of its diagnostic.
+</description>
 <param name="testName">Individual name bounded to 80 wide characters, matching INamed.</param>
 *)
 METHOD ReportTestCaseResult
@@ -112,6 +210,7 @@ VAR_IN_OUT CONSTANT
 	message : TOF_Core.ERROR_MESSAGE;
 END_VAR
 VAR
+	shortDiagnostic : WSTRING(200);
 	diagnostic : TOF_Core.ERROR_MESSAGE;
 END_VAR]]></Declaration>
       <Implementation>
@@ -133,11 +232,28 @@ IF outcome <> TEST_OUTCOME.FAILED THEN
 	RETURN;
 END_IF
 
-diagnostic := TOF_Core.WideStrings.Concat255("[TOF_Testing] ", groupPath, "/", testName, ": ");
+IF _FirstFailureDiagnostic = "" THEN
+	_FirstFailureName := testName;
 
-TOF_Core.WideStrings.AppendFit(targetString := diagnostic, sourceString := message);
+	IF _FirstFailureName = "" THEN
+		_FirstFailureName := "<unnamed>";
+	END_IF
 
-_AdsLogger.TryLogMessage(category := TOF_Core.LOG_CATEGORY.ERROR, message := diagnostic);]]></ST>
+	_FirstFailureDiagnostic := TOF_Core.WideStrings.Concat255(_FirstFailureName, ": ");
+	TOF_Core.WideStrings.AppendFit(targetString := _FirstFailureDiagnostic, sourceString := message);
+END_IF
+
+shortDiagnostic := "[TOF_Testing] ";
+
+IF groupPath <> "" THEN
+	TOF_Core.WideStrings.AppendFit255(shortDiagnostic, groupPath, "/");
+END_IF
+
+TOF_Core.WideStrings.AppendFit255(shortDiagnostic, testName, ": ");
+TOF_Core.WideStrings.AppendFit(targetString := shortDiagnostic, sourceString := message);
+diagnostic := shortDiagnostic;
+
+logMessage(category := TOF_Core.LOG_CATEGORY.ERROR, message := diagnostic);]]></ST>
       </Implementation>
     </Method>
     <Property Name="SelfSize" Id="{0dd6e191-246a-483b-a793-65cba039133e}">
@@ -153,5 +269,24 @@ PROPERTY SelfSize : ULINT]]></Declaration>
         </Implementation>
       </Get>
     </Property>
+    <Method Name="TryWriteMessage" Id="{7d405a37-57d8-443b-b1c8-999f47920d35}">
+      <Declaration><![CDATA[(*!
+<summary>Submits one message to the ADS backend and reports whether the logger accepted it.</summary>
+<description>
+An override may replace the backend. It must return FALSE on rejection and must not raise an exception,
+retry the write, or retain the borrowed message. TRUE does not confirm display in XAE.
+</description>
+*)
+METHOD PROTECTED TryWriteMessage : BOOL
+VAR_INPUT
+	category : TOF_Core.LOG_CATEGORY;
+END_VAR
+VAR_IN_OUT CONSTANT
+	message : TOF_Core.ERROR_MESSAGE;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[TryWriteMessage := _AdsLogger.TryLogMessage(category := category, message := message);]]></ST>
+      </Implementation>
+    </Method>
   </POU>
 </TcPlcObject>

@@ -1,0 +1,245 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="FileSystemExceptionCloneTest" Id="{58e2d726-950c-4ded-badf-baabe6eeb596}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+SPDX-FileCopyrightText: © 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+SPDX-License-Identifier: MIT
+License: https://opensource.org/license/mit
+*)
+
+(*!
+<summary>Checks concrete filesystem exception clones and complete copied diagnostics within one task call.</summary>
+<description>
+Verifies the concrete exception interfaces and payloads, including a message longer than 255 characters.
+Clone references are used only within one test call. The hosting AutomationRunner owns task memory cleanup.
+</description>
+*)
+
+{attribute 'no_assign'}
+{attribute 'no_explicit_call' := 'do not call this function block directly'}
+FUNCTION_BLOCK FileSystemExceptionCloneTest EXTENDS TOF_Testing.SingleCycleTest
+VAR_STAT
+	{attribute 'hide'}
+	_ClassName : STRING := __POUNAME();
+END_VAR
+VAR
+	_FileTemplate : TOF_FileSystem.FileSystemException;
+	_PathTemplate : TOF_FileSystem.InvalidPathException;
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[]]></ST>
+    </Implementation>
+    <Method Name="ExecuteTest" Id="{d9f3ea37-56a0-45ab-83de-6e1a12dce313}">
+      <Declaration><![CDATA[(*!
+<summary>Checks concrete filesystem exception clones and complete copied diagnostics within one task call.</summary>
+<description>
+The filesystem payload crosses the 255-character boundary. Both snapshots must retain their data after
+the caller-owned template is cleared. References remain local to the test call.
+</description>
+*)
+METHOD PROTECTED ExecuteTest
+VAR
+	i : DINT;
+	exceptionCode : __SYSTEM.ExceptionCode;
+	caught : TOF_Core.IException;
+	caughtFile : TOF_FileSystem.IFileSystemException;
+	caughtPath : TOF_FileSystem.IInvalidPathException;
+	cloned : TOF_Core.IObject;
+	fileClone : TOF_FileSystem.IFileSystemException;
+	pathClone : TOF_FileSystem.IInvalidPathException;
+	message : TOF_Core.ERROR_MESSAGE;
+	sourceLocalTimestamp : LDATE_AND_TIME;
+	sourceUtcTimestamp : LDATE_AND_TIME;
+	path : STRING(255) := 'C:\invalid|path';
+	thrown : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[message := "Native filesystem failure payload: ";
+
+FOR i := 1 TO 5 DO
+	TOF_Core.WideStrings.Append255(
+		message,
+		"Long diagnostic fragment preserving data beyond the 255-character string boundary. "
+	);
+END_FOR
+
+TOF_Core.WideStrings.Append255(message, "Payload suffix");
+Assert.ThatBool(
+	actual := TOF_Core.WideStrings.GetLength(value := message) > 255,
+	message := "Filesystem clone test payload must exceed 255 characters"
+).IsTrue();
+
+__TRY
+	_FileTemplate.Throw(
+		sourceNamespaceName := 'Tests',
+		sourceClassName := 'FileSystemContractTest',
+		sourcePOUName := 'FileFailure',
+		sourcePosition := 'PositionA',
+		message := message,
+		errorCode := UDINT#16#70C
+	);
+__CATCH(exceptionCode)
+	thrown := TRUE;
+	caught := TOF_Core.ExceptionManager.GetLastException(
+		exceptionCode := exceptionCode,
+		catchPointNamespaceName := NamespaceName,
+		catchPointPOUName := __POUNAME(),
+		catchPointPosition := __POSITION()
+	);
+	Assert.ThatBool(
+		actual := __QUERYINTERFACE(caught, caughtFile),
+		message := "Throw must retain the concrete filesystem exception"
+	).IsTrue();
+__ENDTRY
+
+Assert.ThatBool(actual := thrown, message := "Filesystem Throw must propagate").IsTrue();
+sourceLocalTimestamp := _FileTemplate.LocalTimestamp;
+sourceUtcTimestamp := _FileTemplate.UtcTimestamp;
+cloned := _FileTemplate.Clone();
+_FileTemplate.Clear();
+Assert.ThatBool(
+	actual := __QUERYINTERFACE(cloned, fileClone),
+	message := "Clone must implement IFileSystemException"
+).IsTrue();
+
+IF fileClone <> 0 THEN
+	Assert.ThatBool(
+		actual := fileClone.IsDynamicInstance,
+		message := "Clone must be a dynamic task-owned instance"
+	).IsTrue();
+	Assert.ThatBool(
+		actual := fileClone.SelfAddress <> _FileTemplate.SelfAddress,
+		message := "Clone must be distinct from its template"
+	).IsTrue();
+	Assert.ThatBool(
+		actual := fileClone.SourceMessage = message,
+		message := "Clone must preserve message payload"
+	).IsTrue();
+	Assert.ThatBool(
+		actual := fileClone.ErrorCode = UDINT#16#70C,
+		message := "Clone must preserve native error code"
+	).IsTrue();
+	Assert.ThatBool(
+		actual := fileClone.SourceFullPOUName = 'Tests.FileSystemContractTest.FileFailure()',
+		message := "Clone must preserve source POU"
+	).IsTrue();
+	Assert.ThatBool(
+		actual := fileClone.SourcePosition = 'PositionA',
+		message := "Clone must preserve source position"
+	).IsTrue();
+	Assert.ThatBool(
+		actual := fileClone.LocalTimestamp = sourceLocalTimestamp,
+		message := "Clone must preserve local timestamp"
+	).IsTrue();
+	Assert.ThatBool(
+		actual := fileClone.UtcTimestamp = sourceUtcTimestamp,
+		message := "Clone must preserve UTC timestamp"
+	).IsTrue();
+END_IF
+
+thrown := FALSE;
+
+__TRY
+	_PathTemplate.Throw(
+		sourceNamespaceName := 'Tests',
+		sourceClassName := 'FileSystemContractTest',
+		sourcePOUName := 'PathFailure',
+		sourcePosition := 'PositionB',
+		path := path,
+		errorMessage := "Forbidden character"
+	);
+__CATCH(exceptionCode)
+	thrown := TRUE;
+	caught := TOF_Core.ExceptionManager.GetLastException(
+		exceptionCode := exceptionCode,
+		catchPointNamespaceName := NamespaceName,
+		catchPointPOUName := __POUNAME(),
+		catchPointPosition := __POSITION()
+	);
+	Assert.ThatBool(
+		actual := __QUERYINTERFACE(caught, caughtPath),
+		message := "Throw must retain the concrete invalid-path exception"
+	).IsTrue();
+__ENDTRY
+
+Assert.ThatBool(actual := thrown, message := "Invalid-path Throw must propagate").IsTrue();
+sourceLocalTimestamp := _PathTemplate.LocalTimestamp;
+sourceUtcTimestamp := _PathTemplate.UtcTimestamp;
+cloned := _PathTemplate.Clone();
+_PathTemplate.Clear();
+Assert.ThatBool(
+	actual := __QUERYINTERFACE(cloned, pathClone),
+	message := "Clone must implement IInvalidPathException"
+).IsTrue();
+
+IF pathClone <> 0 THEN
+	Assert.ThatBool(
+		actual := pathClone.IsDynamicInstance,
+		message := "Path clone must be a dynamic task-owned instance"
+	).IsTrue();
+	Assert.ThatBool(
+		actual := pathClone.SelfAddress <> _PathTemplate.SelfAddress,
+		message := "Path clone must be distinct from its template"
+	).IsTrue();
+	Assert.ThatBool(
+		actual := pathClone.SourceMessage = TO_WSTRING('Invalid path $22C:\invalid|path$22: Forbidden character'),
+		message := "Path clone must preserve the rejected path and the explanation"
+	).IsTrue();
+	Assert.ThatBool(
+		actual := pathClone.ErrorCode = TOF_Core.UnsignedInt32.ZERO,
+		message := "Path clone must preserve error code"
+	).IsTrue();
+	Assert.ThatBool(
+		actual := pathClone.SourceFullPOUName = 'Tests.FileSystemContractTest.PathFailure()',
+		message := "Path clone must preserve source POU"
+	).IsTrue();
+	Assert.ThatBool(
+		actual := pathClone.SourcePosition = 'PositionB',
+		message := "Path clone must preserve source position"
+	).IsTrue();
+	Assert.ThatBool(
+		actual := pathClone.LocalTimestamp = sourceLocalTimestamp,
+		message := "Path clone must preserve local timestamp"
+	).IsTrue();
+	Assert.ThatBool(
+		actual := pathClone.UtcTimestamp = sourceUtcTimestamp,
+		message := "Path clone must preserve UTC timestamp"
+	).IsTrue();
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="ClassName" Id="{9dbce162-5058-40f4-9443-411ec4028124}">
+      <Declaration><![CDATA[//! <summary>Borrows the concrete class name for the lifetime of this instance; callers must not modify it.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{f312793c-eb9a-422f-8de3-42317c0ebdf3}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ClassName REF= _ClassName;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="NamespaceName" Id="{b6d93026-01be-4b8f-901a-788b8bad899b}">
+      <Declaration><![CDATA[//! <summary>Borrows the compiler-initialized namespace; callers must not modify the returned reference.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{c4303d3b-6dc2-4d93-92d2-2052a8f2081b}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[NamespaceName REF= CurrentNamespace.Name;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="SelfSize" Id="{ff364715-ed19-4fe8-b0b8-46f12f48b0d6}">
+      <Declaration><![CDATA[//! <summary>Reports the complete concrete instance size, excluding separately allocated storage.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY SelfSize : ULINT]]></Declaration>
+      <Get Name="Get" Id="{682d1213-8a25-4286-9c87-810088deb932}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[SelfSize := XSIZEOF(THIS^);]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+  </POU>
+</TcPlcObject>

@@ -1,0 +1,293 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="OpenMissingFileForReadingTest" Id="{5c0ce868-0c7f-4754-ac0c-7ba0ff6064b7}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+SPDX-FileCopyrightText: © 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+SPDX-License-Identifier: MIT
+License: https://opensource.org/license/mit
+*)
+
+(*!
+<summary>Checks resource acquisition failure when reading a missing file in an owned test directory.</summary>
+<description>
+The shared FileTestRoot is driven by the test controller. This instance owns its directory and file tasks
+for the entire scenario. The ten-second scenario deadline excludes cleanup. Setup or scenario failures
+are retained while the manager stops and the directory cleanup attempts finish. Only then is a result
+reported. Native failures can leave artifacts requiring inspection. Use from one task without reentry.
+Do not copy the instance or drive borrowed file tasks independently.
+</description>
+*)
+
+{attribute 'no_assign'}
+{attribute 'no_explicit_call' := 'do not call this function block directly'}
+FUNCTION_BLOCK OpenMissingFileForReadingTest EXTENDS TOF_Testing.TestCase
+VAR CONSTANT
+	//! <summary>Bounds scenario preparation and execution before cleanup is requested.</summary>
+	_ScenarioTimeout : TIME := T#10S;
+	//! <summary>FB_FileOpen code for a missing file or invalid filename or path.</summary>
+	_FileNotFoundCode : UDINT := 16#70C;
+END_VAR
+VAR
+	_Directory : FileTestDirectory(directoryPath := 'C:\OpenFrameworkTests\FileContent_Missing');
+	_FileContentManager : TOF_FileSystem.FileContentManager(name := "fileContentManager");
+	_ReadStringFromFile : TOF_FileSystem.ReadString255FromFile(name := "readStringFromFile");
+	_ScenarioDeadline : Tc2_Standard.TON;
+
+	_Lifecycle : FILE_TEST_LIFECYCLE;
+	_ScenarioFailure : TOF_Core.ERROR_MESSAGE;
+	_CleanupExceptionObserved : BOOL;
+END_VAR
+VAR_STAT
+	//! <summary>Class name shared by all instances of this function block.</summary>
+	{attribute 'hide'}
+	_ClassName : STRING := __POUNAME();
+END_VAR
+VAR
+	{attribute 'hide'}
+	{attribute 'init_namespace'}
+	_NamespaceName : STRING;
+END_VAR
+]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[]]></ST>
+    </Implementation>
+    <Method Name="BeforeTest" Id="{b75efadc-cfad-41f9-91c8-1c73b760ed50}">
+      <Declaration><![CDATA[(*!
+<summary>Prepares the owned fixture and file queue for a fresh run.</summary>
+<description>
+After a previous run, reuse requires successful directory cleanup and idle file tasks. If a reset is refused,
+report failure without submitting new native I/O. A retained resource requires inspection before reuse.
+</description>
+*)
+METHOD PROTECTED BeforeTest]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF _Lifecycle = FILE_TEST_LIFECYCLE.FINISHED THEN
+	IF _FileContentManager.State.Running
+		OR_ELSE _FileContentManager.ResourceManager.ResourceAcquired
+		OR_ELSE NOT _FileContentManager.Reset()
+	THEN
+		RecordFailure(message := "Missing-file fixture could not be rearmed after the previous run");
+		RETURN;
+	END_IF
+
+	// Reset on a READY manager does not clear its queue after a refused Start.
+	_FileContentManager.ClearWaitingTasks();
+
+	IF NOT _ReadStringFromFile.Reset() OR_ELSE NOT _Directory.Reset() THEN
+		RecordFailure(message := "Missing-file directory or read task could not be rearmed after the previous run");
+		RETURN;
+	END_IF
+END_IF
+
+_ScenarioDeadline(IN := FALSE, PT := _ScenarioTimeout);
+_ScenarioFailure := "";
+_CleanupExceptionObserved := FALSE;
+_Lifecycle := FILE_TEST_LIFECYCLE.RUNNING_SCENARIO;]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="ClassName" Id="{de0ec3cf-93da-4d2a-99ec-ded876cd4c48}">
+      <Declaration><![CDATA[//! <summary>Borrows the concrete class name for the lifetime of this instance; callers must not modify it.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{126cc600-e414-487d-aaa5-30d0aa70f3ba}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ClassName REF= _ClassName;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="RunCycle" Id="{4332f8ae-b7fe-45ea-b969-08b9bf459127}">
+      <Declaration><![CDATA[(*!
+<summary>Advances the scenario or one cycle of cleanup before publishing its result.</summary>
+<description>
+Retains an ordinary scenario failure without calling RecordFailure until cleanup completes, because that
+call ends the leaf after this callback. A caught cleanup exception keeps the persistent fixture available
+for another attempt on the next cycle. The inherited test boundary handles terminal allocation failure.
+</description>
+*)
+METHOD PROTECTED RunCycle : TOF_Testing.TEST_CYCLE_RESULT
+VAR
+	cleanupFailure : WSTRING(255);
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[RunCycle := TOF_Testing.TEST_CYCLE_RESULT.BUSY;
+
+IF _Lifecycle = FILE_TEST_LIFECYCLE.RUNNING_SCENARIO THEN
+	__TRY
+		IF runScenario() THEN
+			_Lifecycle := FILE_TEST_LIFECYCLE.CLEANING_UP;
+		END_IF
+	__CATCH
+		_ScenarioFailure := "Exception interrupted the file scenario";
+		_Lifecycle := FILE_TEST_LIFECYCLE.CLEANING_UP;
+	__ENDTRY
+
+	RETURN;
+END_IF
+
+__TRY
+	IF _FileContentManager.State.Running THEN
+		_FileContentManager.Cancel();
+		_FileContentManager.Execute();
+
+		IF _FileContentManager.State.Running THEN
+			RETURN;
+		END_IF
+	END_IF
+
+	_Directory.Cleanup();
+__CATCH
+	_CleanupExceptionObserved := TRUE;
+	RETURN;
+__ENDTRY
+
+IF NOT _Directory.CleanupComplete THEN
+	RETURN;
+END_IF
+
+IF NOT _Directory.CleanupSucceeded THEN
+	cleanupFailure := TOF_Core.WideStrings.ConcatFit255(
+		"Cleanup failed for ", TO_WSTRING(_Directory.DirectoryPath), ": ", TO_WSTRING(_Directory.CleanupMessage)
+	);
+ELSIF _CleanupExceptionObserved THEN
+	cleanupFailure := "An exception interrupted cleanup before the final removal attempt";
+END_IF
+
+IF cleanupFailure <> "" THEN
+	IF _ScenarioFailure <> "" THEN
+		TOF_Core.WideStrings.AppendFit(targetString := _ScenarioFailure, sourceString := " | ");
+	END_IF
+
+	TOF_Core.WideStrings.AppendFit(targetString := _ScenarioFailure, sourceString := cleanupFailure);
+END_IF
+
+IF _ScenarioFailure <> "" THEN
+	RecordFailure(message := _ScenarioFailure);
+END_IF
+
+_Lifecycle := FILE_TEST_LIFECYCLE.FINISHED;
+RunCycle := TOF_Testing.TEST_CYCLE_RESULT.DONE;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="runScenario" Id="{30886634-1178-4389-942b-60555e4e1a61}">
+      <Declaration><![CDATA[(*!
+<summary>Advances directory preparation and verifies the expected failure to acquire a read handle.</summary>
+<description>
+Returns TRUE once the scenario has passed or a failure requires cleanup. Copies the first failed
+expectation, leaving reporting to RunCycle after cleanup. The expected open diagnostic identifies the exact
+file in the newly created directory and its native code. Waiting for the shared root counts toward the same scenario deadline.
+</description>
+*)
+METHOD PRIVATE runScenario : BOOL
+VAR
+	expectedOpenFailure : TOF_Core.ERROR_MESSAGE;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_ScenarioDeadline(IN := TRUE, PT := _ScenarioTimeout);
+
+IF FileTestRoot.FailureMessage <> TOF_Core.Strings.Empty THEN
+	_ScenarioFailure := TO_WSTRING(FileTestRoot.FailureMessage);
+	runScenario := TRUE;
+	RETURN;
+END_IF
+
+IF NOT FileTestRoot.Prepared THEN
+	IF _ScenarioDeadline.Q THEN
+		_ScenarioFailure := "Shared filesystem test root was not ready within 10 seconds";
+		runScenario := TRUE;
+	END_IF
+
+	RETURN;
+END_IF
+
+_Directory.Prepare();
+
+IF _Directory.PreparationFailed THEN
+	_ScenarioFailure := TOF_Core.WideStrings.ConcatFit255(
+		TO_WSTRING(_Directory.DirectoryPath), ": ", TO_WSTRING(_Directory.PreparationMessage)
+	);
+	runScenario := TRUE;
+	RETURN;
+END_IF
+
+IF NOT _Directory.Prepared THEN
+	IF _ScenarioDeadline.Q THEN
+		_ScenarioFailure := "Scenario directory preparation exceeded its deadline";
+		runScenario := TRUE;
+	END_IF
+
+	RETURN;
+END_IF
+
+IF _FileContentManager.State.Ready THEN
+	_FileContentManager.FilePath := _Directory.FirstFilePath;
+	_FileContentManager.ModeFlags := Tc2_System.Global_Variables.FOPEN_MODEREAD
+		OR Tc2_System.Global_Variables.FOPEN_MODETEXT;
+	_FileContentManager.PathType := Tc2_System.E_OpenPath.PATH_GENERIC;
+	_FileContentManager.Timeout := T#2S;
+	_FileContentManager.StopWhenNoPendingTasks := TRUE;
+	_FileContentManager.Enqueue(fileHandleTask := _ReadStringFromFile);
+
+	IF NOT _FileContentManager.Start() THEN
+		_ScenarioFailure := "Start must accept the task; the missing file must be detected during resource acquisition";
+		runScenario := TRUE;
+		RETURN;
+	END_IF
+END_IF
+
+_FileContentManager.Execute();
+
+IF _FileContentManager.State.Stopped THEN
+	expectedOpenFailure := TOF_Core.WideStrings.Concat255(
+		"Error while open file '",
+		TO_WSTRING(_Directory.FirstFilePath),
+		"'",
+		TOF_Core.Exceptions.ERROR_CODE_PREFIX,
+		TO_WSTRING(_FileNotFoundCode)
+	);
+
+	IF NOT _FileContentManager.FinalStopReason.Failure THEN
+		_ScenarioFailure := "Opening a missing file for reading must stop FileContentManager with Failure";
+	ELSIF _FileContentManager.FinalStopReason.Message <> expectedOpenFailure THEN
+		_ScenarioFailure := "Expected the missing-file open error. Actual: ";
+		TOF_Core.WideStrings.AppendFit(
+			targetString := _ScenarioFailure,
+			sourceString := _FileContentManager.FinalStopReason.Message
+		);
+	ELSIF NOT _ReadStringFromFile.State.Ready THEN
+		_ScenarioFailure := "Read task must remain READY when the file cannot be opened";
+	ELSIF _FileContentManager.ResourceManager.ResourceAcquired THEN
+		_ScenarioFailure := "No file resource must remain acquired after file open failure";
+	END_IF
+
+	runScenario := TRUE;
+ELSIF _ScenarioDeadline.Q THEN
+	_ScenarioFailure := "FileContentManager did not stop within 10 seconds after attempting to open a missing file";
+	runScenario := TRUE;
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="NamespaceName" Id="{e3c8b625-1de3-497a-9f1f-186e8f7d20bc}">
+      <Declaration><![CDATA[//! <summary>Borrows the compiler-initialized namespace; callers must not modify the returned reference.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{19f8ca5d-90ee-4d38-a4ac-050c82fed65d}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[NamespaceName REF= CurrentNamespace.Name;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="SelfSize" Id="{152f0d11-cc3d-4580-b2fd-21f9bdf011a0}">
+      <Declaration><![CDATA[//! <summary>Reports the complete concrete instance size, excluding separately allocated storage.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY SelfSize : ULINT]]></Declaration>
+      <Get Name="Get" Id="{4827a241-c089-4acc-8e8e-835b33d9e3c3}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[SelfSize := XSIZEOF(THIS^);]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+  </POU>
+</TcPlcObject>

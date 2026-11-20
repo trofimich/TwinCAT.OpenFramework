@@ -1,4 +1,4 @@
-<?xml version="1.0" encoding="utf-8"?>
+﻿<?xml version="1.0" encoding="utf-8"?>
 <TcPlcObject Version="1.1.0.1">
   <POU Name="JsonConfigurationReader" Id="{236a8e5c-23da-49c0-8af5-0fa696e16ceb}" SpecialFunc="None">
     <Declaration><![CDATA[(*
@@ -9,7 +9,10 @@ License: https://opensource.org/license/mit
 
 (*!
 <summary>Reads a JSON document using scoped DOM handles.</summary>
-<description>Use a single instance from one task without reentry.</description>
+<description>
+Use a single instance from one task without reentry. UTF-8 text, including ASCII and empty strings, is decoded directly.
+Legacy encodings use the native symbol converter.
+</description>
 *)
 
 {attribute 'no_explicit_call' := 'do not call this function block directly'}
@@ -205,6 +208,8 @@ END_IF]]></ST>
 <summary>Reads one elementary value into a live typed destination or raises.</summary>
 <description>
 Use within one synchronous load. Handles borrow the active document and expire when it is replaced.
+WSTRING requires a JSON string. Direct UTF-8 decoding checks the destination capacity before writing.
+Native copy failures identify the operation and buffer size. Read the destination only after successful return.
 </description>
 <param name="node">Node containing the elementary value.</param>
 <param name="valueType">Elementary IEC type class to decode.</param>
@@ -253,14 +258,34 @@ IF valueType = TOF_Core.CONFIGURATION_VALUE_TYPE.TYPE_STRING THEN
 	END_IF
 
 	IF _Parser.CopyString(v := node.Handle, pStr := target^, nStr := size) = 0 THEN
-		throwInvalidDocumentException(reason := 'value too large', fieldName := '');
+		throwInvalidDocumentException(
+			reason := TOF_Core.Strings.Concat255(
+				'CopyString failed for ', typeName, ' (', TO_STRING(size), ' destination bytes)'
+			),
+			fieldName := ''
+		);
 	END_IF
 
 	RETURN;
 END_IF
 
+IF valueType = TOF_Core.CONFIGURATION_VALUE_TYPE.TYPE_WSTRING THEN
+	IF NOT _Parser.IsString(v := node.Handle) THEN
+		throwInvalidDocumentException(reason := 'type/size mismatch', fieldName := '');
+	END_IF
+
+	IF readUtf8WideString(node := node, destination := data, size := size) THEN
+		RETURN;
+	END_IF
+END_IF
+
 IF _Parser.CopyJson(v := node.Handle, pDoc := _Value, nDoc := SIZEOF(_Value)) = 0 THEN
-	throwInvalidDocumentException(reason := 'value too large', fieldName := '');
+	throwInvalidDocumentException(
+		reason := TOF_Core.Strings.Concat255(
+			'CopyJson failed for ', typeName, ' (', TO_STRING(SIZEOF(_Value)), ' JSON buffer bytes)'
+		),
+		fieldName := ''
+	);
 END_IF
 
 IF NOT _Converter.SetSymbolFromJson(
@@ -288,6 +313,111 @@ PROPERTY SelfSize : ULINT]]></Declaration>
         </Implementation>
       </Get>
     </Property>
+    <Method Name="readUtf8WideString" Id="{80593a06-c9e1-4f7e-9300-d6f64d094430}" FolderPath="Service methods">
+      <Declaration><![CDATA[(*!
+<summary>Decodes a JSON string directly into a WSTRING destination when its bytes are available as UTF-8.</summary>
+<description>
+Expects a live string node and a writable WSTRING buffer with a validated byte size. Returns FALSE
+without writing when the copied text uses a legacy encoding.
+The caller then uses the native symbol converter. Inspects JSON escapes before copying decoded text to an IEC string.
+Both DOM and copy sizes include the terminator. Rejects a size mismatch,
+an embedded null, insufficient destination capacity, or incomplete conversion. Conversion failure may modify the destination.
+</description>
+*)
+METHOD PRIVATE readUtf8WideString : BOOL
+VAR_INPUT
+	node : TOF_Core.CONFIGURATION_NODE;
+	destination : POINTER TO WSTRING;
+	size : UDINT;
+END_VAR
+VAR
+	// A JSON escape for U+0000, which IEC text cannot represent within a value.
+	nullEscape : STRING(6) := '\u0000';
+	jsonSize : UDINT;
+	offset : UDINT;
+	escapeIndex : UDINT;
+	jsonBytes : POINTER TO BYTE;
+	domStringSize : UDINT;
+	copiedSize : UDINT;
+	characterCount : UDINT;
+	decodedCount : UDINT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[jsonSize := _Parser.CopyJson(v := node.Handle, pDoc := _Value, nDoc := SIZEOF(_Value));
+
+IF jsonSize = 0 THEN
+	throwInvalidDocumentException(reason := 'parse failure', fieldName := '');
+END_IF
+
+jsonBytes := ADR(_Value);
+offset := 1; // Skip the opening JSON quote.
+
+WHILE offset + SIZEOF(nullEscape) <= jsonSize DO
+	IF jsonBytes[offset] = nullEscape[0] THEN
+		escapeIndex := 1;
+
+		WHILE escapeIndex < SIZEOF(nullEscape) - TOF_Core.Strings.CharSize
+			AND_THEN jsonBytes[offset + escapeIndex] = nullEscape[escapeIndex]
+		DO
+			escapeIndex := escapeIndex + 1;
+		END_WHILE
+
+		IF escapeIndex = SIZEOF(nullEscape) - TOF_Core.Strings.CharSize THEN
+			throwInvalidDocumentException(reason := 'parse failure', fieldName := '');
+		END_IF
+
+		// Skip the escaped byte as well, including a second backslash in a literal backslash pair.
+		offset := offset + 1;
+	END_IF
+
+	offset := offset + 1;
+END_WHILE
+
+domStringSize := _Parser.GetStringLength(v := node.Handle);
+
+copiedSize := _Parser.CopyString(v := node.Handle, pStr := _Value, nStr := SIZEOF(_Value));
+
+IF copiedSize = 0
+	OR_ELSE copiedSize <> domStringSize
+	OR_ELSE TOF_Core.Strings.GetActualSize(value := _Value) <> copiedSize
+THEN
+	throwInvalidDocumentException(reason := 'parse failure', fieldName := '');
+END_IF
+
+IF copiedSize = TOF_Core.Strings.CharSize THEN
+	destination^[0] := 0;
+	readUtf8WideString := TRUE;
+	RETURN;
+END_IF
+
+characterCount := Tc2_Utilities.UTF8Len(pUTF8 := ADR(_Value));
+
+IF characterCount = 0 THEN
+	RETURN;
+END_IF
+
+IF characterCount >= size / TOF_Core.WideStrings.CharSize THEN
+	throwInvalidDocumentException(
+		reason := TOF_Core.Strings.Concat255(
+			'WSTRING needs ', TO_STRING(characterCount), ' characters, capacity ',
+			TO_STRING(size / TOF_Core.WideStrings.CharSize - 1)
+		),
+		fieldName := ''
+	);
+END_IF
+
+IF NOT Tc2_Utilities.UTF8_TO_WSTRING(
+	pDstWSTRING := destination,
+	pSrcUTF8 := ADR(_Value),
+	nDstSize := size,
+	nDstLen => decodedCount
+) OR_ELSE decodedCount <> characterCount THEN
+	throwInvalidDocumentException(reason := 'parse failure', fieldName := '');
+END_IF
+
+readUtf8WideString := TRUE;]]></ST>
+      </Implementation>
+    </Method>
     <Method Name="throwInvalidDocumentException" Id="{e0005382-6117-4a05-a35e-b58f52a8f44d}" FolderPath="Service methods\">
       <Declaration><![CDATA[(*!
 <summary>Reports an invalid or incompatible configuration value or document structure.</summary>

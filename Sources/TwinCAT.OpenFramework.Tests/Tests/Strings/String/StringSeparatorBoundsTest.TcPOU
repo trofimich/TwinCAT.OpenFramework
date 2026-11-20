@@ -1,0 +1,199 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="StringSeparatorBoundsTest" Id="{88392bc4-88b7-478a-ad0e-05de87529503}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+SPDX-FileCopyrightText: c 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+SPDX-License-Identifier: MIT
+License: https://opensource.org/license/mit
+*)
+
+(*!
+<summary>Checks separator length boundaries and missing borrowed sources.</summary>
+<description>
+Uses one task and stays at a stable address while assertions are bound to this instance.
+</description>
+*)
+
+{attribute 'no_assign'}
+{attribute 'no_explicit_call' := 'do not call this function block directly'}
+FUNCTION_BLOCK StringSeparatorBoundsTest EXTENDS TOF_Testing.SingleCycleTest
+VAR_STAT
+	{attribute 'hide'}
+	_ClassName : STRING := __POUNAME();
+END_VAR
+VAR
+	_Source : STRING(82) := 'xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaay';
+	_Splitter : TOF_Core.StringSplittingEnumerator;
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[]]></ST>
+    </Implementation>
+    <Method Name="ExecuteTest" Id="{825f8098-0f93-4635-8e98-e6bda7aa9973}">
+      <Declaration><![CDATA[(*!
+<summary>Checks separator length boundaries and missing borrowed sources.</summary>
+<description>
+Owns a persistent cursor and its borrowed source. The separators are bounded ASCII byte sequences.
+Reset releases the current fragment before the result is reported.
+</description>
+*)
+METHOD PROTECTED ExecuteTest
+VAR
+	separator : STRING(256);
+	separatorUnits : POINTER TO BYTE;
+	separatorLength : UINT;
+	lengths : ARRAY [0..4] OF UINT := [0, 80, 81, 255, 256];
+	caseLabel : WSTRING(80);
+	missingSource : REFERENCE TO STRING;
+
+	exceptionCode : __SYSTEM.ExceptionCode;
+	caught : TOF_Core.IException;
+	rangeException : TOF_Core.IArgumentOutOfRangeException;
+	accepted : BOOL;
+	i : DINT;
+	j : INT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[// SA0175: Construct bounded ASCII separators of exact byte lengths.
+{analysis -175}
+separatorUnits := ADR(separator);
+{analysis +175}
+
+FOR i := 0 TO UPPER_BOUND(lengths, 1) DO
+	separatorLength := lengths[i];
+	caseLabel := Tc2_Utilities.WCONCAT(STR1 := "separator length ", STR2 := TO_WSTRING(separatorLength));
+	FOR j := 0 TO TO_INT(separatorLength) - 1 DO
+		separatorUnits[j] := BYTE#16#61;
+	END_FOR
+
+	separatorUnits[separatorLength] := TO_BYTE(TOF_Core.UnsignedInt8.MIN_VALUE);
+
+	accepted := TOF_Core.Strings.TryCreateSplitter(sourceString := _Source, separator := separator, splitter => _Splitter);
+	Assert.ThatBool(
+		actual := accepted = (separatorLength = 80),
+		message := Tc2_Utilities.WCONCAT(STR1 := "TryCreateSplitter at ", STR2 := caseLabel)
+	).IsTrue();
+
+	IF accepted THEN
+		assertMaximumSplit(scenario := "TryCreateSplitter must use the full accepted separator");
+		_Splitter.Reset();
+	END_IF
+
+	caught := 0;
+
+	// Capture the expected argument error before inspecting the payload.
+	__TRY
+		_Splitter := TOF_Core.Strings.CreateSplitter(sourceString := _Source, separator := separator);
+	__CATCH(exceptionCode)
+		caught := TOF_Core.ExceptionManager.GetLastException(
+			exceptionCode := exceptionCode,
+			catchPointNamespaceName := NamespaceName,
+			catchPointPOUName := __POUNAME(),
+			catchPointPosition := __POSITION()
+		);
+	__ENDTRY
+
+	IF separatorLength = 80 THEN
+		Assert.ThatBool(actual := caught = 0, message := "CreateSplitter must accept length 80").IsTrue();
+
+		IF caught = 0 THEN
+			assertMaximumSplit(scenario := "CreateSplitter must use the full accepted separator");
+			_Splitter.Reset();
+		END_IF
+	ELSE
+		Assert.ThatBool(
+			actual := __QUERYINTERFACE(caught, rangeException),
+			message := Tc2_Utilities.WCONCAT(STR1 := "Expected ArgumentOutOfRangeException for ", STR2 := caseLabel)
+		).IsTrue();
+	END_IF
+END_FOR
+
+accepted := TOF_Core.Strings.TryCreateSplitter(
+	sourceString := missingSource,
+	separator := ',',
+	splitter => _Splitter
+);
+Assert.ThatBool(
+	actual := accepted,
+	message := "TryCreateSplitter must return FALSE for an unbound source"
+).IsFalse();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="assertMaximumSplit" Id="{e6487211-63e0-4c74-a45c-3f93014989d5}">
+      <Declaration><![CDATA[(*!
+<summary>Verifies that all 80 separator units are used when locating the two fragments.</summary>
+<param name="scenario">Factory name included in failure messages.</param>
+*)
+METHOD PRIVATE assertMaximumSplit
+VAR_INPUT
+	scenario : WSTRING(80);
+END_VAR
+VAR
+	entry : REFERENCE TO STRING;
+	advanced : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[advanced := _Splitter.MoveNext();
+entry REF= _Splitter.CurrentEntry;
+Assert.ThatBool(
+	actual := advanced AND_THEN __ISVALIDREF(entry) AND_THEN entry = 'x',
+	message := scenario
+).IsTrue();
+
+advanced := _Splitter.MoveNext();
+entry REF= _Splitter.CurrentEntry;
+Assert.ThatBool(
+	actual := advanced AND_THEN __ISVALIDREF(entry) AND_THEN entry = 'y',
+	message := scenario
+).IsTrue();
+
+advanced := _Splitter.MoveNext();
+Assert.ThatBool(actual := advanced, message := scenario).IsFalse();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="AfterTest" Id="{889f046f-ba09-4a72-8bb0-0e098958f013}">
+      <Declaration><![CDATA[(*!
+<summary>Resets the splitter and releases any active fragment before reporting.</summary>
+<description>
+Safe after partial initialization and after explicit cleanup in the scenario.
+</description>
+*)
+METHOD PROTECTED AfterTest]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_Splitter.Reset();]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="ClassName" Id="{552812d5-4e16-4881-9fbe-feedca290bf1}">
+      <Declaration><![CDATA[//! <summary>Borrows the concrete class name. Callers must not modify it.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{7b5c1b6b-2390-4dfa-9fe5-1fe0f7ef57a7}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ClassName REF= _ClassName;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="NamespaceName" Id="{ba1da811-6f3e-4c25-8b3c-dfe3cbfc0d06}">
+      <Declaration><![CDATA[//! <summary>Borrows the compiler-initialized namespace name. Callers must not modify it.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{4781265a-bb83-406f-a83e-c4aa11530637}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[NamespaceName REF= CurrentNamespace.Name;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="SelfSize" Id="{bd8e436a-b599-468e-8577-5ba332c7fcd0}">
+      <Declaration><![CDATA[//! <summary>Reports the concrete instance size in bytes.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY SelfSize : ULINT]]></Declaration>
+      <Get Name="Get" Id="{6bcc85e3-175f-4f0b-b90f-6eeb0dc84e76}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[SelfSize := XSIZEOF(THIS^);]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+  </POU>
+</TcPlcObject>

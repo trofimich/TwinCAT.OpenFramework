@@ -1,0 +1,143 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="TaskReinitViewsTest" Id="{a06860ea-b7b5-4736-8b49-c333b31a593e}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+SPDX-FileCopyrightText: © 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+SPDX-License-Identifier: MIT
+License: https://opensource.org/license/mit
+*)
+
+(*!
+<summary>Checks that reinitialization preserves a task's live views while cancellation is pending.</summary>
+<description>
+Exercises the reinitialization hook in place on a resource-free task. Copy-code relocation requires a runtime check.
+</description>
+*)
+
+{attribute 'no_explicit_call' := 'do not call this function block directly'}
+FUNCTION_BLOCK TaskReinitViewsTest EXTENDS TOF_Testing.SingleCycleTest
+VAR_STAT
+	{attribute 'hide'}
+	_ClassName : STRING := __POUNAME();
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[]]></ST>
+    </Implementation>
+    <Method Name="ExecuteTest" Id="{6ee12275-2205-4195-b84d-61cfa2d9b89b}">
+      <Declaration><![CDATA[//! <summary>Requests cancellation, calls FB_reinit in STOPPING and observes the original and final stop diagnostics.</summary>
+METHOD PROTECTED ExecuteTest
+VAR
+	task : CounterTask(name := "Reinit view fixture");
+	started : BOOL;
+	cancelled : BOOL;
+	reinitialized : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[Assert.ThatBool(actual := task.State.Ready, message := "Task must begin in READY").IsTrue();
+Assert.ThatBool(actual := task.FinalStopReason.WorkDone, message := "Initial final reason must be WORK_DONE").IsTrue();
+
+started := task.Start();
+Assert.ThatBool(actual := started, message := "Fixture must accept Start").IsTrue();
+
+IF NOT started THEN
+	RETURN;
+END_IF
+
+Assert.ThatBool(
+	actual := task.RunningSubstate.Processing,
+	message := "Resource-free task must start in PROCESSING"
+).IsTrue();
+cancelled := task.Cancel();
+Assert.ThatBool(actual := cancelled, message := "Fixture must accept Cancel").IsTrue();
+
+IF NOT cancelled THEN
+	RETURN;
+END_IF
+
+reinitialized := task.FB_reinit();
+Assert.ThatBool(actual := reinitialized, message := "FB_reinit must return true").IsTrue();
+Assert.ThatBool(
+	actual := task.State.Running,
+	message := "Reinitialization must preserve RUNNING during cancellation"
+).IsTrue();
+Assert.ThatBool(
+	actual := task.State.StateChanged,
+	message := "Reinitialization must preserve the lifecycle transition flag"
+).IsTrue();
+Assert.ThatBool(
+	actual := task.RunningSubstate.Stopping,
+	message := "Reinitialization must preserve the STOPPING phase"
+).IsTrue();
+Assert.ThatBool(
+	actual := task.OriginalStopReason.ExternalCancel,
+	message := "Reinitialization must preserve the requested cancellation"
+).IsTrue();
+Assert.ThatBool(
+	actual := __ISVALIDREF(task.OriginalStopReason.Message),
+	message := "Original cancellation diagnostic must be bound"
+).IsTrue();
+
+IF __ISVALIDREF(task.OriginalStopReason.Message) THEN
+	Assert.ThatBool(
+		actual := task.OriginalStopReason.Message = "Cancelled by external logic",
+		message := "Reinitialization must preserve the original cancellation diagnostic"
+	).IsTrue();
+END_IF
+
+task.Execute();
+Assert.ThatBool(
+	actual := task.State.Stopped,
+	message := "The state view must observe completion of cancellation"
+).IsTrue();
+Assert.ThatBool(
+	actual := task.FinalStopReason.ExternalCancel,
+	message := "The final reason view must observe the completed cancellation"
+).IsTrue();
+Assert.ThatBool(
+	actual := __ISVALIDREF(task.FinalStopReason.Message),
+	message := "Final cancellation diagnostic must be bound"
+).IsTrue();
+
+IF __ISVALIDREF(task.FinalStopReason.Message) THEN
+	Assert.ThatBool(
+		actual := task.FinalStopReason.Message = "Cancelled by external logic",
+		message := "The final message view must observe the copied cancellation diagnostic"
+	).IsTrue();
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="ClassName" Id="{4cff9132-b193-4c5b-b6d7-ea1950098c2c}">
+      <Declaration><![CDATA[//! <summary>Borrows the concrete class name. Callers must not modify the returned storage.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{3d431dcf-7bfa-4427-aa0f-2f019747e397}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ClassName REF= _ClassName;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="NamespaceName" Id="{5659af9c-7fd1-4fc5-93ed-535b4e4d813a}">
+      <Declaration><![CDATA[//! <summary>Borrows the compiler-initialized namespace name. Callers must not modify the returned storage.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{13f7a8be-1a01-46f6-a607-4f79a403c806}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[NamespaceName REF= CurrentNamespace.Name;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="SelfSize" Id="{dafe55cd-e9bf-4977-9d74-b9072f63c6b0}">
+      <Declaration><![CDATA[//! <summary>Reports the complete concrete instance size in bytes.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY SelfSize : ULINT]]></Declaration>
+      <Get Name="Get" Id="{005012f2-68cc-4e4c-9929-91cbb4bf56d9}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[SelfSize := XSIZEOF(THIS^);]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+  </POU>
+</TcPlcObject>

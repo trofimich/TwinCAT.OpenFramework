@@ -1,0 +1,257 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="DelayedTimerObservationTest" Id="{db1782f9-71ef-4b5c-981a-36530c0bb80b}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+SPDX-FileCopyrightText: © 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+SPDX-License-Identifier: MIT
+License: https://opensource.org/license/mit
+*)
+
+(*!
+<summary>Checks how a positive timer behaves when its first Execute is intentionally delayed.</summary>
+<description>
+Uses independent task time to postpone the first observation until after the preset. Each case owns a
+persistent timer for one PLC task. AfterTest returns the timer to READY.
+</description>
+*)
+
+{attribute 'no_assign'}
+{attribute 'no_explicit_call' := 'do not call this function block directly'}
+FUNCTION_BLOCK DelayedTimerObservationTest EXTENDS TOF_Testing.MultiCycleTest
+VAR_STAT
+	{attribute 'hide'}
+	_ClassName : STRING := __POUNAME();
+END_VAR
+VAR CONSTANT
+	//! <summary>Positive preset that is observable across PLC cycles.</summary>
+	_PositiveInterval : TIME := T#30MS;
+	//! <summary>Task clock counts 100 ns per tick.</summary>
+	_TaskTimeTicksPerMillisecond : ULINT := 10000;
+	//! <summary>Accounts for the millisecond precision of the TIME preset.</summary>
+	_TimingToleranceTicks : ULINT := 10000;
+
+	//! <summary>Keeps the old timer active until the scenario cancels or restarts it.</summary>
+	_ActiveInterval : TIME := T#1H;
+END_VAR
+VAR
+	_Timer : TOF_Timers.Timer(name := "Delayed timer");
+	_Scenario : DELAYED_TIMER_TEST_SCENARIO;
+	_StartedAt : ULINT;
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[]]></ST>
+    </Implementation>
+    <Method Name="FB_init" Id="{042e8174-c7aa-49b3-8407-19c2cac90262}">
+      <Declaration><![CDATA[(*!
+<summary>Selects the case configuration and its ten-second nominal deadline.</summary>
+<param name="name">Display name of this case.</param>
+<param name="parent">Group that owns this test.</param>
+<param name="scenario">Operation to perform before the delayed observation.</param>
+*)
+METHOD FB_init : BOOL
+VAR_INPUT
+	bInitRetains: BOOL; // TRUE: the retain variables are initialized (reset warm / reset cold)
+	bInCopyCode: BOOL; // TRUE: the instance will be copied to the copy code afterward (online change)
+	name : WSTRING;
+	parent : TOF_Testing.ITestElement;
+	scenario : DELAYED_TIMER_TEST_SCENARIO;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_Scenario := scenario;
+_Timeout := T#10S;
+FB_init := TRUE;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="BeforeTest" Id="{270d0461-bde1-435f-a4e7-b088bf45b7d1}">
+      <Declaration><![CDATA[(*!
+<summary>Starts the positive interval directly or by restarting an already active long timer.</summary>
+*)
+METHOD PROTECTED BeforeTest]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF _Scenario = DELAYED_TIMER_TEST_SCENARIO.AFTER_ACTIVE_RESTART THEN
+	_Timer.Interval := _ActiveInterval;
+
+	IF NOT _Timer.Start() THEN
+		RecordFailure(message := "The long timer must start before positive restart");
+		RETURN;
+	END_IF
+
+	_StartedAt := Tc2_System.F_GetTaskTime();
+	Assert.ThatBool(
+		actual := _Timer.SetIntervalAndRestart(interval := _PositiveInterval),
+		message := "The active timer must restart with a positive preset"
+	).IsTrue();
+ELSE
+	_Timer.Interval := _PositiveInterval;
+	_StartedAt := Tc2_System.F_GetTaskTime();
+	Assert.ThatBool(actual := _Timer.Start(), message := "The prepared positive timer must accept Start").IsTrue();
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="ExecuteTest" Id="{45a0c050-24f0-42c9-9b04-26bbc80ddde7}">
+      <Declaration><![CDATA[(*!
+<summary>Waits without evaluating TON, then observes completion or requested cancellation.</summary>
+*)
+METHOD PROTECTED ExecuteTest : TOF_Testing.TEST_CYCLE_RESULT
+VAR
+	currentTaskTime : ULINT;
+	elapsedTicks : ULINT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[ExecuteTest := TOF_Testing.TEST_CYCLE_RESULT.DONE;
+currentTaskTime := Tc2_System.F_GetTaskTime();
+
+IF currentTaskTime < _StartedAt THEN
+	RecordFailure(message := "Independent task time moved backwards");
+	RETURN;
+END_IF
+
+elapsedTicks := currentTaskTime - _StartedAt;
+Assert.ThatBool(
+	actual := _Timer.State.Running,
+	message := "The timer must remain running until its first Execute"
+).IsTrue();
+Assert.ThatBool(
+	actual := _Timer.Elapsed,
+	message := "Skipping Execute must preserve the unelapsed observation"
+).IsFalse();
+Assert.ThatBool(
+	actual := _Timer.ElapsedTime = TOF_Core.Times.MIN_VALUE,
+	message := "Getter reads must leave elapsed time at zero before the first Execute"
+).IsTrue();
+
+IF elapsedTicks < TO_ULINT(_PositiveInterval) * _TaskTimeTicksPerMillisecond + _TimingToleranceTicks THEN
+	ExecuteTest := TOF_Testing.TEST_CYCLE_RESULT.BUSY;
+	RETURN;
+END_IF
+
+IF Outcome = TOF_Testing.TEST_OUTCOME.FAILED THEN
+	RETURN;
+END_IF
+
+IF _Scenario = DELAYED_TIMER_TEST_SCENARIO.CANCEL_BEFORE_EXECUTE THEN
+	IF NOT _Timer.Cancel() THEN
+		RecordFailure(message := "Cancel must take precedence over unobserved expiry");
+		RETURN;
+	END_IF
+
+	_Timer.Execute();
+	Assert.ThatBool(
+		actual := _Timer.State.Stopped,
+		message := "Cancellation must finish on the first Execute"
+	).IsTrue();
+	Assert.ThatBool(
+		actual := _Timer.FinalStopReason.ExternalCancel,
+		message := "Unobserved expiry must not replace cancellation"
+	).IsTrue();
+	Assert.ThatBool(
+		actual := _Timer.Triggered,
+		message := "Cancelled unobserved expiry must not trigger"
+	).IsFalse();
+	Assert.ThatBool(
+		actual := _Timer.Elapsed,
+		message := "Stopping must leave the unobserved TON expiry unevaluated"
+	).IsFalse();
+	Assert.ThatBool(
+		actual := _Timer.ElapsedTime = TOF_Core.Times.MIN_VALUE,
+		message := "Unobserved cancellation must preserve zero elapsed time"
+	).IsTrue();
+
+	RETURN;
+END_IF
+
+_Timer.Execute();
+Assert.ThatBool(
+	actual := _Timer.Triggered,
+	message := "The first delayed Execute must observe expiry anchored at Start"
+).IsTrue();
+Assert.ThatBool(actual := _Timer.Elapsed, message := "Delayed completion must expose TON.Q").IsTrue();
+Assert.ThatBool(actual := _Timer.State.Stopped, message := "Delayed completion must be immediate").IsTrue();
+Assert.ThatBool(
+	actual := _Timer.FinalStopReason.WorkDone,
+	message := "Delayed completion must remain successful"
+).IsTrue();
+Assert.ThatBool(
+	actual := _Timer.ElapsedTime = _PositiveInterval,
+	message := "Completed elapsed time must reach the positive preset"
+).IsTrue();
+
+IF Outcome = TOF_Testing.TEST_OUTCOME.FAILED THEN
+	RETURN;
+END_IF
+
+IF NOT _Timer.SetIntervalAndRestart(interval := _PositiveInterval) THEN
+	RecordFailure(message := "A completed positive timer must accept positive restart");
+	RETURN;
+END_IF
+
+Assert.ThatBool(
+	actual := _Timer.State.Running,
+	message := "Positive restart must start a new run immediately"
+).IsTrue();
+Assert.ThatBool(actual := _Timer.Elapsed, message := "Positive restart must clear the prior Q").IsFalse();
+Assert.ThatBool(
+	actual := _Timer.Triggered,
+	message := "Positive restart must clear the prior completion pulse"
+).IsFalse();
+Assert.ThatBool(
+	actual := _Timer.Cancel(),
+	message := "The active replacement run must accept cancellation"
+).IsTrue();
+_Timer.Execute();
+Assert.ThatBool(
+	actual := _Timer.State.Stopped AND_THEN _Timer.FinalStopReason.ExternalCancel,
+	message := "The replacement run must finish cancellation"
+).IsTrue();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="AfterTest" Id="{55016c12-32b5-4f7f-b2e9-dedf70f26665}">
+      <Declaration><![CDATA[(*!
+<summary>Returns the owned timer to READY before reporting the result.</summary>
+<description>
+Cooperatively cancels active work and clears any retained TON observations through Reset.
+</description>
+*)
+METHOD PROTECTED AfterTest]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[Assert.ThatBool(
+	actual := PrepareTimerTestForReuse(timer := _Timer),
+	message := "The timer must return to READY after cleanup"
+).IsTrue();]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="ClassName" Id="{9c2ae60f-b614-4f50-bb29-1e2d87b36ce9}">
+      <Declaration><![CDATA[//! <summary>Borrows the concrete class name. Callers must not modify it.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{f9c4f9bf-1fce-4b11-9493-e282e5564159}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ClassName REF= _ClassName;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="NamespaceName" Id="{ddd4047d-919b-465f-9ebb-4ff18b40114e}">
+      <Declaration><![CDATA[//! <summary>Borrows the compiler-initialized namespace. Callers must not modify it.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{9945ee3e-a38b-4831-8eb0-c42f62d08a44}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[NamespaceName REF= CurrentNamespace.Name;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="SelfSize" Id="{4c8f9a56-55c3-4c85-ba32-0662954bec03}">
+      <Declaration><![CDATA[//! <summary>Reports the concrete instance size in bytes.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY SelfSize : ULINT]]></Declaration>
+      <Get Name="Get" Id="{30aa352c-6b76-4dc5-9b1f-e4628ee4c09e}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[SelfSize := XSIZEOF(THIS^);]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+  </POU>
+</TcPlcObject>

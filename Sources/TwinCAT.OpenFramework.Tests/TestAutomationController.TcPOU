@@ -8,8 +8,8 @@ License: https://opensource.org/license/mit
 *)
 
 (*!
-<summary>Hosts the registered TcUnit suites and invokes their cyclic test runner.</summary>
-<description>Instances must not be copied because their suites contain non-copyable state.</description>
+<summary>Runs the OpenFramework test tree and the independent runner contract suite.</summary>
+<description>Instances must not be copied because their test fixtures contain non-copyable state.</description>
 *)
 
 {attribute 'no_assign'}
@@ -21,75 +21,14 @@ VAR_STAT
 	_ClassName : STRING := __POUNAME();
 END_VAR
 VAR
-	_TestRunnerTest : TestRunnerTest;
-	_ExceptionTest : ExceptionTest;	
-	_ObjectLifetimeTest : ObjectLifetimeTest;
-	//! <summary>Checks complete string ordering, NaN ordering and supported generic conversion pairs.</summary>
-	_GenericValueTest : GenericValueTest;
-	//! <summary>Exercises JSON conversion, callback failures, capacity and encoding.</summary>
-	_AutomaticJsonSerializerTest : AutomaticJsonSerializerTest;
-	
-	_RandomTest : RandomTest;
-	
-	_StringHelperTest : StringsTest;
-	_StringBuilderTest : StringBuilderTest;
-	
-	_WideStringHelperTest : WideStringsTest;
-	_WideStringBuilderTest : WideStringBuilderTest;
+	//! <summary>Checks the framework with a separate driver and direct ADS results.</summary>
+	_TestRunnerTest : TestRunnerContractTest;
 
-	//! <summary>Exercises collection failure cleanup, ownership, hashing and cursor contracts.</summary>
-	_CollectionsContractTest : CollectionsContractTest;
-
-	_DynamicByteListTest : DynamicByteListTest;	
-	_DynamicListTest : DynamicListTest;
-	_DynamicDictionaryTest : DynamicDictionaryTest;
-	_DynamicUniqueDataSetTest : DynamicUniqueDataSetTest;
-	_DynamicQueueTest : DynamicQueueTest;
-	_DynamicStackTest : DynamicStackTest;
+	//! <summary>Owns the I/O symbols and the fixture borrowed by the test runner.</summary>
+	_IOModelsTest : IOModelsTestFixture;
 	
-	_StaticByteListTest : StaticByteListTest;	
-	_StaticListTest : StaticListTest;
-	_StaticDictionaryTest : StaticDictionaryTest;
-	_StaticUniqueDataSetTest : StaticUniqueDataSetTest;
-	_StaticQueueTest : StaticQueueTest;
-	_StaticStackTest : StaticStackTest;
-	
-	_RangeAnalogValueConverterTest : RangeAnalogValueConverterTest;
-	//! <summary>Runs comprehensive digital and analog IO device tests.</summary>
-	_DevicesIOTest : DevicesIOTest;
-	//! <summary>Checks PDO field contracts and simulated signed/fractional compound input binding.</summary>
-	_IOModelsTest : IOModelsTest;
-	
-	_TaskSequenceTest : TaskSequenceTest; 
-	//! <summary>Runs the cyclic TaskQueue failure-cleanup regression scenarios.</summary>
-	_TaskQueueCleanupTest : TaskQueueCleanupTest;
-	//! <summary>Runs unified stopping and diagnostic-failure scenarios.</summary>
-	_TaskStoppingTest : TaskStoppingTest;
-	//! <summary>Checks timer pulses and restart without added PLC cycles.</summary>
-	_TimerTimingTest : TimerTimingTest;
-	//! <summary>Exercises TaskState, TaskRunningSubstate, TaskStopReason and FB_reinit.</summary>
-	_TaskLifecycleViewsTest : TaskLifecycleViewsTest;
-	
-	_DirectoryTest : DirectoryTest; 
-	_FileContentManagerTest : FileContentManagerTest;
-	//! <summary>Checks filesystem metadata, lexical paths, binding and failure contracts without disk I/O.</summary>
-	_FileSystemContractTest : FileSystemContractTest;
-	//! <summary>Exercises owned file operations, collision preservation and binary buffer failures.</summary>
-	_FileSystemIntegrationTest : FileSystemIntegrationTest;
-
-	_SimpleTextFileLoggerTest : LoggerTest;
-	//! <summary>Checks deterministic logger delivery, failure containment and diagnostic routing.</summary>
-	_LoggerContractTest : LoggerContractTest;
-	//! <summary>Checks direct and queued file logging without internal diagnostic feedback.</summary>
-	_LoggerRoutingTest : LoggerRoutingTest; 
-	//! <summary>Runs the comprehensive end-to-end workflow test suite.</summary>
-	_WorkflowComprehensiveTest : WorkflowComprehensiveTest;
-	//! <summary>Checks workflow topology, failure boundaries, initialization retry and task adapter outcomes.</summary>
-	_WorkflowContractTest : WorkflowContractTest;
-	//! <summary>Runs automation component lifecycle, policy, event and runner tests.</summary>
-	_AutomationComponentTest : AutomationComponentTest;
-	//! <summary>Runs the standalone JSON configuration writer, reader and round-trip unit tests.</summary>
-	_JsonConfigurationRunner : JsonConfigurationTestRunner;
+	//! <summary>Runs the general OpenFramework.Testing regression suites.</summary>
+	_JsonConfigurationRunner : JsonConfigurationTestRunner(ioModelsFixture := _IOModelsTest);
 END_VAR]]></Declaration>
     <Implementation>
       <ST><![CDATA[]]></ST>
@@ -125,10 +64,11 @@ PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
     </Property>
     <Method Name="OnBeforeChildrenWorking" Id="{f0394797-3eeb-44c9-847b-75920f0bbead}">
       <Declaration><![CDATA[(*!
-<summary>Advances shared filesystem test-root preparation before invoking the cyclic TcUnit runner.</summary>
+<summary>Advances filesystem test-root preparation, the independent contract suite, and the general test tree.</summary>
 <description>
 One controller task owns FileTestRoot. Suites observe its readiness instead of issuing competing root-create
-requests. Keep calling the controller after test completion so root and scenario cleanup can finish.
+requests. The independent suite has its own assertions and result reporting. AutomationRunner cleans task
+memory after both test paths. Keep calling the controller so root and scenario cleanup can finish.
 </description>
 *)
 METHOD PROTECTED OnBeforeChildrenWorking
@@ -140,6 +80,7 @@ VAR
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[FileTestRoot.Execute();
+_TestRunnerTest.Execute();
 
 __TRY
 	_JsonConfigurationRunner.Execute(cleanupTaskMemory := FALSE);
@@ -159,35 +100,6 @@ __CATCH(exceptionCode)
 	Tc2_System.ADSLOGSTR(
 		msgCtrlMask := Tc2_System.Global_Variables.ADSLOG_MSGTYPE_ERROR,
 		msgFmtStr := 'CRITICAL: _JsonConfigurationRunner threw: %s',
-		strArg := logMessage
-	);
-
-	TOF_Core.ExceptionManager.ReThrowLastException(
-		exceptionCode := exceptionCode,
-		catchPointNamespaceName := NamespaceName,
-		catchPointPOUName := __POUNAME(),
-		catchPointPosition := __POSITION()
-	);
-__ENDTRY
-
-__TRY
-	TcUnit.RUN();
-__CATCH(exceptionCode)
-	exception := TOF_Core.ExceptionManager.GetLastException(
-		exceptionCode := exceptionCode,
-		catchPointNamespaceName := NamespaceName,
-		catchPointPOUName := __POUNAME(),
-		catchPointPosition := __POSITION()
-	);
-	lastExMessage := exception.GetMessage(
-		showSource := TRUE,
-		timestampDisplayMode := TOF_Core.TIMESTAMP_DISPLAY_MODE.LOCAL
-	);
-	logMessage := TO_STRING(lastExMessage);
-
-	Tc2_System.ADSLOGSTR(
-		msgCtrlMask := Tc2_System.Global_Variables.ADSLOG_MSGTYPE_ERROR,
-		msgFmtStr := 'CRITICAL: TcUnit.RUN threw: %s',
 		strArg := logMessage
 	);
 

@@ -27,8 +27,13 @@ VAR
 	{attribute 'init_namespace'}
 	_NamespaceName : STRING;
 END_VAR
+VAR CONSTANT
+	//! <summary>HRESULT for invalid arguments used by JsonConfigurationReader diagnostics.</summary>
+	_InvalidArgumentCode : UDINT := 16#80070057;
+END_VAR
 VAR
 	_Reader : TOF_JSON.JsonConfigurationReader;
+	_Mock : MockConfigurationWritable;
 	_Doc : TOF_Core.JSON_DOCUMENT;
 END_VAR]]></Declaration>
     <Implementation>
@@ -49,7 +54,7 @@ PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
     </Property>
     <Method Name="ExecuteTest" Id="{67721956-fd99-4d4c-b9f2-7e76d01ca4fc}">
       <Declaration><![CDATA[(*!
-<summary>Executes all reader test scenarios in a single PLC cycle.</summary>
+<summary>Executes reader scenarios including Unicode decoding and destination capacity in a single PLC cycle.</summary>
 *)
 METHOD PROTECTED ExecuteTest]]></Declaration>
       <Implementation>
@@ -58,10 +63,12 @@ testOpenNonObjectRoot();
 testOpenInvalidJson();
 testFieldExistingAndMissing();
 testFieldOnNonObject();
-testTryField();
+testFindOptionalField();
 testListOperations();
 testReadValueValidationAndErrors();
-testRepeatedOpen();]]></ST>
+testReadWideString();
+testReparseReadsNewDocument();
+testDeserializeContextFreeObject();]]></ST>
       </Implementation>
     </Method>
     <Property Name="NamespaceName" Id="{87f06da3-491f-4214-bc4b-4b823ffc6357}">
@@ -98,7 +105,7 @@ METHOD PRIVATE testFieldExistingAndMissing
 VAR
 	root : TOF_Core.CONFIGURATION_NODE;
 	fieldNode : TOF_Core.CONFIGURATION_NODE;
-	caught : BOOL;
+	caughtMessage : WSTRING(255);
 	exceptionCode : __SYSTEM.ExceptionCode;
 END_VAR]]></Declaration>
       <Implementation>
@@ -108,14 +115,22 @@ root := _Reader.Parse(document := _Doc);
 fieldNode := _Reader.GetField(node := root, name := 'existing');
 Assert.ThatBool(actual := _Reader.IsPresent(node := fieldNode)).IsTrue();
 
-caught := FALSE;
+caughtMessage := TOF_Core.WideStrings.Empty;
+
 __TRY
 	fieldNode := _Reader.GetField(node := root, name := 'missing');
-__CATCH (exceptionCode)
-	caught := TRUE;
+__CATCH(exceptionCode)
+	caughtMessage := getInvalidDocumentMessage(
+		exceptionCode := exceptionCode,
+		catchPointPOUName := __POUNAME(),
+		catchPointPosition := __POSITION()
+	);
 __ENDTRY
 
-Assert.ThatBool(actual := caught).IsTrue();]]></ST>
+Assert.ThatWideString(
+	actual := caughtMessage,
+	message := "GetField on a missing member"
+).ToBe(expected := "Invalid JSON configuration: missing field (field: missing)");]]></ST>
       </Implementation>
     </Method>
     <Method Name="testFieldOnNonObject" Id="{21c6c8e5-1f31-4f9e-b65d-43a7321a2b3e}">
@@ -127,7 +142,7 @@ VAR
 	root : TOF_Core.CONFIGURATION_NODE;
 	scalarNode : TOF_Core.CONFIGURATION_NODE;
 	childNode : TOF_Core.CONFIGURATION_NODE;
-	caught : BOOL;
+	caughtMessage : WSTRING(255);
 	exceptionCode : __SYSTEM.ExceptionCode;
 END_VAR]]></Declaration>
       <Implementation>
@@ -135,14 +150,22 @@ END_VAR]]></Declaration>
 root := _Reader.Parse(document := _Doc);
 scalarNode := _Reader.GetField(node := root, name := 'scalar');
 
-caught := FALSE;
+caughtMessage := TOF_Core.WideStrings.Empty;
+
 __TRY
 	childNode := _Reader.GetField(node := scalarNode, name := 'child');
-__CATCH (exceptionCode)
-	caught := TRUE;
+__CATCH(exceptionCode)
+	caughtMessage := getInvalidDocumentMessage(
+		exceptionCode := exceptionCode,
+		catchPointPOUName := __POUNAME(),
+		catchPointPosition := __POSITION()
+	);
 __ENDTRY
 
-Assert.ThatBool(actual := caught).IsTrue();]]></ST>
+Assert.ThatWideString(
+	actual := caughtMessage,
+	message := "GetField on a scalar"
+).ToBe(expected := "Invalid JSON configuration: not an object (field: child)");]]></ST>
       </Implementation>
     </Method>
     <Method Name="testListOperations" Id="{dc3ff508-9226-494a-a702-a5d11a4a2c9a}">
@@ -158,7 +181,7 @@ VAR
 	item2 : TOF_Core.CONFIGURATION_NODE;
 	itemBad : TOF_Core.CONFIGURATION_NODE;
 	countVal : UDINT;
-	caught : BOOL;
+	caughtMessage : WSTRING(255);
 	exceptionCode : __SYSTEM.ExceptionCode;
 END_VAR]]></Declaration>
       <Implementation>
@@ -175,35 +198,59 @@ Assert.ThatBool(actual := _Reader.IsPresent(node := item0)).IsTrue();
 item2 := _Reader.GetItem(node := listNode, index := 2);
 Assert.ThatBool(actual := _Reader.IsPresent(node := item2)).IsTrue();
 
-caught := FALSE;
+caughtMessage := TOF_Core.WideStrings.Empty;
+
 __TRY
 	itemBad := _Reader.GetItem(node := listNode, index := 3);
-__CATCH (exceptionCode)
-	caught := TRUE;
+__CATCH(exceptionCode)
+	caughtMessage := getInvalidDocumentMessage(
+		exceptionCode := exceptionCode,
+		catchPointPOUName := __POUNAME(),
+		catchPointPosition := __POSITION()
+	);
 __ENDTRY
 
-Assert.ThatBool(actual := caught).IsTrue();
+Assert.ThatWideString(
+	actual := caughtMessage,
+	message := "GetItem at the array length"
+).ToBe(expected := "Invalid JSON configuration: index out of range");
 
 objNode := _Reader.GetField(node := root, name := 'obj');
 Assert.ThatBool(actual := _Reader.IsArray(node := objNode)).IsFalse();
 
-caught := FALSE;
+caughtMessage := TOF_Core.WideStrings.Empty;
+
 __TRY
 	countVal := _Reader.GetArraySize(node := objNode);
-__CATCH (exceptionCode)
-	caught := TRUE;
+__CATCH(exceptionCode)
+	caughtMessage := getInvalidDocumentMessage(
+		exceptionCode := exceptionCode,
+		catchPointPOUName := __POUNAME(),
+		catchPointPosition := __POSITION()
+	);
 __ENDTRY
 
-Assert.ThatBool(actual := caught).IsTrue();
+Assert.ThatWideString(
+	actual := caughtMessage,
+	message := "GetArraySize on an object"
+).ToBe(expected := "Invalid JSON configuration: not an array");
 
-caught := FALSE;
+caughtMessage := TOF_Core.WideStrings.Empty;
+
 __TRY
 	itemBad := _Reader.GetItem(node := objNode, index := 0);
-__CATCH (exceptionCode)
-	caught := TRUE;
+__CATCH(exceptionCode)
+	caughtMessage := getInvalidDocumentMessage(
+		exceptionCode := exceptionCode,
+		catchPointPOUName := __POUNAME(),
+		catchPointPosition := __POSITION()
+	);
 __ENDTRY
 
-Assert.ThatBool(actual := caught).IsTrue();]]></ST>
+Assert.ThatWideString(
+	actual := caughtMessage,
+	message := "GetItem on an object"
+).ToBe(expected := "Invalid JSON configuration: not an array");]]></ST>
       </Implementation>
     </Method>
     <Method Name="testOpenInvalidJson" Id="{2b4e1c79-8499-4416-8bb3-c230d976c1c6}">
@@ -213,20 +260,28 @@ Assert.ThatBool(actual := caught).IsTrue();]]></ST>
 METHOD PRIVATE testOpenInvalidJson
 VAR
 	root : TOF_Core.CONFIGURATION_NODE;
-	caught : BOOL;
+	caughtMessage : WSTRING(255);
 	exceptionCode : __SYSTEM.ExceptionCode;
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[_Doc := '{unclosed object';
 
-caught := FALSE;
+caughtMessage := TOF_Core.WideStrings.Empty;
+
 __TRY
 	root := _Reader.Parse(document := _Doc);
-__CATCH (exceptionCode)
-	caught := TRUE;
+__CATCH(exceptionCode)
+	caughtMessage := getInvalidDocumentMessage(
+		exceptionCode := exceptionCode,
+		catchPointPOUName := __POUNAME(),
+		catchPointPosition := __POSITION()
+	);
 __ENDTRY
 
-Assert.ThatBool(actual := caught).IsTrue();]]></ST>
+Assert.ThatWideString(
+	actual := caughtMessage,
+	message := "Parse malformed JSON"
+).ToBe(expected := "Invalid JSON configuration: parse failure");]]></ST>
       </Implementation>
     </Method>
     <Method Name="testOpenNonObjectRoot" Id="{66a12c3f-811a-4227-9990-83fc8e6c85fe}">
@@ -236,31 +291,47 @@ Assert.ThatBool(actual := caught).IsTrue();]]></ST>
 METHOD PRIVATE testOpenNonObjectRoot
 VAR
 	root : TOF_Core.CONFIGURATION_NODE;
-	caught : BOOL;
+	caughtMessage : WSTRING(255);
 	exceptionCode : __SYSTEM.ExceptionCode;
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[_Doc := '[1, 2, 3]';
 
-caught := FALSE;
+caughtMessage := TOF_Core.WideStrings.Empty;
+
 __TRY
 	root := _Reader.Parse(document := _Doc);
-__CATCH (exceptionCode)
-	caught := TRUE;
+__CATCH(exceptionCode)
+	caughtMessage := getInvalidDocumentMessage(
+		exceptionCode := exceptionCode,
+		catchPointPOUName := __POUNAME(),
+		catchPointPosition := __POSITION()
+	);
 __ENDTRY
 
-Assert.ThatBool(actual := caught).IsTrue();
+Assert.ThatWideString(
+	actual := caughtMessage,
+	message := "Parse an array root"
+).ToBe(expected := "Invalid JSON configuration: not an object");
 
 _Doc := '12345';
 
-caught := FALSE;
+caughtMessage := TOF_Core.WideStrings.Empty;
+
 __TRY
 	root := _Reader.Parse(document := _Doc);
-__CATCH (exceptionCode)
-	caught := TRUE;
+__CATCH(exceptionCode)
+	caughtMessage := getInvalidDocumentMessage(
+		exceptionCode := exceptionCode,
+		catchPointPOUName := __POUNAME(),
+		catchPointPosition := __POSITION()
+	);
 __ENDTRY
 
-Assert.ThatBool(actual := caught).IsTrue();]]></ST>
+Assert.ThatWideString(
+	actual := caughtMessage,
+	message := "Parse a scalar root"
+).ToBe(expected := "Invalid JSON configuration: not an object");]]></ST>
       </Implementation>
     </Method>
     <Method Name="testOpenObjectRoot" Id="{e8380616-e75f-4125-b106-f8b807100827}">
@@ -294,8 +365,6 @@ VAR
 	dstDint : DINT;
 	dstStr : STRING(80);
 	tinyStr : STRING(2);
-	caught : BOOL;
-	exceptionCode : __SYSTEM.ExceptionCode;
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[_Doc := '{"num": 42, "str": "hello world", "nullVal": null, "arr": [1], "obj": {}}';
@@ -306,141 +375,168 @@ nullNode := _Reader.GetField(node := root, name := 'nullVal');
 arrNode := _Reader.GetField(node := root, name := 'arr');
 objNode := _Reader.GetField(node := root, name := 'obj');
 
-caught := FALSE;
-__TRY
-	_Reader.ReadValue(
-		node := numNode,
-		valueType := TOF_Core.CONFIGURATION_VALUE_TYPE.TYPE_DINT,
-		data := 0,
-		size := 4
-	);
-__CATCH (exceptionCode)
-	caught := TRUE;
-__ENDTRY
+expectReadValueFailure(
+	node := numNode,
+	valueType := TOF_Core.CONFIGURATION_VALUE_TYPE.TYPE_DINT,
+	data := 0,
+	size := 4,
+	message := "ReadValue with a null destination",
+	expected := "Invalid JSON configuration: type/size mismatch"
+);
 
-Assert.ThatBool(actual := caught).IsTrue();
+expectReadValueFailure(
+	node := numNode,
+	valueType := TOF_Core.CONFIGURATION_VALUE_TYPE.TYPE_DINT,
+	data := ADR(dstDint),
+	size := 0,
+	message := "ReadValue with zero destination size",
+	expected := "Invalid JSON configuration: type/size mismatch"
+);
 
-caught := FALSE;
-__TRY
-	_Reader.ReadValue(
-		node := numNode,
-		valueType := TOF_Core.CONFIGURATION_VALUE_TYPE.TYPE_DINT,
-		data := ADR(dstDint),
-		size := 0
-	);
-__CATCH (exceptionCode)
-	caught := TRUE;
-__ENDTRY
+expectReadValueFailure(
+	node := emptyNode,
+	valueType := TOF_Core.CONFIGURATION_VALUE_TYPE.TYPE_DINT,
+	data := ADR(dstDint),
+	size := 4,
+	message := "ReadValue with an absent node",
+	expected := "Invalid JSON configuration: missing field"
+);
 
-Assert.ThatBool(actual := caught).IsTrue();
+expectReadValueFailure(
+	node := nullNode,
+	valueType := TOF_Core.CONFIGURATION_VALUE_TYPE.TYPE_DINT,
+	data := ADR(dstDint),
+	size := 4,
+	message := "ReadValue on a null value",
+	expected := "Invalid JSON configuration: type/size mismatch"
+);
 
-caught := FALSE;
-__TRY
-	_Reader.ReadValue(
-		node := emptyNode,
-		valueType := TOF_Core.CONFIGURATION_VALUE_TYPE.TYPE_DINT,
-		data := ADR(dstDint),
-		size := 4
-	);
-__CATCH (exceptionCode)
-	caught := TRUE;
-__ENDTRY
+expectReadValueFailure(
+	node := arrNode,
+	valueType := TOF_Core.CONFIGURATION_VALUE_TYPE.TYPE_DINT,
+	data := ADR(dstDint),
+	size := 4,
+	message := "ReadValue on an array",
+	expected := "Invalid JSON configuration: type/size mismatch"
+);
 
-Assert.ThatBool(actual := caught).IsTrue();
+expectReadValueFailure(
+	node := objNode,
+	valueType := TOF_Core.CONFIGURATION_VALUE_TYPE.TYPE_DINT,
+	data := ADR(dstDint),
+	size := 4,
+	message := "ReadValue on an object",
+	expected := "Invalid JSON configuration: type/size mismatch"
+);
 
-caught := FALSE;
-__TRY
-	_Reader.ReadValue(
-		node := nullNode,
-		valueType := TOF_Core.CONFIGURATION_VALUE_TYPE.TYPE_DINT,
-		data := ADR(dstDint),
-		size := 4
-	);
-__CATCH (exceptionCode)
-	caught := TRUE;
-__ENDTRY
-
-Assert.ThatBool(actual := caught).IsTrue();
-
-caught := FALSE;
-__TRY
-	_Reader.ReadValue(
-		node := arrNode,
-		valueType := TOF_Core.CONFIGURATION_VALUE_TYPE.TYPE_DINT,
-		data := ADR(dstDint),
-		size := 4
-	);
-__CATCH (exceptionCode)
-	caught := TRUE;
-__ENDTRY
-
-Assert.ThatBool(actual := caught).IsTrue();
-
-caught := FALSE;
-__TRY
-	_Reader.ReadValue(
-		node := objNode,
-		valueType := TOF_Core.CONFIGURATION_VALUE_TYPE.TYPE_DINT,
-		data := ADR(dstDint),
-		size := 4
-	);
-__CATCH (exceptionCode)
-	caught := TRUE;
-__ENDTRY
-
-Assert.ThatBool(actual := caught).IsTrue();
-
-caught := FALSE;
-__TRY
-	_Reader.ReadValue(
-		node := numNode,
-		valueType := TOF_Core.CONFIGURATION_VALUE_TYPE.TYPE_DINT,
-		data := ADR(dstDint),
-		size := 3
-	);
-__CATCH (exceptionCode)
-	caught := TRUE;
-__ENDTRY
-
-Assert.ThatBool(actual := caught).IsTrue();
+expectReadValueFailure(
+	node := numNode,
+	valueType := TOF_Core.CONFIGURATION_VALUE_TYPE.TYPE_DINT,
+	data := ADR(dstDint),
+	size := 3,
+	message := "ReadValue with the wrong DINT size",
+	expected := "Invalid JSON configuration: type/size mismatch"
+);
 
 // SA0175: ReadValue targets a raw string buffer; no character indexing is performed.
 {analysis -175}
-caught := FALSE;
-__TRY
-	_Reader.ReadValue(
-		node := numNode,
-		valueType := TOF_Core.CONFIGURATION_VALUE_TYPE.TYPE_STRING,
-		data := ADR(dstStr),
-		size := SIZEOF(dstStr)
-	);
-__CATCH (exceptionCode)
-	caught := TRUE;
-__ENDTRY
+expectReadValueFailure(
+	node := numNode,
+	valueType := TOF_Core.CONFIGURATION_VALUE_TYPE.TYPE_STRING,
+	data := ADR(dstStr),
+	size := SIZEOF(dstStr),
+	message := "ReadValue into STRING from a number",
+	expected := "Invalid JSON configuration: type/size mismatch"
+);
 
-Assert.ThatBool(actual := caught).IsTrue();
-
-caught := FALSE;
-__TRY
-	_Reader.ReadValue(
-		node := strNode,
-		valueType := TOF_Core.CONFIGURATION_VALUE_TYPE.TYPE_STRING,
-		data := ADR(tinyStr),
-		size := SIZEOF(tinyStr)
-	);
-__CATCH (exceptionCode)
-	caught := TRUE;
-__ENDTRY
-{analysis +175}
-
-Assert.ThatBool(actual := caught).IsTrue();]]></ST>
+expectReadValueFailure(
+	node := strNode,
+	valueType := TOF_Core.CONFIGURATION_VALUE_TYPE.TYPE_STRING,
+	data := ADR(tinyStr),
+	size := SIZEOF(tinyStr),
+	message := "ReadValue into an undersized string buffer",
+	expected := "Invalid JSON configuration: CopyString failed for STRING(2) (3 destination bytes)"
+);
+{analysis +175}]]></ST>
       </Implementation>
     </Method>
-    <Method Name="testRepeatedOpen" Id="{c38aada2-fc95-494a-baf4-fd4fb3bd8af5}">
+    <Method Name="testReadWideString" Id="{dfe3844a-c91c-4b0d-bcc1-e5f7e1dbc7d0}">
       <Declaration><![CDATA[(*!
-<summary>Verifies that opening a new document invalidates old handles and works cleanly.</summary>
+<summary>Checks empty and ASCII WSTRING values, exact-fit Unicode decoding, and distinguishes a null escape from literal backslash text.</summary>
 *)
-METHOD PRIVATE testRepeatedOpen
+METHOD PRIVATE testReadWideString
+VAR
+	root : TOF_Core.CONFIGURATION_NODE;
+	unicodeNode : TOF_Core.CONFIGURATION_NODE;
+	wideText : WSTRING(2);
+	shortText : WSTRING(1) := "X";
+	literalText : WSTRING(6);
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_Doc := '{"name":"AB","emptyName":"","unicode":"\u00e9\u0416","withNull":"A\u0000B","literal":"\\u0000"}';
+root := _Reader.Parse(document := _Doc);
+
+_Reader.ReadValue(
+	node := _Reader.GetField(node := root, name := 'name'),
+	valueType := TOF_Core.CONFIGURATION_VALUE_TYPE.TYPE_WSTRING,
+	data := ADR(wideText),
+	size := SIZEOF(wideText)
+);
+Assert.ThatWideString(actual := wideText, message := "Read an ASCII name").ToBe(expected := "AB");
+
+_Reader.ReadValue(
+	node := _Reader.GetField(node := root, name := 'emptyName'),
+	valueType := TOF_Core.CONFIGURATION_VALUE_TYPE.TYPE_WSTRING,
+	data := ADR(wideText),
+	size := SIZEOF(wideText)
+);
+Assert.ThatWideString(actual := wideText, message := "An empty name clears the previous value").ToBe(expected := "");
+
+unicodeNode := _Reader.GetField(node := root, name := 'unicode');
+
+_Reader.ReadValue(
+	node := unicodeNode,
+	valueType := TOF_Core.CONFIGURATION_VALUE_TYPE.TYPE_WSTRING,
+	data := ADR(wideText),
+	size := SIZEOF(wideText)
+);
+Assert.ThatWideString(actual := wideText, message := "Decode two Unicode characters into two wide slots").ToBe(
+	expected := "$00E9$0416"
+);
+
+expectReadValueFailure(
+	node := unicodeNode,
+	valueType := TOF_Core.CONFIGURATION_VALUE_TYPE.TYPE_WSTRING,
+	data := ADR(shortText),
+	size := SIZEOF(shortText),
+	message := "Reject a WSTRING destination with room for only one character",
+	expected := "Invalid JSON configuration: WSTRING needs 2 characters, capacity 1"
+);
+Assert.ThatWideString(actual := shortText, message := "Capacity failure must precede conversion").ToBe(expected := "X");
+
+_Reader.ReadValue(
+	node := _Reader.GetField(node := root, name := 'literal'),
+	valueType := TOF_Core.CONFIGURATION_VALUE_TYPE.TYPE_WSTRING,
+	data := ADR(literalText),
+	size := SIZEOF(literalText)
+);
+Assert.ThatWideString(actual := literalText, message := "Preserve a literal backslash").ToBe(expected := "\u0000");
+
+expectReadValueFailure(
+	node := _Reader.GetField(node := root, name := 'withNull'),
+	valueType := TOF_Core.CONFIGURATION_VALUE_TYPE.TYPE_WSTRING,
+	data := ADR(wideText),
+	size := SIZEOF(wideText),
+	message := "Reject embedded null in JSON string",
+	expected := "Invalid JSON configuration: parse failure"
+);]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="testReparseReadsNewDocument" Id="{c38aada2-fc95-494a-baf4-fd4fb3bd8af5}">
+      <Declaration><![CDATA[(*!
+<summary>Verifies that a new document can be parsed and read using newly obtained cursors.</summary>
+*)
+METHOD PRIVATE testReparseReadsNewDocument
 VAR
 	root1 : TOF_Core.CONFIGURATION_NODE;
 	root2 : TOF_Core.CONFIGURATION_NODE;
@@ -471,17 +567,18 @@ _Reader.ReadValue(
 Assert.ThatDInt(actual := val).ToBe(expected := 2);]]></ST>
       </Implementation>
     </Method>
-    <Method Name="testTryField" Id="{a3b81e6d-75c9-418a-882a-2c19667c2318}">
+    <Method Name="testFindOptionalField" Id="{a3b81e6d-75c9-418a-882a-2c19667c2318}">
       <Declaration><![CDATA[(*!
-<summary>Verifies that TryField returns EMPTY_NODE on missing or invalid parent without throwing.</summary>
+<summary>Verifies that FindField returns an empty node for absent members and non-object parents.</summary>
 *)
-METHOD PRIVATE testTryField
+METHOD PRIVATE testFindOptionalField
 VAR
 	root : TOF_Core.CONFIGURATION_NODE;
 	fieldNode : TOF_Core.CONFIGURATION_NODE;
 	missingNode : TOF_Core.CONFIGURATION_NODE;
 	emptyParent : TOF_Core.CONFIGURATION_NODE;
 	fieldOnEmpty : TOF_Core.CONFIGURATION_NODE;
+	fieldOnScalar : TOF_Core.CONFIGURATION_NODE;
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[_Doc := '{"present": 10}';
@@ -494,7 +591,101 @@ missingNode := _Reader.FindField(node := root, name := 'absent');
 Assert.ThatBool(actual := _Reader.IsPresent(node := missingNode)).IsFalse();
 
 fieldOnEmpty := _Reader.FindField(node := emptyParent, name := 'any');
-Assert.ThatBool(actual := _Reader.IsPresent(node := fieldOnEmpty)).IsFalse();]]></ST>
+Assert.ThatBool(actual := _Reader.IsPresent(node := fieldOnEmpty)).IsFalse();
+
+fieldOnScalar := _Reader.FindField(node := fieldNode, name := 'any');
+Assert.ThatBool(
+	actual := _Reader.IsPresent(node := fieldOnScalar),
+	message := "FindField on a scalar must return an empty node"
+).IsFalse();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="expectReadValueFailure" Id="{ede799eb-6e83-4de6-82c3-18ad173aeb72}">
+      <Declaration><![CDATA[(*!
+<summary>Invokes ReadValue with one invalid input and compares the resulting reader diagnostic.</summary>
+<description>A valid return or a different exception fails the named scenario.</description>
+*)
+METHOD PRIVATE expectReadValueFailure
+VAR_INPUT
+	node : TOF_Core.CONFIGURATION_NODE;
+	valueType : TOF_Core.CONFIGURATION_VALUE_TYPE;
+	data : PVOID;
+	size : UDINT;
+	message : WSTRING(255);
+	expected : WSTRING(255);
+END_VAR
+VAR
+	caughtMessage : WSTRING(255);
+	exceptionCode : __SYSTEM.ExceptionCode;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[__TRY
+	_Reader.ReadValue(node := node, valueType := valueType, data := data, size := size);
+__CATCH(exceptionCode)
+	caughtMessage := getInvalidDocumentMessage(
+		exceptionCode := exceptionCode,
+		catchPointPOUName := __POUNAME(),
+		catchPointPosition := __POSITION()
+	);
+__ENDTRY
+
+Assert.ThatWideString(actual := caughtMessage, message := message).ToBe(expected := expected);]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="getInvalidDocumentMessage" Id="{a65af4da-1538-429f-a3e1-55aa391daf6b}">
+      <Declaration><![CDATA[(*!
+<summary>Copies the structured invalid-argument diagnostic from the active catch.</summary>
+<description>Unexpected payloads yield a diagnostic that cannot match a valid reader error.</description>
+*)
+METHOD PRIVATE getInvalidDocumentMessage : WSTRING(255)
+VAR_INPUT
+	exceptionCode : __SYSTEM.ExceptionCode;
+	catchPointPOUName : STRING;
+	catchPointPosition : STRING;
+END_VAR
+VAR
+	exception : TOF_Core.IException;
+	generalException : TOF_Core.IGeneralException;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[exception := TOF_Core.ExceptionManager.GetLastException(
+	exceptionCode := exceptionCode,
+	catchPointNamespaceName := NamespaceName,
+	catchPointPOUName := catchPointPOUName,
+	catchPointPosition := catchPointPosition
+);
+
+IF exception <> 0 AND_THEN __QUERYINTERFACE(exception, generalException) THEN
+	IF generalException.ErrorCode = _InvalidArgumentCode THEN
+		getInvalidDocumentMessage := generalException.SourceMessage;
+		RETURN;
+	END_IF
+END_IF
+
+IF exception = 0 THEN
+	getInvalidDocumentMessage := "No exception payload";
+ELSE
+	getInvalidDocumentMessage := TOF_Core.WideStrings.ConcatFit255("Unexpected exception: ", exception.GetMessage());
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="testDeserializeContextFreeObject" Id="{16157275-0ae9-47a7-8250-4fd46dbd539e}">
+      <Declaration><![CDATA[(*!
+<summary>Verifies that a context-free object deserializes successfully with null deserialization context.</summary>
+*)
+METHOD PRIVATE testDeserializeContextFreeObject
+VAR
+	root : TOF_Core.CONFIGURATION_NODE;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_Mock.Reset();
+_Doc := '{"intField":123,"stringField":"test context-free"}';
+root := _Reader.Parse(document := _Doc);
+_Mock.Deserialize(reader := _Reader, node := root, context := 0);
+
+Assert.ThatUDInt(actual := _Mock.DeserializeCount).ToBe(expected := 1);
+Assert.ThatDInt(actual := _Mock.IntField).ToBe(expected := 123);
+Assert.ThatString(actual := _Mock.StringField).ToBe(expected := 'test context-free');]]></ST>
       </Implementation>
     </Method>
   </POU>

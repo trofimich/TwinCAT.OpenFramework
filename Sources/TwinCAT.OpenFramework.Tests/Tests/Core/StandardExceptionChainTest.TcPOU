@@ -1,0 +1,156 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="StandardExceptionChainTest" Id="{7b2efd68-2d1c-4540-83a2-3dea037dd9b8}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+SPDX-FileCopyrightText: c 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+SPDX-License-Identifier: MIT
+License: https://opensource.org/license/mit
+*)
+
+(*!
+<summary>Checks the text, inner identity and root of a three-level standard exception chain.</summary>
+<description>
+Uses one task and stays at a stable address while assertions are bound to this instance.
+</description>
+*)
+
+{attribute 'no_assign'}
+{attribute 'no_explicit_call' := 'do not call this function block directly'}
+FUNCTION_BLOCK StandardExceptionChainTest EXTENDS TOF_Testing.SingleCycleTest
+VAR_STAT
+	{attribute 'hide'}
+	_ClassName : STRING := __POUNAME();
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[]]></ST>
+    </Implementation>
+    <Method Name="ExecuteTest" Id="{c373ac37-12d8-43fe-aed4-07ff819066eb}">
+      <Declaration><![CDATA[(*!
+<summary>Checks the text, inner identity and root of a three-level standard exception chain.</summary>
+<description>
+Keeps only cycle-local references. Compares the root with the first caught cause through read-only views.
+ToError copies the outer diagnostic and the deepest cause.
+</description>
+*)
+METHOD PROTECTED ExecuteTest
+VAR
+	exceptionCode : __SYSTEM.ExceptionCode;
+	caught : TOF_Core.IException;
+	previous : TOF_Core.IException;
+	previousView : TOF_Core.IReadOnlyException;
+	first : TOF_Core.IReadOnlyException;
+	root : TOF_Core.IReadOnlyException;
+	typed : TOF_Core.IStandardException;
+
+	inputs : ARRAY [0..2] OF WSTRING := ["First cause", "Second cause", "Outer failure"];
+	expected : ARRAY [0..2] OF WSTRING := [
+		"First cause",
+		"Second cause -> First cause",
+		"Outer failure -> Second cause -> First cause"
+	];
+	message : TOF_Core.ERROR_MESSAGE;
+	actual : TOF_Core.ERROR_MESSAGE;
+	snapshot : TOF_Core.ERROR;
+	i : DINT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[FOR i := 0 TO UPPER_BOUND(inputs, 1) DO
+	message := inputs[i];
+	caught := 0;
+
+	// Each deliberate throw adds one outer cause and is captured before asserting its payload.
+	__TRY
+		TOF_Core.Exceptions.ThrowStandard(
+			sourceNamespaceName := NamespaceName,
+			sourceClassName := ClassName,
+			sourcePOUName := __POUNAME(),
+			sourcePosition := __POSITION(),
+			message := message,
+			innerException := previous
+		);
+	__CATCH(exceptionCode)
+		caught := TOF_Core.ExceptionManager.GetLastException(
+			exceptionCode := exceptionCode,
+			catchPointNamespaceName := NamespaceName,
+			catchPointPOUName := __POUNAME(),
+			catchPointPosition := __POSITION()
+		);
+	__ENDTRY
+
+	IF NOT __QUERYINTERFACE(caught, typed) THEN
+		Assert.ThatBool(
+			actual := FALSE,
+			message := Tc2_Utilities.WCONCAT(STR1 := "StandardException missing for ", STR2 := inputs[i])
+		).IsTrue();
+		RETURN;
+	END_IF
+
+	actual := typed.GetMessage();
+	Assert.ThatBool(
+		actual := actual = expected[i],
+		message := Tc2_Utilities.WCONCAT(STR1 := "Incorrect chain text for ", STR2 := inputs[i])
+	).IsTrue();
+	Assert.ThatBool(
+		actual := typed.InnerException = previousView,
+		message := Tc2_Utilities.WCONCAT(STR1 := "Incorrect immediate cause for ", STR2 := inputs[i])
+	).IsTrue();
+
+	IF i = 0 THEN
+		first := typed;
+	END_IF
+
+	previous := caught;
+	previousView := typed;
+END_FOR
+
+root := typed.GetRootException();
+Assert.ThatBool(
+	actual := root = first,
+	message := "The outer standard exception must reach the first cause"
+).IsTrue();
+typed.ToError(targetError := snapshot, severity := TOF_Core.ERROR_SEVERITY.CRITICAL);
+Assert.ThatBool(
+	actual := snapshot.TopMessage = expected[2] AND_THEN snapshot.RootMessage = "First cause",
+	message := "The ERROR snapshot must keep the outer diagnostics and the deepest cause"
+).IsTrue();
+Assert.ThatBool(
+	actual := snapshot.Severity = TOF_Core.ERROR_SEVERITY.CRITICAL,
+	message := "ToError must copy the supplied severity"
+).IsTrue();]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="ClassName" Id="{56507ff4-72bd-4b87-921d-80ab5b171455}">
+      <Declaration><![CDATA[//! <summary>Borrows the concrete class name. Callers must not modify it.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{f9b34bc7-8ad8-45f2-b217-e9a34a79e988}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ClassName REF= _ClassName;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="NamespaceName" Id="{63807f35-dd76-41c2-bd53-cddc6587ef71}">
+      <Declaration><![CDATA[//! <summary>Borrows the compiler-initialized namespace name. Callers must not modify it.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{1b45ddbb-65cf-4d56-ab0b-bffd0c06cf13}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[NamespaceName REF= CurrentNamespace.Name;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="SelfSize" Id="{035582c7-8c65-492d-8d31-179388a8ee4b}">
+      <Declaration><![CDATA[//! <summary>Reports the concrete instance size in bytes.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY SelfSize : ULINT]]></Declaration>
+      <Get Name="Get" Id="{fda0dcc7-9ad4-46d0-a9cf-7dbb2db11d11}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[SelfSize := XSIZEOF(THIS^);]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+  </POU>
+</TcPlcObject>
