@@ -76,14 +76,16 @@ A dedicated base class (`Exception`) used to describe errors, with specialized d
 
 ### 3.2 Exception Manager
 
-Transports exceptions within the current cyclic PLC task:
+Handles passing exceptions inside the current cyclic PLC task:
 
-* Stores the last framework payload separately for each task
-* Returns that payload or a task-local native wrapper from `GetLastException`
-* Propagates an already obtained exception through `Throw`; `ReThrowLastException` uses the current catch code and context
+* Saves the active framework exception separately for each PLC task
+* Returns that exception — or a task-local `SystemException` — from `GetLastException`
+* Passes along an existing exception via `Throw`; `ReThrowLastException` captures the current catch point and rethrows it
+
+How references behave if you hold on to one:
 
 * **Framework exceptions** get a fresh dynamic copy via `__NEW` on each `Throw`. If you hold an `IException` reference to one framework exception and another framework exception is thrown in the same cycle, the first one is **not** overwritten (it stays valid until `DynamicMemoryManager.CleanupMemory()`).
-* **Built-in TwinCAT runtime errors** (such as divide-by-zero or null pointer access) do **not** call `__NEW` in `GetLastException`; instead, each task reuses one shared static `SystemException` instance. Because of that, catching another built-in error in the same task overwrites the fields of that shared object. If you need to keep the first system error before calling code that might catch another one, copy it into an `ERROR` struct (`ToError`) or call `Clone()`.
+* **Built-in TwinCAT runtime errors** (such as divide-by-zero or null pointer access) do **not** call `__NEW` in `GetLastException`; instead, each task reuses one shared static `SystemException` instance. Because of that, catching another built-in error in the same task overwrites the fields of that shared object. If you need to keep the first system error before calling code that might catch another one, copy it into an `ERROR` (`ToError`) or call `Clone()`.
 
 Never pass exception references to another PLC task.
 
@@ -93,8 +95,8 @@ Never pass exception references to another PLC task.
 
 * `TOF_Core.System.Execute()` updates the calling task's cached time
 * Wait for `SystemDataValid` before using that time
-* Framework exceptions capture cached timestamps on `Throw`; native wrappers capture them on `GetLastException`
-* Cloning preserves the captured timestamps
+* Framework exceptions record the time when `Throw` is called; built-in TwinCAT errors (`SystemException`) record the time when `GetLastException` catches them
+* Cloning keeps those saved timestamps intact
 
 ---
 
@@ -105,9 +107,20 @@ Never pass exception references to another PLC task.
 * At the end of the task cycle, `DynamicMemoryManager.CleanupMemory()` automatically frees all registered exception objects created in that task.
 * Registering the exact same object twice is safely ignored.
 
-Do not keep an `IException` reference after the end-of-cycle cleanup, do not `__DELETE` it manually, and do not pass it to another PLC task. If you need to keep error information for later cycles (for example, to show on an HMI), call `ToError()` to copy it into an `ERROR` struct.
+Do not keep an `IException` reference after the end-of-cycle cleanup, do not `__DELETE` it manually, and do not pass it to another PLC task. If you need to keep error information for later cycles (for example, to show on an HMI), call `ToError()` to copy it into an `ERROR` (see below).
 
 If you create your own custom exception class with extra fields, override `Clone` so it creates your exact class, registers it with `DynamicMemoryManager.RegisterAutoDisposedObject`, and copies all extra fields. Never create or throw exceptions inside `FB_init`, `FB_exit`, or `FB_reinit`.
+
+---
+
+### 3.5 `Exception` vs. `ERROR` (Event vs. State)
+
+A simple way to think about the difference:
+
+* **`Exception` is an event.** It happens at a specific moment to stop the current operation and jump to a `__CATCH` block. It is temporary and lives only until end-of-cycle cleanup (`DynamicMemoryManager.CleanupMemory()`). Do not store `IException` references across cycles or pass them to another PLC task.
+* **`ERROR` is a state.** `TOF_Core.ERROR` (a data function block extending `READ_ONLY_ERROR`) stores copied error details — `Severity`, `TopMessage`, `RootMessage`, `TopSource`, `RootSource`, `LocalTimestamp`, and `UtcTimestamp` (along with `HasError`, `Empty`, `ToString()`, and `Clear()`) — with no reference back to the original exception object. It stays valid across PLC cycles until your code clears or replaces it, making it suitable for component fault state, HMI display, and long-term diagnostics.
+
+In short: throw an **`Exception`** when something goes wrong right now; catch it and call `caughtException.ToError(...)` when you want to keep that failure as an **`ERROR`** state across future PLC cycles.
 
 ---
 
@@ -133,7 +146,7 @@ Your business logic where exceptions may be raised.
 
 ## 5. Example without AutomationRunner
 
-Call this program from a cyclic PLC task. Setting `requestException` raises one demonstration exception after system time becomes available. The request is cleared before throwing; no machine operation is partially executed. `lastError` retains copied diagnostics until explicitly cleared or replaced.
+Call this program from a cyclic PLC task. Setting `requestException` raises one example exception once system time is ready (`requestException` is cleared first so nothing runs twice). `lastError` keeps the saved error details until your code clears or replaces them.
 
 Declaration:
 
@@ -161,8 +174,8 @@ IF TOF_Core.System.SystemDataValid THEN
 			requestException := FALSE;
 
 			TOF_Core.Exceptions.ThrowStandard(
-				sourceNamespaceName := '',
-				sourceClassName := '',
+				sourceNamespaceName := CurrentNamespace.Name, (* name of your project namespace *)
+				sourceClassName := ClassName, (* usually property ClassName returns __POUNAME() of the FB or PROGRAM *)
 				sourcePOUName := __POUNAME(),
 				sourcePosition := __POSITION(),
 				message := demoMessage
@@ -171,7 +184,7 @@ IF TOF_Core.System.SystemDataValid THEN
 	__CATCH(exceptionCode)
 		caughtException := TOF_Core.ExceptionManager.GetLastException(
 			exceptionCode := exceptionCode,
-			catchPointNamespaceName := '',
+			catchPointNamespaceName := CurrentNamespace.Name,
 			catchPointPOUName := __POUNAME(),
 			catchPointPosition := __POSITION()
 		);

@@ -1,15 +1,20 @@
 # JSON and EventLogger: task ownership
 
 `TOF_JSON.AutomaticJsonSerializer`, `TOF_JSON.JsonConfigurationReader`,
-`TOF_JSON.JsonConfigurationWriter`, and `TOF_Core.EventLoggerMessage`
-have **one owner task per instance**. All application method calls and property
-access, including configuration, belong to that task. A call must finish before
-another operation starts on the same instance. Initialization and destruction
-must not overlap application operations.
+`TOF_JSON.JsonConfigurationWriter`, and `TOF_Core.EventLoggerMessage` must each be
+used by **one PLC task only**. Every method call, property read/write, initialization,
+and cleanup on one instance must happen in that same task, one call at a time.
 
-These classes have no internal locks or cross-task checks, and you must not call an instance again from inside its own callback. `Try` methods catch normal runtime errors and return `FALSE`, but they cannot make cross-task access or nested callbacks on the same instance safe.
+These classes have no built-in thread locks or cross-task checks, and you must not call
+an instance again from inside its own callback. `Try` methods catch normal runtime errors
+and return `FALSE`, but they cannot make cross-task access or recursive callbacks on the
+same instance safe.
 
-Each program in the fragments below should be assigned to its matching task. Every PLC task must also run end-of-cycle exception cleanup (`ExceptionManager.Cleanup()`, `DynamicMemoryManager.CleanupMemory()`) and call `DynamicMemoryManager.RaiseIfAllocationFailed()` outside recovery handlers (`AutomationRunner` handles this automatically if you use it).
+Assign each program below to its matching PLC task. Every task must also run
+end-of-cycle exception cleanup (`ExceptionManager.Cleanup()`,
+`DynamicMemoryManager.CleanupMemory()`) and call
+`DynamicMemoryManager.RaiseIfAllocationFailed()` outside `__TRY`/`__CATCH` recovery
+blocks (`AutomationRunner` handles this automatically if you use it).
 
 ## Separate JSON instances
 
@@ -75,24 +80,24 @@ IF serializeRequested THEN
 END_IF
 ```
 
-The identically named local variables are different instances. Neither program
-calls or reads the other's serializer. Consume the latest conversion output
-only when `jsonValid` is `TRUE`; `jsonSize` includes the terminator. On failure,
-output may be partial and must not be treated as a valid new document.
+In the code above, both `PRG_ControlJson` and `PRG_DiagnosticsJson` use the same local
+variable names, but they are completely separate instances in separate tasks. Only read
+the output JSON when `jsonValid` is `TRUE` (`jsonSize` includes the trailing null byte).
+If `TrySerialize` returns `FALSE`, the output buffer may be half-written and must not be
+used.
 
-Separate serializers do not protect shared data. If diagnostics needs data from
-the control task, transfer an owned snapshot using an application synchronization
-mechanism before serialization. An ordinary structure assignment from a buffer
-being modified concurrently is not a synchronized snapshot. Likewise, publishing
-the JSON to another task requires synchronized transfer of its content and status.
-During deserialization, the owner must have exclusive access to the destination;
-other tasks must not read a partially updated structure.
+Having separate serializers does not automatically protect shared PLC data. If the
+diagnostics task needs data from the control task, copy a safe snapshot between tasks
+first using proper task synchronization — assigning a struct while another task is
+still writing to it can mix old and new fields. Likewise, synchronize sharing the finished
+JSON text with another task. While deserializing into a variable, make sure no other
+task reads it half-updated.
 
 ## Extender callbacks and nested conversion
 
-`WritePrefix` and `WriteSuffix` run synchronously in the serializer's owner
-task. Each callback borrows the writer only until that callback returns. It must
-not retain the writer or hand it to another task.
+`WritePrefix` and `WriteSuffix` run inside the serializer's own PLC task. The callback
+may only use the supplied writer while that callback is running — do not store it or
+pass it to another task.
 
 For example, while `outerSerializer` is inside `WritePrefix`:
 
@@ -103,24 +108,22 @@ For example, while `outerSerializer` is inside `WritePrefix`:
 | Read or change `outerSerializer.DecimalPlaces` | Not allowed while serialization is running |
 | Convert an independent structure with `nestedSerializer` and a separate buffer | Supported if that serializer is idle and belongs to this task |
 
-Keep the outer source stable and its destination exclusive throughout callbacks.
-Nested conversion must not modify or alias those buffers. A stateful extender
-also needs a single owner or its own explicit synchronization; two independent
-serializers do not make one shared extender safe. Make sure callbacks do not loop back
-and call a serializer that is already running.
+Keep the outer input data and output buffer unchanged and untouched by other code
+during the callback, and do not write a nested conversion into those same buffers. If
+your extender stores state across calls, keep it dedicated to one task or synchronize it
+yourself. Make sure callbacks never loop back and call a serializer that is already
+running.
 
 ## Separate EventLogger message instances
 
-`EventLoggerMessage` is abstract. An application descendant must provide its
-event definition and concrete metadata. For example, a descendant named
-`FB_MachineEvent` can expose this method, in addition to its `EventEntry`,
-`ClassName` and `NamespaceName` implementations:
+`EventLoggerMessage` is abstract, so create your own subclass with its `EventEntry`,
+`ClassName`, and `NamespaceName` properties, plus a `TrySend` method such as:
 
 ```iecst
 (*!
 <summary>Attempts to send this event with an owner-task JSON payload.</summary>
-<description>Call only from the message's owner task, and never recursively from inside its own callback. Borrows stable JSON for the call.
-Returns the native send outcome through InternalTrySend; failure does not roll back prior native effects.</description>
+<description>Call only from the message's owner task, and never recursively from inside its own callback. Keep jsonData valid while the call runs.
+Returns the native send outcome through InternalTrySend; failure does not undo prior side effects.</description>
 <param name="jsonData">Stable JSON text for this event.</param>
 *)
 METHOD TrySend : BOOL
@@ -131,7 +134,7 @@ END_VAR
 TrySend := InternalTrySend(jsonData := jsonData);
 ```
 
-With that application-specific descendant defined, use independent instances:
+With that subclass defined, declare separate instances for separate tasks:
 
 ```iecst
 (*! <summary>Sends events exclusively from Task_Control.</summary> *)
@@ -165,21 +168,19 @@ IF sendRequested THEN
 END_IF
 ```
 
-Configure each instance's source information in its owner task before sending.
-The descendant must not use an overridden property or callback to send through
-the same message recursively. A `FALSE` send result does not schedule a retry;
-the application decides what to do next. Event definitions and source identity
-remain application choices: separate instances do not automatically create
-distinct event IDs or source identities.
+Set each instance's source settings in its own PLC task before sending. Never call the
+same message's send method recursively from an overridden property or callback. If
+`TrySend` returns `FALSE`, nothing retries automatically — decide in your application
+what to do next. Having separate instances also does not automatically give them
+different event IDs or source names; configure those in your application as needed.
 
 ## If a shared service is needed later
 
-A future service can accept requests through a synchronized queue and perform
-all native message operations in one owner task. Such a service must explicitly
-define queue capacity, behavior when full, ordering and how producers observe
-acceptance versus actual sending. Queue entries must own their payload copies;
-do not enqueue references to a producer's temporary or reusable buffer, borrowed
-writers or task-local exception objects.
+If multiple tasks need to log events, you could build an application wrapper that takes
+requests through a thread-safe queue and calls TwinCAT's event logger from one dedicated
+task. Such a service should clearly define queue size, what happens when full, ordering,
+and how callers check delivery results. Store full copies of event text inside queue
+items rather than pointers to temporary buffers, writers, or task-local exceptions.
 
 This queued service is just an idea for how your application could extend it — not
 a built-in `EventLogger` API. Wrapping one shared instance in a mutex does not make

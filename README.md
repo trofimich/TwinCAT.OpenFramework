@@ -62,7 +62,7 @@ Defines a predictable and explicit execution model, replacing ad-hoc control flo
 * `AutomationRunner` (top-level root scheduler and per-task runtime boundary)
 * `AutomationController` / `CompositeAutomationComponent` / `LeafAutomationComponent`
 * Cooperative `Task` / `TaskQueue` / `Timer` state machines
-* `Workflow` orchestration engine for dynamic recipes and sequences
+* `Workflow` orchestration engine for dynamic scenarios
 
 This layer separates **how code runs** from **what it does**.
 

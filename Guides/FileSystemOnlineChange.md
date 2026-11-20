@@ -1,73 +1,83 @@
 # FileSystem: preparing for online change
 
-Finish file operations and release their resources **before** online change.
-Keeping an open file handle or a pending native operation across online change
-is unsupported. The application and operator enforce this precondition; the
-library does not intercept an IDE online-change request.
+Finish all file operations and close their files **before** triggering TwinCAT online
+change. Keeping a file open or a file operation running during online change is not
+supported. Your application (and the person running online change) must make sure files
+are closed first — the library does not pause or intercept TwinCAT's online-change dialog.
 
-## Finish work while the application is still cycling
+## Finish work while the PLC is still running
 
-1. Stop producers from submitting new file work. Keep this restriction in place
-   throughout preparation and online change, including background services.
-2. For each running `FileContentManager`, set `StopWhenNoPendingTasks := TRUE`
-   and continue calling its `Execute()` from its owner task. This lets queued
-   work finish and then releases the file. If abandoning waiting work is
-   acceptable, request `Cancel()` instead and continue `Execute()` until
-   `State.Stopped`. Cancellation is a request, not synchronous cleanup or rollback.
-3. Keep advancing standalone file and directory tasks until they stop. They may
-   finish normally or accept cancellation according to the application's policy.
-   Drive queued children through their manager; do not call them independently.
-4. Keep configuration, task instances, resource owners and borrowed buffers alive
-   throughout this process. Do not reset or destroy an active object to force
-   completion. Do not replace cyclic execution with a blocking wait or a delay.
+1. Stop all code (including background tasks) from starting new file operations, and
+   keep them paused until online change finishes.
+2. For each running `FileContentManager`, set `StopWhenNoPendingTasks := TRUE` and
+   keep calling its `Execute()` every PLC cycle from its owning task. This lets already
+   queued operations finish and then closes the file. If it is okay to drop waiting
+   operations, call `Cancel()` instead and keep calling `Execute()` until
+   `State.Stopped`. Remember: `Cancel()` only requests a stop — it does not finish or
+   undo partial work right away.
+3. Keep calling `Execute()` on standalone file and directory tasks until they stop
+   (either normally or after `Cancel()`). For child tasks queued inside
+   `FileContentManager`, let the manager drive them — do **not** call their `Execute()`
+   separately.
+4. Keep all settings, task instances, managers, and read/write data buffers alive
+   until everything finishes. Never reset or destroy an active task to force it to stop,
+   and never replace normal PLC cycles with a delay or blocking `WHILE` loop.
 
-A running manager with an empty queue can still own an open file. A stopped
-read/write child does not mean its manager has released that file. A never-started
-READY task needs no artificial Start/Cancel cycle, but must remain prevented from
-starting during preparation.
+Even when a `FileContentManager`'s queue is empty, it can still hold an open file. A
+child read/write task reaching `STOPPED` also does not mean the manager closed the file.
+A `READY` task that never started does not need to be started and cancelled — just make
+sure nothing starts it during preparation.
 
-## Decide whether preparation is complete
+## Check that everything really closed
 
-All previously running tasks and managers must have finished their stopping and
-release phases. There must be no pending open, read, write, directory operation,
-enumeration, abort or close, and no retained open file resource.
+Before running online change, every active file task and manager must finish stopping
+and closing: there should be no pending open, read, write, directory listing, or close
+call, and no open file handle left behind.
 
-Look at task results and error logs carefully. If a low-level close or directory-abort call fails, the library stops trying to clean up that resource right away, so `State.Stopped` or `ResourceAcquired = FALSE` does not guarantee TwinCAT actually released the OS file handle. Because log messages can also be dropped if logging fails, having no logged errors is not proof either. There is no single flag that guarantees physical file release after a low-level error.
+Look at task results and error logs carefully. If a low-level close or directory-abort
+call fails, the library stops trying to clean up that resource right away, so
+`State.Stopped` or `ResourceAcquired = FALSE` does not guarantee TwinCAT actually
+released the OS file handle. Because log messages can also be dropped if logging fails,
+having no logged errors is not proof either. There is no single flag that guarantees the
+file was closed physically after a low-level error.
 
-If cleanup fails, gets stuck, or you are not sure it completed, fix the underlying file or server problem before running online change — the library does not retry automatically. Only perform online change once all file operations and handles are cleanly closed.
+If cleanup fails, gets stuck, or you are not sure it completed, fix the underlying file
+or server problem before running online change — the library does not retry automatically.
+Only perform online change once all file operations and handles are cleanly closed.
 
-`FileHandleResourceManager.FB_exit` is a final best-effort fallback. It does not
-wait for close completion and does not transfer an active handle to a copied
-instance. Under the supported preparation procedure, normal release has already
-completed before this callback runs.
+`FileHandleResourceManager.FB_exit` is only a last-resort fallback. It cannot wait for
+TwinCAT's async close to finish and cannot move an open handle to a new copy during
+online change. If you follow the steps above, files are already closed long before
+`FB_exit` runs.
 
-## Resume explicitly
+## Resume safely after online change
 
-Keep producers paused until the application has prepared its tasks for reuse.
-Save any results needed before resetting. Reset a stopped manager, restore its
-configuration (including `FilePath`, which Reset clears), prepare its children
-and enqueue them again before Start. Resetting the manager clears queue entries;
-it does not reset its children. Restore `StopWhenNoPendingTasks` to the intended
-operating policy before restarting.
+Keep new file requests paused until your tasks are ready again. Save any results you
+still need before resetting. Reset a stopped `FileContentManager`, restore its settings
+(including `FilePath`, which `Reset()` clears), prepare its child tasks, and add them
+back to the queue before calling `Start()`. Note that resetting the manager clears the
+queue — it does **not** reset the child tasks themselves. Set `StopWhenNoPendingTasks`
+back to your normal operating value before restarting.
 
-Cancellation or failure can leave waiting entries retained until explicitly
-cleared or reset. Removing an entry does not clear its borrowed resource binding.
-A removed STOPPED child can Reset to clear that binding; Reset on a READY child
-does nothing. Explicitly clear or replace a removed READY child's binding before
-destroying its previous resource owner. Do not reuse cached native handles across
-release or assume this procedure guarantees migration of arbitrary pointers.
+Cancelling or failing a task can leave waiting entries in the queue until you remove
+them or reset the manager. Removing a child from the queue does not clear the data
+buffer pointer it is holding: call `Reset()` on a `STOPPED` child to clear that
+reference (`Reset()` on a `READY` child does nothing, so clear or replace a removed
+`READY` child's buffer reference manually before freeing the old buffer). Do not keep
+old raw TwinCAT file handles after closing.
 
-## Components that hide a file manager
+## Loggers and other wrappers that own a file manager
 
-The same rule applies to loggers and other services owning a file manager.
-Use their public shutdown contract, rather than accessing internal fields.
+Follow the same steps for loggers or components that manage files internally — always
+use their public stop/close methods instead of touching internal fields.
 
-For `SimpleTextFileLogger`, call `Stop()` from its owner task and continue cyclic
-`Execute()`. Stop immediately rejects new messages, while accepted messages finish
-writing, including any required file rotations. The logger then enters `STOPPING`
-for final release and `STOPPED` after release and buffer cleanup finish. Until
-draining finishes, State can still report initialization or `LOGGING`; Busy remains
-TRUE while the stop request is unfinished. Stop returns acceptance, not completion.
+For `SimpleTextFileLogger`, call `Stop()` from its owning task and keep calling
+`Execute()`. After `Stop()`, new log messages are rejected right away, while messages
+already accepted finish writing (including rotating files if needed). Once writing
+finishes, the logger enters `STOPPING` to close the file, then `STOPPED` after buffers
+are cleaned up. Until queued messages finish writing, `State` may still say
+initializing or `LOGGING`, and `Busy` stays `TRUE`. Notice that `Stop()` only starts
+stopping — it does not mean the file is closed yet.
 
 Check for `FAILED` too: if initialization or writing fails, the logger runs its
 error cleanup and may drop queued messages that were not written yet — keep calling
@@ -76,28 +86,28 @@ manager's limitation: after a low-level close error, it does not guarantee the O
 file handle was released. Likewise, `Busy = FALSE` alone does not mean it is safe,
 because a logger waiting without `Stop()` can still hold an open file.
 
-After preparation and online change, `Start()` resumes a normally stopped logger.
-It returns FALSE in every other state, including FAILED. Execute checks the
-directory again, and the next accepted message opens the next generated file.
-The file counter is retained, so resumption does not deliberately reopen the
-previous file. The existing timestamp/counter naming policy is not exclusive
-creation and does not guarantee uniqueness against other instances or previous
-PLC runs. The initial instance still starts automatically without a Start call.
+After online change, call `Start()` to resume a normally stopped logger (it returns
+`FALSE` in any other state, including `FAILED`). `Execute()` checks the folder again and
+creates the next log file when the next message arrives. The file counter is preserved
+so it moves on to the next number instead of reopening the old file (timestamp/counter
+names are not guaranteed to be unique if another run or instance writes to the same
+folder). At PLC startup, a fresh logger still starts automatically without `Start()`.
 
-If a `QueuedLogger` wraps the backend, first stop all producers, then advance the
-wrapper from its owner task until `PendingMessageCount = 0` after Execute returns.
-Only then call the concrete backend's Stop from that same owner task. Continue
-the wrapper's Execute to advance backend stopping; do not execute the backend
-independently. Stopping the backend before the wrapper drains causes remaining
-forwarded messages to be rejected. Inspect `FailedDeliveryCount` as well as the
-backend state: draining the wrapper is not a guarantee of successful delivery.
-Follow this order so files close cleanly before online change; note that it only
-covers file shutdown, not migrating `QueuedLogger`'s internal synchronization state
-across online change.
+If `SimpleTextFileLogger` is wrapped inside `QueuedLogger`:
+1. Stop all code that sends log messages, then keep calling `QueuedLogger.Execute()` from
+   its owning task until `PendingMessageCount = 0`.
+2. Only then call `Stop()` on the inner `SimpleTextFileLogger` from that same task.
+3. Keep calling `QueuedLogger.Execute()` so the inner logger finishes closing — do
+   **not** call `Execute()` on the inner logger directly. Stopping the inner logger
+   early causes remaining queued messages to be rejected. Also check
+   `FailedDeliveryCount` in addition to the logger state, since an empty queue alone
+   does not prove every message succeeded. Remember that this shuts down file handles;
+   do not expect `QueuedLogger`'s cross-task synchronization state to carry over
+   unchanged across online change.
 
-`SimpleTextFileLogger` routes its embedded task and file-resource diagnostics directly
-to an owned `AdsLogger`. They bypass `LogManager` filters and counters, so servicing
-this backend does not feed its own file-operation diagnostics back into the wrapper.
-Standalone tasks retain normal `LogManager` routing unless their optional borrowed
-`DiagnosticLogger` is configured. Keep an explicit destination alive and unchanged
-through task stopping and reset; it must not return to the active logging chain.
+Inside `SimpleTextFileLogger`, its internal file tasks send their own status logs directly
+to a private `AdsLogger` instead of going through `LogManager`, so logging its own file
+work cannot loop back into the same file logger. Any standalone `Task` normally sends
+status logs through `LogManager` unless you assign its optional `DiagnosticLogger` to
+bypass `LogManager` — if you do, keep that target logger alive and untouched until after
+the task stops and resets, and never point it back into `LogManager`.

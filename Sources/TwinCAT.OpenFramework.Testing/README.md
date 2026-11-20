@@ -9,25 +9,22 @@ Choose a base class for one scenario:
 | `TestGroup<N>` (abstract) | `Children` reference property | Executes its `N` children sequentially, including nested groups. |
 | `TestRunner<N>` (abstract) | `Children` reference property | Drives `N` root elements and reports the run result. |
 
-Concrete tests, groups and runners provide the Core.Object metadata properties: ClassName, NamespaceName and SelfSize.
-Both test base classes provide optional BeforeTest and AfterTest hooks. Construction only copies the display
-name and assigned parent, without inspecting the tree or invoking overridable code. Pass every argument explicitly:
-`test : AdditionTest(name := "Addition", parent := 0);`. A root has no parent; nested elements use `parent := THIS^`.
-Individual names use WSTRING with an 80-character limit throughout construction, INamed access and reporter testName.
-Longer input is truncated by ordinary IEC conversion. Computed group paths have a separate 255-character limit.
+All concrete tests, groups, and runners must provide the standard `TOF_Core.Object` properties (`ClassName`, `NamespaceName`, and `SelfSize`). Tests also have optional `BeforeTest` and `AfterTest` methods for setup and cleanup. Creating a test only stores its `name` and `parent` — it does not inspect the tree or call overridden methods yet. Always pass all `FB_init` parameters explicitly (no defaults): for example, `test : AdditionTest(name := "Addition", parent := 0);`. Use `parent := 0` for root items, and `parent := THIS^` for items inside a group.
+
+Each item's `name` is a `WSTRING` up to 80 characters (longer names are cut off normally by TwinCAT). Full group paths built for reporters are limited to 255 characters.
 
 ## Start with one test
 
-1. Create an FB extending `TOF_Testing.SingleCycleTest`.
-2. Override `METHOD PROTECTED ExecuteTest` and write assertions such as
+1. Create a function block extending `TOF_Testing.SingleCycleTest`.
+2. Override `METHOD PROTECTED ExecuteTest` and add checks such as
    `Assert.ThatDInt(actual := 2 + 3).ToBe(expected := 5);`.
-3. Create a concrete FB extending `TOF_Testing.TestRunner<1>` and declare the test instance inside it with `parent := 0`.
-4. Initialize a persistent interface array from that instance and override `Children` to return it by reference.
-   Provide the concrete runner's ClassName, NamespaceName and SelfSize; see AdditionTestRunner.
-5. Call `runner.Execute(cleanupTaskMemory := TRUE)` once per task cycle at the task boundary.
-6. Wait for `runner.IsFinished`, then read `AllPassed`, `ExitCode` and the result counts.
+3. Create a concrete runner extending `TOF_Testing.TestRunner<1>` and declare your test inside it with `parent := 0`.
+4. Put that test in a persistent `ITestElement` array and override `Children` to return it with `REF=`.
+   Also implement `ClassName`, `NamespaceName`, and `SelfSize` (see `AdditionTestRunner`).
+5. Call `runner.Execute(cleanupTaskMemory := TRUE)` once per PLC task cycle.
+6. Wait until `runner.IsFinished` becomes `TRUE`, then check `AllPassed`, `ExitCode`, and the test counts.
 
-A group is optional. The body is single-cycle; runner startup and reporting use additional cycles.
+You do not have to use a group. Even though the test itself runs in one cycle, starting the runner and reporting take a couple of extra cycles.
 
 Executable sources:
 
@@ -37,60 +34,30 @@ Executable sources:
 
 ## Wait across cycles
 
-Extend `TOF_Testing.MultiCycleTest`. Keep the scenario's persistent objects and state in FB fields. Prepare them
-once in `BeforeTest`, advance one bounded step in `ExecuteTest`, and return `TOF_Testing.TEST_CYCLE_RESULT.BUSY`
-to continue on the next cycle or `TOF_Testing.TEST_CYCLE_RESULT.DONE` when checks are done (any failure also
-terminates the case immediately after the callback returns). Use a typed enumeration if the scenario needs multiple
-phases. There is no numeric step API or separate context FB.
+To test something that takes more than one PLC cycle (like a timer or file operation), extend `TOF_Testing.MultiCycleTest`. Keep your state and objects in FB fields. Set things up once in `BeforeTest`, advance one small step each cycle in `ExecuteTest`, and return `TOF_Testing.TEST_CYCLE_RESULT.BUSY` to wait for the next cycle or `TOF_Testing.TEST_CYCLE_RESULT.DONE` when finished (any failed assertion also stops the test immediately when `ExecuteTest` returns). Use a typed `ENUM` if your test has multiple steps.
 
-The `Timeout` property defaults to `T#1S`; configure it before starting. `T#0S` disables the deadline. `Elapsed`
-starts at zero on the first execution and accumulates nominal calling-task periods in `LTIME` internally.
-The deadline is checked before the next body, so it can prevent that body from executing at the deadline.
-This measures scheduled PLC cycles, not wall-clock time or CPU execution time.
+`Timeout` defaults to `T#1S` (change it before running; `T#0S` disables the timeout). `Elapsed` starts at zero and counts scheduled PLC task cycles using `LTIME` — so it measures PLC cycle time rather than CPU execution time or wall-clock pauses. If `Elapsed` reaches `Timeout` before the next step starts, the test stops with a timeout failure before running `ExecuteTest` again.
 
 - [TimerDelayTest](../TwinCAT.OpenFramework.HowTo/Testing/TimerDelayTest.TcPOU)
 - [MultiCycleTestExample](../TwinCAT.OpenFramework.HowTo/Testing/MultiCycleTestExample.TcPOU)
 
 ## Group related tests
 
-SingleCycleTest, MultiCycleTest and abstract TestGroup<N> implement ITestElement. Create a concrete descendant
-of TestGroup with a fixed child count. Declare its persistent tests and nested groups with parent := THIS^,
-then initialize its interface array from those instances. Use the inherited _ChildCount for array bounds;
-do not redeclare VAR_GENERIC CONSTANT in the descendant.
+`SingleCycleTest`, `MultiCycleTest`, and `TestGroup<N>` all implement `ITestElement`. Create your own concrete FB extending `TestGroup<N>` with a fixed child count `N`. Declare its tests and child groups with `parent := THIS^`, then put them in an interface array. Use the inherited `_ChildCount` constant to size the array — do not declare `VAR_GENERIC CONSTANT` again in the subclass.
 
-Override this property with the exact generic array type:
+Override `Children` with the exact generic array type:
 
 `PROPERTY Children : REFERENCE TO ARRAY [0.._ChildCount - 1] OF TOF_Testing.ITestElement`
 
-Its getter only binds `Children REF= _Children;`. Return the same valid array and unchanged child list throughout
-the group lifetime. The reference is borrowed and read-only by contract: the language still allows writes through
-a reference property, so application code must not mutate it. N = 0 uses an empty array.
+Its getter only needs `Children REF= _Children;`. Always return the same valid array and do not swap children while the group exists (the compiler allows writing through a reference property, so never modify it from outside). `N = 0` uses an empty array.
 
-There is no group Configure call. Parent is assigned in FB_init and has no binding method. It describes the
-assigned group even before execution; it does not register the child or transfer allocation ownership.
-Reset validates array storage, non-null slots, duplicates, matching parents and acyclic parent chains
-once at the beginning of each run, before calling a direct child Reset. Execute uses Children without
-repeating validation and requires a successful Reset, including after any failed Reset. Missing storage or a null slot raises DataMemberNotSpecifiedException; other
-topology violations raise StandardException. Nested validation or external callbacks can still fail after earlier
-siblings have reset, so Reset does not guarantee rollback. The constructors perform no topology checks.
+Groups have no `Configure` method: `parent` is passed in `FB_init` just to describe which group owns each item (passing `parent` does not dynamically allocate or register anything). At the start of a run, `Reset` checks that the array exists, has no empty (`0`) slots, has no duplicates, matches every child's `Parent`, and contains no parent loops. `Execute` expects `Reset` to have succeeded (so if `Reset` failed, fix the issue and `Reset` again). Empty arrays or null slots throw `DataMemberNotSpecifiedException`; duplicate/mismatched/loop wiring throws `StandardException`. Because nested checks can fail after earlier sibling groups already reset, `Reset` cannot undo earlier sibling resets. Constructors do not validate the tree.
 
-One root call executes at most one leaf body. A pending multi-cycle test holds the sequence until it completes.
-Group nodes add no tests to the totals and have no setup or teardown hooks. Reset reuses the same fixed composition.
+One `runner.Execute` call runs at most one test body at a time; a multi-cycle test holds its place until finished. Groups do not count as extra tests and have no setup/teardown hooks of their own. Calling `Reset` restarts the same fixed group tree.
 
-Groups expose `IParentTestElement`: `ChildCount` is the fixed direct count, and
-`GetChildByIndex(index := ...)` borrows a child in execution order without resetting or executing it.
-Missing array storage or a null selected slot raises `DataMemberNotSpecifiedException`;
-an index outside `0..ChildCount - 1` raises `ArgumentOutOfRangeException`. Storage is checked first.
-The accessor is available before Reset and after a rejected Reset when the selected slot exists;
-it does not repeat whole-tree validation. An empty group has no valid child index.
+Groups also implement `IParentTestElement`: `ChildCount` returns `N`, and `GetChildByIndex(index := ...)` returns a direct reference to child `index` without resetting or running it (throws `DataMemberNotSpecifiedException` if the array or slot is null, or `ArgumentOutOfRangeException` if `index` is outside `0..ChildCount - 1`). It works even before `Reset` or after a failed `Reset` as long as the selected slot exists; an empty group (`N = 0`) has no valid index.
 
-TestRunner<N> is also abstract. Its concrete descendant owns root tests/groups and persistent interface-array
-storage and overrides Children with the same reference signature and stable-storage contract. There is no Configure.
-Runner startup validates the storage and rejects null, duplicate, running or group-owned roots before resetting
-any direct root or reporting run start. Subsequent execution cycles do not repeat topology validation.
-Roots explicitly use `parent := 0`; the runner is not their `Parent`. Each root belongs to one runner only — sharing one test or group across runners is not supported. Keep all test objects alive and run each runner from one PLC task only (do not call it again from inside its own callback).
-N = 0 still requires valid empty array storage and finishes with zero tests.
-Group validation is recursive through Reset, not a whole-tree transaction: earlier siblings may already be reset.
+`TestRunner<N>` works the same way: extend `TestRunner<N>` in your own concrete FB that owns the root tests/groups and their `ITestElement` array, and override `Children`. At startup, the runner checks that its root array is valid with no nulls, duplicates, already-running items, or children belonging to a group, and then resets and runs them (subsequent cycles skip repeating that tree check). Root items must pass `parent := 0`; one test or group can belong to only one runner. Keep all test objects alive and run each runner from one PLC task only (do not call it again from inside its own callback). Even with `N = 0`, provide a valid empty array — the runner simply finishes with zero tests.
 
 Complete static compositions and their entry program:
 
@@ -101,29 +68,13 @@ Complete static compositions and their entry program:
 
 ## Failures, cleanup and another run
 
-Assertions and `RecordFailure(message := ...)` copy the first failure and let the current callback return normally.
-They do not stop subsequent statements in that callback. An uncaught preparation or body exception becomes a failed
-test. `AfterTest` runs once even when `BeforeTest` fails, so it must tolerate partial preparation. A teardown
-exception also fails that same test. Later diagnostics do not replace the first failure. The next test can proceed.
-Caught exceptions retain copied message/source text and the interrupted stage. If a custom exception formatter
-throws, a stage/code fallback is retained. Reporter or external-element aborts expose the copied `CallbackMessage`
-alongside the native transport code in `CallbackException`. Neither retains an exception object after task cleanup.
+Calling `Assert.That*` or `RecordFailure(message := ...)` records the first failure and lets the rest of your `ExecuteTest` body finish normally. An uncaught exception in `BeforeTest` or `ExecuteTest` also fails the test. `AfterTest` still runs once even when `BeforeTest` fails (so write `AfterTest` safely in case setup did not finish), and an exception in `AfterTest` fails the same test. Later failures never overwrite the first failure, and the runner moves on to the next test afterward. Caught exceptions save their message, location, and which stage failed (falling back to stage/error-code text if custom formatting fails). If a custom reporter or custom element throws an exception, the run aborts (`ExitCode = -1`), saving `CallbackMessage` and `CallbackException`.
 
 If dynamic memory runs out (`__NEW` fails), execution stops outside normal recovery handlers — it is never converted into a passing test, and normal cleanup hooks may not run. For method-local FBs on code paths that can throw exceptions, do not rely on `FB_exit` to free resources (TwinCAT skips `FB_exit` when an exception leaves a method); keep resource owners in persistent FB fields and clean them up explicitly.
 
-`runner.Reset()` rearms a completed runner. The next Execute recursively resets observations and runs each scenario's
-preparation again. Reset during normal execution is ignored. Element Reset is infrastructure, not cancellation:
-it does not execute teardown. A throwing external element or reporter aborts with `ExitCode = -1`, and the callback
-is not retried. Before resetting such an aborted tree, recover any remaining user resources explicitly.
-After abort, Reset validates the fixed root storage and topology and recursively resets the same tree immediately.
-Running roots are allowed during recovery. Invalid storage or topology raises before any root Reset and retains
-the aborted observations. It invokes element Reset callbacks, but no scenario, teardown or reporter callback.
-If a custom Reset throws, the runner retains its aborted observations; fix the cause and retry Reset.
-For other runs, tree reset remains deferred until the next Execute.
+Once a test run finishes, `runner.Reset()` prepares the runner for another run (on the next `Execute`, tests reset and run `BeforeTest` again; calling `Reset()` while a run is still in progress does nothing). `Reset` does not run `AfterTest` teardown — it is not a cancel command. If a custom element or reporter aborted the run (`ExitCode = -1`), clean up any external resources you opened first, then call `runner.Reset()` — after an abort, `Reset` re-validates the tree and resets all elements right away (even if an element was left running; if your custom `Reset` throws, fix the issue and call `runner.Reset()` again).
 
-For normal completion, `ExitCode` is the number of failed leaves. `AllPassed` is meaningful after `IsFinished`.
-Skipped results are supported by the common counts and reporter contract for custom elements; the two test bases
-do not provide a skip command.
+After a normal run finishes (`IsFinished = TRUE`), `ExitCode` equals the number of failed tests and `AllPassed` tells you whether every test passed. Reporters also support skipped-test counts for custom elements (the built-in single/multi-cycle test classes do not skip tests).
 
 ## Assertion semantics
 
@@ -137,16 +88,8 @@ Assert.ThatReal(actual := measuredTemperature, message := "Measured temperature"
 	.IsLessThanOrEquals(expected := REAL#30.0, tolerance := LREAL#0.1);
 ```
 
-Each typed context copies actual into persistent instance storage before the entry returns. It does not retain
-the address of a temporary input or allocate heap storage. Expected values are used only during their comparison.
-Finish one immediate assertion chain before starting another on the same provider, regardless of type; do not store a
-reference to the assertion context, and do not start another assertion while evaluating an argument of the current one. Instances are confined to the owning test task.
-The provider contains one persistent context for each type, increasing static case storage without heap allocation.
-Typed contexts and the generic `AssertionContext` are independent and extend `Core.Object` directly. Each stores
-its own operand or descriptor, a borrowed receiver link and a copied message. Typed predicates do not create generic value
-descriptors: ordinary values compare directly, strings compare by code unit, and REAL/LREAL use stateless
-floating helpers matching Core canonical semantics. Shared `TestServices` reporting retains no chain state.
-`Prepare` methods and private context helpers are grouped under `Service methods` in the PLC project.
+Each typed assertion copies the actual value right when `Assert.That*` is called — it does not hold a pointer to temporary expressions and does not use dynamic memory. Expected values are only used during each check. Finish one assertion chain before starting another on the same `Assert` helper: do not store a reference to the assertion context, and do not call `Assert` again while computing an argument for the current check. Use each test runner and `Assert` helper from one PLC task only.
+Each assertion type has its own small persistent helper object inside the provider (plus generic `AssertionContext`), storing a copy of the value, a link back to the test reporter, and the failure prefix message without dynamic allocations. Shared `TestServices` formatting and floating-point comparison helpers keep no state between calls. `Prepare` methods and internal helpers live in the `Service methods` folder.
 
 | Entry methods | Context/input types |
 | --- | --- |
@@ -162,101 +105,36 @@ floating helpers matching Core canonical semantics. Shared `TestServices` report
 | `ThatTimeOfDay`, `ThatLongTimeOfDay` | `TIME_OF_DAY` and `LTIME_OF_DAY` contexts |
 | `ThatPointer` | `PointerAssertionContext` / `PVOID` |
 
-Every context has `ToBe` and `NotToBe`. Boolean contexts add `IsTrue`/`IsFalse`; pointer contexts add
-`IsNull`/`IsNotNull`. Other typed contexts provide strict and inclusive ordering. String contexts also provide
-`ToContain` with a substring in the same encoding. Time-of-day ordering uses native IEC comparisons of time since
-midnight without wrapping or converting to a duration. Numeric, date and duration ordering compares typed values;
-floating ordering preserves the Core NaN-first policy.
+Every assertion type provides `ToBe` and `NotToBe`. `ThatBool` adds `IsTrue` / `IsFalse`; `ThatPointer` adds `IsNull` / `IsNotNull`. Numbers, strings, dates, and times support `<`, `<=`, `>`, `>=` checks, and strings add `ToContain`. Time-of-day comparisons use TwinCAT's native time-of-day order (`TOD` / `LTOD`), and floating-point checks follow the Core rule where `NaN` ("not a number") sorts first.
 
-Concrete input types apply ordinary IEC conversions before assertion code executes. Choose the entry matching
-the intended representation: `ThatReal` converts both operands to REAL; `ThatLongReal` converts them to LREAL.
-Signed and unsigned 64-bit integer contexts preserve integer precision without floating-point conversion.
-String inputs are bounded to 255 characters and ordinary parameter conversion can truncate longer inputs.
-For arbitrary-length strings, heterogeneous integer comparisons, structures and FB variables, generic
-`That(actual := variable, message := "...")` remains available. Both its actual and expected ANY operands must
-be live variables; literals, constants, properties and expression results require typed entries or intermediates.
-Generic That borrows storage rather than taking a snapshot. USER_DEFINED/FB equality compares stored bytes,
-including padding and aliases; use `ThatBool` with an explicit object Equals result for domain equality.
-Pointer equality compares addresses and does not inspect targets. For interfaces/references, use `ThatBool`
-with an explicit null comparison or `__ISVALIDREF` predicate.
+Choose the `Assert.That*` method that matches the type you want to test: `ThatReal` converts both numbers to `REAL`, `ThatLongReal` converts them to `LREAL`, and 64-bit integer helpers keep full integer precision without float rounding. Typed string helpers (`ThatString`, `ThatWideString`) accept up to 255 characters. For longer strings, mixing different integer types, structs, or FBs, use generic `Assert.That(actual := variable, message := "...")` — remember that `ANY` inputs only accept live variables (store literals, constants, properties, or expressions in a local variable first). Struct/FB equality in generic `That` compares raw memory bytes (including alignment padding); to compare objects by domain rules, call `Assert.ThatBool(actual := objA.Equals(other := objB)).IsTrue()`. `ThatPointer` compares memory addresses only; for interfaces or `REFERENCE TO`, use `Assert.ThatBool` with `= 0` or `__ISVALIDREF(...)`.
 
-Only `RealAssertionContext` and `LongRealAssertionContext` expose a `tolerance : LREAL := LREAL#0.0` argument in
-`ToBe`, `NotToBe`, `IsGreaterThanOrEquals` and `IsLessThanOrEquals`. It is a finite nonnegative absolute distance
-for that call only. Strict ordering and other context types have no tolerance argument. Negative values, NaN
-and infinity record failure before comparison. Zero requests Core canonical floating equality; NaNs compare
-equal to NaNs, signed zeros are equal, and unequal nonfinite values never become close. Inclusive ordering
-accepts Core ordering or closeness to the boundary. Finite opposite-sign distances avoid overflowing subtraction.
-Generic comparisons remain exact. A following floating assertion without tolerance uses zero independently.
+Only `ThatReal` and `ThatLongReal` have an optional `tolerance : LREAL := LREAL#0.0` parameter (in `ToBe`, `NotToBe`, `IsGreaterThanOrEquals`, and `IsLessThanOrEquals`). Set `tolerance >= 0.0` to allow that much difference for that single check (negative values, `NaN`, or infinity immediately fail the test). A tolerance of `0.0` checks exact equality while treating `NaN = NaN` and `+0.0 = -0.0`. Opposite-sign numbers safely avoid subtraction overflow, generic `That` has no tolerance, and the next floating-point check resets back to `0.0` automatically.
 
-Every That entry has an optional `message : WSTRING(255) := ""` copied as the diagnostic prefix for the entire
-chain. A successful assertion does not consume it. A new entry without a message replaces the previous prefix
-with empty text. Assertions append their own expected/actual diagnostic; the test case retains its first failure.
-`WithMessage`, `WithTolerance` and the modifier-reset mechanism have been removed.
+Every `Assert.That*` call accepts an optional `message : WSTRING(255) := ""` prefix for all checks in that chain (reusing `Assert` clears the previous prefix unless you pass a new `message`). Each failed check adds details showing expected vs. actual values, and the test keeps the first failure. `WithMessage` and `WithTolerance` have been removed.
 
 ## Reporters and task boundaries
 
-The default reporter writes ADS diagnostics. Set `runner.Reporter` before starting to use a custom reporter.
-`JUnitXmlReporter` builds one flat JUnit testsuite; each testcase's `classname` contains its group path.
-`ITestElement.GetPath()` computes the full path through `Parent`, including the element's own name, without Reset.
-Nonempty names are separated by `/`; an empty name adds no separator. The result retains up to 255 wide characters,
-with a final ellipsis on overflow. Cyclic parent links raise `StandardException`; use the tree from its owning task.
-Leaf reporting uses `Parent.GetPath()` as the group path, or empty text for a root leaf, keeping the test name separate.
-`Reset(reporter := ...)` no longer accepts a path, and elements no longer store a copied parent path.
-Paths are display names, not unique identifiers. Adding GetPath and changing Reset require consumer migration and rebuild.
-Test names and copied error diagnostics are escaped, including wide Unicode characters.
+By default, results are printed to TwinCAT ADS logs (`AdsReporter`). Set `runner.Reporter` before starting to use another reporter. `JUnitXmlReporter` builds a single JUnit XML testsuite where each testcase's `classname` is the group path (`ITestElement.GetPath()` walks up `Parent` names separated by `/`, ignoring empty names and truncating at 255 characters with `...`; loops in `Parent` links throw `StandardException`). Read `ContentLength` bytes starting at `ContentAddress` once `IsReady` is `TRUE` (before resetting or starting another run — an aborted run may leave partial XML, and never assign the `JUnitXmlReporter` FB directly to another variable).
 
-Read `ContentLength` bytes from `ContentAddress` after `IsReady`, before report reset or the next run.
-An aborted callback can leave incomplete XML and partial result counts. Do not copy the reporter's buffer-owning FB.
+Run each test tree, runner, and reporter from one cyclic PLC task only, and do not call them again from inside their own callbacks. To run tests in more than one task:
 
-Run each test tree, runner, and reporter from one cyclic PLC task only, and do not call them again from inside their own callbacks. To run independently in several tasks:
+1. Give each task its own runner, test/group instances, and reporter.
+2. Give tested code separate data per task, or add your own cross-task synchronization.
+3. Keep starting, configuring, and reading results inside each runner's own task — copy finished results safely if another task needs them.
+4. Use a separate `JUnitXmlReporter` per task (`AdsReporter` / ADS logging has no guarantee for concurrent calls from multiple tasks).
 
-1. Give every task its own runner, test/group instances and reporter.
-2. Give tested objects separate mutable state, or use their explicitly documented synchronization.
-3. Call each runner from its owning task and keep configuration and observation in that task. Other tasks must not
-   directly inspect live mutable state; transfer completed results through an externally synchronized mechanism.
-4. Use a separate `JUnitXmlReporter` per task for independent in-memory output. The ADS backend has no established
-   concurrent-call guarantee, even for separate reporter instances.
+`SingleCycleTestExample` and `MultiCycleTestExample` in `HowTo` use completely separate objects and in-memory reports, so you can map them to different PLC tasks to see this setup. *(By default, `HowTo` maps `MAIN` on `PlcTask` and `MAIN` calls `SingleCycleTestExample.Execute()` — never run the same `PROGRAM` both from `MAIN` and from its own task mapping at the same time.)*
 
-`SingleCycleTestExample` and `MultiCycleTestExample` own disjoint objects and in-memory reports. Assign them to
-different tasks to inspect this arrangement. The examples are registered in HowTo but are not automatically mapped
-to PLC tasks by this change. Do not assign the same program instance to multiple tasks.
-The existing HowTo `PlcTask` maps `MAIN`, which calls `SingleCycleTestExample.Execute()`.
-Each example PROGRAM also delegates its mapped cyclic body to its own Execute method. Use one entry path per instance;
-do not additionally map SingleCycleTestExample while MAIN is driving it. These standalone methods perform task cleanup;
-hosts with additional transient-exception consumers must supply a shared boundary instead.
+For standalone tests, call `runner.Execute()` (which defaults `cleanupTaskMemory` to `TRUE`). `Execute` checks for out-of-memory errors and then frees all temporary exceptions and auto-disposed objects created anywhere in that PLC task cycle — so call it after any other code in that cycle that reads temporary exceptions. If you run tests inside `AutomationRunner` (or run multiple test runners in one task), pass `cleanupTaskMemory := FALSE` and let the main cycle loop call `DynamicMemoryManager.RaiseIfAllocationFailed()` outside `__TRY`/`__CATCH` recovery blocks followed by `CleanupMemory()` at the end of the cycle. (`Execute` still checks for out-of-memory errors even when `cleanupTaskMemory := FALSE`; once dynamic memory runs out, the global flag stays set until the PLC application restarts.)
 
-For standalone execution, use `runner.Execute()` or explicitly pass `cleanupTaskMemory := TRUE` (the default).
-Execute checks for out-of-memory errors and then cleans all registered auto-disposed objects and the exception
-payload of the current PLC task, not only objects created by this runner. Any borrowed references to those objects
-become invalid afterward, so call it after the last code in the task cycle that reads temporary exceptions.
+## Migration from TcUnit / older test versions
 
-When called from `AutomationRunner` or another host that already cleans up current-task memory, pass
-`cleanupTaskMemory := FALSE`. If you run several runners in one task, pass `FALSE` to each and let the host do
-one shared cleanup at the end of the cycle. In every cycle, the host must call `DynamicMemoryManager.RaiseIfAllocationFailed`
-outside recovery blocks, then `CleanupMemory` after all exception consumers. `Execute` still checks for
-out-of-memory errors even when `FALSE` is passed. Once the global out-of-memory flag is set, it applies to the whole
-application and is only cleared when the PLC application restarts.
-
-## Migration
-
-This model replaces `TestSuite`, `ITestSuite`, `AsyncTestContext` and `CurrentTestSession`.
-Move each guarded scenario into its own FB. Remove `RunTests` enumeration and `Test`/`AsyncTest` guards.
-Move per-scenario setup and cleanup into `BeforeTest`/`AfterTest`; return `TEST_CYCLE_RESULT.DONE` from
-`MultiCycleTest.ExecuteTest` when finished (`BUSY` to continue). Keep fluent `Assert.That…` expressions inside the
-leaf test. Declare fixed group and runner children instead of passing `ITestSuite` arrays on every Execute call.
-Runner root count is now a generic constant.
-
-Custom reporters implement `ReportRunStart(totalElements)`, `ReportTestCaseResult(groupPath, testName, outcome,
-duration, message)` and `ReportRunEnd(totalTests, passedTests, failedTests, skippedTests, duration)`.
-There are no group start/end callbacks. Test names are now wide strings; long `ERROR_MESSAGE` parameters remain
-`VAR_IN_OUT CONSTANT`. Previous source, reporter and binary interfaces require migration.
-The constructor name and reporter testName inputs now use WSTRING (80 characters), matching INamed.
-Custom reporter overrides must use exactly the same input signature and be rebuilt.
-
-Custom elements extending `TestElement` must replace old `OnReset` overrides with
-`Reset(reporter : ITestReporter)` overrides and explicitly call `SUPER^.Reset(reporter := reporter)`.
-The base no longer calls OnReset. Define the state left by a failed override and allow explicit retry after abort;
-Reset must not silently release user resources or retry the aborted Execute callback.
+* Replace old `TestSuite`, `ITestSuite`, `AsyncTestContext`, and `CurrentTestSession` classes by putting each test into its own `SingleCycleTest` or `MultiCycleTest` function block (using `BeforeTest`/`AfterTest` and returning `TEST_CYCLE_RESULT.BUSY` / `DONE`).
+* Put your fixed `ITestElement` child arrays inside concrete subclasses of `TestGroup<N>` and `TestRunner<N>` using `_ChildCount` for array bounds (do not redeclare `VAR_GENERIC CONSTANT`), implement `ClassName`, `NamespaceName`, and `SelfSize`, and pass `parent` explicitly at every construction site (`0` for root items, `THIS^` inside groups). `TestRunner.Configure` and `BindParent` were removed — test trees cannot be swapped between runs.
+* `Reset(reporter := ...)` no longer takes a path, elements no longer store a copied parent path, and custom `TestElement` subclasses must override `Reset(reporter : ITestReporter)` (calling `SUPER^.Reset(reporter := reporter)`) instead of the removed `OnReset`. Missing `Children` arrays or null slots throw `DataMemberNotSpecifiedException`; duplicate slots, wrong `Parent` links, parent loops, or already-running roots throw `StandardException`. Startup failures set `IsFinished := TRUE`, `ExitCode := -1`, and `CallbackMessage`; `Group.Reset` and recovery `Reset` rethrow errors so you can fix them and retry.
+* Custom reporters must implement `ReportRunStart(totalElements)`, `ReportTestCaseResult(groupPath, testName, outcome, duration, message)`, and `ReportRunEnd(totalTests, passedTests, failedTests, skippedTests, duration)` with `WSTRING(80)` for `testName` and `VAR_IN_OUT CONSTANT` for `message`. Reporters throw `ArgumentValueNotSupportedException` if passed an invalid outcome enum value.
+* `Assert.That*` replaces the removed `WithMessage` and `WithTolerance` modifiers with a `message` parameter on each `That*` call and a `tolerance` parameter on floating-point checks (`Generic` `That` takes variables only, with no tolerance). Typed `Assert.That*` helpers convert inputs using normal IEC rules before comparing. Rebuild all dependent projects after upgrading.
 
 The framework's own test suite for `TOF_Testing` is [TestRunnerTest](../TwinCAT.OpenFramework.Tests/Tests/Testing/TestRunnerTest.TcPOU).
 
@@ -274,22 +152,3 @@ The framework's own test suite for `TOF_Testing` is [TestRunnerTest](../TwinCAT.
 - `Version`: generated library version metadata.
 
 Regression tests live in the `Tests` project and standalone runnable examples live in `HowTo` (`Tests` and `HowTo` reference the `Testing` library; `HowTo` also references `Core`).
-
-When upgrading from earlier versions, note these changes:
-* Added `CallbackMessage` and replaced `WithMessage` / `WithTolerance` modifiers with a `message` parameter on each `That*` entry and a `tolerance` parameter directly on supported floating-point comparisons (`Generic` `That` still takes variables only, with no tolerance).
-* Typed `Assert.That*` entries convert operands using normal IEC rules before comparing them.
-* After an aborted run, `Reset` calls element `Reset` callbacks immediately, so custom elements must handle retrying `Reset` after a partial reset.
-* Rebuild dependent projects after upgrading.
-
-Both TestGroup<N> and TestRunner<N> are abstract. Replace direct instances with concrete descendants that own
-their child instances and persistent arrays and override Children by reference. Use the inherited _ChildCount
-for array bounds; do not redeclare VAR_GENERIC CONSTANT. Provide concrete ClassName, NamespaceName and SelfSize.
-TestRunner.Configure and its copied root array have been removed; root replacement between runs is no longer supported.
-Parent is assigned in FB_init; pass it at every construction site: zero for roots, THIS^ for group-owned children.
-BindParent has been removed. Reset repeats the same composition. Rebuild all consumers after these source and layout changes.
-
-Missing Children storage or a null fixed slot raises DataMemberNotSpecifiedException in both groups and runners.
-Duplicate slots, a mismatched parent, a cyclic group parent chain or an active root raise StandardException.
-Runner Execute catches startup failures and exposes IsFinished, ExitCode = -1 and copied CallbackMessage.
-Group Reset and explicit runner abort-recovery Reset propagate failures. Reporters retain
-ArgumentValueNotSupportedException for an actual nonterminal outcome enum value.

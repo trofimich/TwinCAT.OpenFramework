@@ -22,13 +22,13 @@ Subrange `SINT` defining the switching-interval speed correction percentage (`-2
 
 ## 2. Implement the `TrafficLight` Composite Device
 
-`TrafficLight` encapsulates three `TOF_Devices_IO.DigitalOutput` leaves (`_RedLight`, `_YellowLight`, `_GreenLight`) and extends `TOF_Automation.CompositeAutomationComponent<3>` implementing `ITrafficLight`.
+`TrafficLight` groups three `TOF_Devices_IO.DigitalOutput` devices (`_RedLight`, `_YellowLight`, `_GreenLight`) inside a `TOF_Automation.CompositeAutomationComponent<3>` implementing `ITrafficLight`.
 
 Key members:
 * **Properties**: `ActiveLight`, `BoundToIO`, `Children` (returns `_Children` by reference), `RedLight` / `YellowLight` / `GreenLight` (`IReadOnlyDigitalOutput`), `ClassName` (from `VAR_STAT _ClassName`), `NamespaceName`, `SelfSize`.
 * **Methods**:
-  * `BindToIO(redLightRawValue, yellowLightRawValue, greenLightRawValue)` — binds the three `DigitalOutput` sub-devices to raw `BOOL` variables in the terminal process image.
-  * `TrySetLight(color, rejectReason) : BOOL` — checks hierarchical action permission via `Parent.RequestActionPermission(...)` (with `TrySetLightActionDescriptor`), updates the three outputs, catches any exceptions so it never throws, and returns `FALSE` if `TOF_Core.DynamicMemoryManager.HasAllocationFailed` reports an out-of-memory error.
+  * `BindToIO(redLightRawValue, yellowLightRawValue, greenLightRawValue)` — links the three `DigitalOutput` devices to raw `BOOL` I/O variables from `TerminalModels`.
+  * `TrySetLight(color, rejectReason) : BOOL` — asks `Parent.RequestActionPermission(...)` (with `TrySetLightActionDescriptor`) whether changing the light is allowed, updates the three outputs, catches any exceptions so it never throws, and returns `FALSE` if `TOF_Core.DynamicMemoryManager.HasAllocationFailed` reports an out-of-memory error.
 
 ---
 
@@ -42,11 +42,11 @@ Key members:
 * **1 `DemoExceptionGenerator`**: `_DemoExceptionGenerator` (`"WatchdogDevice"`, configured with `_DemoExceptionHandlingPolicy` in `FB_init`).
 
 Key lifecycle and cyclic members:
-* **`FB_init(name, plugins)`**: assigns `_DemoExceptionHandlingPolicy` to `_DemoExceptionGenerator` and registers the borrowed HMI plugin array via `AssignPlugins(plugins := plugins)`.
-* **`OnBeforeChildrenInitializing`**: sets timer intervals from `IntersectionConstants` and invokes `bindIO()` to map child devices to `TerminalModels`.
-* **`OnBeforeChildrenStopped`**: monitors `_ResetButton` so a hardware reset signal can call `Reset()` while `STOPPED`.
-* **`OnBeforeChildrenWorking`**: runs the timers, reads buttons and speed adjuster, and executes `processNormalMode()` or `processBlinkingYellowMode()`.
-* **`OnOperationalStateChanged`**: turns the intersection off when entering `OPERATIONAL_STATE.STOPPED`.
+* **`FB_init(name, plugins)`**: assigns `_DemoExceptionHandlingPolicy` to `_DemoExceptionGenerator` and registers the HMI plugin array via `AssignPlugins(plugins := plugins)` (keep that array alive while the controller runs).
+* **`OnBeforeChildrenInitializing`**: sets timer intervals from `IntersectionConstants` and calls `bindIO()` to link child devices to `TerminalModels`.
+* **`OnBeforeChildrenStopped`**: watches `_ResetButton` so a physical reset button can call `Reset()` while `STOPPED`.
+* **`OnBeforeChildrenWorking`**: updates the timers, reads buttons and speed adjuster, and runs `processNormalMode()` or `processBlinkingYellowMode()`.
+* **`OnOperationalStateChanged`**: turns all traffic lights off when entering `OPERATIONAL_STATE.STOPPED`.
 * **Commands & Statuses**: `TurnOn`, `TurnOff`, `SetYellowFlashingModeOn`, `SetYellowFlashingModeOff`, `SetSwitchingSpeedCorrectionPercent`, `ThrowExceptionInDemoExceptionGenerator`, `Mode`, `LightsState`, `OperationalStateName`.
 
 ---
@@ -55,19 +55,19 @@ Key lifecycle and cyclic members:
 
 `HmiIntersectionController` extends `TOF_Automation.HmiAutomationComponentElement` and implements `TOF_Automation.IAutomationControllerPlugin`:
 
-* **`OnBeforeControllerExecute`**: calls `ProcessAutomationComponentCommands(automationComponent := controller)` first so root `Enable`, `Disable`, and `Reset` HMI commands remain serviced even while the controller is disabled. Technological commands (`TurnOn`, `TurnOff`, flashing mode, speed correction, traffic light overrides via `HmiTrafficLight`) run only when `controller.Enabled` is `TRUE`.
-* **`OnAfterControllerExecute`**: calls `UpdateAutomationComponentStatuses(automationComponent := controller)` and refreshes intersection and per-light statuses every serviced cycle (`WORKING` and `STOPPED`).
+* **`OnBeforeControllerExecute`**: calls `ProcessAutomationComponentCommands(automationComponent := controller)` first so `Enable`, `Disable`, and `Reset` HMI commands still work even while the controller is disabled. Machine-control commands (`TurnOn`, `TurnOff`, flashing mode, speed correction, and manual traffic-light overrides via `HmiTrafficLight`) only run when `controller.Enabled` is `TRUE`.
+* **`OnAfterControllerExecute`**: calls `UpdateAutomationComponentStatuses(automationComponent := controller)` and refreshes intersection and per-light statuses on every serviced cycle (`WORKING` and `STOPPED`).
 
 ---
 
 ## 5. Implement I/O Terminal Models: `TerminalModels`
 
-`PROGRAM TerminalModels` owns the passive `TOF_IOModels` endpoints used by `IntersectionController.bindIO()`:
+`PROGRAM TerminalModels` holds the `TOF_IOModels` I/O structures used by `IntersectionController.bindIO()`:
 * **`DI_1` (`TOF_IOModels.EL1018`)** — 8-channel digital input terminal (buttons).
 * **`DO_2` (`TOF_IOModels.EL2409`)** — 16-channel digital output terminal (traffic light lamps).
 * **`AI_3` (`TOF_IOModels.EL3001`)** — single-channel standard INT16 analog input terminal (requires standard status-plus-INT16 PDO).
 
-*(Note: `TerminalModels` uses basic terminal records without EtherCAT bus diagnostics. For an example showing explicit `WcState` and channel-status validation with `_EX` models, see `Sources/TwinCAT.OpenFramework.HowTo/IO/IOModelsExample.TcPOU` and [IO Models Guide](IOModels.md).)*
+*(Note: `TerminalModels` uses basic terminal structures without EtherCAT bus status fields. For an example showing `WcState` and channel-status checks with `_EX` models, see `Sources/TwinCAT.OpenFramework.HowTo/IO/IOModelsExample.TcPOU` and [IO Models Guide](IOModels.md).)*
 
 ---
 

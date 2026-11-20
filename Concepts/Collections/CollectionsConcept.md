@@ -2,53 +2,52 @@
 
 ## 1. General Description
 
-Collections are abstract data types that allow you to store, organize, and manipulate a group of objects as a single entity.
+Collections are containers that let you store, search, sort, and loop over a group of items together (such as a list of recipes, a queue of messages, or a lookup table).
 
 ## 2. Built-in Language Options
 
-The StructuredText language provides two basic ways to work with collections:
+Structured Text provides two basic ways to work with multiple items:
 1. Arrays  
 2. Pointers  
 
-Both approaches have significant limitations. The `TwinCAT_OpenFramework_Collections` module is designed to overcome these limitations and provide a safer and more convenient way to work with collections.
+Both approaches have significant limitations. `TwinCAT_OpenFramework_Collections` makes working with groups of items safer and much easier.
 
 ## 3. Limitations of Arrays and Pointers
 
-1. Arrays have a fixed size and are not suitable when the amount of data is unknown in advance.  
-2. Pointers allow working with both static and dynamic data, but type safety and memory management are entirely the developer’s responsibility.  
-3. Pointer misuse can easily lead to controller crashes or system instability.  
-4. Manual memory management often leads to memory leaks, which can eventually stop the controller.  
-5. Implementing collection classes manually is complex and time-consuming.  
-6. Arrays and pointers do not provide common insertion, equality-search or disposal policies.  
+1. Arrays have a fixed size and cannot grow when you do not know the number of items in advance.  
+2. Pointers can handle both fixed and dynamic memory, but type safety and freeing memory are completely up to you.  
+3. A wrong pointer easily crashes the PLC.  
+4. Forgetting to free dynamic memory causes memory leaks that can eventually stop the controller.  
+5. Writing lists, queues, or lookup tables by hand takes a lot of code and testing.  
+6. Raw arrays and pointers give you no built-in way to insert, search, sort, or automatically free removed items.  
 
 ## 4. Standard Library Solutions
 
-Some standard libraries provide basic collection-like structures, such as:
+Standard Beckhoff libraries include a few basic helpers such as:
 - `Tc2_Utilities.FB_MemRingBuffer`  
 - `Tc2_Utilities.FB_HashTableCtrl`  
 
-These building blocks expose their own storage and API contracts; callers must manage the required buffers and lifetimes.
+With these blocks, you still have to allocate and manage the underlying byte buffers and memory lifetimes yourself.
 
 ## 5. What `TwinCAT_OpenFramework_Collections` Provides
 
-The framework provides ByteList, List, Dictionary, UniqueDataSet, Queue and Stack.
+The framework provides `ByteList`, `List`, `Dictionary`, `UniqueDataSet`, `Queue`, and `Stack`.
 
-All collections are universal and store values using the `GENERIC_VALUE` type (except ByteList). 
+Except for `ByteList`, all of them can hold any PLC data type through `GENERIC_VALUE`. 
 
-`GENERIC_VALUE` concept described [here.](../Generics/GenericsConcept.md)
+See the [`GENERIC_VALUE` Concept](../Generics/GenericsConcept.md) for details.
 
 ## 6. Static and Dynamic Collections
 
-Collections can be either static or dynamic:
+Every collection can work in either fixed-size (static) mode or growable (dynamic) mode:
 
-- A collection is **static** if the `VAR_GENERIC CONSTANT` parameter is greater than zero.  
-- A collection is **dynamic** if the `VAR_GENERIC CONSTANT` parameter is set to zero.  
+- **Static (`<N>` > 0, e.g. `List<10>`):** stores up to `N` items in fixed memory created at compile time (no heap allocation when adding items).  
+- **Dynamic (`<0>`, e.g. `List<0>`):** starts small and grows automatically using dynamic memory as you add more items.  
 
-The maximum number of elements a collection can hold is available via the `Capacity` property.  
-The actual number of stored elements is available via the `Length` property.
+`Capacity` shows how many items fit right now, and `Length` shows how many items are currently stored:
 
-- For static collections, `Capacity` is defined at declaration time.  
-- For dynamic collections, `Capacity` grows as needed.  
+- For static collections, `Capacity` stays fixed at the size you chose.  
+- For dynamic collections, `Capacity` increases automatically as needed.  
 
 ## 7. Key Features
 
@@ -83,36 +82,31 @@ Supports standard queue operations such as enqueue, peek, remove first and clear
 
 ### 8.6. Stack
 A LIFO (last-in, first-out) collection of `GENERIC_VALUE`.
-Index zero and enumeration start at the top. Push adds a value; Peek borrows the top;
-RemoveLast destroys the stored entry without transferring ownership to the caller.
+Index `0` (and iteration) starts at the top of the stack. `Push` adds an item on top, `Peek` lets you read the top item without removing it, and `RemoveLast` removes and cleans up the top item directly instead of handing ownership back to you.
 
-## 9. Ownership and borrowed views
+## 9. Ownership and reading items safely
 
-* **Copying (`Copy`):** Creates independent copies of stored elements. To copy an `OBJECT`, it must implement `ICloneable`. Ordinary structures are copied byte-by-byte, so pointer or interface fields inside them are not cloned deeply.
-* **Transferring ownership on insert:** Passing an owning `GENERIC_VALUE` (`IsMemoryOwner = TRUE`) to a generic insertion method transfers memory ownership to the collection when insertion succeeds. Call `Reset()` on your local descriptor afterward so you do not release it a second time. If insertion fails before adding the item, you remain responsible for releasing it.
-* **Reading (`Get`, `Peek`, `FindSingle`, `TryGet`, `Current`):** These return borrowed views — the collection still owns the stored element. Even if the returned descriptor has `IsMemoryOwner = TRUE`, do **not** call `Release()` on it. Keep the collection (and any borrowed caller variables stored in it) alive while using a borrowed view, because changing the collection can invalidate it.
-* **No accidental copying (`no_assign`):** All six collection function blocks block direct variable-to-variable assignment (`colA := colB`), because a bitwise copy would duplicate internal memory pointers without cloning the elements. Assigning to an interface variable still points to the same collection instance.
-* **`Dictionary` & `UniqueDataSet` keys:** `Dictionary` keeps the existing equal key and replaces its value; `UniqueDataSet` replaces the matching item. Neither guarantees sorted order. Do not modify key/element fields that affect equality or hash codes while the item is stored — remove it first, update it, and add it back. Custom comparers are borrowed for the collection's lifetime and must return matching hash codes for equal items.
-* **Lookup queries:** In `Dictionary` and `UniqueDataSet`, lookup arguments are borrowed by default and never freed. In `List`, `Queue`, and `Stack`, `ContainsGeneric` frees an owning query descriptor (`IsMemoryOwner = TRUE`) by default — pass the release flag as `FALSE` if you want to keep owning it. Never pass an owning query descriptor that points to memory still used by the collection, and note that releasing inside the call does not reset other local aliases.
+When a collection stores a `GENERIC_VALUE` with `IsMemoryOwner = TRUE`, the collection takes care of freeing that item's dynamic memory when the item is removed or the collection is cleared.
+
+* **Copying (`Copy`):** Makes an independent copy of stored items. To copy an `OBJECT`, it must implement `ICloneable`. Plain variables and structs are copied byte-by-byte, so pointer or interface fields inside them are not cloned separately.
+* **Giving ownership on insert:** Passing an owning `GENERIC_VALUE` (`IsMemoryOwner = TRUE`) to a generic insert/add method transfers ownership to the collection when adding succeeds. Call `Reset()` on your local wrapper afterward so you do not free the same memory twice. If inserting fails before the item is added, you still own that memory.
+* **Reading (`Get`, `Peek`, `FindSingle`, `TryGet`, `Current`):** These return a direct reference to the item still inside the collection — do **not** call `Release()` on it even if `IsMemoryOwner` says `TRUE`. Keep the collection (and any external caller variables referenced inside it) alive while reading, because modifying or clearing the collection can make that reference invalid.
+* **No direct variable copying (`colA := colB`):** All six collection function blocks prevent direct assignment between variables (`no_assign`), because copying raw bytes would share internal pointers without cloning the elements. Assigning a collection to an interface variable still points to that same collection.
+* **`Dictionary` & `UniqueDataSet` keys:** `Dictionary` keeps the existing key and replaces only its value; `UniqueDataSet` replaces the matching item. Neither keeps items in sorted order. Do not edit fields of a key or set item that change its equality or hash code while it is inside the collection — remove it first, change it, then add it back. If you pass a custom comparer, keep it alive for the collection's lifetime and make sure equal items return the same hash code.
+* **Search arguments:** In `Dictionary` and `UniqueDataSet`, lookup keys are only read and never freed. In `List`, `Queue`, and `Stack`, `ContainsGeneric` frees an owning search wrapper (`IsMemoryOwner = TRUE`) by default — pass the release flag as `FALSE` if you want to keep owning it. Never pass an owning search wrapper that points to memory already owned inside the collection, and note that releasing inside the call does not clear other local variables holding that same pointer.
 
 ## 10. Sorting
 
-List.Sort uses `GENERIC_VALUE.CompareTo` when the comparer is omitted or zero. This default
-supports the Core natural order for compatible numeric, text, temporal and OBJECT values.
-Mixed numeric widths and STRING/WSTRING pairs do not require choosing a typed comparer.
-OBJECT values require `IComparable`; unsupported pairs raise `GenericConversionNotSupportedException`.
-An explicitly supplied comparer takes precedence and defines its own supported representations.
+Calling `List.Sort` without a custom comparer (or passing `0`) uses `GENERIC_VALUE.CompareTo` by default. This handles numbers (even when mixing different numeric types such as `INT` and `LREAL`), text (`STRING` and `WSTRING`), dates/times, and `OBJECT` values implementing `IComparable`. Comparing incompatible types throws `GenericConversionNotSupportedException`. Passing your own `IComparer` overrides this default order.
 
-Empty and singleton lists return without comparing. Comparison failure can leave the order
-partially changed, while preserving every descriptor and its ownership. A default comparer
-is not inferred from the first entry's type.
+Empty and 1-item lists return right away without comparing anything. If comparing two items throws an error mid-sort, the list order may stay partially sorted, but every element and its memory ownership remain intact. A default comparer is never guessed from the first element's type.
 
-## 11. Enumeration and failures
+## 11. Iterators (`CreateEnumerator`) and errors
 
-* **Enumerators (`CreateEnumerator`):** Creates a standalone cursor owned by the caller. Release it explicitly with `TOF_Core.Memory.TryReleaseDynamicObject` after converting its interface to `IObject`. Keep the collection alive and do not modify it while iterating. `Current` is empty before the first successful `MoveNext`, after `Reset`, and after reaching the end (subsequent `MoveNext` calls return `FALSE` until `Reset`). If an enumerator was created without a source, `FB_init` succeeds without throwing, and calling `MoveNext` or reading `Current` throws `DataMemberNotSpecifiedException`.
-* **One task per collection:** Each collection instance must be used by only one PLC task, with no built-in thread locks. Do not modify a collection from inside a user callback while an operation on that collection is running, unless that behavior is explicitly documented as supported.
-* **`Try` methods and running out of memory:** `Try` methods catch errors and return `FALSE`. If dynamic memory runs out (`__NEW` fails), `DynamicMemoryManager` sets a global out-of-memory flag; `Try` methods keep that flag set and return `FALSE`. Each PLC task must call `TOF_Core.DynamicMemoryManager.RaiseIfAllocationFailed()` at the end of every cycle outside normal recovery blocks so the program stops safely instead of running on in a broken state (`AutomationRunner` already does this automatically).
-* **Static vs. dynamic memory & online change:** Static capacity (`N > 0`) avoids heap allocations when adding items, though `Copy`, `CreateEnumerator`, and exception messages can still allocate memory; dynamic growth fails with an out-of-memory error if memory runs out. `FB_init` never throws or runs validators or comparers. If live `Dictionary` or `UniqueDataSet` instances survive an online change where variable addresses relocate, rebuild hash indices that depend on object addresses.
+* **Creating and freeing an iterator:** `CreateEnumerator()` allocates a cursor object in dynamic memory. When you finish iterating, convert its interface to `IObject` and free it with `TOF_Core.Memory.TryReleaseDynamicObject`. Keep the collection alive and do not add or remove items while looping through it. `Current` is empty before the first successful `MoveNext`, after `Reset`, and after reaching the end (further `MoveNext` calls keep returning `FALSE` until `Reset`). If an iterator was created with a null collection, `FB_init` succeeds without throwing, and calling `MoveNext` or reading `Current` throws `DataMemberNotSpecifiedException`.
+* **One PLC task per collection:** Collections have no built-in locks, so use each instance from one PLC task only. Do not modify a collection from inside a user callback while an operation on that same collection is running.
+* **`Try` methods and running out of memory:** `Try` methods catch errors and return `FALSE`. If dynamic memory runs out (`__NEW` fails), `DynamicMemoryManager` sets a global out-of-memory flag; `Try` methods keep that flag set and return `FALSE`. Every PLC task must call `TOF_Core.DynamicMemoryManager.RaiseIfAllocationFailed()` at the end of each cycle outside recovery blocks so the program stops safely instead of running in a broken state (`AutomationRunner` does this automatically).
+* **Static vs. dynamic memory & online change:** Using static size (`N > 0`) avoids heap allocations when adding items, though `Copy`, `CreateEnumerator`, and error messages can still allocate memory; dynamic growth fails with an out-of-memory error when memory is full. `FB_init` never throws or calls validators or comparers. If live `Dictionary` or `UniqueDataSet` instances survive an online change where variable addresses move, rebuild hash indices that depend on object addresses.
 
 ## 12. Usage
 

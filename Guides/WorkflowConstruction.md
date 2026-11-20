@@ -1,21 +1,20 @@
 # Building a dynamic workflow
 
-This example builds a sequence containing a delay. The sequence owns the order of
-execution. The workflow owns the memory of both dynamically allocated nodes.
-The same order of operations applies when node types and parameters come from a recipe.
+This example creates a sequence containing one delay step. The sequence controls the
+order in which its child steps run, and the `Workflow` owns and frees the memory of both
+dynamically created blocks. You follow the same steps whether you create blocks in code
+or load them from a recipe.
 
-When a recipe supplies a qualified type name, call `Workflows.CreateElement`.
-It accepts the owning workflow and an optional `IWorkflowElementFactory` for
-application types. The returned interface borrows an already registered node.
-Query the required activity or condition interface, configure it and attach it
-to its parent. The sample controller uses this path for built-in nodes and
-its custom movement activity. The explicit allocation sequence below shows the
-same ownership handoff for callers constructing a concrete FB directly.
+When creating steps from type names in a recipe (such as JSON), call
+`Workflows.CreateElement`. Pass your `Workflow` and an optional
+`IWorkflowElementFactory` (for your own custom step or condition types). It creates the
+object, registers it in the workflow automatically, and returns an interface you can cast,
+configure, and attach to a parent step (`SequenceActivity`, etc.). The code below shows
+how to do the same thing directly with `__NEW`.
 
-Use an empty workflow dedicated to this build attempt. Run construction once in
-the owning task, outside TwinCAT lifecycle methods. Here, `workflow` is the live
-`TOF_Workflow.Workflow` instance supplied by the caller. The pointer variables
-are local to the construction method.
+Start with an empty `Workflow` dedicated to this build. Run this setup code once from
+the workflow's own PLC task, outside `FB_init`/`FB_exit`/`FB_reinit`. Below, `workflow`
+is your `TOF_Workflow.Workflow` variable, and `sequence` / `delay` are local pointers.
 
 ```iecst
 VAR
@@ -44,11 +43,11 @@ sequence^.AddChildActivity(activity := delay^);
 workflow.SetRootActivity(rootActivity := sequence^);
 ```
 
-Register each new node immediately. If registration raises, discard the local
-pointer. The registration path handles its own release attempt. After successful
-registration, configure the node through the borrowed pointer. Add the child to
-its parent once, then assign the finished root. The caller can now request a
-start and drive the workflow from its cyclic execution path.
+Call `RegisterChild` right after `__NEW` for every new step or condition. If
+`RegisterChild` throws an error, throw away your local pointer (`RegisterChild` already
+cleans up on failure). Once registered, configure the block through the pointer, attach
+it to its parent (`AddChildActivity`), and finally set the root (`SetRootActivity`). After
+that, you can start the workflow and run it cyclically.
 
 ## An interrupted build
 
@@ -63,11 +62,11 @@ and `RaiseIfAllocationFailed()` at the end of the cycle will stop the task safel
 For a larger example with a custom activity and named variables, see
 [DemoWorkflowController](../Sources/TwinCAT.OpenFramework.Samples/Workflow/Classes/DemoWorkflowController.TcPOU).
 
-## Declaring a local value
+## Declaring a local variable in a workflow
 
-`Workflow`, `Activity` and `Condition` implement `IDeclaredVariableContainer`.
-During configuration, pass a typed variable containing the initial value. Its
-storage can be local to the construction method.
+`Workflow`, `Activity`, and `Condition` all implement `IDeclaredVariableContainer`.
+During setup, pass a typed PLC variable holding the starting value (that local variable
+only needs to exist during `DeclareVariable`, because its value is copied):
 
 ```iecst
 VAR
@@ -79,42 +78,43 @@ END_VAR
 sequence^.DeclareVariable(name := 'RetryCount', initialValue := initialRetryCount);
 ```
 
-The sequence owns the current value and an independent copy of the initial value.
-Use `TryGetVariable` to borrow the current value under the usual scope rules.
-Each successful sequence reset restores it at the same address. A child reset
-leaves the sequence's counter intact, so the counter can span loop iterations.
-Condition declarations follow the reset of the activity to which they are attached.
+The sequence stores both the current value and a separate copy of the starting value.
+Use `TryGetVariable` to get a pointer/reference to the variable while it runs (inner steps
+can see variables declared on enclosing steps). Every time `sequence` resets, the value
+is reset back to its starting value at the same memory address; resetting a single child
+step inside a loop leaves `sequence`'s counter intact across loop iterations. Variables
+declared on a `Condition` reset together with the step that owns that condition.
 
-For an existing PLC signal, use `BindPlcVariable` to bind its live storage.
-Both operations share a local namespace. A duplicate name raises a configuration
-error. Elementary numeric, bit-string, date/time and string variables are supported
-for declarations, including `BOOL`. String storage retains the initial variable's
-declared capacity.
+To link an existing external PLC signal instead of copying a value, use
+`BindPlcVariable`. Declared variables and PLC bindings share the same name scope on that
+step, so duplicate names throw an error. Basic numeric types, bit types, dates/times,
+strings, and `BOOL` are supported (strings keep the declared max length of the initial
+variable).
 
 ## When to Use `Workflow` vs. `AutomationController`
 
-Use `TOF_Automation.AutomationController` (with typed `ENUM` state machines and `TOF_Tasks.Task`) for fixed physical machine hardware and deterministic cyclic control. Use `TOF_Workflow.Workflow` when orchestrating dynamic, multi-step recipes or variable sequences configured at runtime (including scenarios loaded from JSON).
+Use `TOF_Automation.AutomationController` (with typed `ENUM` state machines and `TOF_Tasks.Task`) for fixed physical machine hardware and cycle-by-cycle machine control. Use `TOF_Workflow.Workflow` when running flexible multi-step recipes or sequences built or loaded at runtime (for example, from JSON files).
 
 Built-in workflow elements in `TOF_Workflow`:
-* **Activities**: `SequenceActivity`, `WhileActivity` (single `Body : IActivity`), `IfElseActivity`, `WaitAndPickActivity`, `ParallelActivity`, `TryCatchActivity` + `CatchActivity`, `DelayActivity`, `WaitConditionActivity`, `WaitVariableValueActivity`, `AssignVariableActivity`, `InvokeTaskActivity` (supports `ConfigureEmbeddedTask` for workflow-owned tasks and `ConfigureExternalTask` for key-resolved application tasks).
-* **Conditions**: `TrueCondition`, `NotCondition`, `CompositeCondition`, `VariableHasValueCondition`, `CompareVariableCondition` (supports `ConfigureEmbeddedComparer` / `ConfigureExternalComparer`, or built-in `GENERIC_VALUE.CompareTo` ordering when no custom comparer is configured).
+* **Activities**: `SequenceActivity`, `WhileActivity` (single `Body : IActivity`), `IfElseActivity`, `WaitAndPickActivity`, `ParallelActivity`, `TryCatchActivity` + `CatchActivity`, `DelayActivity`, `WaitConditionActivity`, `WaitVariableValueActivity`, `AssignVariableActivity`, `InvokeTaskActivity` (supports `ConfigureEmbeddedTask` for tasks owned by the workflow and `ConfigureExternalTask` for existing tasks looked up by name).
+* **Conditions**: `TrueCondition`, `NotCondition`, `CompositeCondition`, `VariableHasValueCondition`, `CompareVariableCondition` (supports `ConfigureEmbeddedComparer` / `ConfigureExternalComparer`, or compares numbers/strings/objects automatically with `GENERIC_VALUE.CompareTo` if no comparer is set).
 
 ## Loading and Saving Workflow Configurations (JSON)
 
-`TOF_Workflow` implements `TOF_Core.IConfigurationSerializable` independently of any serialization format, and `TOF_JSON` supplies JSON adapters (`JsonConfigurationReader` and `JsonConfigurationWriter`):
+`TOF_Workflow` implements `TOF_Core.IConfigurationSerializable` independently of file format, and `TOF_JSON` adds JSON support (`JsonConfigurationReader` and `JsonConfigurationWriter`):
 
-* **Saving**: pass a `TOF_Workflow.Workflow` and a `TOF_Core.JSON_DOCUMENT` to `JsonConfigurationWriter.Serialize(source := workflow, document := jsonDocument)`. Declared variables write their `initialValue` rather than transient runtime values.
-* **Loading**: parse the document with `JsonConfigurationReader.Parse(document := jsonDocument)` to obtain a root `TOF_Core.CONFIGURATION_NODE`, then call `TOF_Workflow.WorkflowLoader.Load(reader := reader, root := rootNode, factory := ..., dependencyFactory := ..., resolver := ..., binder := ...)`.
-  * `Load` constructs a separate dynamic `Workflow` instance owned by the caller (remember to release it via `TOF_Core.Memory.TryReleaseDynamicObject` when no longer needed).
-  * Optional interfaces (`IWorkflowElementFactory`, `IWorkflowDependencyFactory`, `IWorkflowDependencyResolver`, `IWorkflowVariableBinder`) supply custom activity/condition types, embedded task/comparer types, key-resolved external dependencies, and external PLC variable bindings.
-  * Required PLC variable bindings and embedded dependencies are validated before returning; on any failure, `Load` rolls back and disposes the partial graph automatically.
+* **Saving**: pass a `TOF_Workflow.Workflow` and a `TOF_Core.JSON_DOCUMENT` to `JsonConfigurationWriter.Serialize(source := workflow, document := jsonDocument)`. Variables save their starting `initialValue`, not temporary runtime values.
+* **Loading**: parse the text with `JsonConfigurationReader.Parse(document := jsonDocument)` to get a root `TOF_Core.CONFIGURATION_NODE`, then call `TOF_Workflow.WorkflowLoader.Load(reader := reader, root := rootNode, factory := ..., dependencyFactory := ..., resolver := ..., binder := ...)`.
+  * `Load` creates a new dynamic `Workflow` object that you own — remember to free it with `TOF_Core.Memory.TryReleaseDynamicObject` when you are done with it.
+  * Optional helpers (`IWorkflowElementFactory`, `IWorkflowDependencyFactory`, `IWorkflowDependencyResolver`, `IWorkflowVariableBinder`) let you supply custom steps/conditions, embedded tasks/comparers, named external tasks/comparers, and external PLC variable bindings.
+  * Required PLC variable bindings and embedded helpers are checked before returning; if anything fails, `Load` automatically frees the partially built workflow.
 
-## Declaring and inspecting an array
+## Declaring and reading an array
 
-`DeclareArray` takes a pointer to a contiguous sequence of IEC element descriptors
-and its positive count. The sequence can be allocated at runtime. Each descriptor
-must refer to live readable storage through the call. The scope copies all values.
-For example, these variables describe two initial limits.
+`DeclareArray` takes a pointer to a table of `__SYSTEM.AnyType` descriptions (one per
+array item) and the number of items (`elementCount > 0`). Make sure all referenced
+variables stay alive during the `DeclareArray` call — the workflow copies all values
+into its own storage.
 
 ```iecst
 VAR
@@ -130,15 +130,16 @@ elements[1] := TOF_Workflow.Workflows.GetValueDescriptor(value := secondLimit);
 sequence^.DeclareArray(name := 'RetryLimits', initialValues := ADR(elements[0]), elementCount := 2);
 ```
 
-All elements must have the same IEC type and byte width, including string capacity.
-`GetDeclaredElement` borrows a writable element by local name and zero-based index.
-Arrays retain their shape even at length one. Ordinary variable lookup exposes the
-whole array as aggregate storage. Use indexed access for typed element operations.
+Every item in the array must have the same PLC type and byte size (including string max
+length). Call `GetDeclaredElement` to get a writable reference to one array item by
+name and zero-based index. Even a 1-item array keeps its array shape. Looking up the
+variable by name without an index returns the whole array block, so use indexed access
+for reading or writing single elements.
 
-To inspect a node's declarations, start `position` at zero and call `NextDeclaration`
-until it returns FALSE. It skips borrowed PLC bindings. `ElementType` preserves the
-exact IEC category (for example, BYTE or USINT), `ElementSize` gives its byte width
-and `IsArray` distinguishes a scalar from a singleton. For each index from zero
-through `ElementCount - 1`, use `CopyInitialElement` with a descriptor for matching
-writable storage. For a PLC variable, supply `Workflows.GetValueDescriptor(value := destination)`.
-A format writer can also provide a descriptor for its own runtime-sized buffer.
+To inspect all declared variables on a step or condition, set `position := 0` and keep
+calling `NextDeclaration` until it returns `FALSE` (this skips bound external PLC
+signals). `ElementType` gives the exact TwinCAT type (for example `BYTE` vs `USINT`),
+`ElementSize` gives its byte size, and `IsArray` distinguishes a single value from a
+1-item array. To read each starting element from `0` to `ElementCount - 1`, pass a
+matching destination variable wrapped with `Workflows.GetValueDescriptor(value := destination)`
+to `CopyInitialElement`.

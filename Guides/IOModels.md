@@ -1,12 +1,17 @@
 # IO models: mapping and supported process images
 
-The library provides passive PLC endpoints. It does not configure EtherCAT devices, discover links, validate
-measurements or advance serial handshakes. Select the documented process image in XAE before linking fields.
-Zero-valued, unlinked inputs can look plausible; commissioning must confirm the links independently.
+These models are plain PLC data structures for TwinCAT I/O variables. They do **not**
+configure EtherCAT terminals, link I/O channels automatically, check whether values are
+realistic, or run serial protocols on their own. Always pick the matching PDO layout in
+TwinCAT XAE before linking variables, and test real hardware links during commissioning
+(an unlinked input reads zero and can look normal at first glance).
 
-Use one owner task per model instance. Synchronize other tasks and ADS writes externally. A record copy stores
-data; it creates no new I/O links and provides no atomic multi-field snapshot guarantee. Keep borrowed field
-references valid while consumers are bound. Compiler padding and `SIZEOF(record)` do not define an EtherCAT packet.
+Use each I/O model instance from one PLC task only. If another task or ADS client needs
+to read or write the data, add your own synchronization. Copying a record into another
+variable only copies the current values — it does **not** create I/O links or guarantee
+an all-or-nothing snapshot across fields. Keep any variable pointed to by a reference
+alive while it is bound, and remember that `SIZEOF(record)` includes compiler padding, so
+it does not equal the raw EtherCAT packet size.
 
 ## Supported representations
 
@@ -29,23 +34,28 @@ references valid while consumers are bound. Compiler padding and `SIZEOF(record)
 | EL3413/EL3433 | Three phase channels plus Auxiliary | Map phase status, auxiliary Tx 0x1A03 and selectors Rx 0x1603. |
 | Serial EL/EP models | 16-bit status/control plus 22-byte payload in each direction | Larger buffers and 9-bit modes are outside the model. Configure the electrical interface separately. |
 
-The declarations describe represented fields, not every optional PDO supplied by the ESI. Check the actual
-device revision, firmware and ESI. Disable unneeded optional PDOs or link their data separately.
+These models list only the main fields used by the library, not every optional PDO
+listed in Beckhoff's ESI XML file. Check your exact terminal revision, firmware, and ESI
+in XAE — turn off unused optional PDOs or link their data separately.
 
 ## Validity and selectors
 
-`WcState=TRUE` means invalid process-data exchange. `InputToggle` is an update transition, not a ready level.
-`State` and `AdsAddr` are acyclic information; they do not validate a current measurement. Evaluate the channel's
-own status as well. EL3403 phase synchronization status differs from EL3413/EL3433 measurement status.
+`WcState = TRUE` means the EtherCAT process-data exchange failed and inputs are invalid.
+`InputToggle` toggles whenever new data arrives (it is a change bit, not a "data OK" bit).
+`State` and `AdsAddr` reflect terminal/mailbox status, not whether a live channel reading
+is valid — always check each channel's own status too (`EL3403` phase-sync status differs
+from `EL3413`/`EL3433` measurement status).
 
-Power measurement `Current` and `Voltage` are signed raw values. Their default units are 0.000001 A and 0.0001 V;
-apply the configured transformer ratios and device-variant scaling. Interpret `VariantValue` only after the
-input `Index` acknowledges the requested output selector and the relevant status is valid. For Auxiliary,
-both `Index` and `Channel` must acknowledge the request; units depend on the selected quantity and firmware.
+For power terminals, raw `Current` and `Voltage` are signed integers with default units
+of `0.000001 A` and `0.0001 V` — multiply by your configured transformer ratios and
+terminal scale factor. Only read `VariantValue` once the input `Index` confirms the
+requested output selector and the status is valid (for Auxiliary channels, check both
+`Index` and `Channel`; units depend on the selected measurement and firmware).
 
-EL2521 `Frequency` preserves a 16-bit raw command, including the selected sign representation. Relative mode
-scales the base frequency by the interpreted command divided by 32767; direct mode uses the configured factor
-in 0.01 Hz units. The 32-bit target and counter preset are separate fields.
+`EL2521` `Frequency` stores a raw 16-bit command using whichever sign mode is configured.
+In relative mode, output frequency equals the base frequency multiplied by the signed
+command divided by `32767`; in direct mode, each unit is `0.01 Hz` (multiplied by the
+configured factor). The 32-bit target and counter preset are separate fields.
 
 Relay specifications are device-specific:
 
@@ -55,8 +65,9 @@ Relay specifications are device-specific:
 
 ## Simple EP models and mailbox support
 
-The following models expose discrete endpoints and bus diagnostics; their slaves have no CoE mailbox.
-Their `_EX` types provide WcState and State, plus InputToggle for inputs. They have no AdsAddr endpoint.
+These IP67 EtherCAT box modules provide simple inputs/outputs and EtherCAT link status,
+with no CoE mailbox. Their `_EX` types include `WcState` and `State` (plus `InputToggle`
+for inputs), and have no `AdsAddr` field.
 
 | Model | Discrete endpoints |
 |---|---|
@@ -67,17 +78,19 @@ Their `_EX` types provide WcState and State, plus InputToggle for inputs. They h
 | EP2809_0021 | Sixteen BOOL outputs |
 | EP2624_0002 | Four BOOL relay commands |
 
-EP1809_0021 and EP2809_0021 use the documented 16-channel M8 product identifiers (replacing the old `_0001` names; update declarations and XAE links accordingly). Because unsupported `AdsAddr` fields were removed from simple EP models, rebuild dependent projects and review your mappings. EP3174_0002_EX, EP4174_0002_EX, and the serial EP6001/EP6002 extensions retain their CoE `AdsAddr` endpoints — do not assume mailbox support from the `EP` prefix alone.
+`EP1809_0021` and `EP2809_0021` use the documented 16-channel M8 product identifiers (replacing the old `_0001` names; update declarations and XAE links accordingly). Because unsupported `AdsAddr` fields were removed from simple EP models, rebuild dependent projects and review your mappings. `EP3174_0002_EX`, `EP4174_0002_EX`, and serial `EP6001`/`EP6002` models keep their CoE `AdsAddr` field — do not assume mailbox support from the `EP` prefix alone.
 
-Thermocouple models represent input PDOs. External cold-junction compensation requires additional output
-PDOs linked separately; input-only records do not supply the compensation temperature.
+Thermocouple models map input PDOs only. If you use external cold-junction compensation,
+link that output temperature PDO separately.
 
-## Example and verification
+## Example and commissioning checklist
 
-`Sources/TwinCAT.OpenFramework.HowTo/IO/IOModelsExample.TcPOU` demonstrates an EL3001_EX input. Link all declared
-endpoints, confirm the selected PDO, then set `BindingsConfigured=TRUE`. Invoke `Execute` once per task cycle
-or map the program itself to that task. Inspect `InputValid`, `InputUpdated` and `Voltage`. The existing HowTo
-MAIN continues to run its testing example; the IO example is selected explicitly during commissioning.
+`Sources/TwinCAT.OpenFramework.HowTo/IO/IOModelsExample.TcPOU` shows how to use an
+`EL3001_EX` input. Link all fields in XAE, pick the standard PDO, then set
+`BindingsConfigured := TRUE`. Run `Execute` once per PLC task cycle (or map the program
+directly to that task) and inspect `InputValid`, `InputUpdated`, and `Voltage`. *(Note:
+`HowTo` `MAIN` runs the testing example by default; switch to the IO example manually
+when testing.)*
 
 `IOModelsTest` runs automatically via `TcUnit` and checks PLC field types and byte widths (including the 16-channel EP models, `EL3078` `Real32`, and compound `DINT`/`REAL` inputs). Unit tests do not verify physical EtherCAT wiring or TwinCAT XAE links, so check those during commissioning:
 
