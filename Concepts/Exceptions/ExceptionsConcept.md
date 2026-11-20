@@ -67,8 +67,8 @@ To support this functionality, several internal components are implemented. Belo
 
 A dedicated base class (`Exception`) used to describe errors, with specialized descendants (`StandardException`, `ArgumentNotSpecifiedException`, `ArgumentOutOfRangeException`, `DataMemberNotSpecifiedException`, `NullReferenceException`, `AggregateException`, etc.).
 
-* `TOF_Core.Exceptions` provides static zero-allocation `Throw*` helpers (such as `ThrowStandard`, `ThrowArgumentNotSpecified`, `ThrowArgumentOutOfRange`, `ThrowDataMemberNotSpecified`, `ThrowNullReference`) using stack-allocated fixed formatting without dynamic string builders.
-* Custom exception classes can still call their own static template `Throw` method when specialized fields are required.
+* **Direct throwing:** You can declare a local (or FB-level) exception variable — such as `StandardException`, `AggregateException`, or your own custom exception class — and call `.Throw(...)` directly on it. The message is formatted without dynamic string builders, and `ExceptionManager.Throw` clones the exception via `__NEW` so it survives until `__CATCH` reads it.
+* **`TOF_Core.Exceptions` facade (saves PLC stack space):** Each exception object holds an `ERROR_MESSAGE` buffer (~1 KB by default). Declaring several local exception variables inside a regular method reserves that stack space on *every* normal call, even when no error happens. Calling `TOF_Core.Exceptions.Throw*` (such as `ThrowStandard`, `ThrowArgumentNotSpecified`, `ThrowArgumentOutOfRange`, `ThrowDataMemberNotSpecified`, `ThrowNullReference`) keeps 0 bytes of exception variables on your method's stack — the temporary exception is created inside the helper only when an error actually occurs.
 
 ---
 
@@ -80,7 +80,10 @@ Transports exceptions within the current cyclic PLC task:
 * Returns that payload or a task-local native wrapper from `GetLastException`
 * Propagates an already obtained exception through `Throw`; `ReThrowLastException` uses the current catch code and context
 
-For built-in TwinCAT errors, the framework reuses one shared `SystemException` object per task on the next catch. If you need to keep it while calling code that might catch another error, clone it first. Never pass exception references to another PLC task.
+* **Framework exceptions** get a fresh dynamic copy via `__NEW` on each `Throw`. If you hold an `IException` reference to one framework exception and another framework exception is thrown in the same cycle, the first one is **not** overwritten (it stays valid until `DynamicMemoryManager.CleanupMemory()`).
+* **Built-in TwinCAT runtime errors** (such as divide-by-zero or null pointer access) do **not** call `__NEW` in `GetLastException`; instead, each task reuses one shared static `SystemException` instance. Because of that, catching another built-in error in the same task overwrites the fields of that shared object. If you need to keep the first system error before calling code that might catch another one, copy it into an `ERROR` struct (`ToError`) or call `Clone()`.
+
+Never pass exception references to another PLC task.
 
 ---
 
