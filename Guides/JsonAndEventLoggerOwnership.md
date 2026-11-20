@@ -7,15 +7,9 @@ access, including configuration, belong to that task. A call must finish before
 another operation starts on the same instance. Initialization and destruction
 must not overlap application operations.
 
-The classes have no internal locks, owner-task checks or reentry guards.
-`Try` contains operation exceptions; it does not make unsupported access safe
-or guarantee that an ownership violation returns `FALSE`.
+These classes have no internal locks or cross-task checks, and you must not call an instance again from inside its own callback. `Try` methods catch normal runtime errors and return `FALSE`, but they cannot make cross-task access or nested callbacks on the same instance safe.
 
-These examples are source fragments for an application, not a runnable sample
-project or a compilation/runtime validation. Assign each program to the task
-named in the example. The application's normal task boundary must perform
-exception cleanup and call `RaiseIfAllocationFailed` outside Try and recoverable
-handlers, including when it does not use `AutomationRunner`.
+Each program in the fragments below should be assigned to its matching task. Every PLC task must also run end-of-cycle exception cleanup (`ExceptionManager.Cleanup()`, `DynamicMemoryManager.CleanupMemory()`) and call `DynamicMemoryManager.RaiseIfAllocationFailed()` outside recovery handlers (`AutomationRunner` handles this automatically if you use it).
 
 ## Separate JSON instances
 
@@ -105,15 +99,15 @@ For example, while `outerSerializer` is inside `WritePrefix`:
 | Callback action | Contract |
 | --- | --- |
 | Write the prefix through the supplied SAX writer | Supported |
-| Call Serialize/TrySerialize or Deserialize/TryDeserialize on `outerSerializer` | Unsupported reentry |
-| Read or change `outerSerializer.DecimalPlaces` | Unsupported access during its active operation |
+| Call Serialize/TrySerialize or Deserialize/TryDeserialize on `outerSerializer` | Not allowed (the same serializer is already busy) |
+| Read or change `outerSerializer.DecimalPlaces` | Not allowed while serialization is running |
 | Convert an independent structure with `nestedSerializer` and a separate buffer | Supported if that serializer is idle and belongs to this task |
 
 Keep the outer source stable and its destination exclusive throughout callbacks.
 Nested conversion must not modify or alias those buffers. A stateful extender
 also needs a single owner or its own explicit synchronization; two independent
-serializers do not make one shared extender safe. Avoid callback chains that
-eventually reenter an already active serializer.
+serializers do not make one shared extender safe. Make sure callbacks do not loop back
+and call a serializer that is already running.
 
 ## Separate EventLogger message instances
 
@@ -125,7 +119,7 @@ event definition and concrete metadata. For example, a descendant named
 ```iecst
 (*!
 <summary>Attempts to send this event with an owner-task JSON payload.</summary>
-<description>Call only from the message's owner task, without reentry. Borrows stable JSON for the call.
+<description>Call only from the message's owner task, and never recursively from inside its own callback. Borrows stable JSON for the call.
 Returns the native send outcome through InternalTrySend; failure does not roll back prior native effects.</description>
 <param name="jsonData">Stable JSON text for this event.</param>
 *)
@@ -187,8 +181,7 @@ acceptance versus actual sending. Queue entries must own their payload copies;
 do not enqueue references to a producer's temporary or reusable buffer, borrowed
 writers or task-local exception objects.
 
-This is a possible extension, not an existing EventLogger API. Adding a mutex
-around a shared base instance does not make cross-task use supported by the
-current contract. The owner-task model also avoids assuming that every native
-dependency permits calls from different task contexts merely because they are
-serialized.
+This queued service is just an idea for how your application could extend it — not
+a built-in `EventLogger` API. Wrapping one shared instance in a mutex does not make
+multi-task access supported, because TwinCAT system blocks underneath can also expect
+all calls to stay in one task.

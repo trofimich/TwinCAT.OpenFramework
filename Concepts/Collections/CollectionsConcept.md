@@ -1,4 +1,4 @@
-﻿# Collections Concept
+# Collections Concept
 
 ## 1. General Description
 
@@ -88,28 +88,12 @@ RemoveLast destroys the stored entry without transferring ownership to the calle
 
 ## 9. Ownership and borrowed views
 
-Copy methods prepare independently owned payloads. Object copying requires `ICloneable`;
-copying ordinary data is shallow and does not recursively clone pointer or interface fields.
-Generic insertion transfers disposal responsibility for an owning descriptor on success.
-Reset the caller's descriptor after transfer; do not release it as a second owner.
-Insertion failure before acceptance leaves disposal responsibility with the caller.
-
-Get, Peek, FindSingle, TryGet and enumerator Current return borrowed data. Their descriptor
-may retain `IsMemoryOwner = TRUE`; this does not grant the consumer permission to release it.
-Keep the collection and its borrowed source storage alive. Mutation can invalidate views.
-All six collection FBs use `no_assign`: the compiler rejects whole-instance assignment, which would copy
-backing pointers and ownership without cloning them. Interface assignment still borrows the same instance.
-
-Dictionary keeps the existing equal key and replaces its value. UniqueDataSet replaces
-the matching descriptor. Neither container promises sorted positions or enumeration order.
-Keys and set elements must keep equality/hash-relevant data stable while stored; remove
-them before changing that data. A custom equality comparer is borrowed for the collection
-lifetime and must provide matching equality and hash results.
-
-Generic query arguments are borrowed by default in Dictionary and UniqueDataSet.
-List, Queue and Stack ContainsGeneric default to releasing their query. Pass the release
-argument explicitly when borrowing a descriptor. A releasing query must not own storage
-still retained by the collection; caller-side aliases are not reset by the call.
+* **Copying (`Copy`):** Creates independent copies of stored elements. To copy an `OBJECT`, it must implement `ICloneable`. Ordinary structures are copied byte-by-byte, so pointer or interface fields inside them are not cloned deeply.
+* **Transferring ownership on insert:** Passing an owning `GENERIC_VALUE` (`IsMemoryOwner = TRUE`) to a generic insertion method transfers memory ownership to the collection when insertion succeeds. Call `Reset()` on your local descriptor afterward so you do not release it a second time. If insertion fails before adding the item, you remain responsible for releasing it.
+* **Reading (`Get`, `Peek`, `FindSingle`, `TryGet`, `Current`):** These return borrowed views — the collection still owns the stored element. Even if the returned descriptor has `IsMemoryOwner = TRUE`, do **not** call `Release()` on it. Keep the collection (and any borrowed caller variables stored in it) alive while using a borrowed view, because changing the collection can invalidate it.
+* **No accidental copying (`no_assign`):** All six collection function blocks block direct variable-to-variable assignment (`colA := colB`), because a bitwise copy would duplicate internal memory pointers without cloning the elements. Assigning to an interface variable still points to the same collection instance.
+* **`Dictionary` & `UniqueDataSet` keys:** `Dictionary` keeps the existing equal key and replaces its value; `UniqueDataSet` replaces the matching item. Neither guarantees sorted order. Do not modify key/element fields that affect equality or hash codes while the item is stored — remove it first, update it, and add it back. Custom comparers are borrowed for the collection's lifetime and must return matching hash codes for equal items.
+* **Lookup queries:** In `Dictionary` and `UniqueDataSet`, lookup arguments are borrowed by default and never freed. In `List`, `Queue`, and `Stack`, `ContainsGeneric` frees an owning query descriptor (`IsMemoryOwner = TRUE`) by default — pass the release flag as `FALSE` if you want to keep owning it. Never pass an owning query descriptor that points to memory still used by the collection, and note that releasing inside the call does not reset other local aliases.
 
 ## 10. Sorting
 
@@ -125,25 +109,10 @@ is not inferred from the first entry's type.
 
 ## 11. Enumeration and failures
 
-CreateEnumerator allocates an independent cursor owned by the caller. Release it explicitly
-through `TOF_Core.Memory.TryReleaseDynamicObject` after converting its interface to `IObject`.
-Keep the source alive and structurally unchanged throughout traversal. Current is empty
-before the first successful MoveNext, after Reset and after exhaustion.
-Repeated exhausted MoveNext calls return FALSE until Reset for an unchanged source.
-A cursor constructed with a null source reports `DataMemberNotSpecifiedException` when
-MoveNext or a current-value getter is used. Initialization does not throw for that configuration.
-
-One task drives each collection instance. Cross-task access and reentrant mutation from
-callbacks require an explicitly supported contract; the containers provide no internal locking.
-Try methods contain failures and retain the fatal allocation latch. Each task must call
-`TOF_Core.DynamicMemoryManager.RaiseIfAllocationFailed` outside recoverable handlers at
-its task boundary; AutomationRunner provides that boundary for the tasks it runs.
-
-Static capacity bounds storage, but Copy, CreateEnumerator and error construction can
-still allocate. Dynamic growth can fail terminally. FB_init does not invoke validators,
-comparers or throwing validation. Preserving live contents and cursors across online
-change requires separate target verification; address-based hash indices must be discarded
-and populated again after equality-relevant address relocation.
+* **Enumerators (`CreateEnumerator`):** Creates a standalone cursor owned by the caller. Release it explicitly with `TOF_Core.Memory.TryReleaseDynamicObject` after converting its interface to `IObject`. Keep the collection alive and do not modify it while iterating. `Current` is empty before the first successful `MoveNext`, after `Reset`, and after reaching the end (subsequent `MoveNext` calls return `FALSE` until `Reset`). If an enumerator was created without a source, `FB_init` succeeds without throwing, and calling `MoveNext` or reading `Current` throws `DataMemberNotSpecifiedException`.
+* **One task per collection:** Each collection instance must be used by only one PLC task, with no built-in thread locks. Do not modify a collection from inside a user callback while an operation on that collection is running, unless that behavior is explicitly documented as supported.
+* **`Try` methods and running out of memory:** `Try` methods catch errors and return `FALSE`. If dynamic memory runs out (`__NEW` fails), `DynamicMemoryManager` sets a global out-of-memory flag; `Try` methods keep that flag set and return `FALSE`. Each PLC task must call `TOF_Core.DynamicMemoryManager.RaiseIfAllocationFailed()` at the end of every cycle outside normal recovery blocks so the program stops safely instead of running on in a broken state (`AutomationRunner` already does this automatically).
+* **Static vs. dynamic memory & online change:** Static capacity (`N > 0`) avoids heap allocations when adding items, though `Copy`, `CreateEnumerator`, and exception messages can still allocate memory; dynamic growth fails with an out-of-memory error if memory runs out. `FB_init` never throws or runs validators or comparers. If live `Dictionary` or `UniqueDataSet` instances survive an online change where variable addresses relocate, rebuild hash indices that depend on object addresses.
 
 ## 12. Usage
 
@@ -151,7 +120,7 @@ and populated again after equality-relevant address relocation.
 
 ## 13. Tests
 
-`Sources/TwinCAT.OpenFramework.Tests/Tests/Collections/` contains the existing TcUnit suites
-and `Contract/CollectionsContractTest`. New contract regressions cover callback failure
-cleanup, ownership, hash collisions and growth, and independent cursors. Their source
-registration does not establish successful compilation or runtime results.
+Unit and contract tests for collections live in
+`Sources/TwinCAT.OpenFramework.Tests/Tests/Collections/` (including
+`Contract/CollectionsContractTest`), covering ownership rules, callback failures,
+hash collisions, dynamic growth, and independent enumerators.

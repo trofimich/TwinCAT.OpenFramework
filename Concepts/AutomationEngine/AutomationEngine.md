@@ -20,7 +20,7 @@ The cyclic orchestrator at the application task boundary (`TOF_Automation.Automa
 
 * Accepts a persistent array of root `IAutomationComponent` interfaces in `FB_init(components := ...)` (bounds and order remain fixed for its lifetime).
 * Drives initialization and cyclic execution across one owning task (`Execute()` takes no arguments; nested runner calls are unsupported).
-* Updates `TOF_Core.System.Execute()`, services `TOF_Core.LogManager.ExecuteCurrentTaskLogger()`, raises latched terminal OOM via `DynamicMemoryManager.RaiseIfAllocationFailed()`, and cleans up task-scoped exceptions and auto-disposed objects at the end of each call.
+* Runs `TOF_Core.System.Execute()`, services `TOF_Core.LogManager.ExecuteCurrentTaskLogger()`, checks the global out-of-memory flag via `DynamicMemoryManager.RaiseIfAllocationFailed()`, and cleans up temporary exceptions and auto-disposed objects at the end of every cycle.
 * States (`AUTOMATION_RUNNER_STATE`): `INITIALIZING`, `RUNNING`, `INVALID` (terminal configuration or root-initialization failure; reports `InitializationErrorMessage`).
 
 ### 3.2. `AutomationComponent`
@@ -32,7 +32,7 @@ The abstract base class for all nodes (`TOF_Automation.AutomationComponent` exte
   * `WORKING` — normal cyclic execution state after successful initialization.
   * `STOPPED` — entered via `Stop(reason)` (transitions `WORKING -> STOPPED` regardless of `Enabled`) or a runtime stop reaction; requires an explicit `Reset()` while `Enabled` to return to `WORKING`.
   * `INVALID` — terminal state entered when mandatory dependencies, topology validation, or initialization fail.
-* **Recovery guarantees**: failures in a component's own `Reset` hooks (`OnReset`, `OnBeforeChildrenReset`, `OnAfterChildrenReset`) or automatic `OnRecover` always record a `CRITICAL` error and leave/transition the component to `STOPPED` without consulting `ExceptionHandlingPolicy`.
+* **Safe recovery**: if a component's own reset step (`OnReset`, `OnBeforeChildrenReset`, `OnAfterChildrenReset`) or automatic recovery step (`OnRecover`) throws an error, the component always records a `CRITICAL` error and stays in (or moves to) `STOPPED` — it does not ask `ExceptionHandlingPolicy` whether to ignore it.
 * **Events**: synchronous borrowed `BroadcastEvent` (top-down) and `BubbleEvent` (bottom-up) work regardless of `Enabled` or operational state; `stopPropagation` halts further routing on the current branch.
 
 ### 3.3. `BranchAutomationComponent`
@@ -61,7 +61,7 @@ Composites and controllers parameterize child capacity with `VAR_GENERIC CONSTAN
 
 * Child arrays (`ARRAY [0.._ChildCount - 1] OF IChildAutomationComponent`) are sized at compile time (including empty `N = 0` on Build 4026) with zero runtime heap allocation.
 * Each child receives its `Parent` in `FB_init` and occupies a single fixed slot in its parent's `Children` array.
-* Arbitrary static nesting depth is supported structurally, bounded by PLC task stack depth and cycle time (WCET).
+* Components can be nested as deeply as your machine design requires, limited only by the PLC task's call stack and cycle time.
 
 ---
 

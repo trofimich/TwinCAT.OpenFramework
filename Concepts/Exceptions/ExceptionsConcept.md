@@ -6,7 +6,7 @@ Using `__TRY -> __CATCH -> __FINALLY -> __ENDTRY`, you can execute a block of co
 
 ### Important Notes
 
-1. Catching a runtime error does not prove that the application state remains valid. Do not use exception handling as a substitute for valid pointers, correct ownership or resource cleanup.
+1. Catching an error does not automatically fix broken data. Always check your pointers, clean up resources, and make sure your machine state is safe before continuing.
 
 2. Inside `__CATCH`, you can retrieve an error code.
    This is simply a numeric value. Some error codes are predefined and described in the `__SYSTEM.ExceptionCode` enumeration.
@@ -17,7 +17,7 @@ Using `__TRY -> __CATCH -> __FINALLY -> __ENDTRY`, you can execute a block of co
 
 5. If another exception occurs inside `__CATCH`, its `__FINALLY` block is **not executed**. This is documented TwinCAT behavior; do not assume that a future runtime version will change it. See [Beckhoff's exception-handling documentation](https://infosys.beckhoff.com/content/1033/tc3_plc_intro/2529187211.html).
 
-6. Before allowing execution to continue after an exception, define which component state and results remain valid. A handling policy selects a reaction; it does not roll back a partially completed operation.
+6. Catching an error (or letting an error-handling policy decide how to react) does not undo half-finished work. Make sure your component is left in a safe, known state before continuing.
 
 ---
 
@@ -25,17 +25,19 @@ Using `__TRY -> __CATCH -> __FINALLY -> __ENDTRY`, you can execute a block of co
 
 ### When to Use Exceptions
 
-OpenFramework provides exceptions for deliberate use: interrupt an operation and pass a failure to a handling boundary when the API contract does not represent that failure as an ordinary result. The availability of exception transport and logging is not a reason to use exceptions for every unsuccessful operation.
+Exceptions are meant for real errors that stop an operation from finishing — not for every ordinary "no" or "not found" result.
 
-Choose according to the contract, not how frequently an event occurs:
+Follow these simple rules:
 
-* Represent supported outcomes through the API's result or state. Examples include an optional item being absent, an operation still waiting, or a `Try` method reporting failure. Do not create an exception just to catch it immediately and convert an expected outcome into a status.
-* Use an exception when the operation cannot meet its contract and that contract requires interruption and propagation. Invalid arguments and violated mandatory preconditions still require checks; their reporting follows the specific API contract.
-* Catch where there is a defined responsibility: recovery, resource cleanup, conversion to a result or diagnostic, propagation with context, or enforcement of a no-throw contract. Before continuing, establish the component's state and resource ownership after the interrupted operation. Catching alone does not restore them.
+* **Use return values or states for normal outcomes.** For example, when an optional item is missing, an operation is still in progress, or a `Try` method returns `FALSE`. Never throw an exception just to catch it right away and turn it into `FALSE` or a status code.
+* **Use exceptions when a method cannot do its job.** For example, when a required input is missing or out of range and the method has no normal way to report failure.
+* **Only catch an exception when you actually do something with it.** Good reasons to catch are recovering safely, cleaning up resources, recording error details, adding context before rethrowing, or keeping a `Try` method from throwing. Remember: catching an error does not undo changes that already happened before the error.
 
-When adding a throwing or catching path, explain why the ordinary result is insufficient or which handling responsibility requires the catch. Document failure conditions, how they are reported, and the resulting state next to the API declaration. Account for exception allocation and cleanup as well as the control-flow change.
+Keep three safety rules in mind:
 
-This is guidance for new and changed code, not a claim that all existing implementations already comply or authorization to rewrite existing contracts. Methods prefixed with `Try` must not let exceptions escape, including those from nested calls and callbacks; lifecycle methods must remain free of exception creation and raising. Terminal allocation failure remains terminal: a `Try` method reports failure while preserving the allocation flag, and `RaiseIfAllocationFailed` raises at the task boundary outside recoverable handlers. Execution must not continue into subsequent cycles after terminal OOM.
+* **`Try` methods never throw.** Even if something inside a `Try` method fails (including nested calls or user callbacks), the method must catch the error and return `FALSE` instead of letting an exception escape.
+* **Lifecycle methods (`FB_init`, `FB_exit`, `FB_reinit`) never throw.** Do not create or throw exceptions inside them.
+* **Running out of memory stops the program.** If the PLC runs out of dynamic memory (when `__NEW` fails), `DynamicMemoryManager` sets a global out-of-memory flag. A `Try` method still returns `FALSE` without clearing that flag, and `DynamicMemoryManager.RaiseIfAllocationFailed()` at the end of the cycle raises the error outside normal `__TRY`/`__CATCH` recovery blocks so the program does not keep running in a broken state on the next PLC cycle.
 
 ### What the Framework Adds
 
@@ -53,7 +55,7 @@ Each exception can carry:
 4. Timestamp (both local time and UTC)
 5. Exception class (useful for filtering)
 
-Native errors are represented by `SystemException`. Their original throw location is not available through this wrapper; the catch point is recorded separately. A native error code already lost by the runtime cannot be reconstructed by the framework.
+Built-in TwinCAT runtime errors (such as divide-by-zero or null pointer access) are wrapped in `SystemException`. TwinCAT does not provide the original throw line for these errors, so the framework records where the error was caught instead.
 
 ---
 
@@ -78,7 +80,7 @@ Transports exceptions within the current cyclic PLC task:
 * Returns that payload or a task-local native wrapper from `GetLastException`
 * Propagates an already obtained exception through `Throw`; `ReThrowLastException` uses the current catch code and context
 
-The native wrapper is mutable and reused by the next native catch in the same task. Clone a static result before callbacks that may handle another native error. Exception references must not cross task boundaries.
+For built-in TwinCAT errors, the framework reuses one shared `SystemException` object per task on the next catch. If you need to keep it while calling code that might catch another error, clone it first. Never pass exception references to another PLC task.
 
 ---
 
@@ -93,15 +95,14 @@ The native wrapper is mutable and reused by the next native catch in the same ta
 
 ### 3.4 Dynamic Memory Manager
 
-* Static exception templates are cloned on propagation so that handlers can use them outside the original scope
-* `Clone` creates the dynamic object, checks allocation, explicitly registers it with `DynamicMemoryManager.RegisterAutoDisposedObject`, then copies its payload
-* Plain `__NEW` does not transfer ownership to the manager
-* The manager releases registered instances when the owning task calls cleanup after all consumers
-* Registration ignores a repeated registration of the same object; it does not compare exception contents or merge equivalent errors
+* When an exception is thrown, the framework creates a dynamic copy (`Clone`) so the error survives until a `__CATCH` block reads it.
+* Inside `Clone`, the new object is allocated with `__NEW`, checked for out-of-memory, registered via `DynamicMemoryManager.RegisterAutoDisposedObject`, and then filled with the error data. Plain `__NEW` alone does not register the object for automatic cleanup.
+* At the end of the task cycle, `DynamicMemoryManager.CleanupMemory()` automatically frees all registered exception objects created in that task.
+* Registering the exact same object twice is safely ignored.
 
-Do not retain exception references beyond their task's cleanup, delete registered instances manually or pass them to another task. Copy diagnostics into an `ERROR` value when they must survive across cycles; `ToError` copies data without retaining an exception reference.
+Do not keep an `IException` reference after the end-of-cycle cleanup, do not `__DELETE` it manually, and do not pass it to another PLC task. If you need to keep error information for later cycles (for example, to show on an HMI), call `ToError()` to copy it into an `ERROR` struct.
 
-For a custom exception, ensure that `Clone` preserves its concrete type and all added payload. An inherited `Clone` is not automatically suitable. Follow the existing concrete exception's registration sequence, and keep lifecycle methods (`FB_init`, `FB_exit`, `FB_reinit`) free of exception creation and raising.
+If you create your own custom exception class with extra fields, override `Clone` so it creates your exact class, registers it with `DynamicMemoryManager.RegisterAutoDisposedObject`, and copies all extra fields. Never create or throw exceptions inside `FB_init`, `FB_exit`, or `FB_reinit`.
 
 ---
 
@@ -185,9 +186,12 @@ TOF_Core.ExceptionManager.Cleanup();
 TOF_Core.DynamicMemoryManager.CleanupMemory();
 ```
 
-Run the final three calls after all exception consumers in each task, outside handlers that swallow terminal errors. `RaiseIfAllocationFailed` re-raises a latched terminal allocation failure even if an earlier handler caught it. Cleanup does not clear that latch, and execution must not continue into subsequent cycles after terminal OOM. Diagnostic formatting, including `ToError`, can itself encounter allocation failure.
+Always run those last three lines at the very end of the PLC task cycle, after all code that reads exceptions, and outside any `__TRY`/`__CATCH` block that ignores errors:
 
-`AutomationRunner.Execute()` already updates system services and performs this epilogue on its normal completion path. Its cleanup is the lifetime boundary for exceptions consumed during that call; call the runner outside handlers that swallow terminal errors.
+* `RaiseIfAllocationFailed()` checks the global out-of-memory flag. Even if an earlier `Try` method or `__CATCH` block hid the error, this call stops the task instead of letting the program continue in a broken state on the next cycle. Cleanup does not clear that flag.
+* `ExceptionManager.Cleanup()` and `DynamicMemoryManager.CleanupMemory()` free the temporary exception objects created during this cycle. (Keep in mind that formatting error text, such as `ToError`, can also fail if memory runs out.)
+
+If you use `AutomationRunner.Execute()`, it already runs `TOF_Core.System.Execute()` and all three end-of-cycle steps automatically. Just call `Runner.Execute()` outside any `__TRY`/`__CATCH` block that swallows errors, and do not keep `IException` references after `Execute()` returns.
 
 ---
 

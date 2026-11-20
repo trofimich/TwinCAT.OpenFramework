@@ -23,9 +23,9 @@ It improves upon raw `__SYSTEM.AnyType` by:
    * `CopyTo` / `TryCopyTo` copies the payload to another descriptor; `ChangeValueByAny*` / `TryChangeValueByAny*` updates stored values.
    * `Reset` resets metadata fields to defaults without freeing memory.
    * `Release` frees owned dynamically allocated memory when `IsMemoryOwner` is `TRUE` (calling `FB_exit` via `Object` when appropriate) and then calls `Reset`.
-5. **Failure & Terminal OOM Contract**:
-   * Methods not starting with `Try` may throw exceptions (`GenericConversionNotSupportedException`, `ArgumentOutOfRangeException`, etc.) and should be called inside `__TRY -> __CATCH` when recovery is intended.
-   * `Try*` methods contain exceptions and observe the terminal allocation latch (`HasAllocationFailed`) without clearing it or raising inside `Try`.
+5. **Errors & Running Out of Memory**:
+   * Regular methods (without `Try`) may throw exceptions such as `GenericConversionNotSupportedException` or `ArgumentOutOfRangeException`. Wrap them in `__TRY -> __CATCH` if you want to handle those errors.
+   * `Try*` methods never throw — they catch errors and return `FALSE`. If dynamic memory runs out, they respect the global out-of-memory flag (`DynamicMemoryManager.HasAllocationFailed`) without clearing it and still return `FALSE` (the end-of-cycle `RaiseIfAllocationFailed()` check stops the task safely).
 
 ---
 

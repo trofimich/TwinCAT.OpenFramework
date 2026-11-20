@@ -67,11 +67,7 @@ Their `_EX` types provide WcState and State, plus InputToggle for inputs. They h
 | EP2809_0021 | Sixteen BOOL outputs |
 | EP2624_0002 | Four BOOL relay commands |
 
-EP1809_0021 and EP2809_0021 use the documented 16-channel M8 product identifiers. The former `_0001`
-model names are replaced; update declarations and XAE symbols. Existing object IDs are retained.
-Removing unsupported AdsAddr fields also changes public layouts; rebuild consumers and review mappings.
-EP3174_0002_EX, EP4174_0002_EX and the serial EP6001/EP6002 extensions retain their CoE AdsAddr endpoints.
-Do not infer mailbox capability from the EP prefix.
+EP1809_0021 and EP2809_0021 use the documented 16-channel M8 product identifiers (replacing the old `_0001` names; update declarations and XAE links accordingly). Because unsupported `AdsAddr` fields were removed from simple EP models, rebuild dependent projects and review your mappings. EP3174_0002_EX, EP4174_0002_EX, and the serial EP6001/EP6002 extensions retain their CoE `AdsAddr` endpoints — do not assume mailbox support from the `EP` prefix alone.
 
 Thermocouple models represent input PDOs. External cold-junction compensation requires additional output
 PDOs linked separately; input-only records do not supply the compensation temperature.
@@ -83,22 +79,13 @@ endpoints, confirm the selected PDO, then set `BindingsConfigured=TRUE`. Invoke 
 or map the program itself to that task. Inspect `InputValid`, `InputUpdated` and `Voltage`. The existing HowTo
 MAIN continues to run its testing example; the IO example is selected explicitly during commissioning.
 
-`IOModelsTest` is registered in the existing TcUnit path. Eight cases compare field descriptors with independent
-type/width expectations; two simulate compound DINT/REAL input binding in persistent ordinary buffers.
-The catalog cases include the corrected 16-channel EP names and EL3078 Real32.
-They do not prove EtherCAT linking, physical I/O, task timing or online-change relocation.
+`IOModelsTest` runs automatically via `TcUnit` and checks PLC field types and byte widths (including the 16-channel EP models, `EL3078` `Real32`, and compound `DINT`/`REAL` inputs). Unit tests do not verify physical EtherCAT wiring or TwinCAT XAE links, so check those during commissioning:
 
-Inspect generated symbols to confirm that the eight simple EP extensions expose no AdsAddr and that the
-analog/serial EP extensions retain it. For EL3356, record separate links to Status PDO 0x1A00 and integer
-Value PDO 0x1A01. For EL3078, verify the Real32 assignment and REAL32 Value at 0x60n0:13.
-These device/ESI checks require XAE inspection and are not established by descriptor assertions.
-
-In XAE, create one fixture instance per supported image. For each field record its PLC symbol, device PDO entry,
-direction and width; inspect all links before operation. Do not resolve a width mismatch by silently truncating it.
-For hardware validation exercise bus loss, channel faults, selector changes, presentation/scaling and recovery.
-
-The corrected public layouts require rebuilding consumers and reviewing existing mappings. No legacy duplicates
-are retained. Existing object IDs and library reference identities are preserved.
+* Confirm that the eight simple EP `_EX` models have no `AdsAddr`, while analog and serial EP `_EX` models keep theirs.
+* For `EL3356`, link Status PDO `0x1A00` and integer Value PDO `0x1A01` separately.
+* For `EL3078`, select `AI Standard (Real32)` and link the `REAL32` Value at `0x60n0:13`.
+* In XAE, verify every linked field's direction and bit width before starting operation — never hide a width mismatch by truncating values, and test bus loss, channel faults, selector switching, scaling, and recovery on real hardware.
+* Because outdated duplicates were removed and public layouts updated, rebuild dependent projects and review existing I/O mappings after upgrading.
 
 ## Beckhoff references
 

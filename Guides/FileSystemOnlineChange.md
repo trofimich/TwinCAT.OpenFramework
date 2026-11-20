@@ -32,18 +32,9 @@ All previously running tasks and managers must have finished their stopping and
 release phases. There must be no pending open, read, write, directory operation,
 enumeration, abort or close, and no retained open file resource.
 
-Inspect task results and cleanup diagnostics. Native close and enumeration-abort
-errors end the current best-effort cleanup attempt; they do not certify that the
-server released the resource. Consequently, `State.Stopped` and
-`ResourceAcquired = FALSE` are not independent proof of successful physical
-cleanup. Log delivery can also be rejected, so an absence of error messages is
-not such proof. The current API has no single readiness result that certifies
-physical release after a native failure.
+Look at task results and error logs carefully. If a low-level close or directory-abort call fails, the library stops trying to clean up that resource right away, so `State.Stopped` or `ResourceAcquired = FALSE` does not guarantee TwinCAT actually released the OS file handle. Because log messages can also be dropped if logging fails, having no logged errors is not proof either. There is no single flag that guarantees physical file release after a low-level error.
 
-If cleanup fails, cannot finish, or its outcome is uncertain, preparation has
-not been established. Resolve the native-resource problem before proceeding;
-this library provides no automatic recovery or retry guarantee for that case.
-Only perform online change once the application has met the precondition.
+If cleanup fails, gets stuck, or you are not sure it completed, fix the underlying file or server problem before running online change — the library does not retry automatically. Only perform online change once all file operations and handles are cleanly closed.
 
 `FileHandleResourceManager.FB_exit` is a final best-effort fallback. It does not
 wait for close completion and does not transfer an active handle to a copied
@@ -78,12 +69,12 @@ for final release and `STOPPED` after release and buffer cleanup finish. Until
 draining finishes, State can still report initialization or `LOGGING`; Busy remains
 TRUE while the stop request is unfinished. Stop returns acceptance, not completion.
 
-Check for `FAILED` as well: a write or initialization failure still uses the
-existing terminal failure cleanup and can discard unwritten messages. Continue
-Execute until that cleanup finishes. `STOPPED` retains the underlying manager's
-best-effort close limitation; it does not certify physical release after a native
-close error. `Busy = FALSE` by itself remains insufficient because a logger that
-has not received Stop can be waiting with an open file.
+Check for `FAILED` too: if initialization or writing fails, the logger runs its
+error cleanup and may drop queued messages that were not written yet — keep calling
+`Execute()` until that cleanup finishes. Reaching `STOPPED` still shares the
+manager's limitation: after a low-level close error, it does not guarantee the OS
+file handle was released. Likewise, `Busy = FALSE` alone does not mean it is safe,
+because a logger waiting without `Stop()` can still hold an open file.
 
 After preparation and online change, `Start()` resumes a normally stopped logger.
 It returns FALSE in every other state, including FAILED. Execute checks the
@@ -100,8 +91,9 @@ the wrapper's Execute to advance backend stopping; do not execute the backend
 independently. Stopping the backend before the wrapper drains causes remaining
 forwarded messages to be rejected. Inspect `FailedDeliveryCount` as well as the
 backend state: draining the wrapper is not a guarantee of successful delivery.
-This ordering covers file shutdown; it does not establish migration of the
-wrapper's synchronization objects across online change.
+Follow this order so files close cleanly before online change; note that it only
+covers file shutdown, not migrating `QueuedLogger`'s internal synchronization state
+across online change.
 
 `SimpleTextFileLogger` routes its embedded task and file-resource diagnostics directly
 to an owned `AdsLogger`. They bypass `LogManager` filters and counters, so servicing
@@ -109,6 +101,3 @@ this backend does not feed its own file-operation diagnostics back into the wrap
 Standalone tasks retain normal `LogManager` routing unless their optional borrowed
 `DiagnosticLogger` is configured. Keep an explicit destination alive and unchanged
 through task stopping and reset; it must not return to the active logging chain.
-
-This guide records the supported usage contract. It is not a report of a
-successful compilation, runtime test or online-change experiment.

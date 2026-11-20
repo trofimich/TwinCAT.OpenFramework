@@ -52,13 +52,13 @@ start and drive the workflow from its cyclic execution path.
 
 ## An interrupted build
 
-If configuration, attachment or root initialization raises, earlier successful
-registrations still belong to the workflow. The owner can abandon this unstarted
-build with `DisposeDynamicChildren()` and discard all aliases into the graph.
-That operation clears the entire workflow, including its root and variable
-bindings. Using it on a workflow containing an earlier scenario would discard
-that scenario too. Terminal allocation failure follows the application-wide
-fatal latch and task-boundary contract.
+If setup, adding a node, or initializing the root throws an error, any nodes
+registered earlier still belong to the workflow. You can clean up this unfinished
+build with `DisposeDynamicChildren()` and stop using any old pointers to it. Note
+that `DisposeDynamicChildren()` clears the whole workflow — including its root and
+variable bindings — so only call it when abandoning the entire workflow. If the PLC
+runs out of dynamic memory during construction, the global out-of-memory flag is set
+and `RaiseIfAllocationFailed()` at the end of the cycle will stop the task safely.
 
 For a larger example with a custom activity and named variables, see
 [DemoWorkflowController](../Sources/TwinCAT.OpenFramework.Samples/Workflow/Classes/DemoWorkflowController.TcPOU).

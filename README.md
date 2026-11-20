@@ -10,7 +10,7 @@ Licensed under the [MIT License](LICENSE.txt).
 
 1. **Organized Utility Classes:** Replaces scattered standard functions with logically grouped static methods (e.g., `TOF_Core.Strings` providing `.GetLength()`, `.Concat255()`, `.ConcatFit255()`, `.Append()`, `.ReplaceInSource()`, `.CreateSplitter()`, `.Join()`, `.TrimChars()`).
 2. **Advanced Data Structures:** Provides both fixed-capacity static and heap-backed dynamic collections (`List`, `ByteList`, `Dictionary`, `UniqueDataSet`, `Queue`, `Stack`) with unified `GENERIC_VALUE` descriptors and ownership guards.
-3. **Structured Exception Handling:** Establishes a task-scoped mechanism for exception propagation, contextual diagnostics (`ERROR`), and modular logging. Use exceptions deliberately according to the API contract; represent supported outcomes through results or state. See [when to use exceptions](Concepts/Exceptions/ExceptionsConcept.md#when-to-use-exceptions).
+3. **Structured Exception Handling:** Adds detailed error messages, call-site info, timestamps, and modular logging on top of TwinCAT's `__TRY / __CATCH`. Use normal return values for expected cases (like a missing item or a `Try` method returning `FALSE`), and reserve exceptions for real errors. See [when to use exceptions](Concepts/Exceptions/ExceptionsConcept.md#when-to-use-exceptions).
 4. **Unified Interfaces:** Provides standard interfaces and ready-to-use implementations for logging (`ILogger`), action permissions (`IActionPermissionPolicy`), events (`IEvent`), configuration serialization (`IConfigurationSerializable`), IO terminal process-image models (`TOF_IOModels`), and field devices (`TOF_Devices_IO`).
 5. **Standardized Machine Modeling & Workflow Orchestration:** Offers a deterministic hierarchy (`AutomationRunner` → `AutomationController` → `CompositeAutomationComponent` → `LeafAutomationComponent`) for fixed machine hardware alongside a dynamic `Workflow` engine for external/JSON-configured recipes.
 6. **Native PLC Testing:** Includes `TwinCAT.OpenFramework.Testing` with fluent typed assertions, cycle-bounded tests, and ADS/JUnit XML reporting.
@@ -71,7 +71,7 @@ This layer separates **how code runs** from **what it does**.
 Defines how you write logic:
 
 * Exception-like error handling (`__TRY / __CATCH`) with `TOF_Core.Exceptions`
-* Copied diagnostic state (`ERROR` and `ERROR_MESSAGE`) independent of transient exception lifetimes
+* Saved error details (`ERROR` and `ERROR_MESSAGE`) that stay valid across PLC cycles even after the original exception is cleaned up
 * Base abstractions (`Object`, `GENERIC_VALUE`, policies, events, permissions)
 
 ### 3. Foundation Library
@@ -98,7 +98,7 @@ Provides reusable low-level components:
 
 ## 🚀 Example: Structured Error Handling
 
-When using `AutomationRunner.Execute()`, system time updates, task-local logger servicing, fatal allocation checks, and exception cleanup are managed automatically at the task boundary. For standalone code outside `AutomationRunner`, wrap operations with `__TRY / __CATCH`:
+When using `AutomationRunner.Execute()`, the runner automatically updates system time, services the task's logger, checks for out-of-memory errors, and cleans up exceptions at the end of every cycle. For standalone code without `AutomationRunner`, wrap operations in `__TRY / __CATCH`:
 
 ```iecst
 __TRY
@@ -117,7 +117,7 @@ __CATCH(errorCode)
 __ENDTRY
 ```
 
-See [Concepts/Exceptions/ExceptionsConcept.md](Concepts/Exceptions/ExceptionsConcept.md#5-example-without-automationrunner) for the full standalone task epilogue (`RaiseIfAllocationFailed`, `ExceptionManager.Cleanup`, and `DynamicMemoryManager.CleanupMemory`).
+See [Concepts/Exceptions/ExceptionsConcept.md](Concepts/Exceptions/ExceptionsConcept.md#5-example-without-automationrunner) for the required end-of-cycle cleanup steps (`RaiseIfAllocationFailed`, `ExceptionManager.Cleanup`, and `DynamicMemoryManager.CleanupMemory`).
 
 ---
 

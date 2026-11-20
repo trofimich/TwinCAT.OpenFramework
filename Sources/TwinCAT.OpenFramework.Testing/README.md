@@ -88,8 +88,7 @@ TestRunner<N> is also abstract. Its concrete descendant owns root tests/groups a
 storage and overrides Children with the same reference signature and stable-storage contract. There is no Configure.
 Runner startup validates the storage and rejects null, duplicate, running or group-owned roots before resetting
 any direct root or reporting run start. Subsequent execution cycles do not repeat topology validation.
-Roots explicitly use parent := 0; the runner is not their Parent. Each root belongs to one runner only;
-cross-runner sharing is forbidden without an automatic registry. Keep the graph alive and use one task without reentry.
+Roots explicitly use `parent := 0`; the runner is not their `Parent`. Each root belongs to one runner only — sharing one test or group across runners is not supported. Keep all test objects alive and run each runner from one PLC task only (do not call it again from inside its own callback).
 N = 0 still requires valid empty array storage and finishes with zero tests.
 Group validation is recursive through Reset, not a whole-tree transaction: earlier siblings may already be reset.
 
@@ -110,9 +109,7 @@ Caught exceptions retain copied message/source text and the interrupted stage. I
 throws, a stage/code fallback is retained. Reporter or external-element aborts expose the copied `CallbackMessage`
 alongside the native transport code in `CallbackException`. Neither retains an exception object after task cleanup.
 
-Terminal OOM interrupts normal execution outside recoverable handlers. It is never converted into a passing result,
-and normal cleanup hooks are not promised after terminal OOM. Method-local FBs on throwing paths must not rely on
-`FB_exit` for resource cleanup; use persistent instance fields and explicit scenario cleanup.
+If dynamic memory runs out (`__NEW` fails), execution stops outside normal recovery handlers — it is never converted into a passing test, and normal cleanup hooks may not run. For method-local FBs on code paths that can throw exceptions, do not rely on `FB_exit` to free resources (TwinCAT skips `FB_exit` when an exception leaves a method); keep resource owners in persistent FB fields and clean them up explicitly.
 
 `runner.Reset()` rearms a completed runner. The next Execute recursively resets observations and runs each scenario's
 preparation again. Reset during normal execution is ignored. Element Reset is infrastructure, not cancellation:
@@ -142,8 +139,8 @@ Assert.ThatReal(actual := measuredTemperature, message := "Measured temperature"
 
 Each typed context copies actual into persistent instance storage before the entry returns. It does not retain
 the address of a temporary input or allocate heap storage. Expected values are used only during their comparison.
-Finish one immediate chain before starting another on the same provider, regardless of type; do not retain context
-references or reenter the provider while evaluating an operand. Instances are confined to the owning test task.
+Finish one immediate assertion chain before starting another on the same provider, regardless of type; do not store a
+reference to the assertion context, and do not start another assertion while evaluating an argument of the current one. Instances are confined to the owning test task.
 The provider contains one persistent context for each type, increasing static case storage without heap allocation.
 Typed contexts and the generic `AssertionContext` are independent and extend `Core.Object` directly. Each stores
 its own operand or descriptor, a borrowed receiver link and a copied message. Typed predicates do not create generic value
@@ -211,7 +208,7 @@ Test names and copied error diagnostics are escaped, including wide Unicode char
 Read `ContentLength` bytes from `ContentAddress` after `IsReady`, before report reset or the next run.
 An aborted callback can leave incomplete XML and partial result counts. Do not copy the reporter's buffer-owning FB.
 
-Run each tree, runner and reporter from one cyclic PLC task without reentry. To run independently in several tasks:
+Run each test tree, runner, and reporter from one cyclic PLC task only, and do not call them again from inside their own callbacks. To run independently in several tasks:
 
 1. Give every task its own runner, test/group instances and reporter.
 2. Give tested objects separate mutable state, or use their explicitly documented synchronization.
@@ -229,16 +226,16 @@ do not additionally map SingleCycleTestExample while MAIN is driving it. These s
 hosts with additional transient-exception consumers must supply a shared boundary instead.
 
 For standalone execution, use `runner.Execute()` or explicitly pass `cleanupTaskMemory := TRUE` (the default).
-Execute checks terminal allocation failure and then cleans all registered auto-disposed objects and the exception
-payload of the current PLC task, not only objects created by this runner. Borrowed references to those objects
-become invalid, so call it after the last transient-exception consumer in the task cycle.
+Execute checks for out-of-memory errors and then cleans all registered auto-disposed objects and the exception
+payload of the current PLC task, not only objects created by this runner. Any borrowed references to those objects
+become invalid afterward, so call it after the last code in the task cycle that reads temporary exceptions.
 
-When called from AutomationRunner or any other host that performs current-task memory cleanup, pass
-`cleanupTaskMemory := FALSE`. With several runners in one task, pass FALSE to each and let the host provide
-one shared boundary. In every task cycle, the host must call `DynamicMemoryManager.RaiseIfAllocationFailed`
-outside recoverable handlers, then `CleanupMemory` after all transient-exception consumers. Execute still checks
-terminal allocation failure when FALSE is passed. Fatal allocation state is application-wide and is cleared only
-by application reinitialization.
+When called from `AutomationRunner` or another host that already cleans up current-task memory, pass
+`cleanupTaskMemory := FALSE`. If you run several runners in one task, pass `FALSE` to each and let the host do
+one shared cleanup at the end of the cycle. In every cycle, the host must call `DynamicMemoryManager.RaiseIfAllocationFailed`
+outside recovery blocks, then `CleanupMemory` after all exception consumers. `Execute` still checks for
+out-of-memory errors even when `FALSE` is passed. Once the global out-of-memory flag is set, it applies to the whole
+application and is only cleared when the PLC application restarts.
 
 ## Migration
 
@@ -261,9 +258,7 @@ Custom elements extending `TestElement` must replace old `OnReset` overrides wit
 The base no longer calls OnReset. Define the state left by a failed override and allow explicit retry after abort;
 Reset must not silently release user resources or retry the aborted Execute callback.
 
-The regression suite is [TestRunnerTest](../TwinCAT.OpenFramework.Tests/Tests/Testing/TestRunnerTest.TcPOU).
-Source review and editing do not establish compilation or runtime behavior. Build 4026 compilation, actual task
-execution, ADS/JUnit consumption, online change and terminal-OOM verification remain owner checks.
+The framework's own test suite for `TOF_Testing` is [TestRunnerTest](../TwinCAT.OpenFramework.Tests/Tests/Testing/TestRunnerTest.TcPOU).
 
 ## Source layout
 
@@ -278,16 +273,13 @@ execution, ADS/JUnit consumption, online change and terminal-OOM verification re
 - `TestServices`: caught-exception formatting and stateless assertion reporting/floating helpers.
 - `Version`: generated library version metadata.
 
-Folder moves preserve type names, namespace and existing object/member IDs. Regression fixtures stay in the Tests
-project and executable usage examples stay in HowTo. Tests and HowTo explicitly reference the Testing PLC project;
-HowTo also directly references Core. Existing library resolutions are preserved.
+Regression tests live in the `Tests` project and standalone runnable examples live in `HowTo` (`Tests` and `HowTo` reference the `Testing` library; `HowTo` also references `Core`).
 
-This revision adds `CallbackMessage` and replaces assertion modifiers with typed entry points, call-local
-floating tolerance and a chain-wide message argument. Migrate `WithMessage` to the That entry and
-`WithTolerance` to each supported floating comparison. Generic That still accepts variables, with no tolerance.
-Typed inputs deliberately use IEC conversion rules instead of heterogeneous ANY equality. After abort, Reset now invokes
-element Reset callbacks immediately, so custom recovery callbacks must tolerate retry after a partial reset.
-Rebuild consumers; source-folder reorganization does not by itself establish binary or online-change compatibility.
+When upgrading from earlier versions, note these changes:
+* Added `CallbackMessage` and replaced `WithMessage` / `WithTolerance` modifiers with a `message` parameter on each `That*` entry and a `tolerance` parameter directly on supported floating-point comparisons (`Generic` `That` still takes variables only, with no tolerance).
+* Typed `Assert.That*` entries convert operands using normal IEC rules before comparing them.
+* After an aborted run, `Reset` calls element `Reset` callbacks immediately, so custom elements must handle retrying `Reset` after a partial reset.
+* Rebuild dependent projects after upgrading.
 
 Both TestGroup<N> and TestRunner<N> are abstract. Replace direct instances with concrete descendants that own
 their child instances and persistent arrays and override Children by reference. Use the inherited _ChildCount

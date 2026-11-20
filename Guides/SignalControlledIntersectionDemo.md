@@ -28,7 +28,7 @@ Key members:
 * **Properties**: `ActiveLight`, `BoundToIO`, `Children` (returns `_Children` by reference), `RedLight` / `YellowLight` / `GreenLight` (`IReadOnlyDigitalOutput`), `ClassName` (from `VAR_STAT _ClassName`), `NamespaceName`, `SelfSize`.
 * **Methods**:
   * `BindToIO(redLightRawValue, yellowLightRawValue, greenLightRawValue)` — binds the three `DigitalOutput` sub-devices to raw `BOOL` variables in the terminal process image.
-  * `TrySetLight(color, rejectReason) : BOOL` — checks hierarchical action permission via `Parent.RequestActionPermission(...)` (with `TrySetLightActionDescriptor`), updates the three outputs, contains exceptions, and observes `TOF_Core.DynamicMemoryManager.HasAllocationFailed` before and after the permission callback.
+  * `TrySetLight(color, rejectReason) : BOOL` — checks hierarchical action permission via `Parent.RequestActionPermission(...)` (with `TrySetLightActionDescriptor`), updates the three outputs, catches any exceptions so it never throws, and returns `FALSE` if `TOF_Core.DynamicMemoryManager.HasAllocationFailed` reports an out-of-memory error.
 
 ---
 
