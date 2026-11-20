@@ -11,7 +11,7 @@ License: https://opensource.org/license/mit
 <summary>Exercises typed literal assertions, borrowed values and chain-wide diagnostics.</summary>
 <description>
 Each persistent instance runs one selected scenario. Expected failures are checked by the outer TcUnit suite.
-Raw quiet NaN construction avoids arithmetic that could raise before the assertion begins.
+Raw NaN construction avoids arithmetic that could raise before the assertion begins.
 Independent-context scenarios cover type transitions, native predicates and failed typed diagnostics.
 </description>
 *)
@@ -66,12 +66,46 @@ PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
         </Implementation>
       </Get>
     </Property>
+    <Method Name="checkCanonicalPair" Id="{79147e79-1a3c-4671-ae4c-f986b5fed0e4}">
+      <Declaration><![CDATA[(*!
+<summary>Checks both Core bit results and exact assertion equality for a pair of floating encodings.</summary>
+<description>
+Both inputs must represent the same canonical value. The expected binary64 encoding is an independent test vector.
+</description>
+<param name="realBits">Stored binary32 operand.</param>
+<param name="longRealBits">Stored binary64 operand.</param>
+<param name="expectedBits">Expected canonical binary64 result for both operands.</param>
+*)
+METHOD PRIVATE checkCanonicalPair
+VAR_INPUT
+	realBits : UDINT;
+	longRealBits : ULINT;
+	expectedBits : ULINT;
+END_VAR
+VAR
+	narrow : TOF_Core.REAL_UNION;
+	wide : TOF_Core.LREAL_UNION;
+	expected : TOF_Core.LREAL_UNION;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[narrow.Raw := realBits;
+wide.Raw := longRealBits;
+expected.Raw := expectedBits;
+
+Assert.ThatULInt(actual := TOF_Core.Reals.GetCanonicalBinary64Bits(value := narrow.Value)).ToBe(expected := expectedBits);
+Assert.ThatULInt(actual := TOF_Core.LongReals.GetCanonicalBinary64Bits(value := wide.Value)).ToBe(expected := expectedBits);
+
+Assert.That(actual := narrow.Value).ToBe(expected := wide.Value);
+Assert.ThatLongReal(actual := wide.Value).ToBe(expected := expected.Value);]]></ST>
+      </Implementation>
+    </Method>
     <Method Name="ExecuteTest" Id="{93e11214-3823-451d-ba77-3523d45c472b}">
       <Declaration><![CDATA[(*!
 <summary>Runs one typed or borrowed assertion scenario with passive call-local operands.</summary>
 <description>
 Expected failures are inspected by the outer TcUnit suite. Typed entries deliberately receive
 literals, properties, arithmetic and method results without intermediate operand variables.
+Special floating operands cover exact generic and typed equality and canonical bits at both widths.
 Long narrow operands contain ASCII only; their wide counterparts use explicit destination buffer capacities.
 </description>
 *)
@@ -352,11 +386,61 @@ END_VAR]]></Declaration>
 		Assert.ThatBool(actual := FALSE, message := "Later assertion").IsTrue();
 
 	ASSERTION_PROBE_SCENARIO.SPECIAL_FLOATS:
+		checkCanonicalPair(
+			realBits := UDINT#16#00000000,
+			longRealBits := ULINT#16#8000000000000000,
+			expectedBits := ULINT#16#0000000000000000
+		);
+		checkCanonicalPair(
+			realBits := UDINT#16#80000000,
+			longRealBits := ULINT#16#0000000000000000,
+			expectedBits := ULINT#16#0000000000000000
+		);
+		checkCanonicalPair(
+			realBits := UDINT#16#7F800001,
+			longRealBits := ULINT#16#FFF8000000000123,
+			expectedBits := ULINT#16#7FF8000000000000
+		);
+		checkCanonicalPair(
+			realBits := UDINT#16#FFC00123,
+			longRealBits := ULINT#16#7FF0000000000001,
+			expectedBits := ULINT#16#7FF8000000000000
+		);
+		checkCanonicalPair(
+			realBits := UDINT#16#7F800000,
+			longRealBits := ULINT#16#7FF0000000000000,
+			expectedBits := ULINT#16#7FF0000000000000
+		);
+		checkCanonicalPair(
+			realBits := UDINT#16#FF800000,
+			longRealBits := ULINT#16#FFF0000000000000,
+			expectedBits := ULINT#16#FFF0000000000000
+		);
+		checkCanonicalPair(
+			realBits := UDINT#16#BFC00000,
+			longRealBits := ULINT#16#BFF8000000000000,
+			expectedBits := ULINT#16#BFF8000000000000
+		);
+		checkCanonicalPair(
+			realBits := UDINT#16#3F800001,
+			longRealBits := ULINT#16#3FF0000020000000,
+			expectedBits := ULINT#16#3FF0000020000000
+		);
+
+		// The next binary64 value above one rounds to one in binary32.
+		actualReal := REAL#1.0;
+		special.Raw := ULINT#16#3FF0000000000001;
+		Assert.That(actual := actualReal).NotToBe(expected := special.Value);
+		Assert.ThatLongReal(actual := LREAL#1.0).NotToBe(expected := special.Value);
+
 		special.Raw := TOF_Core.LongReals.CANONICAL_NAN_BITS;
 		Assert.ThatLongReal(actual := special.Value).ToBe(expected := special.Value);
-		realSpecial.Raw := TOF_Core.Reals.CANONICAL_NAN_BITS;
+		realSpecial.Raw := UDINT#16#FFC00123;
+		expectedReal := realSpecial.Value;
+		realSpecial.Raw := UDINT#16#7F800001;
+		Assert.That(actual := realSpecial.Value).ToBe(expected := expectedReal);
 		Assert.ThatReal(actual := realSpecial.Value)
-			.ToBe(expected := realSpecial.Value)
+			.ToBe(expected := expectedReal)
 			.IsLessThan(expected := REAL#0.0)
 			.IsLessThanOrEquals(expected := realSpecial.Value);
 		Assert.ThatReal(actual := REAL#0.0).IsGreaterThan(expected := realSpecial.Value);
