@@ -19,6 +19,8 @@ Using `__TRY -> __CATCH -> __FINALLY -> __ENDTRY`, you can execute a block of co
 
 6. Catching an error (or letting an error-handling policy decide how to react) does not undo half-finished work. Make sure your component is left in a safe, known state before continuing.
 
+7. The compiler does **not** perform stack unwinding when an exception is thrown: if an exception leaves a method, `FB_exit` is **not** called for local function blocks declared inside that method (or in intermediate methods on the call stack). Do not rely on `FB_exit` of method-local function blocks to free memory, handles, or other resources on code paths that can throw — keep resource-owning objects in FB/PROGRAM fields or clean them up explicitly. This is a permanent limitation of the CODESYS compiler (`Won't Fix`; see [CODESYS ticket CDS-94841 in the CODESYS V3.5 SP22 Release Notes](https://api-www.codesys.com/fileadmin/user_upload/CODESYS_Group/Ecosystem/Up-to-Date/Releases-Lifecycle/Release-Updates/Release-Notes/Release_Notes_CODESYS_35220.html)).
+
 ---
 
 ## 2. Usage in OpenFramework
