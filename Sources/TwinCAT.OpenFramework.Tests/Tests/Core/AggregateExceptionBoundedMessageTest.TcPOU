@@ -31,8 +31,8 @@ END_VAR]]></Declaration>
       <Declaration><![CDATA[(*!
 <summary>Checks that a long aggregate diagnostic is terminated and ends in an ellipsis.</summary>
 <description>
-Three entries share one task-managed cause. Each payload fills half the diagnostic buffer so the
-combined message exceeds its capacity. The persistent reference array is released in AfterTest.
+Three entries share a capacity-sized cause. Checks the bounded full listing and the snapshot with a short
+aggregate summary and a shortened root. The persistent reference array is released in AfterTest.
 </description>
 *)
 METHOD PROTECTED ExecuteTest
@@ -42,6 +42,7 @@ VAR
 	cause : TOF_Core.IStandardException;
 	payload : TOF_Core.ERROR_MESSAGE;
 	message : TOF_Core.ERROR_MESSAGE;
+	snapshot : TOF_Core.ERROR;
 	payloadUnits : POINTER TO WORD;
 	messageUnits : POINTER TO WORD;
 	i : UDINT;
@@ -53,11 +54,11 @@ END_VAR]]></Declaration>
         <ST><![CDATA[// Make an ASCII payload whose length scales with the documented diagnostic capacity.
 payloadUnits := ADR(payload);
 
-FOR i := 0 TO MESSAGE_CAPACITY / 2 - 1 DO
+FOR i := 0 TO MESSAGE_CAPACITY - 1 DO
 	payloadUnits[i] := WORD#16#0058; // Uppercase X makes the retained prefix distinguishable from the ellipsis.
 END_FOR
 
-payloadUnits[MESSAGE_CAPACITY / 2] := TO_WORD(TOF_Core.UnsignedInt16.MIN_VALUE);
+payloadUnits[MESSAGE_CAPACITY] := TO_WORD(TOF_Core.UnsignedInt16.MIN_VALUE);
 
 // Obtain one dynamic cause so repeated entries exercise permitted sharing.
 __TRY
@@ -109,6 +110,20 @@ Assert.ThatBool(
 Assert.ThatBool(
 	actual := messageUnits[MESSAGE_CAPACITY - 1] = TOF_Core.WideStrings.ELLIPSIS,
 	message := "The final character must be an ellipsis"
+).IsTrue();
+
+_Aggregate.ToError(targetError := snapshot, severity := TOF_Core.ERROR_SEVERITY.CRITICAL);
+message := snapshot.ToString();
+Assert.ThatBool(
+	actual := snapshot.RootMessage = payload AND_THEN snapshot.TopMessage = "3 aggregated exceptions",
+	message := "Formatting must preserve the full root in the snapshot"
+).IsTrue();
+Assert.ThatBool(
+	actual := Tc2_Standard.WFIND(STR1 := message, STR2 := "3 aggregated exceptions -> X") = 1
+		AND_THEN messageUnits[MESSAGE_CAPACITY - 2] = WORD#16#0058
+		AND_THEN messageUnits[MESSAGE_CAPACITY - 1] = TOF_Core.WideStrings.ELLIPSIS
+		AND_THEN messageUnits[MESSAGE_CAPACITY] = 0,
+	message := "A short aggregate summary must leave the unused space for the long root"
 ).IsTrue();]]></ST>
       </Implementation>
     </Method>

@@ -26,11 +26,11 @@ synchronization with affected calls. Replace CurrentTaskLogger only in its own t
 calls, without reentry. Keep replaced logger and filter instances alive until their in-flight calls finish.
 A filter shared by tasks must support concurrent ShouldLog calls and synchronize its own mutable state and
 rule updates. The assigned number describes numbering order, not backend delivery order. Total counters
-count cyclic requests reaching filtering after the initial null or empty-input guard. PassedFilter counters
-count requests that pass filtering and are incremented before calling the logger, regardless of its result.
+count cyclic requests accepted for filtering after the initial input guards. PassedFilter counters are
+incremented after the filter and fatal allocation checks, before calling the logger, regardless of its result.
 Message numbers use these post-filter counters and can have gaps in successfully written output. Exception logging
-accepts IReadOnlyException and reads borrowed diagnostics without transferring ownership. Implementations must
-not retain exception references beyond their task cleanup. A logger or filter invoked by LogManager must not
+accepts IReadOnlyException and reads borrowed diagnostics without transferring ownership. Backends may use
+exception references only during the call. A logger or filter invoked by LogManager must not
 call back into that manager, directly or indirectly, while handling the invocation. TryLog methods return
 FALSE on caught exceptions without logging them again. Counters retain increments already performed, and
 backend side effects are not rolled back. A fatal allocation latch is not cleared; task boundaries must call
@@ -240,8 +240,9 @@ effects. Counter-lock acquisition failure returns FALSE. Counter increments alre
 receives a call-local number snapshot. The fatal allocation latch remains set; RaiseIfAllocationFailed must be
 called at the task boundary outside recoverable handlers. Uses CurrentTaskLogger; outside a valid cyclic
 task, returns FALSE before reading diagnostics, filtering, counter changes or backend calls.
-Returns FALSE when fatal allocation state is observed before work or after nested calls. The latch remains
-set for the caller's task boundary; already accepted or emitted records are not rolled back.
+Returns FALSE when fatal allocation state is observed before work or after nested calls. After the filter,
+checks the latch before updating PassedFilter counters or calling the logger. The latch remains set for the
+caller's task boundary.
 </description>
 *)
 METHOD TryLogError : BOOL
@@ -292,6 +293,10 @@ END_VAR]]></Declaration>
 		RETURN;
 	END_IF
 
+	IF DynamicMemoryManager.HasAllocationFailed THEN
+		RETURN;
+	END_IF
+
 	IF NOT _CounterLock.Enter() THEN
 		RETURN;
 	END_IF
@@ -332,14 +337,18 @@ __ENDTRY]]></ST>
 <summary>Attempts to log diagnostic information from a read-only exception view.</summary>
 <description>
 Borrows the exception for the call without clearing it or taking ownership. The exception and its inner causes
-must remain live while their diagnostics are read. Logging does not extend their lifetime. Returns FALSE if a
-nested call raises an exception. Does not log the caught exception or roll back counters and backend side
-effects. Counter-lock acquisition failure returns FALSE. Counter increments already made are retained. Logger
+must remain live while their diagnostics are read. Logging does not extend their lifetime. If a filter is
+configured, the calling task's shared native wrapper is copied into call-local storage before filtering. The logger
+borrows that copy only during its synchronous call, so a filter can handle a later native exception without
+changing the diagnostic being logged. Returns FALSE if a nested call raises an exception. Does not log the
+caught exception or roll back counters and backend side effects. Counter-lock acquisition failure returns
+FALSE. Counter increments already made are retained. Logger
 receives a call-local number snapshot. The fatal allocation latch remains set; RaiseIfAllocationFailed must be
 called at the task boundary outside recoverable handlers. Uses CurrentTaskLogger; outside a valid cyclic
 task, returns FALSE before reading diagnostics, filtering, counter changes or backend calls.
-Returns FALSE when fatal allocation state is observed before work or after nested calls. The latch remains
-set for the caller's task boundary; already accepted or emitted records are not rolled back.
+Returns FALSE when fatal allocation state is observed before work or after nested calls. Checks the latch
+after reading the exception class name and before calling the filter, then again before updating PassedFilter
+counters or calling the logger. The latch remains set for the caller's task boundary.
 </description>
 <param name="exception">Exception view to read; null is ignored.</param>
 <param name="severity">Severity used to select the log category.</param>
@@ -355,6 +364,8 @@ VAR_INPUT
 END_VAR
 VAR
 	selectedLogger : ILogger;
+	loggedException : IReadOnlyException;
+	systemSnapshot : SystemException;
 	sequentialNumber : ULINT;
 	categoryNumber : ULINT;
 	counterLockHeld : BOOL;
@@ -370,6 +381,14 @@ END_VAR]]></Declaration>
 		RETURN;
 	END_IF
 
+	loggedException := exception;
+
+	IF _Filter <> 0
+		AND_THEN ExceptionManager.CopySharedSystemException(exception := exception, snapshot := systemSnapshot)
+	THEN
+		loggedException := systemSnapshot;
+	END_IF
+
 	category := SEL(severity = ERROR_SEVERITY.CRITICAL, LOG_CATEGORY.ERROR, LOG_CATEGORY.CRITICAL_ERROR);
 
 	IF NOT _CounterLock.Enter() THEN
@@ -382,13 +401,22 @@ END_VAR]]></Declaration>
 	_CounterLock.Leave();
 	counterLockHeld := FALSE;
 
-	topics[0] := TO_WSTRING(exception.ClassName);
+	topics[0] := TO_WSTRING(loggedException.ClassName);
+
+	IF DynamicMemoryManager.HasAllocationFailed THEN
+		RETURN;
+	END_IF
+
 	topics[1] := topic1;
 	topics[2] := topic2;
 	topics[3] := topic3;
 	topics[4] := topic4;
 
 	IF _Filter <> 0 AND_THEN NOT _Filter.ShouldLog(category := category, topics := topics) THEN
+		RETURN;
+	END_IF
+
+	IF DynamicMemoryManager.HasAllocationFailed THEN
 		RETURN;
 	END_IF
 
@@ -406,18 +434,18 @@ END_VAR]]></Declaration>
 
 	CASE MessageNumberFormat OF
 		LOG_MESSAGE_NUMBER_FORMAT.NONE:
-			TryLogException := selectedLogger.TryLogException(exception := exception, severity := severity);
+			TryLogException := selectedLogger.TryLogException(exception := loggedException, severity := severity);
 
 		LOG_MESSAGE_NUMBER_FORMAT.SEQUENTIAL:
 			TryLogException := selectedLogger.TryLogException(
-				exception := exception,
+				exception := loggedException,
 				severity := severity,
 				messageNumber := sequentialNumber
 			);
 
 		LOG_MESSAGE_NUMBER_FORMAT.SEQUENTIAL_BY_CATEGORY:
 			TryLogException := selectedLogger.TryLogException(
-				exception := exception,
+				exception := loggedException,
 				severity := severity,
 				messageNumber := categoryNumber
 			);
@@ -446,8 +474,9 @@ effects. Counter-lock acquisition failure returns FALSE. Counter increments alre
 receives a call-local number snapshot. The fatal allocation latch remains set; RaiseIfAllocationFailed must be
 called at the task boundary outside recoverable handlers. Uses CurrentTaskLogger; outside a valid cyclic
 task, returns FALSE before reading diagnostics, filtering, counter changes or backend calls.
-Returns FALSE when fatal allocation state is observed before work or after nested calls. The latch remains
-set for the caller's task boundary; already accepted or emitted records are not rolled back.
+Returns FALSE when fatal allocation state is observed before work or after nested calls. After the filter,
+checks the latch before updating PassedFilter counters or calling the logger. The latch remains set for the
+caller's task boundary.
 </description>
 *)
 METHOD TryLogMessage : BOOL
@@ -495,6 +524,10 @@ END_VAR]]></Declaration>
 	topics[4] := topic5;
 
 	IF _Filter <> 0 AND_THEN NOT _Filter.ShouldLog(category := category, topics := topics) THEN
+		RETURN;
+	END_IF
+
+	IF DynamicMemoryManager.HasAllocationFailed THEN
 		RETURN;
 	END_IF
 

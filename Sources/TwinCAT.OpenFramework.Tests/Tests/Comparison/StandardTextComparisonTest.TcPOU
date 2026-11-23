@@ -1,0 +1,167 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1" ProductVersion="3.1.4026.21">
+  <POU Name="StandardTextComparisonTest" Id="{6bb50c44-de1a-47fb-98f5-b713666e7aed}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+SPDX-FileCopyrightText: © 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+SPDX-License-Identifier: MIT
+License: https://opensource.org/license/mit
+*)
+
+(*!
+<summary>Checks catalogue text ordering at the last character of the supported 255-character buffers.</summary>
+<description>Uses borrowed stack storage and compares equal, forward, reverse and null operands.</description>
+*)
+
+{attribute 'no_assign'}
+{attribute 'no_explicit_call' := 'do not call this function block directly'}
+FUNCTION_BLOCK StandardTextComparisonTest EXTENDS TOF_Testing.SingleCycleTest
+VAR_STAT
+	//! <summary>Class name shared by all instances of this test.</summary>
+	{attribute 'hide'}
+	_ClassName : STRING := __POUNAME();
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[]]></ST>
+    </Implementation>
+    <Method Name="checkOrdering" Id="{f7d15d83-94a5-4e88-9264-812ebfb72c2f}">
+      <Declaration><![CDATA[(*!
+<summary>Verifies catalogue selection and ordering against independently prepared text buffers.</summary>
+<description>The two live buffers differ only at the last character. The comparer borrows both operands.</description>
+*)
+METHOD PRIVATE checkOrdering
+VAR_INPUT
+	typeClass : TOF_Core.GENERIC_TYPE_CLASS;
+	firstAddress : POINTER TO BYTE;
+	secondAddress : POINTER TO BYTE;
+	size : ULINT;
+	encoding : WSTRING;
+END_VAR
+VAR
+	comparer : TOF_Core.IComparer;
+	message : WSTRING(255);
+	first : TOF_Core.GENERIC_VALUE;
+	second : TOF_Core.GENERIC_VALUE;
+	empty : TOF_Core.GENERIC_VALUE;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[comparer := TOF_Comparison.StandardComparers.GetForTypeClass(typeClass := typeClass);
+
+IF comparer = 0 THEN
+	message := TOF_Core.WideStrings.Concat255(encoding, ": catalogue comparer is missing");
+	RecordFailure(message := message);
+	RETURN;
+END_IF
+
+first := TOF_Core.GenericValueFactory.FromParts(
+	genericTypeClass := typeClass,
+	address := firstAddress,
+	size := size,
+	memoryManagementBehavior := TOF_Core.GENERIC_MEMORY_MANAGEMENT_BEHAVIOR.STORE_ORIGINAL_REFERENCE_AND_NOT_OWNS_MEMORY
+);
+second := TOF_Core.GenericValueFactory.FromParts(
+	genericTypeClass := typeClass,
+	address := secondAddress,
+	size := size,
+	memoryManagementBehavior := TOF_Core.GENERIC_MEMORY_MANAGEMENT_BEHAVIOR.STORE_ORIGINAL_REFERENCE_AND_NOT_OWNS_MEMORY
+);
+
+Assert.ThatBool(
+	actual := comparer.Compare(first := first, second := second) = TOF_Core.COMPARISON_RESULT.FIRST_LESS_THAN_SECOND,
+	message := TOF_Core.WideStrings.Concat255(encoding, ": must compare character 255")
+).IsTrue();
+Assert.ThatBool(
+	actual := comparer.Compare(first := second, second := first) = TOF_Core.COMPARISON_RESULT.FIRST_GREATER_THAN_SECOND,
+	message := TOF_Core.WideStrings.Concat255(encoding, ": reversing operands must reverse the result")
+).IsTrue();
+Assert.ThatBool(
+	actual := comparer.Compare(first := first, second := first) = TOF_Core.COMPARISON_RESULT.FIRST_EQUAL_TO_SECOND,
+	message := TOF_Core.WideStrings.Concat255(encoding, ": identical text must compare equal")
+).IsTrue();
+Assert.ThatBool(
+	actual := comparer.Compare(first := empty, second := first) = TOF_Core.COMPARISON_RESULT.FIRST_LESS_THAN_SECOND
+		AND_THEN comparer.Compare(first := first, second := empty)
+			= TOF_Core.COMPARISON_RESULT.FIRST_GREATER_THAN_SECOND
+		AND_THEN comparer.Compare(first := empty, second := empty) = TOF_Core.COMPARISON_RESULT.FIRST_EQUAL_TO_SECOND,
+	message := TOF_Core.WideStrings.Concat255(encoding, ": null operands must have a consistent order")
+).IsTrue();]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="ClassName" Id="{5df7cc6f-8b5a-4f4b-bdf0-e95e0f03fc45}">
+      <Declaration><![CDATA[//! <summary>Borrows the initialized concrete class name.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{a84b73a9-438e-4443-ab00-60e1dd461e70}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ClassName REF= _ClassName;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="ExecuteTest" Id="{4cc35175-900c-44f9-99c4-f898e26ac313}">
+      <Declaration><![CDATA[(*!
+<summary>Builds terminated buffers with their only difference at character 255.</summary>
+<description>Uses byte and wide-character storage of the size and alignment of the corresponding text types.</description>
+*)
+METHOD PROTECTED ExecuteTest
+VAR
+	narrowFirst : ARRAY [0..255] OF BYTE;
+	narrowSecond : ARRAY [0..255] OF BYTE;
+	wideFirst : ARRAY [0..255] OF WORD;
+	wideSecond : ARRAY [0..255] OF WORD;
+	i : DINT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[FOR i := 0 TO 254 DO
+	narrowFirst[i] := BYTE#16#61;
+	narrowSecond[i] := BYTE#16#61;
+	wideFirst[i] := WORD#16#0410;
+	wideSecond[i] := WORD#16#0410;
+END_FOR
+
+narrowSecond[254] := BYTE#16#62;
+wideSecond[254] := WORD#16#0411;
+narrowFirst[255] := BYTE#0;
+narrowSecond[255] := BYTE#0;
+wideFirst[255] := WORD#0;
+wideSecond[255] := WORD#0;
+
+checkOrdering(
+	typeClass := TOF_Core.GENERIC_TYPE_CLASS.STRING_8,
+	firstAddress := ADR(narrowFirst),
+	secondAddress := ADR(narrowSecond),
+	size := XSIZEOF(narrowFirst),
+	encoding := "STRING"
+);
+checkOrdering(
+	typeClass := TOF_Core.GENERIC_TYPE_CLASS.STRING_16,
+	firstAddress := ADR(wideFirst),
+	secondAddress := ADR(wideSecond),
+	size := XSIZEOF(wideFirst),
+	encoding := "WSTRING"
+);]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="NamespaceName" Id="{72d17ac4-1bdf-432e-b20c-5f4b4d90dcea}">
+      <Declaration><![CDATA[//! <summary>Borrows the compiler-initialized namespace name.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{8be6ef39-203e-45bd-a2ea-98b339132227}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[NamespaceName REF= CurrentNamespace.Name;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="SelfSize" Id="{4cc42a70-f294-4443-9eb3-82a9739cefb8}">
+      <Declaration><![CDATA[//! <summary>Reports the concrete test instance size in bytes.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY SelfSize : ULINT]]></Declaration>
+      <Get Name="Get" Id="{c3ae10c1-8cfe-43b6-9ac7-d2c644ac5cb2}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[SelfSize := XSIZEOF(THIS^);]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+  </POU>
+</TcPlcObject>

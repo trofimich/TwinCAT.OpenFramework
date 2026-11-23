@@ -31,7 +31,8 @@ END_VAR]]></Declaration>
 <description>
 Both Try entry points exercise live source and destination storage. Each rejection preserves the destination
 and the known task exception. The original string descriptor address is captured before writes. Borrowed
-descriptors and their addresses stay within the callback.
+descriptors and their addresses stay within the callback. The shorter source must copy its terminator and
+leave the remaining bytes of the destination buffer intact.
 </description>
 *)
 METHOD PROTECTED ExecuteTest
@@ -45,6 +46,8 @@ VAR
 	shortText : STRING(1) := 'x';
 	longText : STRING(8) := 'longer';
 	replacementText : STRING(1) := 'y';
+	largerText : STRING(4) := 'abcd';
+	textBytes : POINTER TO BYTE;
 	source : TOF_Core.GENERIC_VALUE;
 	accepted : BOOL;
 	exceptionCode : __SYSTEM.ExceptionCode;
@@ -141,6 +144,22 @@ Assert.ThatBool(
 		AND_THEN shortDestination.TypeClass = TOF_Core.GENERIC_TYPE_CLASS.STRING_8
 		AND_THEN NOT shortDestination.IsMemoryOwner,
 	message := "STRING writes must preserve size, type, address and borrowed ownership"
+).IsTrue();
+shortDestination := TOF_Core.GenericValueFactory.FromAny(
+	value := largerText,
+	isObject := FALSE,
+	memoryManagementBehavior := TOF_Core.GENERIC_MEMORY_MANAGEMENT_BEHAVIOR.STORE_ORIGINAL_REFERENCE_AND_NOT_OWNS_MEMORY
+);
+// SA0175: Inspect the ASCII buffer at fixed byte offsets, including bytes after the string terminator.
+{analysis -175}
+textBytes := ADR(largerText);
+{analysis +175}
+accepted := shortDestination.TryChangeValueByAny(value := replacementText);
+Assert.ThatBool(actual := accepted, message := "A smaller STRING representation must fit").IsTrue();
+Assert.ThatBool(actual := largerText = 'y', message := "The copy must include the source terminator").IsTrue();
+Assert.ThatBool(
+	actual := textBytes[2] = 16#63 AND_THEN textBytes[3] = 16#64 AND_THEN textBytes[4] = 0,
+	message := "Bytes beyond the source representation must retain c, d and the final terminator"
 ).IsTrue();]]></ST>
       </Implementation>
     </Method>

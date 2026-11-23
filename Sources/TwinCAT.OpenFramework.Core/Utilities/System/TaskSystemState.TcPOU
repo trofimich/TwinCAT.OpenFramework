@@ -21,7 +21,9 @@ reinitializing the PLC application. No exception objects are allocated.
 {attribute 'no_explicit_call' := 'Use Execute'}
 FUNCTION_BLOCK FINAL TaskSystemState
 VAR_OUTPUT	
-	SystemTimeZoneId : Tc2_Utilities.E_TimeZoneID;	
+	SystemTimeZoneId : Tc2_Utilities.E_TimeZoneID := Tc2_Utilities.E_TimeZoneID.eTimeZoneID_Invalid;
+	//! <summary>ADS error of the last completed timezone request, or zero after a successful read.</summary>
+	TimeZoneAdsErrorId : UDINT;	
 	SystemTimeZoneInformation : Tc2_Utilities.ST_TimeZoneInformation;		
 			
 	SystemLocalDateTime : LDATE_AND_TIME;			
@@ -46,6 +48,7 @@ VAR
 	_LocalSystemTime : Tc2_Utilities.FB_LocalSystemTime; 
 	{attribute 'hide'} 
 	_GetTimeZone : Tc2_Utilities.FB_GetTimeZoneInformation;
+	_TimeZoneReady : BOOL;
 	{attribute 'hide'} 
 	_LocalTimeToUtcTime : FB_TzSpecificLocalTimeToSystemTime;	
 END_VAR]]></Declaration>
@@ -58,7 +61,7 @@ END_VAR]]></Declaration>
 <description>
 Call only from the cyclic PLC task owning this instance. Updates local and UTC snapshots after initial
 synchronization. Readiness remains set once time and timezone are obtained; AMS Net ID does not gate
-readiness. Timezone requests continue while the identifier is unknown or invalid; after a known identifier is
+readiness. Only Standard and Daylight enable UTC conversion. Rejected replies rearm the ADS request. Once a known ID is
 obtained, the cached rules are retained until application reinitialization.
 </description>
 *)
@@ -67,39 +70,40 @@ METHOD Execute]]></Declaration>
       <Implementation>
         <ST><![CDATA[_GetLocalAmsNetId(bExecute := TRUE);
 
-IF SystemTimeZoneId = Tc2_Utilities.E_TimeZoneID.eTimeZoneID_Unknown
-	OR_ELSE SystemTimeZoneId = Tc2_Utilities.E_TimeZoneID.eTimeZoneID_Invalid
-THEN
+IF NOT _TimeZoneReady THEN
 	_GetTimeZone(bExecute := TRUE, tTimeout := T#1S);
 	
 	IF NOT _GetTimeZone.bBusy THEN
 		IF _GetTimeZone.bError THEN
-			_GetTimeZone(bExecute := FALSE);
-			_GetTimeZone(bExecute := TRUE);
+			TimeZoneAdsErrorId := _GetTimeZone.nErrId;
+			SystemTimeZoneId := Tc2_Utilities.E_TimeZoneID.eTimeZoneID_Invalid;
 		ELSE
+			TimeZoneAdsErrorId := 0;
 			SystemTimeZoneId := _GetTimeZone.tzID;
+			_TimeZoneReady := SystemTimeZoneId = Tc2_Utilities.E_TimeZoneID.eTimeZoneID_Standard
+				OR_ELSE SystemTimeZoneId = Tc2_Utilities.E_TimeZoneID.eTimeZoneID_Daylight;
+		END_IF
+
+		IF _TimeZoneReady THEN
 			SystemTimeZoneInformation := _GetTimeZone.tzInfo;
+		ELSE
+			_GetTimeZone(bExecute := FALSE);
 		END_IF		
 	END_IF
 END_IF
  
 _LocalSystemTime(bEnable := TRUE);
 
-IF _LocalSystemTime.bValid AND_THEN NOT _GetTimeZone.bBusy AND_THEN NOT _GetTimeZone.bError THEN
+IF _LocalSystemTime.bValid AND_THEN _TimeZoneReady THEN
 	SystemLocalDateTime := System.ConvertTimestructToLongDateTime(timestruct := _LocalSystemTime.systemTime);
 
-	_LocalTimeToUtcTime(in := _LocalSystemTime.systemTime, tzInfo := _GetTimeZone.tzInfo);	
+	_LocalTimeToUtcTime(in := _LocalSystemTime.systemTime, tzInfo := SystemTimeZoneInformation);	
 
 	SystemUtcDateTime := System.ConvertTimestructToLongDateTime(timestruct := _LocalTimeToUtcTime.out);
 
 	SystemFileTime := Tc2_Utilities.SYSTEMTIME_TO_FILETIME(systemTime := _LocalSystemTime.systemTime);
 	SystemFileTime64 := Tc2_Utilities.SYSTEMTIME_TO_FILETIME64(systemTime := _LocalSystemTime.systemTime);
-END_IF
 
-IF NOT SystemDataValid 
-	AND_THEN NOT _GetTimeZone.bBusy AND_THEN NOT _GetTimeZone.bError 
-	AND_THEN _LocalSystemTime.bValid 
-THEN
 	SystemDataValid := TRUE; 	
 END_IF]]></ST>
       </Implementation>

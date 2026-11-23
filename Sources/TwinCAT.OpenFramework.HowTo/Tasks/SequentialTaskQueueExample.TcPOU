@@ -1,0 +1,129 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="SequentialTaskQueueExample" Id="{f654798d-2eeb-421c-af6b-7de8272d75a4}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+SPDX-FileCopyrightText: © 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+SPDX-License-Identifier: MIT
+License: https://opensource.org/license/mit
+*)
+
+(*!
+<summary>Runs two timer tasks in the order they are enqueued.</summary>
+<description>
+Write _StartRequested once. Watch the states of the two timers: the second stays READY until the first
+has finished. Read _WorkDone and _StopMessage when _Completed is TRUE, then request another run.
+Requests while the queue is running are consumed without starting a new batch. The program owns both
+timers and the queue borrows them. Only the queue drives their execution while enqueued.
+Map this program to a dedicated cyclic task. It cleans task memory after advancing the queue.
+</description>
+*)
+
+{attribute 'no_explicit_call' := 'do not call this function block directly'}
+PROGRAM SequentialTaskQueueExample
+VAR
+	_ClassName : STRING := __POUNAME();
+
+	_FirstTimer : TOF_Timers.Timer(name := "First timer");
+	_SecondTimer : TOF_Timers.Timer(name := "Second timer");
+	_Queue : TOF_Tasks.StandardTaskQueue(name := "Sequential timers");
+
+	_StartRequested : BOOL;
+	_Completed : BOOL;
+	_WorkDone : BOOL;
+	_StopMessage : TOF_Core.ERROR_MESSAGE;
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[IF _StartRequested THEN
+	_StartRequested := FALSE;
+
+	IF NOT _Queue.State.Running THEN
+		startTimers();
+	END_IF
+END_IF
+
+IF _Queue.State.Running THEN
+	_Queue.Execute();
+
+	IF _Queue.State.Stopped THEN
+		_WorkDone := _Queue.FinalStopReason.WorkDone;
+		_StopMessage := _Queue.FinalStopReason.Message;
+		_Completed := TRUE;
+	END_IF
+END_IF
+
+TOF_Core.DynamicMemoryManager.RaiseIfAllocationFailed();
+TOF_Core.DynamicMemoryManager.CleanupMemory();]]></ST>
+    </Implementation>
+    <Method Name="startTimers" Id="{8a813951-ca61-4718-a313-e2a25348a727}">
+      <Declaration><![CDATA[(*!
+<summary>Prepares both timers and submits a new batch to the idle queue.</summary>
+<description>
+Reset the queue first so its old entries are removed before resetting the timers. A refusal or enqueue
+exception sets _StopMessage and leaves _Completed TRUE. On unsuccessful submission, clear any queued
+entries so a retry can enqueue each timer once. The program checks terminal allocation failure at the task boundary.
+</description>
+*)
+METHOD PRIVATE startTimers
+VAR
+	exceptionCode : __SYSTEM.ExceptionCode;
+	caughtException : TOF_Core.IException;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_Completed := TRUE;
+_WorkDone := FALSE;
+_StopMessage := "";
+
+IF NOT _Queue.Reset(refuseReason => _StopMessage)
+	OR_ELSE NOT _FirstTimer.Reset(refuseReason => _StopMessage)
+	OR_ELSE NOT _SecondTimer.Reset(refuseReason => _StopMessage)
+THEN
+	RETURN;
+END_IF
+
+_FirstTimer.Interval := T#3S;
+_SecondTimer.Interval := T#6S;
+_Queue.StopWhenNoPendingTasks := TRUE;
+
+__TRY
+	_Queue.Enqueue(task := _FirstTimer);
+	_Queue.Enqueue(task := _SecondTimer);
+	_Completed := NOT _Queue.Start(refuseReason => _StopMessage);
+__CATCH(exceptionCode)
+	caughtException := TOF_Core.ExceptionManager.GetLastException(
+		exceptionCode := exceptionCode,
+		catchPointNamespaceName := NamespaceName,
+		catchPointPOUName := __POUNAME(),
+		catchPointPosition := __POSITION()
+	);
+	_StopMessage := caughtException.GetMessage();
+__ENDTRY
+
+IF _Completed THEN
+	_Queue.ClearWaitingTasks();
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="ClassName" Id="{80945a58-7df3-4fe4-8424-94a0e59b8963}">
+      <Declaration><![CDATA[//! <summary>Borrows the initialized program name. Treat it as read-only.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{9eeac9bf-13a4-4ec6-8210-514f7b5be2aa}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ClassName REF= _ClassName;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="NamespaceName" Id="{99ebbbce-534e-48bf-acd6-92ffa3b430b7}">
+      <Declaration><![CDATA[//! <summary>Borrows the initialized namespace name. Treat it as read-only.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{d92be0fd-02ce-4507-a800-975a0c5d5b8f}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[NamespaceName REF= CurrentNamespace.Name;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+  </POU>
+</TcPlcObject>

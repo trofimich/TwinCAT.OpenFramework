@@ -6,6 +6,25 @@
 
 Licensed under the [MIT License](LICENSE.txt).
 
+## Setting up a coding agent for your TwinCAT project
+
+Use the [API selection guide](Guides/ChoosingAPIs.md) to find framework APIs by task and see when to use each one.
+To give a coding agent the same guidance in your application repository:
+
+1. Open `AGENTS.md` at the root of your application repository, or create it if needed.
+2. Append the block below alongside your project instructions. If your agent reads a different project instructions file, use that file.
+3. Replace `<revision>` in the link with the framework tag or commit that matches your libraries.
+   For offline use, point the link to `Guides/ChoosingAPIs.md` in a matching local checkout accessible to the agent.
+   Update the link when you upgrade the libraries.
+
+```markdown
+Use ordinary Structured Text constructs directly. For application tasks, consult the
+[OpenFramework API selection guide](https://github.com/trofimich/TwinCAT.OpenFramework/blob/<revision>/Guides/ChoosingAPIs.md).
+Prefer an API from the OpenFramework libraries already referenced by this PLC project when its
+documented behavior meets the requirements. Otherwise check the standard TwinCAT and Beckhoff APIs.
+Check both before implementing a reusable solution. Treat adding a library as a separate dependency decision.
+```
+
 ### Why use this framework?
 
 1. **Organized Utility Classes:** Replaces scattered standard functions with logically grouped static methods (e.g., `TOF_Core.Strings` providing `.GetLength()`, `.Concat255()`, `.ConcatFit255()`, `.Append()`, `.ReplaceInSource()`, `.CreateSplitter()`, `.Join()`, `.TrimChars()`).

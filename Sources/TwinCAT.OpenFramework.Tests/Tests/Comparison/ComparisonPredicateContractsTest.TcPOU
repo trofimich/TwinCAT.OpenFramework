@@ -1,0 +1,170 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="ComparisonPredicateContractsTest" Id="{389cafd1-13fa-467b-b6a6-251a9ffddd86}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+SPDX-FileCopyrightText: © 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+SPDX-License-Identifier: MIT
+License: https://opensource.org/license/mit
+*)
+
+(*!
+<summary>Verifies storage identity, independent snapshot ownership and replacement from a borrowed view.</summary>
+<description>
+Keeps the source and predicate instances alive in the owning test task. Teardown clears both predicates
+after a successful or failed run.
+</description>
+*)
+
+{attribute 'no_assign'}
+{attribute 'no_explicit_call' := 'do not call this function block directly'}
+FUNCTION_BLOCK ComparisonPredicateContractsTest EXTENDS TOF_Testing.SingleCycleTest
+VAR_STAT
+	//! <summary>Class name shared by instances of this test.</summary>
+	{attribute 'hide'}
+	_ClassName : STRING := __POUNAME();
+END_VAR
+VAR
+	_Source : STRING(24);
+	_Storage : TOF_Comparison.SameStoragePredicate;
+	_Snapshot : TOF_Comparison.BytewiseEqualityPredicate;
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[]]></ST>
+    </Implementation>
+    <Method Name="ExecuteTest" Id="{eb6c5aeb-5c0e-4e8d-aafb-012686226155}">
+      <Declaration><![CDATA[(*!
+<summary>Checks matching text in disjoint storage and the result of mutating the borrowed source.</summary>
+<description>
+Replaces the snapshot through its own view, then checks that an enum descriptor with an unsupported
+byte size is rejected and leaves the snapshot readable.
+</description>
+*)
+METHOD PROTECTED ExecuteTest
+VAR
+	matchingText : STRING(8) := 'sample';
+	sourceValue : __SYSTEM.AnyType;
+	query : __SYSTEM.AnyType;
+	view : __SYSTEM.AnyType;
+	invalidValue : __SYSTEM.AnyType;
+	exceptionCode : __SYSTEM.ExceptionCode;
+	caught : TOF_Core.IException;
+	notSupported : TOF_Core.INotSupportedException;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_Source := matchingText;
+sourceValue := TOF_Core.SystemAnyTypes.CreateAnyTypeByAny(anyValue := _Source);
+query := TOF_Core.SystemAnyTypes.CreateAnyTypeByAny(anyValue := matchingText);
+_Storage.SetReferenceValueByAny(referenceValue := _Source);
+_Snapshot.SetReferenceValueByAny(referenceValue := _Source);
+
+Assert.ThatBool(
+	actual := _Storage.Check(valueToCompare := sourceValue),
+	message := "Storage predicate must accept the original address"
+).IsTrue();
+Assert.ThatBool(
+	actual := _Storage.Check(valueToCompare := query),
+	message := "Equal text in a different buffer must fail storage identity"
+).IsFalse();
+Assert.ThatBool(
+	actual := _Snapshot.Check(valueToCompare := query),
+	message := "Equal terminated text must match across different capacities"
+).IsTrue();
+
+_Source := 'changed';
+Assert.ThatBool(
+	actual := _Storage.Check(valueToCompare := sourceValue),
+	message := "Replacing source content must preserve storage identity"
+).IsTrue();
+Assert.ThatBool(
+	actual := _Snapshot.Check(valueToCompare := sourceValue),
+	message := "Replacing source content must leave the owned snapshot independent"
+).IsFalse();
+
+view := _Snapshot.ReferenceValue.AsAnyType();
+_Snapshot.SetReferenceValueByAnyType(referenceValue := view);
+Assert.ThatBool(
+	actual := _Snapshot.Check(valueToCompare := query),
+	message := "Replacing the owned snapshot from its own view must preserve its text"
+).IsTrue();
+
+// Three readable bytes cannot be mapped as an enum by the descriptor factory.
+invalidValue.TypeClass := __SYSTEM.TYPE_CLASS.TYPE_ENUM;
+invalidValue.pValue := sourceValue.pValue;
+invalidValue.diSize := 3;
+
+__TRY
+	_Snapshot.SetReferenceValueByAnyType(referenceValue := invalidValue);
+__CATCH(exceptionCode)
+	caught := TOF_Core.ExceptionManager.GetLastException(
+		exceptionCode := exceptionCode,
+		catchPointNamespaceName := NamespaceName,
+		catchPointPOUName := __POUNAME(),
+		catchPointPosition := __POSITION()
+	);
+__ENDTRY
+
+Assert.ThatBool(
+	actual := __QUERYINTERFACE(caught, notSupported),
+	message := "Unsupported enum metadata must fail during replacement"
+).IsTrue();
+Assert.ThatBool(
+	actual := _Snapshot.Check(valueToCompare := query),
+	message := "Rejected replacement must leave the previous snapshot readable"
+).IsTrue();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="AfterTest" Id="{03f0e113-d77f-4be3-a724-03bc9a307220}">
+      <Declaration><![CDATA[(*!
+<summary>Clears the borrowed source and releases the owned snapshot for another run.</summary>
+*)
+METHOD PROTECTED AfterTest
+VAR
+	emptyValue : __SYSTEM.AnyType;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[emptyValue.TypeClass := __SYSTEM.TYPE_CLASS.TYPE_NONE;
+emptyValue.pValue := 0;
+emptyValue.diSize := 0;
+_Storage.SetReferenceValueByAnyType(referenceValue := emptyValue);
+_Snapshot.SetReferenceValueByAnyType(referenceValue := emptyValue);
+Assert.ThatBool(
+	actual := _Storage.ReferenceValue.IsNull AND_THEN _Snapshot.ReferenceValue.IsNull,
+	message := "Teardown must clear both predicate descriptors"
+).IsTrue();]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="ClassName" Id="{0be5ca0d-9f50-4774-9233-779f77cc137c}">
+      <Declaration><![CDATA[//! <summary>Borrows the concrete class name. Callers must not modify it.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{c2283abc-9e83-4d0d-b5cb-329965ff653e}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ClassName REF= _ClassName;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="NamespaceName" Id="{d4ad1406-a17a-4504-9084-f8ee9dc91a65}">
+      <Declaration><![CDATA[//! <summary>Borrows the compiler-initialized namespace name. Callers must not modify it.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{72b9d180-0a6b-4a05-8bf5-76b2c5bd0b88}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[NamespaceName REF= CurrentNamespace.Name;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="SelfSize" Id="{498f8297-d715-43c7-8fa5-e97a03a7d114}">
+      <Declaration><![CDATA[//! <summary>Reports the concrete instance size in bytes.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY SelfSize : ULINT]]></Declaration>
+      <Get Name="Get" Id="{6eb18f04-6351-4d93-b988-a566bc196cab}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[SelfSize := XSIZEOF(THIS^);]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+  </POU>
+</TcPlcObject>

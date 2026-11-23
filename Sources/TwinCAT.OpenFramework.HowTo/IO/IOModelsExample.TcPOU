@@ -15,7 +15,8 @@ State and AdsAddr to the corresponding slave entries in XAE, then set BindingsCo
 The flag records caller confirmation; software cannot detect unlinked zero-valued inputs.
 Map this program to one task or call Execute once per cycle from that task. Use only one execution path.
 Voltage is zero while InputValid is FALSE; use InputValid before consuming Voltage. InputUpdated observes
-a toggle transition, not the level of InputToggle. State and AdsAddr are acyclic and do not validate measurements.
+a change between two sampled toggle values. The first scan establishes the baseline.
+State and AdsAddr are acyclic and do not validate measurements.
 The program owns no dynamic resources. Execute checks the fatal allocation latch outside recoverable handlers;
 a hosting task remains responsible for cleanup after all of its transient-exception consumers.
 Do not copy the program or share its mutable state across tasks without external synchronization.
@@ -37,6 +38,7 @@ VAR
 	_InputValid : BOOL;
 	_InputUpdated : BOOL;
 	_PreviousToggle : BOOL;
+	_HasPreviousToggle : BOOL;
 	_Voltage : LREAL;
 END_VAR]]></Declaration>
     <Implementation>
@@ -46,7 +48,8 @@ END_VAR]]></Declaration>
       <Declaration><![CDATA[(*!
 <summary>Samples the configured input and exposes guarded voltage and update observations.</summary>
 <description>
-Call once per scan from the owning task. Reading mapped fields is not an atomic cross-task snapshot.
+Call once per scan from the owning task. The first sample initializes the toggle history.
+Reading mapped fields is not an atomic cross-task snapshot.
 Fatal allocation failure propagates at this task boundary; no handler here can convert it into normal operation.
 </description>
 *)
@@ -54,12 +57,14 @@ METHOD Execute]]></Declaration>
       <Implementation>
         <ST><![CDATA[TOF_Core.DynamicMemoryManager.RaiseIfAllocationFailed();
 
+(* EL3001 standard status word: bit 6 signals a channel error and bit 14 marks invalid TxPDO data. *)
 _InputValid := _BindingsConfigured
 	AND_THEN NOT _Terminal.WcState
 	AND_THEN NOT _Terminal.Ch1.Status.6
 	AND_THEN NOT _Terminal.Ch1.Status.14;
-_InputUpdated := _InputValid AND_THEN (_Terminal.InputToggle <> _PreviousToggle);
+_InputUpdated := _InputValid AND_THEN _HasPreviousToggle AND_THEN (_Terminal.InputToggle <> _PreviousToggle);
 _PreviousToggle := _Terminal.InputToggle;
+_HasPreviousToggle := TRUE;
 
 IF _InputValid THEN
 	_Voltage := TO_LREAL(_Terminal.Ch1.Value) * _FullScaleVoltage / _FullScaleRawValue;
@@ -92,7 +97,7 @@ PROPERTY InputValid : BOOL]]></Declaration>
       </Get>
     </Property>
     <Property Name="InputUpdated" Id="{58b7f790-1b5f-4610-ac8b-6d0d46304f13}">
-      <Declaration><![CDATA[//! <summary>Reports a valid input-toggle transition observed during the latest Execute.</summary>
+      <Declaration><![CDATA[//! <summary>Reports a toggle change since the preceding scan when the current input is valid.</summary>
 PROPERTY InputUpdated : BOOL]]></Declaration>
       <Get Name="Get" Id="{53ac499f-f36a-4537-8a24-d80554d7a7be}">
         <Declaration><![CDATA[]]></Declaration>

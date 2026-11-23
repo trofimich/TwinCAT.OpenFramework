@@ -14,7 +14,9 @@ Execute updates the timer. Start begins or resumes counting and does nothing whi
 counted time into both saved values and pauses counting. Reset clears time without changing the active state;
 Restart clears time and starts counting. Start selects the memory mode; internal resume operations and Restart
 preserve it. CountedTime combines the selected saved value with the timer elapsed time. Persistent saved time
-is updated by Stop and Reset, not by each Execute.
+is updated by Stop and Reset. During an online change that copies the instance, a running stopwatch resumes
+from its last sampled time in the same direction and memory mode. The interval spent relocating is excluded.
+A paused stopwatch stays paused. An ordinary application start begins paused.
 </description>
 *)
 
@@ -33,7 +35,8 @@ VAR
 	_Direction : DIRECTION_TYPE := DIRECTION_TYPE.POSITIVE;
 
 	{attribute 'hide'} 
-	_NotPersistentSavedTime : LTIME; 
+	_NotPersistentSavedTime : LTIME;
+	_ResumeAfterCopy : BOOL; 
 END_VAR
 VAR PERSISTENT
 	_UsePersistentMemory : BOOL;
@@ -159,33 +162,45 @@ METHOD FINAL Execute]]></Declaration>
     </Method>
     <Method Name="FB_Exit" Id="{c137b4a8-96dd-4365-bc66-bf7d2b09d719}">
       <Declaration><![CDATA[(*!
-<summary>FB_Exit must be implemented explicitly. If there is an implementation, then the</summary>
+<summary>Stops the stopwatch and saves the last counted time before the instance exits.</summary>
 <description>
-method is called before the controller removes the code of the function block instance (implicit call). The
-return value is not evaluated.
+Saves the last sampled time and stops the timer. Only an active instance exiting for relocation requests
+resumption after its data has been copied.
 </description>
 *)
-
-
 METHOD FB_Exit: BOOL
 VAR_INPUT
-    bInCopyCode: BOOL;  
+	bInCopyCode : BOOL;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[Stop();]]></ST>
+        <ST><![CDATA[_ResumeAfterCopy := bInCopyCode AND_THEN _Timer.IN;
+Stop();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="FB_reinit" Id="{77eec2bf-e737-4b32-aa3b-ddfca77a0d10}">
+      <Declaration><![CDATA[(*!
+<summary>Restores the active state after online-change relocation.</summary>
+<description>
+Consumes the copied resume request once. Starts a fresh timing interval with the copied memory selection,
+direction and saved time. A stopped instance remains stopped.
+</description>
+*)
+METHOD FB_reinit : BOOL]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF _ResumeAfterCopy THEN
+	_ResumeAfterCopy := FALSE;
+	Start(usePersistentMemory := _UsePersistentMemory);
+END_IF]]></ST>
       </Implementation>
     </Method>
     <Method Name="FB_Init" Id="{bc33c0fc-ee85-405a-90f8-9d8eba01e55f}">
       <Declaration><![CDATA[(*!
-<summary>FB_Init is always available implicitly and it is used primarily for initialization.</summary>
+<summary>Initializes the timer preset for elapsed-time accumulation.</summary>
 <description>
-The return value is not evaluated. For a specific influence, you can also declare the methods explicitly and
-provide additional code there with the standard initialization code. You can evaluate the return value.
+Sets the embedded timer preset to LongTimes.MAX_VALUE. This method does not start counting or explicitly
+clear saved time.
 </description>
 *)
-
-
-
 METHOD FB_Init: BOOL
 VAR_INPUT
 	bInitRetains : BOOL; // TRUE: the retain variables are initialized (reset warm / reset cold)

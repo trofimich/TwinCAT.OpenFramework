@@ -216,10 +216,11 @@ FinishScenario := NOT _ReleaseFailed;]]></ST>
     </Method>
     <Method Name="allCursorContracts" Id="{c78adc37-c14c-43fe-814f-252d492f0812}">
       <Declaration><![CDATA[(*!
-<summary>Checks independent cursors, generic byte values, Reset and repeated exhaustion for six containers.</summary>
+<summary>Checks independent cursors, their values, Reset and repeated exhaustion for six containers.</summary>
 <description>
-Starts with independent fixture state. The harness clears persistent resources before publication, including
-after an aborted call. Terminal OOM injection is reserved for an isolated test.
+Expected counts and values come from fixture inputs and explicit Clear operations, independent of indexed access.
+The harness clears persistent resources before publication, including after an aborted call. Terminal OOM
+injection is reserved for an isolated test.
 </description>
 *)
 METHOD PRIVATE allCursorContracts
@@ -229,16 +230,26 @@ END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[_Bytes.AppendData(data := ADR(_ByteValues), dataSize := 3);
 _List.AppendCopy(value := _Scalar);
+_List.AppendCopy(value := _OtherScalar);
 _Queue.EnqueueCopy(value := _Scalar);
+_Queue.EnqueueCopy(value := _OtherScalar);
 _Stack.PushCopy(value := _Scalar);
+_Stack.PushCopy(value := _OtherScalar);
 _Dictionary.SetCopy(key := _Scalar, value := _OtherScalar);
+_Dictionary.SetCopy(key := _OtherScalar, value := _Scalar);
 _Set.SetCopy(value := _Scalar);
-checkCursor(source := _Bytes);
-checkCursor(source := _List);
-checkCursor(source := _Queue);
-checkCursor(source := _Stack);
-checkCursor(source := _Dictionary);
-checkCursor(source := _Set);
+_Set.SetCopy(value := _OtherScalar);
+checkCursor(source := _Bytes, expectedLength := 3, sourceName := "Bytes");
+checkCursor(source := _List, expectedLength := 2, sourceName := "List");
+checkCursor(source := _Queue, expectedLength := 2, sourceName := "Queue");
+checkCursor(source := _Stack, expectedLength := 2, sourceName := "Stack");
+checkCursor(source := _Dictionary, expectedLength := 2, sourceName := "Dictionary");
+checkCursor(source := _Set, expectedLength := 2, sourceName := "Set");
+
+checkScalarCursorValues(source := _List, sourceName := "List");
+checkScalarCursorValues(source := _Queue, sourceName := "Queue");
+checkScalarCursorValues(source := _Set, sourceName := "Set", ordered := FALSE);
+checkDictionaryCursorValues();
 
 _Enumerator := _Bytes.CreateEnumerator();
 _Assertions.ThatBool(
@@ -268,12 +279,12 @@ _Queue.Clear();
 _Stack.Clear();
 _Dictionary.Clear();
 _Set.Clear();
-checkCursor(source := _Bytes);
-checkCursor(source := _List);
-checkCursor(source := _Queue);
-checkCursor(source := _Stack);
-checkCursor(source := _Dictionary);
-checkCursor(source := _Set);]]></ST>
+checkCursor(source := _Bytes, expectedLength := 0, sourceName := "Bytes");
+checkCursor(source := _List, expectedLength := 0, sourceName := "List");
+checkCursor(source := _Queue, expectedLength := 0, sourceName := "Queue");
+checkCursor(source := _Stack, expectedLength := 0, sourceName := "Stack");
+checkCursor(source := _Dictionary, expectedLength := 0, sourceName := "Dictionary");
+checkCursor(source := _Set, expectedLength := 0, sourceName := "Set");]]></ST>
       </Implementation>
     </Method>
     <Method Name="assertOriginalFailure" Id="{91a4b1f4-e7e6-4b43-8603-f63e4537e2c4}">
@@ -456,23 +467,30 @@ _Query.Reset();]]></ST>
       <Declaration><![CDATA[(*!
 <summary>Checks traversal and invalid-current states without changing the borrowed source.</summary>
 <description>
-The source stays alive and structurally unchanged. Cursor ownership remains in fixture fields if a call raises.
+The fixture supplies an independent expected entry count. The source stays alive and structurally unchanged. 
+Cursor ownership remains in fixture fields if a call raises.
 </description>
 *)
 METHOD PRIVATE checkCursor
 VAR_INPUT
 	source : TOF_Collections.ICollection;
+	expectedLength : DINT;
+	sourceName : WSTRING;
 END_VAR
 VAR
 	i : DINT;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[_Enumerator := source.CreateEnumerator();
+        <ST><![CDATA[_Assertions.ThatDInt(
+	actual := source.Length,
+	message := TOF_Core.WideStrings.Concat255(sourceName, ": unexpected source length")
+).ToBe(expected := expectedLength);
+_Enumerator := source.CreateEnumerator();
 _SecondEnumerator := source.CreateEnumerator();
 
 _Assertions.ThatBool(
 	actual := _Enumerator <> 0 AND_THEN _SecondEnumerator <> 0,
-	message := "Each traversal must create a cursor"
+	message := TOF_Core.WideStrings.Concat255(sourceName, ": Each traversal must create a cursor")
 ).IsTrue();
 
 IF _Enumerator = 0 OR_ELSE _SecondEnumerator = 0 THEN
@@ -483,7 +501,7 @@ END_IF
 
 _Assertions.ThatBool(
 	actual := _Enumerator <> _SecondEnumerator,
-	message := "Owned cursors must be independent"
+	message := TOF_Core.WideStrings.Concat255(sourceName, ": Owned cursors must be independent")
 ).IsTrue();
 
 IF _Enumerator = _SecondEnumerator THEN
@@ -494,45 +512,142 @@ END_IF
 
 _Assertions.ThatBool(
 	actual := _Enumerator.Current.IsNull,
-	message := "Current before MoveNext must be empty"
+	message := TOF_Core.WideStrings.Concat255(sourceName, ": Current before MoveNext must be empty")
 ).IsTrue();
 
-FOR i := 0 TO source.Length - 1 DO
+FOR i := 0 TO expectedLength - 1 DO
 	_Assertions.ThatBool(
 		actual := _Enumerator.MoveNext(),
-		message := "Cursor must visit every source entry"
+		message := TOF_Core.WideStrings.Concat255(sourceName, ": Cursor must visit every source entry")
 	).IsTrue();
 	_Assertions.ThatBool(
 		actual := _Enumerator.Current.IsNull,
-		message := "Current must expose the visited entry"
+		message := TOF_Core.WideStrings.Concat255(sourceName, ": Current must expose the visited entry")
 	).IsFalse();
 END_FOR
 
 _Assertions.ThatBool(
 	actual := _Enumerator.MoveNext(),
-	message := "Cursor must stop at source end"
+	message := TOF_Core.WideStrings.Concat255(sourceName, ": Cursor must stop at source end")
 ).IsFalse();
 _Assertions.ThatBool(
 	actual := _Enumerator.MoveNext(),
-	message := "Exhausted cursor must stay exhausted"
+	message := TOF_Core.WideStrings.Concat255(sourceName, ": Exhausted cursor must stay exhausted")
 ).IsFalse();
 _Assertions.ThatBool(
 	actual := _Enumerator.Current.IsNull,
-	message := "Current after exhaustion must be empty"
+	message := TOF_Core.WideStrings.Concat255(sourceName, ": Current after exhaustion must be empty")
 ).IsTrue();
 _Assertions.ThatBool(
 	actual := _SecondEnumerator.MoveNext(),
-	message := "Second cursor must retain an independent position"
-).ToBe(expected := source.Length > TOF_Core.SignedInt32.ZERO);
+	message := TOF_Core.WideStrings.Concat255(sourceName, ": Second cursor must retain an independent position")
+).ToBe(expected := expectedLength > TOF_Core.SignedInt32.ZERO);
 _Enumerator.Reset();
 _Assertions.ThatBool(
 	actual := _Enumerator.Current.IsNull,
-	message := "Current after Reset must be empty"
+	message := TOF_Core.WideStrings.Concat255(sourceName, ": Current after Reset must be empty")
 ).IsTrue();
 _Assertions.ThatBool(
 	actual := _Enumerator.MoveNext(),
-	message := "Reset must restore the initial cursor position"
-).ToBe(expected := source.Length > TOF_Core.SignedInt32.ZERO);
+	message := TOF_Core.WideStrings.Concat255(sourceName, ": Reset must restore the initial cursor position")
+).ToBe(expected := expectedLength > TOF_Core.SignedInt32.ZERO);
+releaseCursors();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="checkScalarCursorValues" Id="{00edc401-a2a5-43e8-90a0-75b562b2b68b}">
+      <Declaration><![CDATA[(*!
+<summary>Checks both distinct scalar values produced by a cursor.</summary>
+<description>
+The live source contains the two fixture scalars. Ordered sources yield them in insertion order. An unordered
+source yields each once. Retains cursor ownership in the fixture until release, including on an exception.
+</description>
+*)
+METHOD PRIVATE checkScalarCursorValues
+VAR_INPUT
+	source : TOF_Collections.ICollection;
+	sourceName : WSTRING;
+	ordered : BOOL := TRUE;
+END_VAR
+VAR
+	values : ARRAY [0..1] OF DINT;
+	currentValue : REFERENCE TO TOF_Core.GENERIC_VALUE;
+	i : DINT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_Enumerator := source.CreateEnumerator();
+
+FOR i := 0 TO UPPER_BOUND(values, 1) DO
+	IF _Enumerator = 0 OR_ELSE NOT _Enumerator.MoveNext() THEN
+		EXIT;
+	END_IF
+
+	currentValue REF= _Enumerator.Current;
+
+	IF NOT __ISVALIDREF(currentValue) OR_ELSE currentValue.IsNull THEN
+		EXIT;
+	END_IF
+
+	values[i] := currentValue.AsDInt();
+END_FOR
+
+_Assertions.ThatBool(
+	actual := i > UPPER_BOUND(values, 1)
+		AND_THEN ((values[0] = _Scalar AND_THEN values[1] = _OtherScalar)
+			OR_ELSE (NOT ordered AND_THEN values[0] = _OtherScalar AND_THEN values[1] = _Scalar)),
+	message := TOF_Core.WideStrings.Concat255(sourceName, ": Current must return both inserted values")
+).IsTrue();
+
+releaseCursors();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="checkDictionaryCursorValues" Id="{07bbf2f6-f599-473a-aa42-385ac758fff0}">
+      <Declaration><![CDATA[(*!
+<summary>Checks that the dictionary cursor exposes both inserted key-value pairs.</summary>
+<description>
+Reads each borrowed pair before the next cursor operation. Both pairs must appear once in either order. The
+fixture retains ownership of the cursor if enumeration aborts.
+</description>
+*)
+METHOD PRIVATE checkDictionaryCursorValues
+VAR
+	currentValue : REFERENCE TO TOF_Core.GENERIC_VALUE;
+	pair : POINTER TO TOF_Core.GENERIC_KEY_VALUE_PAIR;
+	keyValue : DINT;
+	storedValue : DINT;
+	observedFirstPair : BOOL;
+	observedSecondPair : BOOL;
+	i : DINT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_Enumerator := _Dictionary.CreateEnumerator();
+
+FOR i := 0 TO 1 DO
+	IF _Enumerator = 0 OR_ELSE NOT _Enumerator.MoveNext() THEN
+		EXIT;
+	END_IF
+
+	currentValue REF= _Enumerator.Current;
+
+	IF NOT __ISVALIDREF(currentValue)
+		OR_ELSE currentValue.IsNull
+		OR_ELSE currentValue.TypeClass <> TOF_Core.GENERIC_TYPE_CLASS.USER_DEFINED
+		OR_ELSE currentValue.Size <> XSIZEOF(TOF_Core.GENERIC_KEY_VALUE_PAIR)
+	THEN
+		EXIT;
+	END_IF
+
+	pair := currentValue.Address;
+	keyValue := pair^.Key.AsDInt();
+	storedValue := pair^.Value.AsDInt();
+	observedFirstPair := observedFirstPair OR_ELSE (keyValue = _Scalar AND_THEN storedValue = _OtherScalar);
+	observedSecondPair := observedSecondPair OR_ELSE (keyValue = _OtherScalar AND_THEN storedValue = _Scalar);
+END_FOR
+
+_Assertions.ThatBool(
+	actual := observedFirstPair AND_THEN observedSecondPair,
+	message := "Dictionary Current must expose both expected key-value pairs in either order"
+).IsTrue();
+
 releaseCursors();]]></ST>
       </Implementation>
     </Method>
@@ -1527,7 +1642,7 @@ _Assertions.ThatUDInt(
       <Declaration><![CDATA[(*!
 <summary>Applies skip and maxRemoved and preserves completed removals after a predicate failure.</summary>
 <description>
-Starts with independent fixture state. The harness clears persistent resources before publication, including
+Checks full-width skip before any predicate call. The harness clears persistent resources before publication, including
 after an aborted call. Terminal OOM injection is reserved for an isolated test.
 </description>
 *)
@@ -1536,12 +1651,29 @@ VAR
 	i : DINT;
 	removedCount : DINT;
 	rejected : BOOL;
+	found : BOOL;
 	exceptionCode : __SYSTEM.ExceptionCode;
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[FOR i := 1 TO 5 DO
 	_List.AppendCopy(value := i);
 END_FOR
+
+_Predicate.ResetCount();
+found := _List.FindSingle(predicate := _Predicate, skip := TOF_Core.UnsignedInt32.MAX_VALUE);
+_Assertions.ThatBool(actual := found, message := "Maximum skip cannot select a match").IsFalse();
+_Assertions.ThatUDInt(
+	actual := _Predicate.CallCount,
+	message := "FindSingle must skip the search when skip exceeds Length"
+).ToBe(expected := 0);
+_Predicate.ResetCount();
+_List.RemoveMatched(predicate := _Predicate, skip := TOF_Core.UnsignedInt32.MAX_VALUE, removedCount => removedCount);
+_Assertions.ThatDInt(actual := removedCount, message := "Maximum skip cannot remove a match").ToBe(expected := 0);
+_Assertions.ThatUDInt(
+	actual := _Predicate.CallCount,
+	message := "RemoveMatched must skip traversal when skip exceeds Length"
+).ToBe(expected := 0);
+_Assertions.ThatDInt(actual := _List.Length, message := "Maximum skip must preserve the list").ToBe(expected := 5);
 
 _Predicate.ResetCount();
 _List.RemoveMatched(predicate := _Predicate, skip := 1, maxRemoved := 2, removedCount => removedCount);
@@ -2402,27 +2534,40 @@ _Assertions.ThatDInt(
       <Declaration><![CDATA[(*!
 <summary>Contains hash and equality failures in all six Try methods and still releases owned queries.</summary>
 <description>
-Starts with independent fixture state. The harness clears persistent resources before publication, including
+Each call must reach the selected injection once. Successful lookups after each round verify the stored entries.
+The harness clears persistent resources before publication, including
 after an aborted call. Terminal OOM injection is reserved for an isolated test.
 </description>
 *)
 METHOD PRIVATE containsCollectionCallbackFailures
 VAR
 	failureKind : DINT;
+	selectedCount : REFERENCE TO UDINT;
+	expectedCount : UDINT;
+	failureName : WSTRING;
 	found : BOOL;
 	escaped : BOOL;
 	foundValue : TOF_Core.GENERIC_VALUE;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[_CollisionDictionary.SetCopy(key := _Scalar, value := _Scalar);
+        <ST><![CDATA[_CollisionDictionary.SetCopy(key := _Scalar, value := _OtherScalar);
 _CollisionSet.SetCopy(value := _Scalar);
 
 FOR failureKind := 0 TO 1 DO
 	_Equality.ThrowOnHash := failureKind = 0;
 	_Equality.ThrowOnEquality := failureKind = 1;
 
+	IF _Equality.ThrowOnHash THEN
+		selectedCount REF= _Equality.HashFailureCount;
+		failureName := "hash";
+	ELSE
+		selectedCount REF= _Equality.EqualityFailureCount;
+		failureName := "equality";
+	END_IF
+
 	found := TRUE;
 	escaped := FALSE;
+	expectedCount := selectedCount + 1;
 
 	__TRY
 		found := _CollisionDictionary.TryGetValueByKey(key := _OtherScalar, value => foundValue);
@@ -2430,13 +2575,17 @@ FOR failureKind := 0 TO 1 DO
 		escaped := TRUE;
 	__ENDTRY
 
+	_Assertions.ThatUDInt(
+		actual := selectedCount,
+		message := TOF_Core.WideStrings.Concat255("TryGetValueByKey must reach ", failureName, " injection once")
+	).ToBe(expected := expectedCount);
 	_Assertions.ThatBool(
 		actual := escaped,
-		message := "Try callback failure must not escape"
+		message := TOF_Core.WideStrings.Concat255("TryGetValueByKey propagated ", failureName, " failure")
 	).IsFalse();
 	_Assertions.ThatBool(
 		actual := found,
-		message := "Try callback failure must report failure"
+		message := TOF_Core.WideStrings.Concat255("TryGetValueByKey reported success after ", failureName, " failure")
 	).IsFalse();
 
 	prepareOwnedValue();
@@ -2445,6 +2594,7 @@ FOR failureKind := 0 TO 1 DO
 	_CloneExitCount := TOF_Core.UnsignedInt32.ZERO;
 	found := TRUE;
 	escaped := FALSE;
+	expectedCount := selectedCount + 1;
 
 	__TRY
 		found := _CollisionDictionary.TryGetValueByGenericKey(key := _Query, releaseKey := TRUE, value => foundValue);
@@ -2452,13 +2602,17 @@ FOR failureKind := 0 TO 1 DO
 		escaped := TRUE;
 	__ENDTRY
 
+	_Assertions.ThatUDInt(
+		actual := selectedCount,
+		message := TOF_Core.WideStrings.Concat255("TryGetValueByGenericKey must reach ", failureName, " injection once")
+	).ToBe(expected := expectedCount);
 	_Assertions.ThatBool(
 		actual := escaped,
-		message := "Try callback failure must not escape"
+		message := TOF_Core.WideStrings.Concat255("TryGetValueByGenericKey propagated ", failureName, " failure")
 	).IsFalse();
 	_Assertions.ThatBool(
 		actual := found,
-		message := "Try callback failure must report failure"
+		message := TOF_Core.WideStrings.Concat255("TryGetValueByGenericKey reported success after ", failureName, " failure")
 	).IsFalse();
 	_Query.Reset();
 	_Assertions.ThatUDInt(
@@ -2468,6 +2622,7 @@ FOR failureKind := 0 TO 1 DO
 
 	found := TRUE;
 	escaped := FALSE;
+	expectedCount := selectedCount + 1;
 
 	__TRY
 		_CollisionDictionary.TryRemoveByKey(key := _OtherScalar, removed => found);
@@ -2475,13 +2630,17 @@ FOR failureKind := 0 TO 1 DO
 		escaped := TRUE;
 	__ENDTRY
 
+	_Assertions.ThatUDInt(
+		actual := selectedCount,
+		message := TOF_Core.WideStrings.Concat255("TryRemoveByKey must reach ", failureName, " injection once")
+	).ToBe(expected := expectedCount);
 	_Assertions.ThatBool(
 		actual := escaped,
-		message := "Try callback failure must not escape"
+		message := TOF_Core.WideStrings.Concat255("TryRemoveByKey propagated ", failureName, " failure")
 	).IsFalse();
 	_Assertions.ThatBool(
 		actual := found,
-		message := "Try callback failure must report failure"
+		message := TOF_Core.WideStrings.Concat255("TryRemoveByKey reported success after ", failureName, " failure")
 	).IsFalse();
 
 	prepareOwnedValue();
@@ -2490,6 +2649,7 @@ FOR failureKind := 0 TO 1 DO
 	_CloneExitCount := TOF_Core.UnsignedInt32.ZERO;
 	found := TRUE;
 	escaped := FALSE;
+	expectedCount := selectedCount + 1;
 
 	__TRY
 		_CollisionDictionary.TryRemoveByGenericKey(key := _Query, releaseKey := TRUE, removed => found);
@@ -2497,13 +2657,17 @@ FOR failureKind := 0 TO 1 DO
 		escaped := TRUE;
 	__ENDTRY
 
+	_Assertions.ThatUDInt(
+		actual := selectedCount,
+		message := TOF_Core.WideStrings.Concat255("TryRemoveByGenericKey must reach ", failureName, " injection once")
+	).ToBe(expected := expectedCount);
 	_Assertions.ThatBool(
 		actual := escaped,
-		message := "Try callback failure must not escape"
+		message := TOF_Core.WideStrings.Concat255("TryRemoveByGenericKey propagated ", failureName, " failure")
 	).IsFalse();
 	_Assertions.ThatBool(
 		actual := found,
-		message := "Try callback failure must report failure"
+		message := TOF_Core.WideStrings.Concat255("TryRemoveByGenericKey reported success after ", failureName, " failure")
 	).IsFalse();
 	_Query.Reset();
 	_Assertions.ThatUDInt(
@@ -2513,6 +2677,7 @@ FOR failureKind := 0 TO 1 DO
 
 	found := TRUE;
 	escaped := FALSE;
+	expectedCount := selectedCount + 1;
 
 	__TRY
 		_CollisionSet.TryRemove(value := _OtherScalar, removed => found);
@@ -2520,13 +2685,17 @@ FOR failureKind := 0 TO 1 DO
 		escaped := TRUE;
 	__ENDTRY
 
+	_Assertions.ThatUDInt(
+		actual := selectedCount,
+		message := TOF_Core.WideStrings.Concat255("TryRemove must reach ", failureName, " injection once")
+	).ToBe(expected := expectedCount);
 	_Assertions.ThatBool(
 		actual := escaped,
-		message := "Try callback failure must not escape"
+		message := TOF_Core.WideStrings.Concat255("TryRemove propagated ", failureName, " failure")
 	).IsFalse();
 	_Assertions.ThatBool(
 		actual := found,
-		message := "Try callback failure must report failure"
+		message := TOF_Core.WideStrings.Concat255("TryRemove reported success after ", failureName, " failure")
 	).IsFalse();
 
 	prepareOwnedValue();
@@ -2535,6 +2704,7 @@ FOR failureKind := 0 TO 1 DO
 	_CloneExitCount := TOF_Core.UnsignedInt32.ZERO;
 	found := TRUE;
 	escaped := FALSE;
+	expectedCount := selectedCount + 1;
 
 	__TRY
 		_CollisionSet.TryRemoveGeneric(value := _Query, releaseValue := TRUE, removed => found);
@@ -2542,19 +2712,42 @@ FOR failureKind := 0 TO 1 DO
 		escaped := TRUE;
 	__ENDTRY
 
+	_Assertions.ThatUDInt(
+		actual := selectedCount,
+		message := TOF_Core.WideStrings.Concat255("TryRemoveGeneric must reach ", failureName, " injection once")
+	).ToBe(expected := expectedCount);
 	_Assertions.ThatBool(
 		actual := escaped,
-		message := "Try callback failure must not escape"
+		message := TOF_Core.WideStrings.Concat255("TryRemoveGeneric propagated ", failureName, " failure")
 	).IsFalse();
 	_Assertions.ThatBool(
 		actual := found,
-		message := "Try callback failure must report failure"
+		message := TOF_Core.WideStrings.Concat255("TryRemoveGeneric reported success after ", failureName, " failure")
 	).IsFalse();
 	_Query.Reset();
 	_Assertions.ThatUDInt(
 		actual := _CloneExitCount,
 		message := "Failed Try must dispose its owned query"
 	).ToBe(expected := 1);
+	_Equality.ThrowOnHash := FALSE;
+	_Equality.ThrowOnEquality := FALSE;
+	found := _CollisionDictionary.TryGetValueByKey(key := _Scalar, value => foundValue);
+	_Assertions.ThatBool(
+		actual := found,
+		message := TOF_Core.WideStrings.Concat255("Dictionary lost the stored key after ", failureName, " failures")
+	).IsTrue();
+
+	IF found THEN
+		_Assertions.ThatDInt(
+			actual := foundValue.AsDInt(),
+			message := TOF_Core.WideStrings.Concat255("Dictionary changed the value after ", failureName, " failures")
+		).ToBe(expected := _OtherScalar);
+	END_IF
+
+	_Assertions.ThatBool(
+		actual := _CollisionSet.Contains(value := _Scalar),
+		message := TOF_Core.WideStrings.Concat255("Set lost the stored value after ", failureName, " failures")
+	).IsTrue();
 END_FOR
 
 _Assertions.ThatDInt(

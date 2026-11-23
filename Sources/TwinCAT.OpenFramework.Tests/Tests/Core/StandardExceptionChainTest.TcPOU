@@ -11,12 +11,19 @@ License: https://opensource.org/license/mit
 <summary>Checks the text, inner identity and root of a three-level standard exception chain.</summary>
 <description>
 Uses one task and stays at a stable address while assertions are bound to this instance.
+The runner executes task cleanup between capture and the next-cycle checks of the copied error.
 </description>
 *)
 
 {attribute 'no_assign'}
 {attribute 'no_explicit_call' := 'do not call this function block directly'}
-FUNCTION_BLOCK StandardExceptionChainTest EXTENDS TOF_Testing.SingleCycleTest
+FUNCTION_BLOCK StandardExceptionChainTest EXTENDS TOF_Testing.MultiCycleTest
+VAR
+	_Snapshot : TOF_Core.ERROR;
+	_CaptureTaskCycle : UDINT;
+	_ExpectedLocalTimestamp : LDATE_AND_TIME;
+	_ExpectedUtcTimestamp : LDATE_AND_TIME;
+END_VAR
 VAR_STAT
 	{attribute 'hide'}
 	_ClassName : STRING := __POUNAME();
@@ -26,13 +33,40 @@ END_VAR]]></Declaration>
     </Implementation>
     <Method Name="ExecuteTest" Id="{c373ac37-12d8-43fe-aed4-07ff819066eb}">
       <Declaration><![CDATA[(*!
+<summary>Captures the chain on the first cycle and verifies its copied diagnostics on a later PLC cycle.</summary>
+<description>The test deadline bounds the wait if the task cycle never advances.</description>
+*)
+METHOD PROTECTED ExecuteTest : TOF_Testing.TEST_CYCLE_RESULT
+VAR
+	taskInfo : Global.PlcTaskSystemInfo;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[taskInfo := Tc2_System.F_GetTaskInfo();
+ExecuteTest := TOF_Testing.TEST_CYCLE_RESULT.BUSY;
+
+IF CycleCount = 1 THEN
+	_CaptureTaskCycle := taskInfo.CycleCount;
+	checkChainAndCaptureError();
+	RETURN;
+END_IF
+
+IF taskInfo.CycleCount = _CaptureTaskCycle THEN
+	RETURN;
+END_IF
+
+checkSnapshot();
+ExecuteTest := TOF_Testing.TEST_CYCLE_RESULT.DONE;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="checkChainAndCaptureError" Id="{ebc894c0-7fd2-4c54-ac98-b19284688118}">
+      <Declaration><![CDATA[(*!
 <summary>Checks the text, inner identity and root of a three-level standard exception chain.</summary>
 <description>
-Keeps only cycle-local references. Compares the root with the first caught cause through read-only views.
-ToError copies the outer diagnostic and the deepest cause.
+Keeps the exception references in this method. Copies the diagnostic and timestamps into persistent fields
+for observation after the runner's task-boundary cleanup.
 </description>
 *)
-METHOD PROTECTED ExecuteTest
+METHOD PRIVATE checkChainAndCaptureError
 VAR
 	exceptionCode : __SYSTEM.ExceptionCode;
 	caught : TOF_Core.IException;
@@ -50,7 +84,6 @@ VAR
 	];
 	message : TOF_Core.ERROR_MESSAGE;
 	actual : TOF_Core.ERROR_MESSAGE;
-	snapshot : TOF_Core.ERROR;
 	i : DINT;
 END_VAR]]></Declaration>
       <Implementation>
@@ -61,10 +94,10 @@ END_VAR]]></Declaration>
 	// Each deliberate throw adds one outer cause and is captured before asserting its payload.
 	__TRY
 		TOF_Core.Exceptions.ThrowStandard(
-			sourceNamespaceName := NamespaceName,
-			sourceClassName := ClassName,
-			sourcePOUName := __POUNAME(),
-			sourcePosition := __POSITION(),
+			sourceNamespaceName := 'SnapshotTest',
+			sourceClassName := 'Producer',
+			sourcePOUName := SEL(i = 0, 'RaiseOuter', 'RaiseRoot'),
+			sourcePosition := SEL(i = 0, 'P2', 'P1'),
 			message := message,
 			innerException := previous
 		);
@@ -97,6 +130,14 @@ END_VAR]]></Declaration>
 
 	IF i = 0 THEN
 		first := typed;
+		typed.ToError(targetError := _Snapshot, severity := TOF_Core.ERROR_SEVERITY.CRITICAL);
+		actual := _Snapshot.ToString();
+		Assert.ThatBool(
+			actual := _Snapshot.TopMessage = "First cause" AND_THEN _Snapshot.RootMessage = "First cause"
+				AND_THEN actual = "First cause",
+			message := "A single cause must populate both fields and render once"
+		).IsTrue();
+		checkMessageBudget(rootCause := caught);
 	END_IF
 
 	previous := caught;
@@ -108,14 +149,167 @@ Assert.ThatBool(
 	actual := root = first,
 	message := "The outer standard exception must reach the first cause"
 ).IsTrue();
-typed.ToError(targetError := snapshot, severity := TOF_Core.ERROR_SEVERITY.CRITICAL);
+_ExpectedLocalTimestamp := typed.LocalTimestamp;
+_ExpectedUtcTimestamp := typed.UtcTimestamp;
+typed.ToError(targetError := _Snapshot, severity := TOF_Core.ERROR_SEVERITY.CRITICAL);
 Assert.ThatBool(
-	actual := snapshot.TopMessage = expected[2] AND_THEN snapshot.RootMessage = "First cause",
+	actual := _Snapshot.TopMessage = inputs[2] AND_THEN _Snapshot.RootMessage = "First cause",
 	message := "The ERROR snapshot must keep the outer diagnostics and the deepest cause"
+).IsTrue();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="checkMessageBudget" Id="{9f506e9b-b871-4781-abcc-bb04717b9134}">
+      <Declaration><![CDATA[(*!
+<summary>Checks exact fit and one-character overflow for a long wrapper and a short root.</summary>
+<description>
+The supplied root is the task-owned First cause fixture. The snapshot is reused by the caller.
+Compares the complete output buffer, including the terminator, with source and UTC metadata requested.
+</description>
+*)
+METHOD PRIVATE checkMessageBudget
+VAR_INPUT
+	rootCause : TOF_Core.IException;
+END_VAR
+VAR
+	payload : TOF_Core.ERROR_MESSAGE;
+	formatted : TOF_Core.ERROR_MESSAGE;
+	expected : TOF_Core.ERROR_MESSAGE;
+	expectedSuffix : WSTRING(15) := " -> First cause";
+	payloadWords : POINTER TO WORD;
+	expectedWords : POINTER TO WORD;
+	caught : TOF_Core.IException;
+	exceptionCode : __SYSTEM.ExceptionCode;
+	i : UDINT;
+	extra : UDINT;
+END_VAR
+VAR CONSTANT
+	// Reserve four code units for the separator and eleven for First cause.
+	TOP_LIMIT : UDINT := TOF_Core.Parameters.ERROR_MESSAGE_WIDE_CHAR_SIZE - 15;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[payloadWords := ADR(payload);
+expectedWords := ADR(expected);
+
+FOR i := 0 TO TOP_LIMIT - 1 DO
+	payloadWords[i] := WORD#16#0058;
+	expectedWords[i] := WORD#16#0058;
+END_FOR
+
+// Copy the complete suffix, including its terminator, independently of the formatter.
+Tc2_System.MEMCPY(destAddr := ADR(expectedWords[TOP_LIMIT]), srcAddr := ADR(expectedSuffix), n := SIZEOF(expectedSuffix));
+
+FOR extra := 0 TO 1 DO
+	IF extra = 1 THEN
+		payloadWords[TOP_LIMIT] := WORD#16#0058;
+		expectedWords[TOP_LIMIT - 1] := TOF_Core.WideStrings.ELLIPSIS;
+	END_IF
+
+	payloadWords[TOP_LIMIT + extra] := TO_WORD(TOF_Core.UnsignedInt16.MIN_VALUE);
+	caught := 0;
+
+	__TRY
+		TOF_Core.Exceptions.ThrowStandard(
+			sourceNamespaceName := NamespaceName,
+			sourceClassName := ClassName,
+			sourcePOUName := __POUNAME(),
+			sourcePosition := __POSITION(),
+			message := payload,
+			innerException := rootCause
+		);
+	__CATCH(exceptionCode)
+		caught := TOF_Core.ExceptionManager.GetLastException(
+			exceptionCode := exceptionCode,
+			catchPointNamespaceName := NamespaceName,
+			catchPointPOUName := __POUNAME(),
+			catchPointPosition := __POSITION()
+		);
+	__ENDTRY
+
+	IF caught = 0 THEN
+		RecordFailure(message := "Missing wrapper in error message capacity test");
+		RETURN;
+	END_IF
+
+	caught.ToError(targetError := _Snapshot, severity := TOF_Core.ERROR_SEVERITY.CRITICAL);
+	formatted := _Snapshot.ToString(
+		sourceDisplayMode := TOF_Core.ERROR_SOURCE_DISPLAY_MODE.TOP_AND_ROOT,
+		timestampDisplayMode := TOF_Core.TIMESTAMP_DISPLAY_MODE.UTC
+	);
+	Assert.ThatBool(
+		actual := Tc2_System.MEMCMP(pBuf1 := ADR(formatted), pBuf2 := ADR(expected), n := SIZEOF(expected)) = 0,
+		message := SEL(
+			extra = 1,
+			"An exact-fit diagnostic must retain the full wrapper and root",
+			"One-character overflow must shorten only the wrapper and retain the root"
+		)
+	).IsTrue();
+END_FOR]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="checkSnapshot" Id="{ccc9bc16-5965-430b-aec7-16fbf68d3061}">
+      <Declaration><![CDATA[(*!
+<summary>Checks stored diagnostics and their formatting after the capture cycle.</summary>
+<description>Reads the copied values only. The runner owns task cleanup and the exception lifetimes.</description>
+*)
+METHOD PRIVATE checkSnapshot
+VAR
+	formatted : TOF_Core.ERROR_MESSAGE;
+	utcText : WSTRING(255);
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[Assert.ThatBool(actual := _Snapshot.HasError, message := "ERROR must survive task cleanup").IsTrue();
+Assert.ThatBool(
+	actual := _Snapshot.TopMessage = "Outer failure"
+		AND_THEN _Snapshot.RootMessage = "First cause",
+	message := "ERROR must retain both copied messages after task cleanup"
 ).IsTrue();
 Assert.ThatBool(
-	actual := snapshot.Severity = TOF_Core.ERROR_SEVERITY.CRITICAL,
-	message := "ToError must copy the supplied severity"
+	actual := _Snapshot.TopSource = 'SnapshotTest.Producer.RaiseOuter() P2'
+		AND_THEN _Snapshot.RootSource = 'SnapshotTest.Producer.RaiseRoot() P1',
+	message := "ERROR must retain distinct top and root sources after task cleanup"
+).IsTrue();
+Assert.ThatBool(
+	actual := _Snapshot.Severity = TOF_Core.ERROR_SEVERITY.CRITICAL,
+	message := "ERROR must retain the supplied severity after task cleanup"
+).IsTrue();
+Assert.ThatBool(
+	actual := _Snapshot.LocalTimestamp = _ExpectedLocalTimestamp
+		AND_THEN _Snapshot.UtcTimestamp = _ExpectedUtcTimestamp,
+	message := "ERROR must retain both captured timestamps after task cleanup"
+).IsTrue();
+
+formatted := _Snapshot.ToString();
+Assert.ThatBool(
+	actual := formatted = "Outer failure -> First cause",
+	message := "Formatting must show each endpoint once and omit intermediate wrappers"
+).IsTrue();
+
+formatted := _Snapshot.ToString(
+	sourceDisplayMode := TOF_Core.ERROR_SOURCE_DISPLAY_MODE.TOP_AND_ROOT,
+	timestampDisplayMode := TOF_Core.TIMESTAMP_DISPLAY_MODE.UTC
+);
+utcText := TO_WSTRING(_ExpectedUtcTimestamp);
+Assert.ThatBool(
+	actual := Tc2_Standard.WFIND(STR1 := formatted, STR2 := "SnapshotTest.Producer.RaiseOuter() P2") > 0
+		AND_THEN Tc2_Standard.WFIND(STR1 := formatted, STR2 := "SnapshotTest.Producer.RaiseRoot() P1") > 0
+		AND_THEN Tc2_Standard.WFIND(STR1 := formatted, STR2 := utcText) > 0
+		AND_THEN Tc2_Standard.WFIND(STR1 := formatted, STR2 := "UTC") > 0,
+	message := "ERROR must format the copied top and root sources and UTC timestamp"
+).IsTrue();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="AfterTest" Id="{c2ad61b6-db6a-4467-8741-25ef580ea249}">
+      <Declaration><![CDATA[(*! <summary>Clears and verifies the owned error state for the next run.</summary> *)
+METHOD PROTECTED AfterTest]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_Snapshot.Clear();
+Assert.ThatBool(
+	actual := _Snapshot.Empty AND_THEN _Snapshot.RootMessage = ""
+		AND_THEN _Snapshot.TopSource = '' AND_THEN _Snapshot.RootSource = ''
+		AND_THEN _Snapshot.Severity = TOF_Core.ERROR_SEVERITY.ERROR
+		AND_THEN _Snapshot.LocalTimestamp = TOF_Core.LongDateAndTimes.EPOCH
+		AND_THEN _Snapshot.UtcTimestamp = TOF_Core.LongDateAndTimes.EPOCH,
+	message := "Clearing ERROR must restore its empty state for another run"
 ).IsTrue();]]></ST>
       </Implementation>
     </Method>

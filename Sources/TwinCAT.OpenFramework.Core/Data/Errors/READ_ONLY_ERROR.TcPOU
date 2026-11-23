@@ -11,8 +11,8 @@ License: https://opensource.org/license/mit
 <summary>Stores an error snapshot for reading and diagnostic formatting.</summary>
 <description>
 Consumers must treat the exposed fields as read-only. The snapshot stores its own messages, sources and
-timestamps independently of exception lifetime. ToString returns bounded diagnostic text with an ellipsis when
-the combined text exceeds its capacity.
+timestamps independently of exception lifetime. TopMessage holds the outer diagnostic and RootMessage the
+selected deepest cause. ToString shares limited space between distinct messages before appending metadata.
 </description>
 *)
 
@@ -95,9 +95,10 @@ PROPERTY FINAL HasError : BOOL]]></Declaration>
       <Declaration><![CDATA[(*!
 <summary>Formats the stored error with optional source and timestamp information.</summary>
 <description>
-Preserves the order: top message, distinct root message, source, timestamp. If the combined text exceeds
-ERROR_MESSAGE capacity, returns its leading characters with a final ellipsis and stops formatting. Exact-fit
-text is preserved. Does not allocate dynamic memory, modify the snapshot or raise a size-overflow exception.
+Writes top message, distinct nonempty root, optional source and timestamp in order. If both messages do not
+fit, each gets up to half the space, with unused space available to the other. A shortened message ends in
+an ellipsis. When the messages fill the result, optional metadata is omitted.
+Does not allocate dynamic memory, modify the snapshot or raise a size-overflow exception.
 The intermediate source buffer holds 255 characters, matching the GetSource result capacity. Source formatting
 retains the existing GetSource limit. Descendants cannot replace this snapshot formatter; formatting retains
 the documented field order and truncation rules.
@@ -110,15 +111,27 @@ VAR_INPUT
 END_VAR
 VAR
 	tempString : WSTRING(255);
+	topLength : UDINT;
+	rootLength : UDINT;
+	messageSpace : UDINT;
+	topLimit : UDINT;
+	resultWords : POINTER TO WORD;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[// always show top message
-IF NOT WideStrings.TryAppendFit(targetString := ToString, sourceString := TopMessage) THEN
-	RETURN;
-END_IF
+        <ST><![CDATA[ToString := TopMessage;
 
-// append root message if it exists ond differs from top message
 IF RootMessage <> "" AND_THEN TopMessage <> RootMessage THEN
+	topLength := WideStrings.GetLength(value := TopMessage);
+	rootLength := WideStrings.GetLength(value := RootMessage);
+	messageSpace := Parameters.ERROR_MESSAGE_WIDE_CHAR_SIZE - WideStrings.GetLength(value := Exceptions.INNER_MESSAGE_PREFIX);
+	topLimit := messageSpace - MIN(rootLength, messageSpace / 2);
+
+	IF topLength > topLimit THEN
+		resultWords := ADR(ToString);
+		resultWords[topLimit - 1] := WideStrings.ELLIPSIS;
+		resultWords[topLimit] := 0;
+	END_IF
+
 	IF NOT WideStrings.TryAppendFit(targetString := ToString, sourceString := Exceptions.INNER_MESSAGE_PREFIX) THEN
 		RETURN;
 	END_IF
@@ -128,13 +141,17 @@ IF RootMessage <> "" AND_THEN TopMessage <> RootMessage THEN
 	END_IF
 END_IF 
 
+IF WideStrings.GetLength(value := ToString) = Parameters.ERROR_MESSAGE_WIDE_CHAR_SIZE THEN
+	RETURN;
+END_IF
+
 // append message source
 IF sourceDisplayMode <> ERROR_SOURCE_DISPLAY_MODE.HIDDEN THEN
 	IF NOT WideStrings.TryAppendFit(targetString := ToString, sourceString := Exceptions.SOURCE_PREFIX) THEN
 		RETURN;
 	END_IF
 	
-	tempString := TO_WSTRING(GetSource(sourceDisplayMode = ERROR_SOURCE_DISPLAY_MODE.TOP_AND_ROOT));
+	tempString := TO_WSTRING(GetSource(appendRootSource := sourceDisplayMode = ERROR_SOURCE_DISPLAY_MODE.TOP_AND_ROOT));
 	
 	IF NOT WideStrings.TryAppendFit(targetString := ToString, sourceString := tempString) THEN
 		RETURN;

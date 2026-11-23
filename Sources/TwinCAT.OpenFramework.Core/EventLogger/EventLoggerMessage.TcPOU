@@ -214,7 +214,8 @@ END_IF]]></ST>
 <description>
 Returns TRUE when Send returns S_OK. HRESULT failures and caught exceptions return FALSE without further
 logging. A successfully created instance is retained even if a later step fails; FALSE does not roll back
-earlier EventLogger operations. Any existing terminal allocation failure remains latched.
+earlier EventLogger operations. Observing terminal allocation failure returns FALSE and stops further native
+operations. The caller handles the preserved latch at the task boundary.
 </description>
 <param name="jsonData">JSON text borrowed for this call.</param>
 *)
@@ -224,32 +225,42 @@ VAR_IN_OUT CONSTANT
 END_VAR
 VAR
 	result : HRESULT;
+	eventEntryForCreate : TcEventEntry;
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[__TRY
+	IF DynamicMemoryManager.HasAllocationFailed THEN
+		RETURN;
+	END_IF
+
 	IF NOT _Created THEN
-		result := _Message.CreateEx(stEventEntry := EventEntry, ipSourceInfo := _MessageSourceInfo);
-	 
+		eventEntryForCreate := EventEntry;
+
+		IF DynamicMemoryManager.HasAllocationFailed THEN
+			RETURN;
+		END_IF
+
+		result := _Message.CreateEx(stEventEntry := eventEntryForCreate, ipSourceInfo := _MessageSourceInfo);
+
 		IF result <> Tc3_Module.S_OK THEN
 			RETURN;
-		ELSE
-			_Created := TRUE;
 		END_IF
+
+		_Created := TRUE;
+	END_IF
+
+	IF DynamicMemoryManager.HasAllocationFailed THEN
+		RETURN;
 	END_IF
 
 	result := _Message.SetJsonAttribute(sJsonAttribute := jsonData);
 
-	IF result <> Tc3_Module.S_OK THEN
+	IF result <> Tc3_Module.S_OK OR_ELSE DynamicMemoryManager.HasAllocationFailed THEN
 		RETURN;
 	END_IF
 
-	result := _Message.Send(nTimeStamp := 0); 
-
-	IF result <> Tc3_Module.S_OK THEN
-		RETURN;
-	END_IF
-
-	InternalTrySend := TRUE;
+	result := _Message.Send(nTimeStamp := 0);
+	InternalTrySend := result = Tc3_Module.S_OK AND_THEN NOT DynamicMemoryManager.HasAllocationFailed;
 __CATCH
 	InternalTrySend := FALSE;
 __ENDTRY]]></ST>

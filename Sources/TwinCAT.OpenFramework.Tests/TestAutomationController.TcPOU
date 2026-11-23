@@ -9,12 +9,26 @@ License: https://opensource.org/license/mit
 
 (*!
 <summary>Runs the OpenFramework test tree and the independent runner contract suite.</summary>
-<description>Instances must not be copied because their test fixtures contain non-copyable state.</description>
+<description>
+RepeatMainTestsRequest rearms the main tree on the controller task after a completed run. The same test instances
+run again and the independent runner contract suite keeps its result. Instances must not be copied because their
+test fixtures contain non-copyable state.
+</description>
 *)
 
 {attribute 'no_assign'}
 {attribute 'no_explicit_call' := 'do not call this function block directly'}
 FUNCTION_BLOCK TestAutomationController EXTENDS TOF_Automation.AutomationController<0>
+VAR_INPUT
+	(*!
+	<summary>Requests one repeat of the main test tree from TwinCAT Watch.</summary>
+	<description>
+	Write TRUE once after the main runner reports its totals. The controller clears the request on its next working
+	cycle. Requests before completion or after a runner abort are discarded. Do not force this input.
+	</description>
+	*)
+	RepeatMainTestsRequest : BOOL;
+END_VAR
 VAR_STAT
 	//! <summary>Class name shared by all instances of this function block.</summary>
 	{attribute 'hide'} 
@@ -69,6 +83,7 @@ PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
 One controller task owns FileTestRoot. Suites observe its readiness instead of issuing competing root-create
 requests. The independent suite has its own assertions and result reporting. AutomationRunner cleans task
 memory after both test paths. Keep calling the controller so root and scenario cleanup can finish.
+Consumes the repeat request before advancing the main runner and keeps the existing test instances.
 </description>
 *)
 METHOD PROTECTED OnBeforeChildrenWorking
@@ -83,6 +98,16 @@ END_VAR]]></Declaration>
 _TestRunnerTest.Execute();
 
 __TRY
+	IF RepeatMainTestsRequest THEN
+		RepeatMainTestsRequest := FALSE;
+
+		IF _JsonConfigurationRunner.IsFinished
+			AND_THEN _JsonConfigurationRunner.ExitCode >= TOF_Core.SignedInt32.ZERO
+		THEN
+			_JsonConfigurationRunner.Reset();
+		END_IF
+	END_IF
+
 	_JsonConfigurationRunner.Execute(cleanupTaskMemory := FALSE);
 __CATCH(exceptionCode)
 	exception := TOF_Core.ExceptionManager.GetLastException(

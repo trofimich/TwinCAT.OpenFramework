@@ -27,6 +27,10 @@ be reflected in Beckhoff documentation; do not override it based on documentatio
 
 ## Documentation and Contracts
 
+- For application code and usage examples, follow the API selection policy in [Choosing APIs](Guides/ChoosingAPIs.md).
+  Update the guide when a new application task becomes supported or the recommended choice changes.
+  Keep signatures and detailed contracts beside their declarations.
+
 - Document each new or modified type, method, property, or function next to its declaration. When changing a member,
   update or add its DocGen. Update the type's DocGen as well if the member change affects the type's contract.
   Documentation of unrelated members is outside the scope of that change.

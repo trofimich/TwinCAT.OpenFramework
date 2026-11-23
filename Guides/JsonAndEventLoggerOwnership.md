@@ -16,6 +16,12 @@ end-of-cycle exception cleanup (`ExceptionManager.Cleanup()`,
 `DynamicMemoryManager.RaiseIfAllocationFailed()` outside `__TRY`/`__CATCH` recovery
 blocks (`AutomationRunner` handles this automatically if you use it).
 
+Use `AutomaticJsonSerializer` for a typed PLC data snapshot. Use the configuration
+reader and writer for a component's explicit `IConfigurationSerializable` contract.
+The reader's nodes belong to its current document and expire at the next `Parse`.
+Consume output only after successful conversion. A successful EventLogger send
+reports native acceptance for that call. The event instance stays with its owning task.
+
 ## Separate JSON instances
 
 Define a static structure type with native type information available to the

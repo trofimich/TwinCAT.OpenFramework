@@ -8,7 +8,7 @@ License: https://opensource.org/license/mit
 *)
 
 (*!
-<summary>Checks FIFO head, copy independence, length and capacity during dynamic growth.</summary>
+<summary>Checks FIFO order, copy independence and state through successful and rejected growth.</summary>
 <description>
 Owns a dynamic queue and copied payloads at a stable address. Run from one task.
 Teardown clears surviving entries and releases dynamic capacity.
@@ -30,11 +30,16 @@ END_VAR]]></Declaration>
     </Implementation>
     <Method Name="ExecuteTest" Id="{14841a3b-fe19-4f72-b4f9-ffc04d0ee69f}">
       <Declaration><![CDATA[(*!
-<summary>Checks FIFO head, copy independence, length and capacity during dynamic growth.</summary>
+<summary>Checks FIFO head, copy independence, and recovery after a rejected growth increment.</summary>
 *)
 METHOD PROTECTED ExecuteTest
 VAR
-	values : ARRAY [1..4] OF INT := [11, 22, 33, 44];
+	values : ARRAY [1..5] OF INT := [11, 22, 33, 44, 55];
+	expected : ARRAY [0..3] OF INT := [11, 22, 33, 44];
+	exceptionCode : __SYSTEM.ExceptionCode;
+	caught : TOF_Core.IException;
+	rangeException : TOF_Core.IArgumentOutOfRangeException;
+	i : DINT;
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[_Queue.DefaultDynamicAllocationElementCount := BYTE#2;
@@ -84,7 +89,48 @@ Assert.ThatDInt(
 Assert.ThatInt(
 	actual := _Queue.GetByIndex(index := 2).AsInt(),
 	message := "Third enqueue must append the tail"
-).ToBe(expected := values[3]);]]></ST>
+).ToBe(expected := values[3]);
+
+_Queue.DefaultDynamicAllocationElementCount := BYTE#0;
+_Queue.EnqueueCopy(value := values[4]);
+
+__TRY
+	_Queue.EnqueueCopy(value := values[5]);
+__CATCH(exceptionCode)
+	caught := TOF_Core.ExceptionManager.GetLastException(
+		exceptionCode := exceptionCode,
+		catchPointNamespaceName := NamespaceName,
+		catchPointPOUName := __POUNAME(),
+		catchPointPosition := __POSITION()
+	);
+__ENDTRY
+
+Assert.ThatBool(
+	actual := __QUERYINTERFACE(caught, rangeException),
+	message := "Zero growth increment must raise ArgumentOutOfRangeException only when growth is required"
+).IsTrue();
+Assert.ThatBool(
+	actual := _Queue.Capacity = 4 AND_THEN _Queue.Length = 4,
+	message := "Rejected growth must preserve length and capacity"
+).IsTrue();
+
+FOR i := 0 TO UPPER_BOUND(expected, 1) DO
+	Assert.ThatInt(
+		actual := _Queue.GetByIndex(index := i).AsInt(),
+		message := "Rejected growth must preserve every FIFO entry"
+	).ToBe(expected := expected[i]);
+END_FOR
+
+_Queue.DefaultDynamicAllocationElementCount := BYTE#2;
+_Queue.EnqueueCopy(value := values[5]);
+Assert.ThatBool(
+	actual := _Queue.Capacity = 6 AND_THEN _Queue.Length = 5,
+	message := "Restoring a valid increment must allow growth"
+).IsTrue();
+Assert.ThatInt(
+	actual := _Queue.GetByIndex(index := 4).AsInt(),
+	message := "Growth after rejection must append the new tail"
+).ToBe(expected := values[5]);]]></ST>
       </Implementation>
     </Method>
     <Method Name="AfterTest" Id="{b0e9403f-3ead-4bde-bf0d-4a7c24fad920}">

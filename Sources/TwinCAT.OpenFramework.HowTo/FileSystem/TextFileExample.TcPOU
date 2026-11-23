@@ -1,0 +1,155 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="TextFileExample" Id="{ba6aec4c-147e-45e0-a0e7-2ae84e449623}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+SPDX-FileCopyrightText: © 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+SPDX-License-Identifier: MIT
+License: https://opensource.org/license/mit
+*)
+
+(*!
+<summary>Uses a file manager to read or write one short string and close the file.</summary>
+<description>
+Set _FilePath to a disposable local file. _WriteMode selects writing and truncates an existing file;
+otherwise the example reads. Write _RunRequested once and wait for _Completed. _ReadText is valid on successful
+read completion. The manager owns the handle and drives the borrowed child until stopping finishes.
+Map this program to one dedicated cyclic task. The program performs cleanup for that task.
+</description>
+*)
+
+{attribute 'no_explicit_call' := 'do not call this function block directly'}
+PROGRAM TextFileExample
+VAR
+	_ClassName : STRING := __POUNAME();
+	_Manager : TOF_FileSystem.FileContentManager(name := "Text file example");
+	_Reader : TOF_FileSystem.ReadString255FromFile(name := "Read text");
+	_Writer : TOF_FileSystem.WriteString255ToFile(name := "Write text");
+	_RunRequested : BOOL;
+	_WriteMode : BOOL;
+	_FilePath : Tc2_System.T_MaxString;
+	_TextToWrite : STRING(255) := 'OpenFramework example';
+	_ReadText : STRING(255);
+	_ReadOperation : BOOL;
+	_Completed : BOOL;
+	_Succeeded : BOOL;
+	_StopMessage : TOF_Core.ERROR_MESSAGE;
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[IF _RunRequested THEN
+	_RunRequested := FALSE;
+
+	IF NOT _Manager.State.Running THEN
+		startOperation();
+	END_IF
+END_IF
+
+IF _Manager.State.Running THEN
+	_Manager.Execute();
+
+	IF _Manager.State.Stopped THEN
+		_Succeeded := _Manager.FinalStopReason.WorkDone;
+		_StopMessage := _Manager.FinalStopReason.Message;
+
+		IF _Succeeded AND_THEN _ReadOperation THEN
+			_ReadText := _Reader.ReadString;
+		END_IF
+
+		_Completed := TRUE;
+	END_IF
+END_IF
+
+TOF_Core.DynamicMemoryManager.RaiseIfAllocationFailed();
+TOF_Core.DynamicMemoryManager.CleanupMemory();]]></ST>
+    </Implementation>
+    <Method Name="startOperation" Id="{56c0a4f1-c7b8-4b52-ab52-ebdb940774e7}">
+      <Declaration><![CDATA[(*!
+<summary>Selects the reader or writer and starts the manager with that single queued operation.</summary>
+<description>
+Call while the manager is idle. A refused request or enqueue failure leaves _Completed TRUE and sets _StopMessage.
+Once started, the manager advances the selected operation and releases its file before publishing the result.
+</description>
+*)
+METHOD PRIVATE startOperation
+VAR
+	operation : TOF_FileSystem.IFileContentTask;
+	exceptionCode : __SYSTEM.ExceptionCode;
+	caught : TOF_Core.IException;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_Completed := TRUE;
+_Succeeded := FALSE;
+_ReadText := '';
+_StopMessage := "";
+
+IF _FilePath = '' THEN
+	_StopMessage := "Set the file path before starting";
+	RETURN;
+END_IF
+
+IF NOT _Manager.Reset(refuseReason => _StopMessage) THEN
+	RETURN;
+END_IF
+
+(* A refused start can leave the previous operation queued while the manager is still READY. *)
+_Manager.ClearWaitingTasks();
+_Manager.FilePath := _FilePath;
+_Manager.Timeout := T#2S;
+_Manager.StopWhenNoPendingTasks := TRUE;
+_ReadOperation := NOT _WriteMode;
+
+IF _ReadOperation THEN
+	operation := _Reader;
+	_Manager.ModeFlags := Tc2_System.Global_Variables.FOPEN_MODEREAD OR Tc2_System.Global_Variables.FOPEN_MODETEXT;
+ELSE
+	operation := _Writer;
+	_Manager.ModeFlags := Tc2_System.Global_Variables.FOPEN_MODEWRITE OR Tc2_System.Global_Variables.FOPEN_MODETEXT;
+END_IF
+
+IF NOT operation.Reset(refuseReason => _StopMessage) THEN
+	RETURN;
+END_IF
+
+IF NOT _ReadOperation THEN
+	_Writer.StringToWrite := _TextToWrite;
+END_IF
+
+operation.Timeout := T#2S;
+
+__TRY
+	_Manager.Enqueue(fileHandleTask := operation);
+	_Completed := NOT _Manager.Start(refuseReason => _StopMessage);
+__CATCH(exceptionCode)
+	caught := TOF_Core.ExceptionManager.GetLastException(
+		exceptionCode := exceptionCode,
+		catchPointNamespaceName := NamespaceName,
+		catchPointPOUName := __POUNAME(),
+		catchPointPosition := __POSITION()
+	);
+	_StopMessage := caught.GetMessage();
+__ENDTRY]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="ClassName" Id="{5cdf6a80-59dc-4c66-ab6c-c17447a2745c}">
+      <Declaration><![CDATA[//! <summary>Borrows the initialized program name. Treat it as read-only.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{9c45b90c-7846-4926-88e6-e91609c4f014}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ClassName REF= _ClassName;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="NamespaceName" Id="{47e32cf7-c6f6-41e2-9df0-ceb16fd8ca80}">
+      <Declaration><![CDATA[//! <summary>Borrows the initialized namespace name. Treat it as read-only.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{4461f583-66c2-4fba-9d8c-dad839f9307d}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[NamespaceName REF= CurrentNamespace.Name;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+  </POU>
+</TcPlcObject>

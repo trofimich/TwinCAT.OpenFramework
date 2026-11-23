@@ -1,5 +1,19 @@
 # Building a dynamic workflow
 
+## Choosing the execution model
+
+Use a workflow when a procedure needs named steps, branches, waits, or recovery that
+can be composed or loaded from configuration. Use a `Task` for an individual cyclic
+operation with start, cancellation and cleanup. An `InvokeTaskActivity` lets the
+workflow drive that task. Keep that task alive and give the activity exclusive control
+of its lifecycle during the run. For fixed per-scan control with a few local states,
+keep the logic in the owning PLC task or automation component.
+
+A catch activity copies an error and may run recovery. It does not undo earlier
+physical writes, task effects, or callback changes. Design the recovery step around
+the effects that may already have occurred. The owning task still advances execution
+and provides the task-boundary exception cleanup.
+
 This example creates a sequence containing one delay step. The sequence controls the
 order in which its child steps run, and the `Workflow` owns and frees the memory of both
 dynamically created blocks. You follow the same steps whether you create blocks in code

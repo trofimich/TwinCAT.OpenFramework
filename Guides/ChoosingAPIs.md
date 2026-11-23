@@ -1,0 +1,25 @@
+# Choosing APIs for a TwinCAT application
+
+Use ordinary ST constructs directly for assignments, arithmetic, branching and loops. For application tasks,
+start with the OpenFramework libraries referenced by the PLC project. Prefer an existing API when its contract
+fits the required behavior. Otherwise check the standard TwinCAT and Beckhoff libraries before writing a reusable
+implementation. Adding a library is a separate dependency decision.
+
+Use this guide at the revision that matches the installed libraries. The entries below cover common tasks.
+For a task outside the table, use the [technical overview](../TECHNICAL_DESCRIPTION.md) to locate the relevant
+library, then check the declaration for the signature and contract.
+
+| I need to… | Start with | What determines the choice? | Declaration or example |
+| --- | --- | --- | --- |
+| Build a short diagnostic message from several fragments | Core · `Strings.Concat255` or `Strings.ConcatFit255` | Use one call for up to 16 fragments when the result may be limited to `STRING(255)`. Choose the Fit variant when a shortened message should end in `...`. A single standard `CONCAT` also suffices for a simple pair. | [Strings](../Sources/TwinCAT.OpenFramework.Core/Data/Strings/Strings.TcPOU) |
+| Append text that must fit in a buffer larger than 255 bytes | Core · `Strings.Append` | Supply a writable `STRING` with enough capacity for the full result. The method reports insufficient space through an exception. | [Strings](../Sources/TwinCAT.OpenFramework.Core/Data/Strings/Strings.TcPOU) |
+| Show the cause of a failure on the HMI in a later scan | Core · `IException.ToError`, `ERROR` | Copy the caught exception into a persistent `ERROR` before task cleanup. Read the stored diagnostic on later scans. | [Exception snapshot](../Sources/TwinCAT.OpenFramework.HowTo/Exceptions/ExceptionSnapshotExample.TcPOU) |
+| Keep a bounded list of references to live values | Collections · `List<N>` and Core · `GenericValueFactory` | Set the capacity from the application limit. A borrowed entry reflects changes to the source variable and requires that variable to remain alive. | [Borrowed list](../Sources/TwinCAT.OpenFramework.HowTo/Collections/BorrowedListExample.TcPOU) |
+| Delay work across scans and support cancellation | Timers · `Timer` | Use the task lifecycle when the caller needs to start, advance and cancel the operation. For a simple on-delay signal, a standard `TON` suffices. | [Cyclic timer](../Sources/TwinCAT.OpenFramework.HowTo/Tasks/CyclicTimerTaskExample.TcPOU) |
+| Run several cyclic operations in order | Tasks · `StandardTaskQueue` | Enqueue the tasks in execution order and advance the queue each scan. The queue drives its active child. | [Sequential queue](../Sources/TwinCAT.OpenFramework.HowTo/Tasks/SequentialTaskQueueExample.TcPOU) |
+| Select an execution model for a machine or recipe | Automation · automation components, or Workflow · `Workflow` | Keep fixed per-scan machine behavior in the owning component. Choose a workflow when a recipe composes steps, branches or recovery. | [Machine example](SignalControlledIntersectionDemo.md) · [Workflow construction](WorkflowConstruction.md) |
+| Check whether a directory exists on the PLC | FileSystem · `CheckDirectoryExists` | Drive the check to completion. Read the existence result after the operation succeeds so an access failure stays distinguishable from a missing directory. | [Directory check](../Sources/TwinCAT.OpenFramework.HowTo/FileSystem/CheckDirectoryExample.TcPOU) |
+| Read or write a short string in a file | FileSystem · `FileContentManager` with `ReadString255FromFile` or `WriteString255ToFile` | The manager drives the content operation and closes the file. A bounded string read may stop at a line feed. | [Text file operation](../Sources/TwinCAT.OpenFramework.HowTo/FileSystem/TextFileExample.TcPOU) |
+| Save and reload typed configuration fields as JSON | JSON · `JsonConfigurationWriter` and `JsonConfigurationReader` | Use the matching configuration value type when writing and reading each field. Observe the lifetime of nodes returned by the reader or writer. | [Configuration round trip](../Sources/TwinCAT.OpenFramework.HowTo/JSON/JsonConfigurationExample.TcPOU) · [Ownership](JsonAndEventLoggerOwnership.md) |
+| Map a terminal input or scale a raw analog value | IO.Models · terminal model, Devices.IO · `StaticRangeAnalogValueConverter` | Match the model to the selected PDO layout. For scaling alone, supply the raw representation and calibrated endpoints to the converter. | [PDO mapping](IOModels.md) · [Scaling example](../Sources/TwinCAT.OpenFramework.HowTo/IO/ScaleAnalogInputExample.TcPOU) |
+| Test PLC behavior and report results to CI | Testing · `SingleCycleTest`, `MultiCycleTest`, `JUnitXmlReporter` | Use a single-cycle test for an immediate result. For behavior that spans scans, advance a multi-cycle test to completion before reading the report. | [Immediate result](../Sources/TwinCAT.OpenFramework.HowTo/Testing/SingleCycleTestExample.TcPOU) · [Timed result](../Sources/TwinCAT.OpenFramework.HowTo/Testing/MultiCycleTestExample.TcPOU) |

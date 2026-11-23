@@ -1,0 +1,156 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="GenericRepresentationCopyTest" Id="{8f784934-c886-4476-848d-63a0d414f294}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+SPDX-FileCopyrightText: c 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+SPDX-License-Identifier: MIT
+License: https://opensource.org/license/mit
+*)
+
+(*!
+<summary>Checks empty descriptors and byte copies between live caller-owned variables.</summary>
+<description>
+Uses run-local fixtures and references that are used only within the executing PLC task.
+The runner binds assertions to the instance address. Keep the instance at that address for its run.
+</description>
+*)
+
+{attribute 'no_assign'}
+{attribute 'no_explicit_call' := 'do not call this function block directly'}
+FUNCTION_BLOCK GenericRepresentationCopyTest EXTENDS TOF_Testing.SingleCycleTest
+VAR_STAT
+	{attribute 'hide'}
+	_ClassName : STRING := __POUNAME();
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[]]></ST>
+    </Implementation>
+    <Method Name="ExecuteTest" Id="{98e66635-2908-4d84-961a-1c2053960da2}">
+      <Declaration><![CDATA[(*!
+<summary>Checks byte copying and rejection before any destination write.</summary>
+<description>
+Covers empty descriptors from either missing storage component, both size mismatch directions, copying
+across equal-sized types, self-copy and partial overlap in both directions. Storage is local and borrowed throughout.
+</description>
+*)
+METHOD PROTECTED ExecuteTest
+VAR
+	source : TOF_Core.GENERIC_VALUE;
+	wordValue : WORD := 16#1234;
+	rawValue : DWORD := 16#3F800000;
+	floatValue : REAL := 2.0;
+	wideValue : LWORD := 16#1122334455667788;
+	bytes : ARRAY [0..4] OF BYTE := [1, 2, 3, 4, 5];
+	targetBytes : POINTER TO ARRAY [0..3] OF BYTE;
+	accepted : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[source := TOF_Core.GenericValueFactory.FromParts(
+	genericTypeClass := TOF_Core.GENERIC_TYPE_CLASS.UINT_32,
+	address := 0,
+	size := XSIZEOF(rawValue),
+	memoryManagementBehavior := TOF_Core.GENERIC_MEMORY_MANAGEMENT_BEHAVIOR.CLONE_ORIGINAL_VALUE_AND_OWNS_MEMORY
+);
+Assert.ThatBool(
+	actual := source.Address = 0 AND_THEN source.Size = 0
+		AND_THEN source.TypeClass = TOF_Core.GENERIC_TYPE_CLASS.UNSPECIFIED AND_THEN NOT source.IsMemoryOwner,
+	message := "A null clone source must yield an empty descriptor"
+).IsTrue();
+accepted := source.TryCopyTo(target := floatValue);
+Assert.ThatBool(actual := accepted, message := "Empty source must reject copying").IsFalse();
+Assert.ThatReal(actual := floatValue, message := "Empty source changed the target").ToBe(expected := REAL#2.0);
+
+source := TOF_Core.GenericValueFactory.FromParts(
+	genericTypeClass := TOF_Core.GENERIC_TYPE_CLASS.UINT_32,
+	address := ADR(rawValue),
+	size := 0,
+	memoryManagementBehavior := TOF_Core.GENERIC_MEMORY_MANAGEMENT_BEHAVIOR.STORE_ORIGINAL_REFERENCE_AND_NOT_OWNS_MEMORY
+);
+Assert.ThatBool(
+	actual := source.Address = 0 AND_THEN source.Size = 0
+		AND_THEN source.TypeClass = TOF_Core.GENERIC_TYPE_CLASS.UNSPECIFIED AND_THEN NOT source.IsMemoryOwner,
+	message := "Zero size with a live address must yield an empty descriptor"
+).IsTrue();
+
+source := TOF_Core.GenericValueFactory.FromDWordReference(value := rawValue);
+accepted := source.TryCopyTo(target := wordValue);
+Assert.ThatBool(actual := accepted, message := "A smaller target must be rejected").IsFalse();
+Assert.ThatBool(actual := wordValue = 16#1234, message := "Rejected smaller target changed").IsTrue();
+accepted := source.TryCopyTo(target := wideValue);
+Assert.ThatBool(actual := accepted, message := "A larger target must be rejected").IsFalse();
+Assert.ThatBool(actual := wideValue = 16#1122334455667788, message := "Rejected larger target changed").IsTrue();
+
+accepted := source.TryCopyTo(target := floatValue);
+Assert.ThatBool(actual := accepted, message := "An equal-sized REAL must accept DWORD bytes").IsTrue();
+Assert.ThatReal(actual := floatValue, message := "The target must contain the IEEE 754 bit pattern").ToBe(
+	expected := REAL#1.0
+);
+accepted := source.TryCopyTo(target := rawValue);
+Assert.ThatBool(actual := accepted, message := "Identical source and target must be accepted").IsTrue();
+Assert.ThatBool(actual := rawValue = 16#3F800000, message := "Self-copy changed the source").IsTrue();
+
+targetBytes := ADR(bytes[1]);
+source := TOF_Core.GenericValueFactory.FromParts(
+	genericTypeClass := TOF_Core.GENERIC_TYPE_CLASS.UINT_32,
+	address := ADR(bytes[0]),
+	size := XSIZEOF(targetBytes^),
+	memoryManagementBehavior := TOF_Core.GENERIC_MEMORY_MANAGEMENT_BEHAVIOR.STORE_ORIGINAL_REFERENCE_AND_NOT_OWNS_MEMORY
+);
+source.CopyTo(target := targetBytes^);
+Assert.ThatBool(
+	actual := bytes[0] = 1 AND_THEN bytes[1] = 1 AND_THEN bytes[2] = 2
+		AND_THEN bytes[3] = 3 AND_THEN bytes[4] = 4,
+	message := "CopyTo must preserve the original four source bytes when shifting right"
+).IsTrue();
+
+source := TOF_Core.GenericValueFactory.FromParts(
+	genericTypeClass := TOF_Core.GENERIC_TYPE_CLASS.UINT_32,
+	address := ADR(bytes[1]),
+	size := XSIZEOF(targetBytes^),
+	memoryManagementBehavior := TOF_Core.GENERIC_MEMORY_MANAGEMENT_BEHAVIOR.STORE_ORIGINAL_REFERENCE_AND_NOT_OWNS_MEMORY
+);
+targetBytes := ADR(bytes[0]);
+accepted := source.TryCopyTo(target := targetBytes^);
+Assert.ThatBool(actual := accepted, message := "TryCopyTo must accept a left shift").IsTrue();
+Assert.ThatBool(
+	actual := bytes[0] = 1 AND_THEN bytes[1] = 2 AND_THEN bytes[2] = 3
+		AND_THEN bytes[3] = 4 AND_THEN bytes[4] = 4,
+	message := "TryCopyTo must preserve the original four source bytes when shifting left"
+).IsTrue();]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="ClassName" Id="{62a0e8d0-f04c-4cdc-a8f1-90a6c43cb018}">
+      <Declaration><![CDATA[//! <summary>Borrows the concrete class name. Callers must not modify it.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{e238e458-30a0-45a8-9427-453f49b18434}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ClassName REF= _ClassName;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="NamespaceName" Id="{04f2ca18-b9fe-4ab4-a587-d94f1fc0b7cc}">
+      <Declaration><![CDATA[//! <summary>Borrows the compiler-initialized namespace name. Callers must not modify it.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{fc77a166-0310-426a-9da6-b1179c3276ae}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[NamespaceName REF= CurrentNamespace.Name;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="SelfSize" Id="{084653ec-6f5e-44e2-a3b1-886ad2f46930}">
+      <Declaration><![CDATA[//! <summary>Reports the concrete instance size in bytes.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY SelfSize : ULINT]]></Declaration>
+      <Get Name="Get" Id="{701caccc-eb72-409c-a82c-7b8f1c49c2e2}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[SelfSize := XSIZEOF(THIS^);]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+  </POU>
+</TcPlcObject>

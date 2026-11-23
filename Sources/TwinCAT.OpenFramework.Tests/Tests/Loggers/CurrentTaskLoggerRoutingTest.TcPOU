@@ -12,6 +12,7 @@ License: https://opensource.org/license/mit
 <description>
 Owns the queue and captures in the runner task. The task destination, shared filter and numbering are restored
 within the same call. No other task may log while the shared settings are temporarily changed.
+Also checks the shared native diagnostic survives a filter that overwrites the task wrapper.
 </description>
 *)
 
@@ -26,6 +27,7 @@ VAR
 	_Backend : LoggerCaptureBackend;
 	_Queue : TOF_Loggers.QueuedLogger;
 	_QueueConfigured : BOOL;
+	_NativeFilter : LogFilter;
 END_VAR]]></Declaration>
     <Implementation>
       <ST><![CDATA[]]></ST>
@@ -36,6 +38,7 @@ END_VAR]]></Declaration>
 <description>
 Owns the queue and captures in the runner task. The task destination, shared filter and numbering are restored
 within the same call. No other task may log while the shared settings are temporarily changed.
+Also checks the shared native diagnostic survives a filter that overwrites the task wrapper.
 </description>
 *)
 METHOD PROTECTED ExecuteTest
@@ -231,16 +234,76 @@ __TRY
 	Assert.ThatUInt(actual := _Backend.AttemptCount, message := "Hostile TryLog must reach the backend once").ToBe(
 		expected := 5
 	);
+	checkNativeSnapshot();
 __CATCH
 	escaped := TRUE;
 __ENDTRY
 
 _Backend.ThrowOnExecute := FALSE;
 _Backend.DeliveryBehavior := LOGGER_DELIVERY_BEHAVIOR.ACCEPT;
+_NativeFilter.SetSecondaryExceptionProbe(enabled := FALSE);
 TOF_Core.LogManager.CurrentTaskLogger := savedLogger;
 TOF_Core.LogManager.Filter := savedFilter;
 TOF_Core.LogManager.MessageNumberFormat := savedFormat;
 Assert.ThatBool(actual := escaped, message := "The task routing scenario must return normally").IsFalse();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="checkNativeSnapshot" Id="{36cc19d8-818e-4ab8-b9ab-ed7661366e32}">
+      <Declaration><![CDATA[(*!
+<summary>Verifies routing preserves the native diagnostic when the filter reuses the task wrapper.</summary>
+<description>
+Requires the initialized, empty queue. The enclosing scenario owns restoration of the shared filter and
+task logger. Observes the overwritten original wrapper and the independently captured backend message.
+</description>
+*)
+METHOD PRIVATE checkNativeSnapshot
+VAR
+	nativeException : TOF_Core.IException;
+	sharedWrapper : TOF_Core.ISystemException;
+	accepted : BOOL;
+	record : LOGGER_CAPTURED_MESSAGE;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_Backend.ResetCapture();
+nativeException := TOF_Core.ExceptionManager.GetLastException(
+	exceptionCode := __SYSTEM.ExceptionCode.RTSEXCPT_ARRAYBOUNDS,
+	catchPointNamespaceName := 'LogRoutingTest',
+	catchPointPOUName := 'OriginalNativeCatch',
+	catchPointPosition := 'P1'
+);
+
+IF NOT __QUERYINTERFACE(nativeException, sharedWrapper) THEN
+	RecordFailure(message := "The snapshot scenario needs the shared native wrapper");
+	RETURN;
+END_IF
+
+TOF_Core.LogManager.CurrentTaskLogger := _Queue;
+_NativeFilter.SetSecondaryExceptionProbe(enabled := TRUE, allowLog := TRUE);
+TOF_Core.LogManager.Filter := _NativeFilter;
+accepted := TOF_Core.LogManager.TryLogException(
+	exception := nativeException,
+	severity := TOF_Core.ERROR_SEVERITY.ERROR
+);
+TOF_Core.LogManager.Filter := 0;
+
+Assert.ThatBool(actual := accepted, message := "Filter must forward the native diagnostic").IsTrue();
+Assert.ThatBool(
+	actual := sharedWrapper.ExceptionCode = __SYSTEM.ExceptionCode.RTSEXCPT_ACCESS_VIOLATION,
+	message := "Filter must replace the shared wrapper while logging"
+).IsTrue();
+
+TOF_Core.LogManager.ExecuteCurrentTaskLogger();
+Assert.ThatUInt(actual := _Backend.CapturedCount, message := "Backend must receive one native diagnostic").ToBe(
+	expected := 1
+);
+
+IF _Backend.CapturedCount = 1 THEN
+	record := _Backend.RecordAt(index := 0);
+	Assert.ThatBool(
+		actual := Tc2_Standard.WFIND(STR1 := record.Message, STR2 := "OriginalNativeCatch at P1") > 0,
+		message := "Backend must receive the original catch point despite the filter callback"
+	).IsTrue();
+END_IF]]></ST>
       </Implementation>
     </Method>
     <Method Name="BeforeTest" Id="{1bccf1a1-1423-4823-b1c2-a340d85fda80}">
