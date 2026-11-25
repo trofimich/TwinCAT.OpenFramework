@@ -10,28 +10,34 @@ License: https://opensource.org/license/mit
 (*!
 <summary>Runs a fixed tree of individual tests and nested groups in its owning PLC task.</summary>
 <description>
-Concrete descendants own their persistent root tests, groups and interface-array storage and provide Children.
-Call Execute once per PLC cycle until IsFinished. Each run validates roots in STARTING before any direct Reset
-or report callback. Missing storage or null slots raise DataMemberNotSpecifiedException; duplicates, running
-or group-owned roots raise StandardException. Execute catches these failures and exposes an aborted run.
-Children returns the same valid storage and unchanged list throughout the runner lifetime; do not mutate it.
-After startup the runner advances at most one leaf body per call without repeating topology checks.
-AllPassed is meaningful only after IsFinished. Roots are constructed with parent := 0.
-Parent is the fixed association with a group.
-Register each root instance with one runner only and keep the tree stable. This is a caller
-precondition: no parent marker or registry detects sharing roots between runners. Empty runs pass with zero tests.
-ExitCode is the failed leaf count, or -1 for a startup failure or an aborted
-external callback. An aborted callback is never retried; partial counts and report output are possible.
-Before Reset of an externally aborted tree, make its user resources safe; Reset does not provide cancellation.
+<h2>Configure and run</h2>
+Concrete descendants own their persistent root tests, groups and interface-array storage and provide <c>Children</c>.
+Construct roots with <c>parent := 0</c>. <c>Parent</c> is the fixed association with a group.
+Register each root instance with one runner only. The caller must enforce this because the runner has no parent
+marker or registry for detecting shared roots. Keep the <c>Children</c> storage valid and its list unchanged
+throughout the runner lifetime.
+Call <c>Execute</c> once per PLC cycle until <c>IsFinished</c>. Each run validates roots in <c>STARTING</c>
+before any direct reset or report callback. After startup, each call advances at most one leaf body without
+repeating topology checks. Empty runs pass with zero tests.
+
+<h2>Read results and recover</h2>
+Read the read-only run status and counts from the owning task. Read <c>AllPassed</c> only after <c>IsFinished</c>.
+<c>ExitCode</c> is the failed leaf count or <c>-1</c> for a startup failure or an aborted external callback.
+Missing storage or null slots raise <c>DataMemberNotSpecifiedException</c>. Duplicate, running or group-owned roots
+raise <c>StandardException</c>. <c>Execute</c> catches these startup failures and exposes an aborted run.
+An aborted callback is never retried. Counts and report output may be partial.
+Make user resources safe before calling <c>Reset</c> after an external abort. <c>Reset</c> does not cancel a run.
+
+<h2>Task and resource ownership</h2>
 Use one task without reentry per runner, tree and reporter. Other tasks need disjoint instances and buffers.
 Mutable tested resources and custom callbacks also require task isolation or their own synchronization.
-The default ADS backend has no established concurrent-call guarantee; use a separate JUnitXmlReporter per task
-for independent in-memory reporting, or a reporter backed by a synchronized logging service.
-Execute enforces terminal OOM outside recoverable catches. Standalone execution uses cleanupTaskMemory := TRUE
-(the default) to clean the current task after the last consumer of transient exceptions. Under AutomationRunner
-or any other host that performs this cleanup at the task boundary, pass cleanupTaskMemory := FALSE.
-Run status and counts are exposed as read-only properties. Read the observations from the owning task.
-This runner borrows its children and reporter; never copy it by value or delete dependencies while attached.
+The default ADS backend has no established concurrent-call guarantee. Use a separate <c>JUnitXmlReporter</c>
+per task for independent in-memory reporting or a reporter backed by a synchronized logging service.
+<c>Execute</c> enforces terminal OOM outside recoverable catches. Standalone execution uses
+<c>cleanupTaskMemory := TRUE</c> by default to clean the current task after the last consumer of transient exceptions.
+Under <c>AutomationRunner</c> or any host that performs this cleanup at the task boundary, pass
+<c>cleanupTaskMemory := FALSE</c>.
+The runner borrows its children and reporter. Keep dependencies alive while attached and never copy the runner by value.
 </description>
 *)
 
@@ -437,16 +443,21 @@ _Reporter := Reporter;]]></ST>
       <Declaration><![CDATA[(*!
 <summary>Rearms a completed or not-yet-started runner; calls during a normal run are ignored.</summary>
 <description>
-The next Execute resets the tree. After an external callback abort the caller must first recover any
-user resources not covered by scenario teardown. After abort, Reset validates root storage and topology and recursively
-resets the same tree immediately, without setup, body, teardown or reporter callbacks.
+<h2>Repeat a completed run</h2>
+<ol>
+<li>Read or save the previous results while <c>IsFinished</c> is <c>TRUE</c>.</li>
+<li>Call <c>Reset</c> once on the same runner from its owning task.</li>
+<li>Call `$TOF_Testing.TestRunner.Execute` each task cycle until `$TOF_Testing.TestRunner.IsFinished` is <c>TRUE</c>
+again, then check <c>AllPassed</c>, <c>ExitCode</c> and the totals.</li>
+</ol>
+<c>Reset</c> clears the previous run's observations and preserves the same test instances and PLC application.
+The next <c>Execute</c> resets the tree. An existing terminal allocation failure remains latched.
+
+<h2>Recover from an external callback abort</h2>
+First recover any user resources that scenario teardown did not cover. <c>Reset</c> validates root storage and topology
+and recursively resets the same tree immediately without setup, body, teardown or reporter callbacks.
 Running roots are allowed during abort recovery. A validation failure calls no child and retains the aborted observations.
-Custom element Reset callbacks can throw; runner observations remain aborted and recovery can be retried.
-Other tree resets remain deferred until Execute. Reset does not clear terminal allocation failure.
-To repeat a completed run, read or save its results while IsFinished is TRUE, then call this method once on
-the same runner from its owning task. Continue calling Execute each task cycle until IsFinished is TRUE again.
-Check AllPassed, ExitCode and the totals for this second run. Reset clears the previous run's observations and
-does not recreate test instances or reinitialize the PLC application.
+Custom element <c>Reset</c> callbacks can throw. The runner observations remain aborted and recovery can be retried.
 </description>
 *)
 METHOD FINAL Reset

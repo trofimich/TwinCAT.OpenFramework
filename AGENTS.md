@@ -38,6 +38,12 @@ be reflected in Beckhoff documentation; do not override it based on documentatio
 - `<summary>` explains purpose. In `<description>`, cover the applicable preconditions, results, invariants, state transitions,
   ownership/lifetime, failure conditions and reporting mechanisms, post-failure state, Try/lifecycle guarantees,
   and constraints on inheritance, callbacks, and cross-task usage. Do not paraphrase syntax.
+- Use richer DocGen markup where it helps the caller:
+  - Use `<ol>` for steps whose order matters and `<table>` when the caller must compare cases or outcomes.
+  - Use `<c>` for inline ST and `<example><code>...</code></example>` for a short usage example.
+  - Use `$Name` for related API elements (qualify names outside the current element) and `<seealso uri="...">`
+    inside `<description>` for a published guide or full example.
+  - Use `<note type="information">` inside `<description>` for an easily missed ownership, lifetime or timing rule.
 - Distinguish documented guarantees from observed behavior and assumptions. Do not invent a contract based on the
   current implementation.
 - For non-obvious constants, document meaning and application. For bitmasks, document which bits are isolated or

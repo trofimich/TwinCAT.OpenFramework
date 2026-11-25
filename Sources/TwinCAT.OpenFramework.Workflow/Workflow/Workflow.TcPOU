@@ -1,4 +1,4 @@
-<?xml version="1.0" encoding="utf-8"?>
+﻿<?xml version="1.0" encoding="utf-8"?>
 <TcPlcObject Version="1.1.0.1">
   <POU Name="Workflow" Id="{276b6eec-c9aa-49be-b713-e71500f934ba}" SpecialFunc="None">
     <Declaration><![CDATA[(*
@@ -10,15 +10,24 @@ License: https://opensource.org/license/mit
 (*!
 <summary>Coordinates a root activity, workflow state transitions, variable storage and dynamic child lifetime.</summary>
 <description>
-Diagnostic string inputs are borrowed only during the call; retained diagnostic text is copied into owned
-storage. The variable dictionary uses default key equality and hashing. Named variable lookup reports failure
-without propagating exceptions; its output is usable only on success. Dynamic children are registered
-explicitly after construction and identified by address. Registration is not performed by Activity or
-Condition FB_init; registered children remain workflow-owned until disposal. Uncaught non-terminal exceptions
-from the root activity and workflow hooks are contained at the workflow boundary, recorded in FailError and
-logged via LogManager. Terminal allocation failures are propagated.
+<h2>Build and own the activity graph</h2>
+<ol>
+<li>Construct each dynamic activity or condition and check allocation.</li>
+<li>Call <c>RegisterChild</c> before configuring or attaching the node. Registration uses its address and
+transfers ownership to the workflow until disposal. <c>Activity</c> and <c>Condition</c> do not register in
+<c>FB_init</c>.</li>
+<li>Attach the configured nodes to their parents and assign the root with <c>SetRootActivity</c>.</li>
+</ol>
 The ownership registry also holds embedded task and comparer instances until disposal.
-Workflow declarations reset in place when the root completes resetting.
+<h2>Advance execution and read diagnostics</h2>
+The owning PLC task advances the workflow through <c>Execute</c>. Uncaught non-terminal exceptions from
+the root or workflow hooks are recorded in <c>FailError</c> and logged via <c>LogManager</c>.
+Terminal allocation failures propagate. Diagnostic string inputs are borrowed during each call, and
+retained text is copied into the workflow's storage.
+<h2>Observe and reset variables</h2>
+The variable dictionary uses default key equality and hashing. Named variable lookup reports failure
+without propagating exceptions. Its output is usable only on success. Workflow declarations reset in
+place when the root completes resetting.
 </description>
 *)
 
@@ -232,13 +241,17 @@ SetRootActivity(
       <Declaration><![CDATA[(*!
 <summary>Detaches workflow state and releases registered dynamic nodes and embedded dependencies.</summary>
 <description>
-Clears RootActivity, variable bindings and FailError before releasing owned registry entries. Disposal does
-not request cancellation, execute asynchronous cleanup or prove physical resource release. Normal return
-does not certify successful deallocation by every child destructor. Dynamic child destructors must obey
-their no-throw lifecycle contract; disposal must not run concurrently or reenter this workflow.
-Old tree nodes and external aliases are not repaired or cleared. Do not execute or reuse the disposed
-graph, including static containers that borrowed deleted descendants. Build and register a fresh graph for
-SetRootActivity instead. Disposal does not clear the application-wide fatal allocation latch.
+<note type="information">
+For a running graph that needs asynchronous cleanup, request cancellation when permitted and keep advancing
+execution until outstanding work has stopped before disposing of the graph. Disposal only detaches state
+and attempts deletion. Arrange any remaining resource cleanup separately.
+</note>
+Clears <c>RootActivity</c>, variable bindings and <c>FailError</c> before releasing owned registry entries.
+Normal return does not certify physical resource release or successful deallocation by each destructor.
+Dynamic child destructors must obey their no-throw lifecycle contract. Disposal must not run concurrently
+or reenter this workflow.
+Discard old references, including static containers that borrowed deleted descendants. Build and register
+a fresh graph for <c>SetRootActivity</c>. The application-wide fatal allocation latch remains unchanged.
 </description>
 *)
 METHOD DisposeDynamicChildren]]></Declaration>
