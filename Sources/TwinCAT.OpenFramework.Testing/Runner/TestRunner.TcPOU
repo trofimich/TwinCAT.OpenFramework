@@ -16,7 +16,8 @@ or report callback. Missing storage or null slots raise DataMemberNotSpecifiedEx
 or group-owned roots raise StandardException. Execute catches these failures and exposes an aborted run.
 Children returns the same valid storage and unchanged list throughout the runner lifetime; do not mutate it.
 After startup the runner advances at most one leaf body per call without repeating topology checks.
-AllPassed is meaningful only after IsFinished. Roots are constructed with parent := 0; Parent is the fixed association with a group.
+AllPassed is meaningful only after IsFinished. Roots are constructed with parent := 0.
+Parent is the fixed association with a group.
 Register each root instance with one runner only and keep the tree stable. This is a caller
 precondition: no parent marker or registry detects sharing roots between runners. Empty runs pass with zero tests.
 ExitCode is the failed leaf count, or -1 for a startup failure or an aborted
@@ -29,6 +30,7 @@ for independent in-memory reporting, or a reporter backed by a synchronized logg
 Execute enforces terminal OOM outside recoverable catches. Standalone execution uses cleanupTaskMemory := TRUE
 (the default) to clean the current task after the last consumer of transient exceptions. Under AutomationRunner
 or any other host that performs this cleanup at the task boundary, pass cleanupTaskMemory := FALSE.
+Run status and counts are exposed as read-only properties. Read the observations from the owning task.
 This runner borrows its children and reporter; never copy it by value or delete dependencies while attached.
 </description>
 *)
@@ -37,26 +39,35 @@ This runner borrows its children and reporter; never copy it by value or delete 
 FUNCTION_BLOCK ABSTRACT TestRunner
 VAR_GENERIC CONSTANT
 	//! <summary>Exact number of root test or group slots.</summary>
+	{attribute 'hide'}
 	_ChildCount : TOF_Core.INT_LENGTH := 0;
 END_VAR
 EXTENDS TOF_Core.Object
-VAR_OUTPUT
-	IsFinished : BOOL;
-	AllPassed : BOOL;
-	ExitCode : DINT;
-	//! <summary>Runtime exception code for startup or external callback failure when ExitCode is -1.</summary>
-	CallbackException : __SYSTEM.ExceptionCode;
-	//! <summary>Copied stage and exception diagnostic for the aborted run; empty after Reset.</summary>
-	CallbackMessage : TOF_Core.ERROR_MESSAGE;
-	TotalTests : TOF_Core.DINT_LENGTH;
-	PassedTests : TOF_Core.DINT_LENGTH;
-	FailedTests : TOF_Core.DINT_LENGTH;
-	SkippedTests : TOF_Core.DINT_LENGTH;
-	TotalDuration : TIME;
-END_VAR
 VAR
+	{attribute 'hide'}
+	_IsFinished : BOOL;
+	{attribute 'hide'}
+	_AllPassed : BOOL;
+	{attribute 'hide'}
+	_ExitCode : DINT;
+	{attribute 'hide'}
+	_CallbackException : __SYSTEM.ExceptionCode;
+	{attribute 'hide'}
+	_CallbackMessage : TOF_Core.ERROR_MESSAGE;
+	{attribute 'hide'}
+	_TotalTests : TOF_Core.DINT_LENGTH;
+	{attribute 'hide'}
+	_PassedTests : TOF_Core.DINT_LENGTH;
+	{attribute 'hide'}
+	_FailedTests : TOF_Core.DINT_LENGTH;
+	{attribute 'hide'}
+	_SkippedTests : TOF_Core.DINT_LENGTH;
+	{attribute 'hide'}
+	_TotalDuration : TIME;
+
 	_CurrentChildIndex : TOF_Core.INT_LENGTH;
 	_Duration : LTIME;
+	{attribute 'hide'}
 	_Reporter : ITestReporter;
 	_DefaultAdsReporter : AdsLogReporter;
 	_State : TEST_RUN_PHASE;
@@ -98,6 +109,161 @@ PROPERTY ABSTRACT Children : REFERENCE TO ARRAY [0.._ChildCount - 1] OF ITestEle
         </Implementation>
       </Get>
     </Property>
+    <Property Name="IsFinished" Id="{b75203aa-8a34-46f3-b3a9-00058723de22}">
+      <Declaration><![CDATA[(*!
+<summary>Reports whether the run completed or aborted.</summary>
+<description>Reset clears this flag.</description>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY FINAL IsFinished : BOOL]]></Declaration>
+      <Get Name="Get" Id="{62d3f798-ab97-49e8-9045-aac2932a22ea}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[IsFinished := _IsFinished;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="AllPassed" Id="{3ba8a659-2c80-449c-b263-607b0ce65e98}">
+      <Declaration><![CDATA[(*!
+<summary>Reports whether the completed run passed.</summary>
+<description>Read after IsFinished is TRUE. Aborted runs report FALSE.</description>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY FINAL AllPassed : BOOL]]></Declaration>
+      <Get Name="Get" Id="{8b267d7c-8e44-420a-8e0a-2e363e4dce92}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[AllPassed := _AllPassed;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="ExitCode" Id="{93316d75-1210-4197-80c8-a73e59e742e3}">
+      <Declaration><![CDATA[(*!
+<summary>Reports the number of failed tests or -1 if the run aborted.</summary>
+<description>Read after IsFinished is TRUE.</description>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY FINAL ExitCode : DINT]]></Declaration>
+      <Get Name="Get" Id="{1515ee92-a4b7-463c-9a07-f15b26db6fa0}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ExitCode := _ExitCode;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="CallbackException" Id="{311bbd24-e31f-421b-b45c-66930cb50f89}">
+      <Declaration><![CDATA[(*!
+<summary>Reports the runtime exception code when the run aborts.</summary>
+<description>Reset restores RTSEXCPT_NOEXCEPTION.</description>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY FINAL CallbackException : __SYSTEM.ExceptionCode]]></Declaration>
+      <Get Name="Get" Id="{44a97b33-2d1f-496a-b9cf-eb8b3566cddd}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[CallbackException := _CallbackException;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="CallbackMessage" Id="{8804054e-339e-4112-a937-e85ef2ee8286}">
+      <Declaration><![CDATA[(*!
+<summary>Returns the copied stage and exception diagnostic for an aborted run.</summary>
+<description>Reset clears the message.</description>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY FINAL CallbackMessage : TOF_Core.ERROR_MESSAGE]]></Declaration>
+      <Get Name="Get" Id="{b69ec79e-2f7c-42d4-8c9f-e33b095ccc2c}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[CallbackMessage := _CallbackMessage;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="TotalTests" Id="{ae939900-4ffb-4786-8e38-bfe896513757}">
+      <Declaration><![CDATA[(*!
+<summary>Counts passed, failed and skipped tests from completed roots.</summary>
+<description>During execution or after an abort, this count can be partial.</description>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY FINAL TotalTests : TOF_Core.DINT_LENGTH]]></Declaration>
+      <Get Name="Get" Id="{ae41713d-c246-4ff6-a840-9f0336cda2e8}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[TotalTests := _TotalTests;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="PassedTests" Id="{f6f40926-d3c5-4ead-9cf5-4ecb90b1ac6c}">
+      <Declaration><![CDATA[(*!
+<summary>Counts passed tests from completed roots.</summary>
+<description>During execution or after an abort, this count can be partial.</description>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY FINAL PassedTests : TOF_Core.DINT_LENGTH]]></Declaration>
+      <Get Name="Get" Id="{c73557fa-e446-426e-aa48-5bfad2d5a3dd}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[PassedTests := _PassedTests;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="FailedTests" Id="{823536f7-e106-4b81-90a9-1e761f5964cf}">
+      <Declaration><![CDATA[(*!
+<summary>Counts failed tests from completed roots.</summary>
+<description>During execution or after an abort, this count can be partial.</description>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY FINAL FailedTests : TOF_Core.DINT_LENGTH]]></Declaration>
+      <Get Name="Get" Id="{c52af45d-deb0-4ffd-8ccc-41e2e2007923}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[FailedTests := _FailedTests;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="SkippedTests" Id="{a725ea2f-5301-4a5c-b8ae-a80e163ad1bb}">
+      <Declaration><![CDATA[(*!
+<summary>Counts skipped tests from completed roots.</summary>
+<description>During execution or after an abort, this count can be partial.</description>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY FINAL SkippedTests : TOF_Core.DINT_LENGTH]]></Declaration>
+      <Get Name="Get" Id="{4354670b-9f5d-44a9-b8c7-368aba0fef88}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[SkippedTests := _SkippedTests;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="TotalDuration" Id="{0105878a-f512-48d5-8ea2-fb0772bc11b4}">
+      <Declaration><![CDATA[(*!
+<summary>Reports accumulated task cycle time spent advancing the roots.</summary>
+<description>During execution or after an abort, this duration can be partial.</description>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY FINAL TotalDuration : TIME]]></Declaration>
+      <Get Name="Get" Id="{ee6d87e5-30a6-4ce1-929d-7cd93503a2d6}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[TotalDuration := _TotalDuration;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="DefaultAdsRunSummary" Id="{3ff0c619-ed18-4612-b855-6b58524d0b56}">
+      <Declaration><![CDATA[(*!
+<summary>Returns the last summary produced by the built-in ADS reporter.</summary>
+<description>Read after a completed run that used the built-in reporter.
+A custom reporter does not update this summary.</description>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY FINAL DefaultAdsRunSummary : TOF_Core.ERROR_MESSAGE]]></Declaration>
+      <Get Name="Get" Id="{09fe6b43-ada6-4ef8-8bbe-23d472b56094}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[DefaultAdsRunSummary := _DefaultAdsReporter.LastRunSummary;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
     <Method Name="Execute" Id="{d3ffeabc-b7c3-4f44-8869-c4e4801b313d}">
       <Declaration><![CDATA[(*!
 <summary>Drives one root cycle and enforces the terminal allocation latch at the task boundary.</summary>
@@ -127,16 +293,16 @@ END_VAR]]></Declaration>
         <ST><![CDATA[__TRY
 	executeCycle();
 __CATCH(exceptionCode)
-	CallbackException := exceptionCode;
-	CallbackMessage := TestServices.FormatCaughtException(
+	_CallbackException := exceptionCode;
+	_CallbackMessage := TestServices.FormatCaughtException(
 		exceptionCode := exceptionCode,
 		stage := TO_STRING(_State),
 		catchPointPOUName := __POUNAME(),
 		catchPointPosition := __POSITION()
 	);
-	AllPassed := FALSE;
-	ExitCode := -1;
-	IsFinished := TRUE;
+	_AllPassed := FALSE;
+	_ExitCode := -1;
+	_IsFinished := TRUE;
 	_State := TEST_RUN_PHASE.COMPLETED;
 __ENDTRY
 
@@ -198,17 +364,17 @@ CASE _State OF
 			Children[_CurrentChildIndex].Execute();
 
 			IF Children[_CurrentChildIndex].IsFinished THEN
-				PassedTests := PassedTests + Children[_CurrentChildIndex].PassedCount;
-				FailedTests := FailedTests + Children[_CurrentChildIndex].FailedCount;
-				SkippedTests := SkippedTests + Children[_CurrentChildIndex].SkippedCount;
+				_PassedTests := _PassedTests + Children[_CurrentChildIndex].PassedCount;
+				_FailedTests := _FailedTests + Children[_CurrentChildIndex].FailedCount;
+				_SkippedTests := _SkippedTests + Children[_CurrentChildIndex].SkippedCount;
 				
 				_CurrentChildIndex := _CurrentChildIndex + 1;
 			END_IF
 
 		END_IF
 
-		TotalTests := PassedTests + FailedTests + SkippedTests;
-		TotalDuration := TO_TIME(_Duration);
+		_TotalTests := _PassedTests + _FailedTests + _SkippedTests;
+		_TotalDuration := TO_TIME(_Duration);
 
 		IF _CurrentChildIndex >= _ChildCount THEN
 			_State := TEST_RUN_PHASE.REPORTING_TOTALS;
@@ -216,16 +382,16 @@ CASE _State OF
 
 	TEST_RUN_PHASE.REPORTING_TOTALS:
 		activeReporter.ReportRunEnd(
-			totalTests := TotalTests,
-			passedTests := PassedTests,
-			failedTests := FailedTests,
-			skippedTests := SkippedTests,
-			duration := TotalDuration
+			totalTests := _TotalTests,
+			passedTests := _PassedTests,
+			failedTests := _FailedTests,
+			skippedTests := _SkippedTests,
+			duration := _TotalDuration
 		);
 		
-		AllPassed := (FailedTests = TOF_Core.SignedInt32.ZERO);
-		ExitCode := TO_DINT(FailedTests);
-		IsFinished := TRUE;
+		_AllPassed := (_FailedTests = TOF_Core.SignedInt32.ZERO);
+		_ExitCode := TO_DINT(_FailedTests);
+		_IsFinished := TRUE;
 		
 		_State := TEST_RUN_PHASE.COMPLETED;
 
@@ -292,7 +458,7 @@ END_VAR]]></Declaration>
 	RETURN;
 END_IF
 
-IF ExitCode = -1 THEN
+IF _ExitCode = -1 THEN
 	validateChildren(rejectRunningChildren := FALSE);
 
 	FOR i := 0 TO _ChildCount - 1 DO
@@ -302,16 +468,16 @@ END_IF
 
 TOF_Core.DynamicMemoryManager.RaiseIfAllocationFailed();
 
-IsFinished := FALSE;
-AllPassed := FALSE;
-ExitCode := 0;
-CallbackException := __SYSTEM.ExceptionCode.RTSEXCPT_NOEXCEPTION;
-CallbackMessage := "";
-TotalTests := 0;
-PassedTests := 0;
-FailedTests := 0;
-SkippedTests := 0;
-TotalDuration := T#0S;
+_IsFinished := FALSE;
+_AllPassed := FALSE;
+_ExitCode := 0;
+_CallbackException := __SYSTEM.ExceptionCode.RTSEXCPT_NOEXCEPTION;
+_CallbackMessage := "";
+_TotalTests := 0;
+_PassedTests := 0;
+_FailedTests := 0;
+_SkippedTests := 0;
+_TotalDuration := T#0S;
 
 _State := TEST_RUN_PHASE.STARTING;
 _CurrentChildIndex := 0;

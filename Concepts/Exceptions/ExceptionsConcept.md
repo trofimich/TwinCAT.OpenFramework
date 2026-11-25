@@ -32,6 +32,7 @@ Exceptions are meant for real errors that stop an operation from finishing — n
 Follow these simple rules:
 
 * **Use return values or states for normal outcomes.** For example, when an optional item is missing, an operation is still in progress, or a `Try` method returns `FALSE`. Never throw an exception just to catch it right away and turn it into `FALSE` or a status code.
+  For example, if a removal method promises that a value will be absent, it can do nothing when the value is already absent, even in an empty collection. Document this behavior at the method declaration.
 * **Use exceptions when a method cannot do its job.** For example, when a required input is missing or out of range and the method has no normal way to report failure.
 * **Only catch an exception when you actually do something with it.** Good reasons to catch are recovering safely, cleaning up resources, recording error details, adding context before rethrowing, or keeping a `Try` method from throwing. Remember: catching an error does not undo changes that already happened before the error.
 

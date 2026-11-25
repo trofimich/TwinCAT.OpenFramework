@@ -1,158 +1,51 @@
-![TwinCAT Open Framework](Icons/Icon_128.png)
+![TwinCAT OpenFramework](Icons/Icon_128.png)
 
 # TwinCAT.OpenFramework
 
-**A structured application framework for TwinCAT 3.1 (Build 4026+, IEC 61131-3)** — an architectural foundation and extended standard library that brings modern software engineering practices to Beckhoff PLCs, providing deterministic machine modeling, workflow orchestration, dynamic/static collections, structured exceptions, and native PLC testing.
+TwinCAT.OpenFramework is a set of Structured Text libraries for Beckhoff PLCs running TwinCAT 3.1 Build 4026.
+You can use them to organize machine logic, run work across PLC cycles, handle errors, and test code on the PLC.
+The libraries also cover everyday tasks such as building strings, storing lists of values, and reading files.
 
-Licensed under the [MIT License](LICENSE.txt).
+## Getting started
 
-## Setting up a coding agent for your TwinCAT project
+- **Find an API for your task.** Start with [Choosing APIs](Guides/ChoosingAPIs.md).
+  For example, the guide shows how to build a diagnostic message, scale an analog input, or run two tasks in order.
+  Each entry explains when to use the API and links to its declaration or an example.
+  Use the guide from the same tag or commit as your libraries.
+- **Try a first example.** Open the [TwinCAT solution](Sources/TwinCAT.OpenFramework.sln) and find the HowTo project.
+  Its first example tests that adding 2 and 3 gives 5. Follow the [HowTo instructions](Sources/TwinCAT.OpenFramework.HowTo/README.md)
+  to see the result in Watch or choose another example.
+- **Explore a complete machine example.** The [traffic light demo](Guides/SignalControlledIntersectionDemo.md)
+  shows how a controller and its components work together.
 
-Use the [API selection guide](Guides/ChoosingAPIs.md) to find framework APIs by task and see when to use each one.
-To give a coding agent the same guidance in your application repository:
+## Guides by topic
 
-1. Open `AGENTS.md` at the root of your application repository, or create it if needed.
-2. Append the block below alongside your project instructions. If your agent reads a different project instructions file, use that file.
-3. Replace `<revision>` in the link with the framework tag or commit that matches your libraries.
-   For offline use, point the link to `Guides/ChoosingAPIs.md` in a matching local checkout accessible to the agent.
-   Update the link when you upgrade the libraries.
+| I want to... | Read |
+| --- | --- |
+| Organize a machine into components that run each PLC cycle | [Automation architecture](Concepts/AutomationEngine/AutomationEngine.md) |
+| Build a recipe from steps, conditions, and loops | [Workflow construction](Guides/WorkflowConstruction.md) |
+| Handle an exception and keep its details for later | [Exception handling](Concepts/Exceptions/ExceptionsConcept.md) |
+| Handle exceptions in a PLC task without `AutomationRunner` | [Complete example with end-of-cycle cleanup](Concepts/Exceptions/ExceptionsConcept.md#5-example-without-automationrunner) |
+| Choose a collection and understand how it stores values | [Collections](Concepts/Collections/CollectionsConcept.md) and [generic values](Concepts/Generics/GenericsConcept.md) |
+| Map EtherCAT terminal data to PLC variables | [I/O models and supported layouts](Guides/IOModels.md) |
+| Prepare file operations for an online change | [File system guide](Guides/FileSystemOnlineChange.md) |
+| Use JSON and EventLogger objects in PLC tasks | [Task ownership guide](Guides/JsonAndEventLoggerOwnership.md) |
+| Write a PLC test and report its result as JUnit XML | [Testing library guide](Sources/TwinCAT.OpenFramework.Testing/README.md) |
+
+For a list of libraries and their features, see the [technical overview](TECHNICAL_DESCRIPTION.md).
+
+## Using a coding agent in your own project
+
+Copy the instructions below into `AGENTS.md` at the root of your application repository, or into the project
+instructions file your agent reads. Replace `<revision>` with the framework tag or commit that matches your libraries.
+For offline use, link to the guide in a local copy the agent can read. Update the link when you upgrade.
 
 ```markdown
-Use ordinary Structured Text constructs directly. For application tasks, consult the
-[OpenFramework API selection guide](https://github.com/trofimich/TwinCAT.OpenFramework/blob/<revision>/Guides/ChoosingAPIs.md).
-Prefer an API from the OpenFramework libraries already referenced by this PLC project when its
-documented behavior meets the requirements. Otherwise check the standard TwinCAT and Beckhoff APIs.
-Check both before implementing a reusable solution. Treat adding a library as a separate dependency decision.
+Use ordinary Structured Text for assignments, arithmetic, branches, and loops.
+For application tasks, consult the [OpenFramework API selection guide](https://github.com/trofimich/TwinCAT.OpenFramework/blob/<revision>/Guides/ChoosingAPIs.md).
+First check the OpenFramework libraries this PLC project already references. If their APIs do not fit the task,
+check the standard TwinCAT and Beckhoff libraries before writing your own reusable code.
+Treat adding a library as a separate decision.
 ```
 
-### Why use this framework?
-
-1. **Organized Utility Classes:** Replaces scattered standard functions with logically grouped static methods (e.g., `TOF_Core.Strings` providing `.GetLength()`, `.Concat255()`, `.ConcatFit255()`, `.Append()`, `.ReplaceInSource()`, `.CreateSplitter()`, `.Join()`, `.TrimChars()`).
-2. **Advanced Data Structures:** Provides both fixed-capacity static and heap-backed dynamic collections (`List`, `ByteList`, `Dictionary`, `UniqueDataSet`, `Queue`, `Stack`) with unified `GENERIC_VALUE` descriptors and ownership guards.
-3. **Structured Exception Handling:** Adds detailed error messages, call-site info, timestamps, and modular logging on top of TwinCAT's `__TRY / __CATCH`. Use normal return values for expected cases (like a missing item or a `Try` method returning `FALSE`), and reserve exceptions for real errors. See [when to use exceptions](Concepts/Exceptions/ExceptionsConcept.md#when-to-use-exceptions).
-4. **Unified Interfaces:** Provides standard interfaces and ready-to-use implementations for logging (`ILogger`), action permissions (`IActionPermissionPolicy`), events (`IEvent`), configuration serialization (`IConfigurationSerializable`), IO terminal process-image models (`TOF_IOModels`), and field devices (`TOF_Devices_IO`).
-5. **Standardized Machine Modeling & Workflow Orchestration:** Offers a deterministic hierarchy (`AutomationRunner` → `AutomationController` → `CompositeAutomationComponent` → `LeafAutomationComponent`) for fixed machine hardware alongside a dynamic `Workflow` engine for external/JSON-configured recipes.
-6. **Native PLC Testing:** Includes `TwinCAT.OpenFramework.Testing` with fluent typed assertions, cycle-bounded tests, and ADS/JUnit XML reporting.
-7. **Full Technical Overview:** See [TECHNICAL_DESCRIPTION.md](TECHNICAL_DESCRIPTION.md).
-
----
-
-## 🚨 The Problem
-
-As TwinCAT projects grow, they often evolve into implicit state machines with scattered error handling. They become:
-
-* Hard to maintain and extend
-* Tightly coupled
-* Filled with repetitive patterns
-* Lacking clear architectural boundaries
-
-Typical PLC code mixes execution flow, business logic, and error handling. This leads to:
-
-* Fragile systems
-* Slow development
-* High cost of change and maintenance
-
----
-
-## 💡 The Solution
-
-TwinCAT.OpenFramework provides a **unified platform** for PLC development, similar in spirit to modern IT software frameworks.
-
-Instead of ad-hoc code, you get:
-
-* A structured execution model
-* A consistent programming model
-* A modular, reusable foundation library
-
----
-
-## 🧱 Architecture
-
-The framework is built around three main layers:
-
-- Execution Layer → "runtime"
-- Programming Model → "language extensions"
-- Foundation Library → "standard library"
-
-### 1. Execution Layer
-
-Defines a predictable and explicit execution model, replacing ad-hoc control flow typical for PLC applications:
-
-* `AutomationRunner` (top-level root scheduler and per-task runtime boundary)
-* `AutomationController` / `CompositeAutomationComponent` / `LeafAutomationComponent`
-* Cooperative `Task` / `TaskQueue` / `Timer` state machines
-* `Workflow` orchestration engine for dynamic scenarios
-
-This layer separates **how code runs** from **what it does**.
-
-### 2. Programming Model
-
-Defines how you write logic:
-
-* Exception-like error handling (`__TRY / __CATCH`) with `TOF_Core.Exceptions`
-* Saved error details (`ERROR` and `ERROR_MESSAGE`) that stay valid across PLC cycles even after the original exception is cleaned up
-* Base abstractions (`Object`, `GENERIC_VALUE`, policies, events, permissions)
-
-### 3. Foundation Library
-
-Provides reusable low-level components:
-
-* Collections (`List`, `ByteList`, `Dictionary`, `UniqueDataSet`, `Queue`, `Stack`) and `Comparison`
-* String, wide-string, math, bit, and date/time utilities
-* Task-local `LogManager`, `AdsLogger`, `EventLogger`, `SimpleTextFileLogger`, `QueuedLogger`
-* Asynchronous `FileSystem`, `JSON` serialization, EtherCAT `IO.Models`, `Devices.IO`, and `Testing`
-* Full list in [TECHNICAL_DESCRIPTION.md](TECHNICAL_DESCRIPTION.md)
-
----
-
-## 🔥 What You Gain
-
-* 📐 **Clear and scalable architecture**
-* 🔁 **Reusable components** (write once, use across projects)
-* 📉 **Lower maintenance costs** (less repetitive code, faster commissioning)
-* 🤝 **Easier onboarding** (standardized OOP approaches help new developers join faster)
-* ⚡ **Faster development** for medium and large projects
-
----
-
-## 🚀 Example: Structured Error Handling
-
-When using `AutomationRunner.Execute()`, the runner automatically updates system time, services the task's logger, checks for out-of-memory errors, and cleans up exceptions at the end of every cycle. For standalone code without `AutomationRunner`, wrap operations in `__TRY / __CATCH`:
-
-```iecst
-__TRY
-    controller.Execute();
-__CATCH(errorCode)
-    exception := TOF_Core.ExceptionManager.GetLastException(
-        exceptionCode := errorCode,
-        catchPointNamespaceName := CurrentNamespace.Name, // constant with name of your project namespace
-        catchPointPOUName := __POUNAME(),
-        catchPointPosition := __POSITION()
-    );
-    TOF_Core.LogManager.TryLogException(
-        exception := exception,
-        severity := TOF_Core.ERROR_SEVERITY.ERROR
-    );
-__ENDTRY
-```
-
-See [Concepts/Exceptions/ExceptionsConcept.md](Concepts/Exceptions/ExceptionsConcept.md#5-example-without-automationrunner) for the required end-of-cycle cleanup steps (`RaiseIfAllocationFailed`, `ExceptionManager.Cleanup`, and `DynamicMemoryManager.CleanupMemory`).
-
----
-
-## 📚 Documentation Map
-
-### Architecture & Concepts
-* [Technical Capabilities & Library Overview](TECHNICAL_DESCRIPTION.md)
-* [Automation Architecture Concept](Concepts/AutomationEngine/AutomationEngine.md)
-* [Exception Handling Concept](Concepts/Exceptions/ExceptionsConcept.md)
-* [Collections Concept](Concepts/Collections/CollectionsConcept.md)
-* [Generic Values (`GENERIC_VALUE`) Concept](Concepts/Generics/GenericsConcept.md)
-
-### Guides & Examples
-* [Signal-Controlled Intersection Demo](Guides/SignalControlledIntersectionDemo.md)
-* [Building & Loading Dynamic Workflows](Guides/WorkflowConstruction.md)
-* [IO Models: Mapping & Supported Process Images](Guides/IOModels.md)
-* [FileSystem: Preparing for Online Change](Guides/FileSystemOnlineChange.md)
-* [JSON & EventLogger: Task Ownership](Guides/JsonAndEventLoggerOwnership.md)
-* [Testing Library Guide](Sources/TwinCAT.OpenFramework.Testing/README.md)
+Licensed under the [MIT License](LICENSE.txt).

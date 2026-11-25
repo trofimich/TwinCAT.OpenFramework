@@ -11,7 +11,8 @@ License: https://opensource.org/license/mit
 <summary>Verifies the testing library with an independent cyclic driver and direct expectations.</summary>
 <description>
 Runs sixteen scenarios in order with separate inner runners, including deliberately failed inner tests.
-Keeps fixtures and the first diagnostic alive across scans. Publishes results directly to the ADS log.
+Keeps fixtures and the current scenario diagnostic alive across scans. Publishes results to the ADS log and
+retains the first failed scenario diagnostic for the test controller.
 Call Execute once per scan in the owning test task. AutomationRunner owns task memory cleanup.
 This suite runs once per application initialization. Do not copy fixture state.
 </description>
@@ -39,6 +40,8 @@ VAR_OUTPUT
 	FailedTests : DINT;
 	//! <summary>TRUE after every scenario has an outcome and the summary has been published.</summary>
 	IsFinished : BOOL;
+	//! <summary>First failed scenario name and diagnostic. Empty until the first failure is recorded.</summary>
+	FirstFailureMessage : STRING(255);
 END_VAR
 VAR
 	_Scenario : TEST_RUNNER_CONTRACT_SCENARIO;
@@ -177,7 +180,8 @@ END_VAR]]></Declaration>
       <Declaration><![CDATA[(*!
 <summary>Advances one scenario and reports its outcome after completion.</summary>
 <description>
-Retains the first failed expectation across pending cycles. An unexpected exception fails the active scenario.
+Retains the first failed expectation across pending cycles and copies the first completed scenario failure for
+the application lifetime. An unexpected exception fails the active scenario.
 Checks the allocation latch outside the recovery block. The caller owns task memory cleanup.
 Returns immediately after all scenarios finish and publishes exactly one summary per initialization.
 </description>
@@ -187,6 +191,7 @@ VAR
 	caseName : STRING(80);
 	nextScenario : TEST_RUNNER_CONTRACT_SCENARIO;
 	completed : BOOL;
+	failureDiagnostic : STRING(255);
 	exceptionCode : __SYSTEM.ExceptionCode;
 END_VAR]]></Declaration>
       <Implementation>
@@ -304,10 +309,13 @@ END_IF
 
 IF _CaseFailed THEN
 	FailedTests := FailedTests + 1;
-	logResult(
-		isError := TRUE,
-		message := TOF_Core.Strings.Concat255(caseName, ': ', _FailureMessage)
-	);
+	failureDiagnostic := TOF_Core.Strings.Concat255(caseName, ': ', _FailureMessage);
+
+	IF FailedTests = 1 THEN
+		FirstFailureMessage := failureDiagnostic;
+	END_IF
+
+	logResult(isError := TRUE, message := failureDiagnostic);
 ELSE
 	PassedTests := PassedTests + 1;
 END_IF
@@ -1626,11 +1634,11 @@ checkExternalRecovery := TRUE;]]></ST>
     </Method>
     <Method Name="checkIndexedChildren" Id="{ff86329b-fcb6-47e8-9300-27cf974a301e}">
       <Declaration><![CDATA[(*!
-<summary>Checks direct-child interface dispatch, fixed ordering and explicit accessor failures.</summary>
+<summary>Checks child access, fixed ordering and leaf counting before and after the first successful Reset.</summary>
 <description>
 Borrows persistent fixtures before execution and after a rejected Reset. Test-only slot corruption is restored
 before returning. Child identity is compared through ITestElement on both sides; indexed observation
-invokes no child body.
+invokes no child body. A valid read followed by a missing-slot fault detects a leaf count cached by the getter.
 
 Returns TRUE when all observations for this scenario are complete.
 </description>
@@ -1645,6 +1653,7 @@ VAR
 	exceptionCode : __SYSTEM.ExceptionCode;
 	rejected : BOOL;
 	firstBodyCalls : UDINT;
+	observedCount : TOF_Core.DINT_LENGTH;
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[element := _IndexedGroup;
@@ -1707,8 +1716,24 @@ __ENDTRY
 
 expect(condition := rejected, message := 'Missing storage is diagnosed before an invalid index');
 
-// A failed Reset does not prevent observing an existing slot; the missing selected slot remains an error.
+expectDInt(expected := 2, actual := element.TestCount, message := 'Both leaves count before Reset');
+
 _IndexedGroup.Children[1] := 0;
+rejected := FALSE;
+
+__TRY
+	observedCount := element.TestCount;
+__CATCH(exceptionCode)
+	assertCaughtExceptionType(exceptionCode := exceptionCode, expectedTypeName := 'DataMemberNotSpecifiedException');
+	rejected := TRUE;
+__ENDTRY
+
+expect(
+	condition := rejected,
+	message := TOF_Core.Strings.Concat255('Missing slot during leaf counting. Count returned: ', TO_STRING(observedCount))
+);
+
+// A failed Reset does not prevent observing an existing slot; the missing selected slot remains an error.
 rejected := FALSE;
 
 __TRY
@@ -1740,6 +1765,7 @@ expectUDInt(
 	message := 'Indexed observation invokes no child body'
 );
 _IndexedGroup.Reset(reporter := 0);
+expectDInt(expected := 2, actual := element.TestCount, message := 'Successful Reset restores the complete count');
 checkIndexedChildren := TRUE;]]></ST>
       </Implementation>
     </Method>
@@ -1859,7 +1885,7 @@ checkPaths := TRUE;]]></ST>
     </Method>
     <Method Name="checkReporterAbort" Id="{ff8cf1a3-fd79-4c4f-9137-e06eee3d3007}">
       <Declaration><![CDATA[(*!
-<summary>Verifies that a reporter failure aborts once after teardown and clears the reporter reference.</summary>
+<summary>Verifies that a reporter failure aborts once after teardown and records the diagnostic.</summary>
 <description>The same leaf runs with a replacement reporter after a completed abort and Reset.
 An incomplete run fails when it reaches the scan limit. Returns TRUE when the scenario has an outcome.
 </description>
@@ -1947,9 +1973,9 @@ expect(
 	message := 'A completed leaf clears its reporter reference even when result delivery throws'
 );
 expectFalse(condition := _AbortReport.IsReady, message := 'An aborted report remains incomplete');
+diagnostic := _AbortRun.CallbackMessage;
 expect(
-	condition := TOF_Core.WideStrings.Contains(stringToSearchIn := _AbortRun.CallbackMessage,
-		stringToFind := "Reporter failed"),
+	condition := TOF_Core.WideStrings.Contains(stringToSearchIn := diagnostic, stringToFind := "Reporter failed"),
 	message := 'External callback diagnostic is copied'
 );
 _AbortRun.Reset();
@@ -2262,7 +2288,7 @@ checkTopology := TRUE;]]></ST>
     </Method>
     <Method Name="checkXmlEncoding" Id="{a12404ad-44dd-4844-8d07-6492b26dc063}">
       <Declaration><![CDATA[(*!
-<summary>Checks long XML diagnostics, supplementary Unicode, isolated surrogates and XML controls.</summary>
+<summary>Checks compact XML and escaping of long diagnostics, supplementary Unicode and controls.</summary>
 <description>Returns TRUE when all observations for this scenario are complete.</description>
 *)
 METHOD PRIVATE checkXmlEncoding : BOOL
@@ -2273,7 +2299,7 @@ VAR
 	i : UDINT;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[// U+1F600 is a surrogate pair; it is followed by an isolated high surrogate, U+0001, TAB and ampersand.
+        <ST><![CDATA[// U+1F600 is followed by an isolated high surrogate, U+0001, TAB, ampersand, CR and LF.
 characters := ADR(diagnostic);
 characters[0] := 16#D83D;
 characters[1] := 16#DE00;
@@ -2281,8 +2307,10 @@ characters[2] := 16#D800;
 characters[3] := 16#0001;
 characters[4] := 16#0009;
 characters[5] := 16#0026;
+characters[6] := 16#000D;
+characters[7] := 16#000A;
 
-FOR i := 6 TO 405 DO
+FOR i := 8 TO 405 DO
 	characters[i] := 16#0078;
 END_FOR
 
@@ -2302,9 +2330,16 @@ expect(condition := _XmlReport.IsReady AND_THEN content <> 0, message := 'Comple
 
 IF content <> 0 THEN
 	expect(
+		condition := NOT TOF_Core.Strings.Contains(stringToSearchIn := content^, stringToFind := '$R')
+			AND_THEN NOT TOF_Core.Strings.Contains(stringToSearchIn := content^, stringToFind := '$N')
+			AND_THEN NOT TOF_Core.Strings.Contains(stringToSearchIn := content^, stringToFind := '$T')
+			AND_THEN NOT TOF_Core.Strings.Contains(stringToSearchIn := content^, stringToFind := ' <'),
+		message := 'JUnit output contains no line breaks or indentation'
+	);
+	expect(
 		condition := TOF_Core.Strings.Contains(stringToSearchIn := content^,
-			stringToFind := '&#128512;&#65533;&#65533;&#9;&amp;'),
-		message := 'Surrogate pair, isolated surrogate, forbidden control and tab are encoded'
+			stringToFind := '&#128512;&#65533;&#65533;&#9;&amp;&#13;&#10;'),
+		message := 'Unicode and diagnostic whitespace are escaped'
 	);
 	expect(
 		condition := TOF_Core.Strings.Contains(stringToSearchIn := content^, stringToFind := 'END_OF_XML_DIAGNOSTIC'),

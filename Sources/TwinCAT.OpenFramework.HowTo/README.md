@@ -55,9 +55,9 @@ For online change and independent verification of closure see [FileSystem online
 ## Read a mapped analog input
 
 [IOModelsExample](IO/IOModelsExample.TcPOU) requires an EL3001 with the standard status-plus-INT16 PDO.
-Follow the XAE mapping list in the program declaration, then set `_BindingsConfigured` TRUE.
-Read `_Voltage` only while `_InputValid` is TRUE. A valid raw value of 0 gives 0 V and 32767 gives 10 V.
-The first scan establishes the toggle baseline. On later scans `_InputUpdated` is TRUE when the input is valid
+Follow the XAE mapping list in the program declaration, then set `BindingsConfigured` TRUE in Watch.
+Read `Voltage` only while `InputValid` is TRUE. A valid raw value of 0 gives 0 V and 32767 gives 10 V.
+The first scan establishes the toggle baseline. On later scans `InputUpdated` is TRUE when the input is valid
 and the toggle differs from the preceding scan. A PLC trace can show a one-scan update that Watch misses.
 
 For complete applications see [Intersection](../../Guides/SignalControlledIntersectionDemo.md)

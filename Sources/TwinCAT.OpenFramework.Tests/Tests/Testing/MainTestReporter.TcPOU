@@ -1,0 +1,205 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="MainTestReporter" Id="{7eb12daa-2e96-44ac-82a1-0e136171df21}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+SPDX-FileCopyrightText: c 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+SPDX-License-Identifier: MIT
+License: https://opensource.org/license/mit
+*)
+
+(*!
+<summary>Logs the main runner results to ADS and retains a JUnit report.</summary>
+<description>
+The owning runner calls the ADS reporter first and the JUnit reporter second at each reporting boundary.
+Callback exceptions abort the runner. The JUnit buffer belongs to this instance and its contents are stable
+after a successful ReportRunEnd until the next ReportRunStart. Do not copy this instance or reenter its callbacks.
+</description>
+*)
+
+{attribute 'no_assign'}
+{attribute 'no_explicit_call' := 'do not call this function block directly'}
+FUNCTION_BLOCK MainTestReporter EXTENDS TOF_Testing.AdsLogReporter
+VAR_STAT
+	//! <summary>Concrete reporter class name stored separately from the inherited class name.</summary>
+	{attribute 'hide'}
+	_MainReporterClassName : STRING := __POUNAME();
+END_VAR
+VAR
+	//! <summary>Owns the JUnit buffer for the main runner.</summary>
+	_JUnitReporter : TOF_Testing.JUnitXmlReporter;
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[]]></ST>
+    </Implementation>
+    <Property Name="ClassName" Id="{8d7366ea-239d-4c0f-afb1-c02d1f244978}">
+      <Declaration><![CDATA[//! <summary>Provides the concrete report writer class name.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{e3f6574e-9f4b-4980-a8cd-06c64372ab96}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ClassName REF= _MainReporterClassName;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="NamespaceName" Id="{1ae55fc9-f332-41c1-8c48-6d86650c384f}">
+      <Declaration><![CDATA[//! <summary>Provides the concrete report writer namespace.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{a85dbd59-1830-4cda-9643-15a3ab2fafc2}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[NamespaceName REF= CurrentNamespace.Name;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="SelfSize" Id="{1c6051a3-88af-4920-9034-dd9f3921eb0e}">
+      <Declaration><![CDATA[//! <summary>Reports this instance's storage excluding the dynamic JUnit buffer.</summary>
+{attribute 'monitoring' := 'call'}
+PROPERTY SelfSize : ULINT]]></Declaration>
+      <Get Name="Get" Id="{971d65b2-9966-4448-9c28-9a2cde9ae5ed}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[SelfSize := XSIZEOF(THIS^);]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="JUnitContentLength" Id="{df140cf5-fd9c-44d1-a577-ae98f247c746}">
+      <Declaration><![CDATA[(*!
+<summary>Reports the completed JUnit document's byte count without the terminating zero.</summary>
+<description>Returns zero until the JUnit reporter has finished writing the document.</description>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY JUnitContentLength : UDINT]]></Declaration>
+      <Get Name="Get" Id="{cf9052f9-5b13-4227-829f-af02bd923279}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[IF _JUnitReporter.IsReady THEN
+	JUnitContentLength := _JUnitReporter.ContentLength;
+END_IF]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="ReadJUnitChunk" Id="{20ed118a-cd2e-40f3-b3f1-8ccf8a15008d}">
+      <Declaration><![CDATA[(*!
+<summary>Copies up to 1023 ASCII bytes from the completed JUnit document into an IEC string.</summary>
+<description>
+Returns an empty string when the report is unavailable or the offset is at or beyond the end.
+Also returns an empty string if the byte copy does not complete.
+Read in the owning task while callbacks are idle. The returned string is independent of the reporter buffer.
+</description>
+<param name="offset">Zero-based byte offset in the document.</param>
+*)
+METHOD ReadJUnitChunk : STRING(1023)
+VAR_INPUT
+	offset : UDINT;
+END_VAR
+VAR
+	contentLength : UDINT;
+	source : POINTER TO STRING;
+	byteCount : UDINT;
+	chunkBytes : ARRAY [0..1023] OF BYTE;
+	chunkText : POINTER TO STRING(1023);
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[ReadJUnitChunk := '';
+contentLength := JUnitContentLength;
+
+IF offset >= contentLength THEN
+	RETURN;
+END_IF
+
+source := _JUnitReporter.ContentAddress;
+
+IF source = 0 THEN
+	RETURN;
+END_IF
+
+// Reserve the last byte for the ASCII string terminator.
+byteCount := MIN(contentLength - offset, TO_UDINT(SIZEOF(chunkBytes)) - 1);
+
+IF Tc2_System.MEMCPY(destAddr := ADR(chunkBytes), srcAddr := source + offset, n := byteCount) = byteCount THEN
+	chunkBytes[byteCount] := TO_BYTE(TOF_Core.UnsignedInt8.MIN_VALUE);
+	chunkText := ADR(chunkBytes);
+	ReadJUnitChunk := chunkText^;
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="ReportRunStart" Id="{a35df40e-91a6-42db-9795-e2913ec89978}">
+      <Declaration><![CDATA[(*!
+<summary>Starts ADS logging and opens the new JUnit document.</summary>
+<description>The JUnit start invalidates the previous document and reuses the allocated buffer.</description>
+*)
+METHOD ReportRunStart
+VAR_INPUT
+	testCount : TOF_Core.DINT_LENGTH;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[SUPER^.ReportRunStart(testCount := testCount);
+_JUnitReporter.ReportRunStart(testCount := testCount);]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="ReportTestCaseResult" Id="{ef4e5cf7-e97f-49fd-a060-d254781c8a07}">
+      <Declaration><![CDATA[(*!
+<summary>Reports a terminal leaf to ADS and adds its testcase to the JUnit document.</summary>
+<description>Accepts the terminal outcomes defined by ITestReporter. The diagnostic is borrowed for this call.</description>
+*)
+METHOD ReportTestCaseResult
+VAR_INPUT
+	groupPath : WSTRING(255);
+	testName : WSTRING;
+	outcome : TOF_Testing.TEST_OUTCOME;
+	duration : TIME;
+END_VAR
+VAR_IN_OUT CONSTANT
+	message : TOF_Core.ERROR_MESSAGE;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[SUPER^.ReportTestCaseResult(
+	groupPath := groupPath,
+	testName := testName,
+	outcome := outcome,
+	duration := duration,
+	message := message
+);
+_JUnitReporter.ReportTestCaseResult(
+	groupPath := groupPath,
+	testName := testName,
+	outcome := outcome,
+	duration := duration,
+	message := message
+);]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="ReportRunEnd" Id="{d55cbe5b-1ae1-4ad0-9387-1e57bac6a9c2}">
+      <Declaration><![CDATA[(*!
+<summary>Retains the ADS summary and closes the JUnit document.</summary>
+<description>After this callback succeeds, both outputs describe the same completed main run.</description>
+*)
+METHOD ReportRunEnd
+VAR_INPUT
+	totalTests : TOF_Core.DINT_LENGTH;
+	passedTests : TOF_Core.DINT_LENGTH;
+	failedTests : TOF_Core.DINT_LENGTH;
+	skippedTests : TOF_Core.DINT_LENGTH;
+	duration : TIME;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[SUPER^.ReportRunEnd(
+	totalTests := totalTests,
+	passedTests := passedTests,
+	failedTests := failedTests,
+	skippedTests := skippedTests,
+	duration := duration
+);
+_JUnitReporter.ReportRunEnd(
+	totalTests := totalTests,
+	passedTests := passedTests,
+	failedTests := failedTests,
+	skippedTests := skippedTests,
+	duration := duration
+);]]></ST>
+      </Implementation>
+    </Method>
+  </POU>
+</TcPlcObject>

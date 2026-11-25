@@ -14,7 +14,8 @@ Descendants own persistent tests, nested groups and interface-array storage. Chi
 array throughout the group lifetime; callers must not modify its contents through the reference. Each child
 is non-null, occurs once and has this group as its constructor-assigned Parent. Parent chains are acyclic.
 All objects outlive the tree; no allocation ownership is transferred. Zero children form an empty group.
-Reset validates the child reference, slots and parent chain once at the start of each run. Missing
+Reset validates the child reference, slots and parent chain once at the start of each run.
+The first successful Reset records the configured leaf count after the children have reset. Missing
 array storage raises DataMemberNotSpecifiedException; null slots do likewise with an indexed member name.
 Duplicates, a mismatched parent or a parent cycle raise StandardException before any direct child is called.
 A descendant's validation or callback can still fail after earlier siblings have reset; no rollback is promised.
@@ -38,6 +39,7 @@ VAR
 	
 	{attribute 'hide'} 
 	_TestCount : TOF_Core.DINT_LENGTH;
+	_TestCountKnown : BOOL;
 END_VAR]]></Declaration>
     <Implementation>
       <ST><![CDATA[]]></ST>
@@ -171,19 +173,22 @@ GetChildByIndex := Children[index];]]></ST>
       </Implementation>
     </Method>
     <Method Name="getTestCount" Id="{459d572d-b683-422b-a67b-191e7de7c824}" FolderPath="Service methods\">
-      <Declaration><![CDATA[//! <summary>Sums the leaf counts of the group's direct children.</summary>
+      <Declaration><![CDATA[(*!
+<summary>Reads and sums the leaf counts of the group's direct children.</summary>
+<description>
+Requires a stable, acyclic composition in the owning task. Missing storage or a null slot in a nonempty group
+raises DataMemberNotSpecifiedException. Child getter exceptions propagate without recording a count.
+</description>
+*)
 METHOD PRIVATE getTestCount : TOF_Core.DINT_LENGTH
 VAR
-	// An empty group gives the FOR loop an upper bound of -1.
+	child : ITestElement;
 	i : INT;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[IF NOT __ISVALIDREF(Children) THEN
-	RETURN;
-END_IF
-
-FOR i := 0 TO _ChildCount - 1 DO
-	getTestCount := getTestCount + Children[i].TestCount;
+        <ST><![CDATA[FOR i := 0 TO _ChildCount - 1 DO
+	child := GetChildByIndex(index := i);
+	getTestCount := getTestCount + child.TestCount;
 END_FOR]]></ST>
       </Implementation>
     </Method>
@@ -193,7 +198,8 @@ END_FOR]]></ST>
 <description>
 Does not run teardown or release user resources. Call only at the lifecycle boundaries in ITestElement.
 The reporter is borrowed until completion; no locks or cross-task transfer are provided.
-Validation or a child Reset exception propagates and can leave a partially reset tree; the runner aborts startup.
+The first successful Reset records the fixed leaf count after resetting the children.
+Validation, a child Reset or a counting exception can leave a partially reset tree and abort runner startup.
 </description>
 *)
 METHOD FINAL Reset
@@ -294,16 +300,21 @@ _CurrentChildIndex := 0;
 
 FOR i := 0 TO _ChildCount - 1 DO
 	Children[i].Reset(reporter := _Reporter);
-END_FOR]]></ST>
+END_FOR
+
+IF NOT _TestCountKnown THEN
+	_TestCount := getTestCount();
+	_TestCountKnown := TRUE;
+END_IF]]></ST>
       </Implementation>
     </Method>
     <Property Name="TestCount" Id="{62ece350-030b-4f03-9dee-55764a81e8cc}">
       <Declaration><![CDATA[(*!
 <summary>Sums the configured leaf counts of the direct children.</summary>
 <description>
-Requires a valid, acyclic subtree. Traverses nested groups through their getters using the current task stack.
-An empty group returns zero. Missing child storage or a null slot in a nonempty group raises
-DataMemberNotSpecifiedException. Child getter exceptions propagate and the tree state is unchanged.
+Requires a valid, acyclic subtree. Before the first successful Reset, counts the leaves without changing the tree
+or retaining the result. A nonempty group with missing storage or a null slot raises DataMemberNotSpecifiedException.
+After the first successful Reset, returns the stored count of the fixed tree. An empty group returns zero.
 </description>
 *)
 {attribute 'monitoring' := 'call'}
@@ -311,11 +322,11 @@ PROPERTY FINAL TestCount : TOF_Core.DINT_LENGTH]]></Declaration>
       <Get Name="Get" Id="{fced463e-d585-4a9e-b1d7-6c70f0a20b04}">
         <Declaration><![CDATA[]]></Declaration>
         <Implementation>
-          <ST><![CDATA[IF _TestCount = 0 THEN
-	_TestCount := getTestCount();
-END_IF
-
-TestCount := _TestCount;]]></ST>
+          <ST><![CDATA[IF _TestCountKnown THEN
+	TestCount := _TestCount;
+ELSE
+	TestCount := getTestCount();
+END_IF]]></ST>
         </Implementation>
       </Get>
     </Property>

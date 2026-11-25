@@ -31,9 +31,8 @@ be reflected in Beckhoff documentation; do not override it based on documentatio
   Update the guide when a new application task becomes supported or the recommended choice changes.
   Keep signatures and detailed contracts beside their declarations.
 
-- Document each new or modified type, method, property, or function next to its declaration. When changing a member,
-  update or add its DocGen. Update the type's DocGen as well if the member change affects the type's contract.
-  Documentation of unrelated members is outside the scope of that change.
+- Add or update DocGen at the declaration of each new or modified type, method, property, or function.
+  Update the enclosing type's DocGen if its contract changes. Leave unrelated members out of scope.
 - Format: `(*! ... *)` or `//!` with XML tags `<summary>`, `<description>`, `<param>`. Do not mix DocGen with
   Markdown/rST, and do not add empty sections.
 - `<summary>` explains purpose. In `<description>`, cover the applicable preconditions, results, invariants, state transitions,
@@ -50,9 +49,7 @@ be reflected in Beckhoff documentation; do not override it based on documentatio
   `bInCopyCode: BOOL; // TRUE: the instance will be copied to the copy code afterward (online change)`
 - Order FB and PROGRAM headers as follows: license block, DocGen block, blank line, all attributes, then
   immediately the `FUNCTION_BLOCK` or `PROGRAM` declaration.
-- Keep line length of comments and DocGen blocks within 120 characters (maximum 140 when breaking degrades readability).
-  Wrap long sentences in `<summary>`, `<description>`, and implementation comments across multiple lines indented
-  with the surrounding block.
+- When wrapping DocGen text and implementation comments, align continuation lines with the surrounding block.
 
 ## Architecture & Design
 
@@ -64,6 +61,12 @@ be reflected in Beckhoff documentation; do not override it based on documentatio
   from callbacks.
 - Give each component one responsibility, encapsulate its state, and pass dependencies explicitly. Callers should
   not need to navigate nested objects to obtain a dependency.
+- Expose values needed by external callers through the component's public API, including values read by ADS clients.
+  Use properties for externally accessible values when the FB uses an interface, even if the interface is used only
+  for type checks with `__QUERYINTERFACE`. Use `VAR_OUTPUT` only for a direct FB output when the FB uses no interface.
+- For a property that exposes an internal value, use a getter with `{attribute 'monitoring' := 'call'}` so the value is
+  visible in the debugger. Apply `{attribute 'hide'}` to the backing field to avoid displaying the same value twice.
+  Keep monitored getters inexpensive and free of side effects.
 - Use the simplest design that satisfies the agreed contract and supports testing. Introduce abstractions, helpers,
   flags, or fallback paths only for a concrete need. Explain their cost and compatibility impact.
 - Names of types, members, and variables must explain their role and behavior. Distinguish configuration, current
@@ -87,13 +90,13 @@ be reflected in Beckhoff documentation; do not override it based on documentatio
   A literal `0` is allowed in ordinary size, count, and index comparisons when its exact type does not matter.
   Add missing constants to the appropriate type along with a description of their purpose.
 - Separate independent groups of declarations and algorithm steps with blank lines, not every variable or operation.
-- Indent ST with tabs. Apply the same style rules to new and modified code across libraries, tests, and samples.
+- Indent new and modified ST code with tabs.
   For cases these rules do not cover, follow a consistent project-wide convention. If comparable cases differ or
   no convention is established, ask the owner and record the agreed general rule here.
 - In property getters, an early `RETURN` without assigning a result returns the default/initial value of the type.
   Do not add local `defaultValue` variables and assignments purely to duplicate this default initialization.
-- Keep ST statements within 120 characters per line. Allow 121–140 only when wrapping would reduce readability.
-  Always wrap lines longer than 140 characters. Calls with many arguments may be split earlier.
+- Keep ST statements, comments, and DocGen within 120 characters per line. Allow up to 140 only when wrapping
+  would reduce readability. Calls with many arguments may be split earlier.
   In a multiline call, indent each argument on its own line and align the closing parenthesis with the call.
   End a standalone call with `);`.
 - Use named arguments in method, function, and FB calls, including Beckhoff and third-party libraries.
@@ -133,7 +136,6 @@ be reflected in Beckhoff documentation; do not override it based on documentatio
 
 - Use the API's return value or state for expected outcomes such as allowable absence, pending work, or Try failure.
   Use an exception to interrupt an operation and propagate a failure outside those outcomes, regardless of frequency.
-- Deleting a missing value can be a no-op even in an empty collection; document behavior next to the API.
 - Invalid arguments, mandatory preconditions, and terminal OOM must be checked. Do not relax validations or replace
   agreed exceptions with error codes en masse.
   User explanation: [Rational Exception Handling](Concepts/Exceptions/ExceptionsConcept.md#when-to-use-exceptions).
@@ -182,9 +184,9 @@ be reflected in Beckhoff documentation; do not override it based on documentatio
 - `__DELETE(ptr)` automatically invokes `FB_exit` only when the pointer is typed as a concrete function block
   (`POINTER TO FB_Type`). When deleting through `PVOID` or an interface, the runtime only frees memory, and `FB_exit`
   is NOT invoked (risk of resource and handle leaks).
-- Dynamic allocation with `__NEW(DerivedFB)` yields `POINTER TO DerivedFB` and cannot be assigned directly to
-  a pointer of a base type (`POINTER TO BaseFB`). Always store the allocation result in a pointer of the exact
-  instantiated type first before checking for null/OOM and dereferencing into an interface or reference.
+- Store `__NEW(DerivedFB)` in a `POINTER TO DerivedFB`. TwinCAT rejects assigning a derived pointer to
+  `POINTER TO BaseFB` (C0032). Check for null/OOM before dereferencing into an interface (`itf := derivedPtr^`)
+  or a base reference.
 - If `FB_exit` violates its contract during `TryRelease`, the helper returns `FALSE` and clears the passed
   pointer/interface. This does not guarantee deallocation and does not nullify aliases; do not use or re-delete
   a partially destroyed object via other references.
@@ -237,10 +239,6 @@ be reflected in Beckhoff documentation; do not override it based on documentatio
   - No duplicate field declarations with the same name (notably `_ClassName`) if already declared in a base FB.
   - IEC identifiers are case-insensitive. Parameters and locals shadow same-named instance members. Qualify the
     intended member with `THIS^.` (e.g. `THIS^.Name`), because implicit conversions can let the wrong expression compile.
-  - Pointers lack inheritance polymorphism: `POINTER TO Derived` cannot be implicitly converted or assigned to
-    `POINTER TO Base` (compiler error `C0032`). The result of `__NEW(Derived)` must first be assigned to a variable of
-    type `POINTER TO Derived`. To expose it polymorphically, dereference the typed pointer into an interface reference
-    (`itf := derivedPtr^`) or base reference.
 - Bind `REFERENCE TO` via `REF=`. In a reference property getter, `:=` dereferences the uninitialized result,
   causing an Access Violation / Page Fault and an emergency PLC crash.
 - A `REFERENCE TO` property cannot be made truly read-only: direct assignment `fb.Prop := val` dereferences the
