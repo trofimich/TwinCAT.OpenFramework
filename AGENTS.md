@@ -31,11 +31,14 @@ be reflected in Beckhoff documentation; do not override it based on documentatio
   Update the guide when a new application task becomes supported or the recommended choice changes.
   Keep signatures and detailed contracts beside their declarations.
 
-- Add or update DocGen at the declaration of each new or modified type, method, property, or function.
-  Update the enclosing type's DocGen if its contract changes. Leave unrelated members out of scope.
+- Add or update DocGen beside new or modified public library API declarations and protected members available to
+  descendants. Update the enclosing type's DocGen when its contract changes. Leave unrelated members out of scope.
+- Use ordinary ST comments beside private and internal declarations, for implementation variables, and in the Tests,
+  Samples, and HowTo projects. Document the relevant contract or behavior when a reader needs it.
 - Format: `(*! ... *)` or `//!` with XML tags `<summary>`, `<description>`, `<param>`. Do not mix DocGen with
   Markdown/rST, and do not add empty sections.
-- `<summary>` explains purpose. In `<description>`, cover the applicable preconditions, results, invariants, state transitions,
+- `<summary>` explains purpose and is sufficient for a straightforward declaration. Use `<description>` when the
+  contract needs detail beyond the summary. Cover applicable preconditions, results, invariants, state transitions,
   ownership/lifetime, failure conditions and reporting mechanisms, post-failure state, Try/lifecycle guarantees,
   and constraints on inheritance, callbacks, and cross-task usage. Do not paraphrase syntax.
 - Use richer DocGen markup where it helps the caller:
@@ -53,7 +56,7 @@ be reflected in Beckhoff documentation; do not override it based on documentatio
 - Keep the standard `FB_init` system parameter comments inline in `VAR_INPUT`, using the original wording:
   `bInitRetains: BOOL; // TRUE: the retain variables are initialized (reset warm / reset cold)`
   `bInCopyCode: BOOL; // TRUE: the instance will be copied to the copy code afterward (online change)`
-- Order FB and PROGRAM headers as follows: license block, DocGen block, blank line, all attributes, then
+- Order FB and PROGRAM headers as follows: license block, declaration comment, blank line, all attributes, then
   immediately the `FUNCTION_BLOCK` or `PROGRAM` declaration.
 - When wrapping DocGen text and implementation comments, align continuation lines with the surrounding block.
 
