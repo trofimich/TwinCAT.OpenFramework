@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <TcPlcObject Version="1.1.0.1">
   <POU Name="DynamicMemoryManager" Id="{dfd03ea7-11b7-42ce-b52e-f5a7df7a7ad3}" SpecialFunc="None">
     <Declaration><![CDATA[(*
@@ -41,8 +41,9 @@ TOF_Core.DynamicMemoryManager.CleanupMemory();
 {attribute 'no_explicit_call' := 'Direct call is not allowed'}
 PROGRAM DynamicMemoryManager
 VAR CONSTANT
-	//! <summary>Number of additional object-reference slots allocated when a task registry grows.</summary>
-	ALLOCATE_POINTER_COUNT : BYTE := 10;
+	// Initial number of object-reference slots allocated for a task registry.
+	{attribute 'hide'}
+	INITIAL_BUFFER_CAPACITY : DWORD := 16;
 END_VAR
 VAR
 	{attribute 'hide'} 
@@ -164,12 +165,12 @@ VAR_INPUT
 	taskIndex : DINT;
 END_VAR
 VAR
-	systemTaskInfo : Global.PlcTaskSystemInfo;
+	currentCycleCount : UDINT;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[systemTaskInfo := Tc2_System.F_GetTaskInfo();
+        <ST><![CDATA[currentCycleCount := TwinCAT_SystemInfoVarList._TaskInfo[taskIndex].CycleCount;
 
-IF systemTaskInfo.CycleCount <> _TaskMemory[taskIndex].LastSystemTaskCycleCount THEN
+IF currentCycleCount <> _TaskMemory[taskIndex].LastSystemTaskCycleCount THEN
 	IF _TaskMemory[taskIndex].ObjectCount > 0 THEN
 		IF _TaskMemory[taskIndex].MissedCleanupCount < UnsignedInt32.MAX_VALUE THEN
 			_TaskMemory[taskIndex].MissedCleanupCount := _TaskMemory[taskIndex].MissedCleanupCount + 1;
@@ -178,7 +179,7 @@ IF systemTaskInfo.CycleCount <> _TaskMemory[taskIndex].LastSystemTaskCycleCount 
 		cleanupTaskMemory(taskIndex := taskIndex, releaseBuffer := FALSE);
 	END_IF
 
-	_TaskMemory[taskIndex].LastSystemTaskCycleCount := systemTaskInfo.CycleCount;
+	_TaskMemory[taskIndex].LastSystemTaskCycleCount := currentCycleCount;
 END_IF]]></ST>
       </Implementation>
     </Method>
@@ -345,6 +346,8 @@ VAR
 	taskIndex : DINT;
 	newAutoDisposedObjects : POINTER TO IObject;
 	newAutoDisposedPointerCount : DWORD;
+	maxBufferCapacity : ULINT;
+	requiredObjectCount : ULINT;
 	i : LINT;
 END_VAR]]></Declaration>
       <Implementation>
@@ -368,8 +371,22 @@ END_VAR]]></Declaration>
 
 	RaiseIfAllocationFailed();
 
-	IF _TaskMemory[taskIndex].ObjectCount + 1 > _TaskMemory[taskIndex].BufferCapacity THEN
-		newAutoDisposedPointerCount := _TaskMemory[taskIndex].BufferCapacity + ALLOCATE_POINTER_COUNT;
+	maxBufferCapacity := TO_ULINT(UnsignedInt32.MAX_VALUE) / TO_ULINT(XSIZEOF(POINTER TO IObject));
+	requiredObjectCount := TO_ULINT(_TaskMemory[taskIndex].ObjectCount) + 1;
+
+	IF requiredObjectCount > maxBufferCapacity THEN
+		RaiseAllocationFailure();
+	END_IF
+
+	IF requiredObjectCount > TO_ULINT(_TaskMemory[taskIndex].BufferCapacity) THEN
+		IF _TaskMemory[taskIndex].BufferCapacity = 0 THEN
+			newAutoDisposedPointerCount := INITIAL_BUFFER_CAPACITY;
+		ELSIF TO_ULINT(_TaskMemory[taskIndex].BufferCapacity) * 2 <= maxBufferCapacity THEN
+			newAutoDisposedPointerCount := TO_DWORD(TO_ULINT(_TaskMemory[taskIndex].BufferCapacity) * 2);
+		ELSE
+			newAutoDisposedPointerCount := TO_DWORD(requiredObjectCount);
+		END_IF
+
 		newAutoDisposedObjects := __NEW(POINTER TO IObject, newAutoDisposedPointerCount);
 
 		IF newAutoDisposedObjects = 0 THEN
@@ -380,7 +397,7 @@ END_VAR]]></Declaration>
 			Tc2_System.MEMCPY(
 				destAddr := newAutoDisposedObjects,
 				srcAddr := _TaskMemory[taskIndex].Objects,
-				n := TO_UDINT(XSIZEOF(POINTER TO IObject) * _TaskMemory[taskIndex].ObjectCount)
+				n := TO_UDINT(TO_ULINT(XSIZEOF(POINTER TO IObject)) * TO_ULINT(_TaskMemory[taskIndex].ObjectCount))
 			);
 		END_IF
 

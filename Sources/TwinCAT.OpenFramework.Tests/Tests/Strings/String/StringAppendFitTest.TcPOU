@@ -7,10 +7,9 @@ SPDX-License-Identifier: MIT
 License: https://opensource.org/license/mit
 *)
 
-(*
-Checks fitted appends at exact capacity and on truncation.
-
-Uses one task and stays at a stable address while assertions are bound to this instance.
+(*!
+<summary>Checks fitted appends at exact capacity and at byte and UTF-8 truncation boundaries.</summary>
+<description>Uses one task and a stable instance address while assertions are bound.</description>
 *)
 
 {attribute 'no_assign'}
@@ -24,12 +23,19 @@ END_VAR]]></Declaration>
       <ST><![CDATA[]]></ST>
     </Implementation>
     <Method Name="ExecuteTest" Id="{189632eb-fc04-4e80-8a90-39372d6aaeab}">
-      <Declaration><![CDATA[(* Checks fitted appends at exact capacity and on truncation. *)
+      <Declaration><![CDATA[//! <summary>Checks fitted appends through public string APIs.</summary>
 METHOD PROTECTED ExecuteTest
 VAR
 	oneCharacter : STRING(1);
 	twoCharacters : STRING(2);
 	target : STRING(10);
+	{attribute 'TcEncoding' := 'UTF-8'}
+	utf8Target : STRING(8);
+	{attribute 'TcEncoding' := 'UTF-8'}
+	smallUtf8Target : STRING(2);
+	byteTarget : STRING(5);
+	byteSource : STRING(6);
+	byteData : POINTER TO BYTE;
 	longFragment : STRING(30) := '01234567890123456789';
 	accepted : BOOL;
 END_VAR]]></Declaration>
@@ -174,6 +180,74 @@ Assert.ThatBool(
 Assert.ThatBool(
 	actual := twoCharacters = '.',
 	message := "Two-character truncation marker"
+).IsTrue();
+
+utf8Target := UTF8#'ABCDЯ';
+TOF_Core.Strings.AppendFit(targetString := utf8Target, sourceString := 'WXYZ');
+Assert.ThatBool(
+	actual := utf8Target = 'ABCD...',
+	message := "AppendFit must remove the whole UTF-8 code point when shortening the existing target"
+).IsTrue();
+
+utf8Target := 'AB';
+TOF_Core.Strings.AppendFit(targetString := utf8Target, sourceString := UTF8#'C€xyz');
+Assert.ThatBool(
+	actual := utf8Target = 'ABC...',
+	message := "AppendFit must remove a three-byte UTF-8 code point cut after its second byte"
+).IsTrue();
+
+utf8Target := 'A';
+accepted := TOF_Core.Strings.TryAppendFit255(
+	targetString := utf8Target,
+	sourceString1 := UTF8#'B😀xyz',
+	sourceString2 := 'Z'
+);
+Assert.ThatBool(
+	actual := accepted AND_THEN utf8Target = 'AB...',
+	message := "TryAppendFit255 must remove a split four-byte code point and keep the marker at the end"
+).IsTrue();
+
+utf8Target := 'ABC';
+TOF_Core.Strings.AppendFit(targetString := utf8Target, sourceString := UTF8#'Яxyz');
+Assert.ThatBool(
+	actual := utf8Target = UTF8#'ABCЯxyz',
+	message := "AppendFit must preserve all UTF-8 bytes when the text fits exactly"
+).IsTrue();
+
+utf8Target := 'ABC';
+TOF_Core.Strings.AppendFit(targetString := utf8Target, sourceString := UTF8#'Яwxyz');
+Assert.ThatBool(
+	actual := utf8Target = UTF8#'ABCЯ...',
+	message := "AppendFit must keep a code point ending exactly at the truncation boundary"
+).IsTrue();
+
+smallUtf8Target := UTF8#'Я';
+TOF_Core.Strings.AppendFit(targetString := smallUtf8Target, sourceString := 'X');
+Assert.ThatBool(
+	actual := smallUtf8Target = '.',
+	message := "AppendFit must remove a split two-byte code point before the single-dot marker"
+).IsTrue();
+
+byteTarget := '';
+byteSource := '   XYZ';
+
+// SA0175: Replace the prefix with an invalid overlong byte sequence (E0 80 80).
+{analysis -175}
+byteSource[0] := BYTE#16#E0;
+byteSource[1] := BYTE#16#80;
+byteSource[2] := BYTE#16#80;
+{analysis +175}
+
+TOF_Core.Strings.AppendFit(targetString := byteTarget, sourceString := byteSource);
+
+// SA0175: Inspect the raw byte boundary preserved after truncation.
+{analysis -175}
+byteData := ADR(byteTarget);
+{analysis +175}
+
+Assert.ThatBool(
+	actual := byteData[0] = BYTE#16#E0 AND_THEN byteData[1] = BYTE#16#80,
+	message := "AppendFit must keep the byte boundary for an overlong sequence"
 ).IsTrue();]]></ST>
       </Implementation>
     </Method>

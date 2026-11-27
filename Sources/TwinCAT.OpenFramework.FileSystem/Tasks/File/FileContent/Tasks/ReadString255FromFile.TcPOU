@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <TcPlcObject Version="1.1.0.1">
   <POU Name="ReadString255FromFile" Id="{41262c4b-3425-416b-97ce-608743b9ee3d}" SpecialFunc="None">
     <Declaration><![CDATA[(*
@@ -155,11 +155,11 @@ _GetString(bExecute := FALSE);]]></ST>
 <summary>Reads a string from the bound file through the native line reader.</summary>
 <description>
 Requires a live bound resource whose owner keeps the handle acquired until stopping completes. Native errors
-raise an exception for the base Task failure and cleanup path without dynamic string-builder allocations;
-completed I/O effects are not rolled back.
+populate stopReasonMessage and return ERROR for the base Task failure and cleanup path without dynamic
+allocations; completed I/O effects are not rolled back.
 </description>
-<param name="processingState">BUSY while pending; DONE after native completion without an error.</param>
-<param name="stopReasonMessage">Not changed; native failures use exceptions.</param>
+<param name="processingState">BUSY while pending; DONE on success; ERROR on a native operation error.</param>
+<param name="stopReasonMessage">Receives native error diagnostics when processingState is ERROR.</param>
 *)
 METHOD PROTECTED OnRunning
 VAR_OUTPUT
@@ -167,9 +167,6 @@ VAR_OUTPUT
 END_VAR
 VAR_IN_OUT
 	stopReasonMessage : TOF_Core.ERROR_MESSAGE;
-END_VAR
-VAR
-	errorMessage : TOF_Core.ERROR_MESSAGE;
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[IF NOT _GetString.bExecute THEN 
@@ -190,23 +187,15 @@ END_IF
 _GetString(bExecute := TRUE);
 
 IF _GetString.bError THEN
-	TOF_Core.WideStrings.Append255(
-		errorMessage,
+	stopReasonMessage := TOF_Core.WideStrings.Concat255(
 		"An error occurred while reading string from file ",
 		TO_WSTRING(FilePath),
-		"'");
-
-	FileSystemExceptions.ThrowFileSystem(
-		sourceNamespaceName := NamespaceName,
-		sourceClassName := ClassName,
-		sourcePOUName := __POUNAME(),
-		sourcePosition := __POSITION(),
-		message := errorMessage,
-		errorCode := _GetString.nErrId
+		"'",
+		TOF_Core.Exceptions.ERROR_CODE_PREFIX,
+		TO_WSTRING(_GetString.nErrId)
 	);
-END_IF
-
-IF NOT _GetString.bBusy THEN
+	processingState := TOF_Tasks.TASK_PROCESSING_STATE.ERROR;
+ELSIF NOT _GetString.bBusy THEN
 	processingState := TOF_Tasks.TASK_PROCESSING_STATE.DONE;
 END_IF]]></ST>
       </Implementation>

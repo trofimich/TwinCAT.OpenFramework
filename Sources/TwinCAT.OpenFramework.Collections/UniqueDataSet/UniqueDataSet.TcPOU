@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <TcPlcObject Version="1.1.0.1">
   <POU Name="UniqueDataSet" Id="{2442738f-11d0-404d-bb8d-7d07fa17599f}" SpecialFunc="None">
     <Declaration><![CDATA[(*
@@ -28,9 +28,10 @@ storage. Default OBJECT equality/hashing uses Object.Equals/GetHashCode; Clone h
 and populate the index again after equality-relevant address relocation before further lookup. Static index
 storage adds 12 bytes per capacity slot and three pointers plus the comparer reference. Dynamic entries and
 the 12-byte-per-slot index share one allocation; growth temporarily retains both old and new allocations.
-Expected bucket lookup is constant time plus hashing/equality costs, worst case linear; compaction and
-rebuilding after removal are linear in capacity and Length. The validator is borrowed for the collection
-lifetime. No internal locking is implemented. Concurrent access involving mutation requires caller
+Expected bucket lookup is constant time plus hashing/equality costs, worst case linear; removing the last
+slot updates its bucket in constant time without shifting or rebuilding, while removing an earlier slot
+compacts entries and rebuilds bucket links in time linear in capacity and Length. The validator is borrowed
+for the collection lifetime. No internal locking is implemented. Concurrent access involving mutation requires caller
 coordination; this implementation does not provide a concurrent-container guarantee. Generic lookup with
 requested query release also attempts cleanup on lookup failure before propagating the captured exception;
 terminal OOM takes precedence.
@@ -679,6 +680,8 @@ PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
       <Declaration><![CDATA[(*
 Rebuilds bucket chains from cached hashes after entry relocation or capacity changes.
 
+Iterates entries in ascending index order and prepends each slot to its bucket head, maintaining strictly
+descending entry indices within every bucket chain. RemoveAt relies on this invariant for O(1) tail removal.
 Requires bound index storage for positive capacity and valid hashes for every live entry. Does not allocate,
 access payload or invoke callbacks. This only rebuilds links; it does not recompute hashes after
 equality-relevant payload or address changes.
@@ -706,12 +709,13 @@ END_FOR]]></ST>
       <Declaration><![CDATA[(*!
 <summary>Removes the entry at a current storage position.</summary>
 <description>
-The index must be within Length and is not a sorted rank. Entries after the removed slot are compacted and
-bucket links rebuilt from cached hashes before owned payload cleanup. Index compaction and rebuilding invoke
-no equality/hash callbacks and allocate no storage. Invalid indices raise an exception. Positions and borrowed
-entry references may be invalidated. Payload disposal is best effort through GENERIC_VALUE.Release.
-Descendants cannot override this storage operation; capacity, indexing and disposal remain governed by this
-collection implementation.
+The index must be within Length and is not a sorted rank. Removing the last slot unlinks it directly from its
+bucket head in constant time without shifting or rebuilding. Removing an earlier slot compacts trailing
+entries and rebuilds bucket links from cached hashes. All index updates complete before owned payload
+cleanup, invoke no equality/hash callbacks, and allocate no storage. Invalid indices raise an exception.
+Positions and borrowed entry references may be invalidated. Payload disposal is best effort through
+GENERIC_VALUE.Release. Descendants cannot override this storage operation; capacity, indexing and disposal
+remain governed by this collection implementation.
 </description>
 *)
 METHOD FINAL RemoveAt : IUniqueDataSet
@@ -720,6 +724,7 @@ VAR_INPUT
 END_VAR
 VAR
 	removedValue : TOF_Core.GENERIC_VALUE;
+	bucketIndex : DINT;
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[IF index < TOF_Core.SignedInt32.ZERO OR_ELSE index >= _Length THEN
@@ -747,11 +752,18 @@ IF index < _Length - 1 THEN
 		srcAddr := ADR(_Hashes[index + 1]),
 		n := TO_UDINT(XSIZEOF(UDINT) * TO_ULINT(_Length - index - 1))
 	);
+	_Array[_Length - 1].Reset();
+	_Length := _Length - 1;
+	rebuildIndex();
+ELSE
+	// Bucket chains stay strictly descending by entry index, so the last slot is always its bucket head.
+	bucketIndex := TO_DINT(_Hashes[index] MOD TO_UDINT(Capacity));
+	_Buckets[bucketIndex] := _NextIndices[index];
+	_NextIndices[index] := TOF_Core.SignedInt32.ZERO;
+	_Hashes[index] := TOF_Core.UnsignedInt32.ZERO;
+	_Array[index].Reset();
+	_Length := _Length - 1;
 END_IF
-
-_Array[_Length - 1].Reset();
-_Length := _Length - 1;
-rebuildIndex();
 
 removedValue.Release();]]></ST>
       </Implementation>
@@ -917,6 +929,7 @@ END_IF
 _Array[supposedIndex] := value;
 
 IF supposedIndex = _Length THEN
+	// Appending at _Length and prepending to the bucket head keeps each chain strictly descending.
 	_Hashes[supposedIndex] := hashCode;
 	bucketIndex := TO_DINT(hashCode MOD TO_UDINT(Capacity));
 	_NextIndices[supposedIndex] := _Buckets[bucketIndex];

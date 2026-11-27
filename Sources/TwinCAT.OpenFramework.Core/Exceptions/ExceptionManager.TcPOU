@@ -24,6 +24,8 @@ VAR
 
 	_Exceptions : ARRAY [1..System.TASK_COUNT] OF IException;
 	_SystemExceptions : ARRAY [1..System.TASK_COUNT] OF SystemException;
+	_CachedErrors : ARRAY [1..System.TASK_COUNT] OF ERROR;
+	_CachedErrorExceptions : ARRAY [1..System.TASK_COUNT] OF IReadOnlyException;
 END_VAR
 ]]></Declaration>
     <Implementation>
@@ -74,7 +76,60 @@ VAR_INPUT
 	taskIndex : DINT;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[_Exceptions[taskIndex] := 0;]]></ST>
+        <ST><![CDATA[_Exceptions[taskIndex] := 0;
+_CachedErrorExceptions[taskIndex] := 0;
+_CachedErrors[taskIndex].Clear();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="CopyToError" Id="{c71a49e2-3f8b-4a51-9d24-6e81b20c5f93}">
+      <Declaration><![CDATA[(*!
+<summary>Copies an exception into an ERROR snapshot, reusing the current task's cached conversion on repeated calls.</summary>
+<description>
+When a dynamic exception is propagated through a hierarchy (such as nested workflow activities) within the same
+cyclic task, the first call formats the exception via ToError and caches the resulting ERROR for that dynamic
+exception instance. Subsequent calls for the same dynamic exception in the same task cycle copy the cached ERROR
+by value and update its severity without repeating GetSourceDescription or GetMessage formatting. Static or
+non-dynamic exceptions are converted directly via ToError without caching because their contents may mutate in
+place. An invalid target reference or null exception is ignored.
+</description>
+<param name="exception">Live exception to convert.</param>
+<param name="targetError">Destination ERROR snapshot.</param>
+<param name="severity">Severity assigned to targetError.</param>
+*)
+METHOD CopyToError
+VAR_INPUT
+	exception : IReadOnlyException;
+END_VAR
+VAR_IN_OUT
+	targetError : ERROR;
+END_VAR
+VAR_INPUT
+	severity : ERROR_SEVERITY;
+END_VAR
+VAR
+	taskIndex : DINT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF exception = 0 OR_ELSE NOT __ISVALIDREF(targetError) THEN
+	RETURN;
+END_IF
+
+taskIndex := System.GetCurrentTaskIndex();
+
+IF taskIndex < 1 OR_ELSE taskIndex > System.TASK_COUNT OR_ELSE NOT exception.IsDynamicInstance THEN
+	exception.ToError(targetError := targetError, severity := severity);
+	RETURN;
+END_IF
+
+IF _CachedErrorExceptions[taskIndex] = exception AND_THEN _CachedErrors[taskIndex].HasError THEN
+	targetError := _CachedErrors[taskIndex];
+	targetError.SetSeverity(severity := severity);
+	RETURN;
+END_IF
+
+exception.ToError(targetError := targetError, severity := severity);
+_CachedErrors[taskIndex] := targetError;
+_CachedErrorExceptions[taskIndex] := exception;]]></ST>
       </Implementation>
     </Method>
     <Method Name="CopySharedSystemException" Id="{efe20ff0-0ca0-41d3-ab41-10aaa4b34d33}">
@@ -241,6 +296,7 @@ VAR_INPUT CONSTANT
 END_VAR
 VAR
 	taskIndex : DINT;
+	readOnlyException : IReadOnlyException;
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[IF exception = 0 THEN
@@ -256,8 +312,15 @@ IF taskIndex = 0 THEN
 END_IF
 
 IF exception.IsDynamicInstance THEN
+	readOnlyException := exception;
+
+	IF _CachedErrorExceptions[taskIndex] <> readOnlyException THEN
+		_CachedErrorExceptions[taskIndex] := 0;
+	END_IF
+
 	_Exceptions[taskIndex] := exception;
 ELSE
+	_CachedErrorExceptions[taskIndex] := 0;
 	__QUERYINTERFACE(exception.Clone(), _Exceptions[taskIndex]);
 END_IF
 

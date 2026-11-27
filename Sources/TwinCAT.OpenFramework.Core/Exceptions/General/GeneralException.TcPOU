@@ -58,6 +58,63 @@ _SourceMessage := "";
 SUPER^.Clear();]]></ST>
       </Implementation>
     </Method>
+    <Method Name="ConfigureDiagnostic" Id="{b412e89c-3c4a-4e85-9a21-6c5f8d0e1a72}" FolderPath="Service members\">
+      <Declaration><![CDATA[(*!
+<summary>Captures exception metadata, message and optional inner cause without raising the exception.</summary>
+<description>
+Prepares a stack-local or caller-owned exception instance for local diagnostic consumption (such as ToError or
+LogManager.TryLogException) without allocating a dynamic clone in DynamicMemoryManager or invoking
+ExceptionManager.Throw. Call in the owning cyclic task. If innerException is supplied, message must be
+nonempty or errorCode nonzero. Static inner exceptions are cloned, dynamic ones are borrowed until task
+cleanup. Before changing this instance, rejects any cyclic path back to this instance with a StandardException.
+Long diagnostic strings are borrowed read-only for this call; their references are not retained.
+</description>
+*)
+METHOD PROTECTED FINAL ConfigureDiagnostic
+VAR_IN_OUT CONSTANT
+	sourceNamespaceName : STRING;
+	sourceClassName : STRING;
+	sourcePOUName : STRING;
+	sourcePosition : STRING;
+	message : ERROR_MESSAGE;
+END_VAR
+VAR_INPUT
+	errorCode : UDINT;
+	innerException : IException;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF NOT Exceptions.CanAttachInnerException(ownerException := THIS^, innerException := innerException) THEN
+	Exceptions.ThrowStandard(
+		sourceNamespaceName := CurrentNamespace.Name,
+		sourceClassName := ClassName,
+		sourcePOUName := __POUNAME(),
+		sourcePosition := __POSITION(),
+		message := "Cannot attach an exception graph containing its prospective owner."
+	);
+END_IF
+
+_SourceFullPOUName := GetFullPOUName(
+	sourceNamespaceName := sourceNamespaceName,
+	sourceClassName := sourceClassName,
+	sourcePOUName := sourcePOUName
+);
+_SourcePosition := sourcePosition;
+_SourceMessage := message;
+_ErrorCode := errorCode;
+_LocalTimestamp := System.SystemLocalDateTime;
+_UtcTimestamp := System.SystemUtcDateTime;
+
+IF innerException <> 0 THEN
+	IF innerException.IsDynamicInstance THEN
+		_InnerException := innerException;
+	ELSE
+		__QUERYINTERFACE(innerException.Clone(), _InnerException);
+	END_IF
+ELSE
+	_InnerException := 0;
+END_IF]]></ST>
+      </Implementation>
+    </Method>
     <Method Name="CopyGeneralFields" Id="{00e99485-7cf2-47c4-96ca-14a9de96b271}" FolderPath="Service members\">
       <Declaration><![CDATA[(*!
 <summary>Copies metadata and borrows the source's already prepared inner exception.</summary>
@@ -246,35 +303,15 @@ VAR_INPUT
 	innerException : IException;	
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[IF NOT Exceptions.CanAttachInnerException(ownerException := THIS^, innerException := innerException) THEN
-	Exceptions.ThrowStandard(
-		sourceNamespaceName := CurrentNamespace.Name,
-		sourceClassName := ClassName,
-		sourcePOUName := __POUNAME(),
-		sourcePosition := __POSITION(),
-		message := "Cannot attach an exception graph containing its prospective owner.");
-END_IF
-
-_SourceFullPOUName := GetFullPOUName(
+        <ST><![CDATA[ConfigureDiagnostic(
 	sourceNamespaceName := sourceNamespaceName,
 	sourceClassName := sourceClassName,
-	sourcePOUName := sourcePOUName
+	sourcePOUName := sourcePOUName,
+	sourcePosition := sourcePosition,
+	message := message,
+	errorCode := errorCode,
+	innerException := innerException
 );
-_SourcePosition := sourcePosition;
-_SourceMessage := message;
-_ErrorCode := errorCode;
-_LocalTimestamp := System.SystemLocalDateTime;
-_UtcTimestamp := System.SystemUtcDateTime;
-
-IF innerException <> 0 THEN
-	IF innerException.IsDynamicInstance THEN
-		_InnerException := innerException;
-	ELSE		
-		__QUERYINTERFACE(innerException.Clone(), _InnerException); 
-	END_IF
-ELSE
-	_InnerException := 0;
-END_IF
 
 ExceptionManager.Throw(exception := THIS^);]]></ST>
       </Implementation>

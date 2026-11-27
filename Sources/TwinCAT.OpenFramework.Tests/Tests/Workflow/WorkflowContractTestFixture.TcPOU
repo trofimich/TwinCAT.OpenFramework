@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <TcPlcObject Version="1.1.0.1">
   <POU Name="WorkflowContractTestFixture" Id="{c420144d-dae1-4264-b0c8-03a582be053e}" SpecialFunc="None">
     <Declaration><![CDATA[(*
@@ -192,6 +192,21 @@ VAR
 	_WaitScopeWorkflow : TOF_Workflow.Workflow;
 	_WaitScopeActivity : TOF_Workflow.WaitVariableValueActivity(workflow := _WaitScopeWorkflow);
 
+	_StaticExecuteWorkflow : StaticConfigurationTestWorkflow;
+	_StaticStartWorkflow : StaticConfigurationTestWorkflow;
+	_StaticBaseWorkflow : TOF_Workflow.Workflow;
+	_StaticExternalWorkflow : StaticConfigurationTestWorkflow;
+	_StaticExternalRoot : WorkflowContractActivity(workflow := _StaticExternalWorkflow);
+	_StaticFailBeforeWorkflow : StaticConfigurationTestWorkflow;
+	_StaticFailAfterWorkflow : StaticConfigurationTestWorkflow;
+	_StaticFailedExternalRoot : WorkflowContractActivity(workflow := _StaticFailBeforeWorkflow);
+	_StaticReenterStartWorkflow : StaticConfigurationTestWorkflow;
+	_StaticReenterExecuteWorkflow : StaticConfigurationTestWorkflow;
+	_StaticReenterDisposeWorkflow : StaticConfigurationTestWorkflow;
+	_StaticReenterSuspendWorkflow : StaticConfigurationTestWorkflow;
+	_StaticReenterCancelWorkflow : StaticConfigurationTestWorkflow;
+	_StaticReenterResetWorkflow : StaticConfigurationTestWorkflow;
+
 END_VAR]]></Declaration>
     <Implementation>
       <ST><![CDATA[]]></ST>
@@ -291,6 +306,21 @@ END_VAR]]></Declaration>
 
 	WORKFLOW_CONTRACT_TEST_SCENARIO.DELAY_LIFECYCLE:
 		testDelayLifecycle(assertions := assertions);
+
+	WORKFLOW_CONTRACT_TEST_SCENARIO.STATIC_SELF_CONFIGURATION_VIA_EXECUTE:
+		testStaticSelfConfigurationViaExecute(assertions := assertions);
+
+	WORKFLOW_CONTRACT_TEST_SCENARIO.STATIC_SELF_CONFIGURATION_VIA_REQUEST_START:
+		testStaticSelfConfigurationViaRequestStart(assertions := assertions);
+
+	WORKFLOW_CONTRACT_TEST_SCENARIO.EXTERNAL_ROOT_SKIPS_ON_CONFIGURE:
+		testExternalRootSkipsOnConfigure(assertions := assertions);
+
+	WORKFLOW_CONTRACT_TEST_SCENARIO.ON_CONFIGURE_FAILURE_IS_NON_RECOVERABLE:
+		testOnConfigureFailureIsNonRecoverable(assertions := assertions);
+
+	WORKFLOW_CONTRACT_TEST_SCENARIO.ON_CONFIGURE_REENTRANCY_REJECTION:
+		testOnConfigureReentrancyRejection(assertions := assertions);
 ELSE
 	assertions.ThatBool(actual := FALSE, message := "Unknown workflow contract scenario").IsTrue();
 END_CASE]]></ST>
@@ -2224,7 +2254,7 @@ END_VAR]]></Declaration>
 		firstValue := BYTE#255;
 		found := FALSE;
 
-		WHILE scope.NextDeclaration(position := position, name => bindingName, declaration => declaration) DO
+		WHILE scope.ReadNextDeclaration(position := position, name => bindingName, declaration => declaration) DO
 			declarationCount := declarationCount + 1;
 			assertions.ThatBool(
 				actual := declaration.ElementType = __SYSTEM.TYPE_CLASS.TYPE_BYTE AND_THEN declaration.ElementSize = 1,
@@ -2314,7 +2344,7 @@ END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[single[0] := TOF_Workflow.Workflows.GetValueDescriptor(value := flag);
 _ArrayValidation.DeclareArray(name := 'One', initialValues := ADR(single[0]), elementCount := 1);
-more := _ArrayValidation.NextDeclaration(position := position, name => bindingName, declaration => declaration);
+more := _ArrayValidation.ReadNextDeclaration(position := position, name => bindingName, declaration => declaration);
 assertions.ThatBool(
 	actual := more AND_THEN declaration.IsArray AND_THEN declaration.ElementCount = 1,
 	message := "A one-element array must preserve its shape"
@@ -2366,7 +2396,7 @@ FOR i := 1 TO 7 DO
 	).IsTrue();
 END_FOR
 
-more := _ArrayValidation.NextDeclaration(position := position, name => bindingName, declaration => declaration);
+more := _ArrayValidation.ReadNextDeclaration(position := position, name => bindingName, declaration => declaration);
 assertions.ThatBool(actual := more, message := "Invalid definitions must not add dictionary entries").IsFalse();
 assertions.ThatBool(
 	actual := number = USINT#42,
@@ -3033,6 +3063,607 @@ END_IF
 instance := _Loaded;
 _Loaded := 0;
 TryReleaseLoadedWorkflow := TOF_Core.Memory.TryReleaseDynamicObject(instance := instance);]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="assertReentrantFailure" Id="{3577500b-373a-485b-9c34-a605bf9b80a9}">
+      <Declaration><![CDATA[(*
+Runs one reentrant OnConfigure scenario and verifies latching into PASSIVE_FAILED.
+
+assertions — Valid assertion context borrowed from the active case.
+workflow — Fresh self-configuring workflow fixture under test.
+mode — Reentrant call mode injected inside OnConfigure.
+triggerViaStart — TRUE to initiate configuration via RequestStart, FALSE via Execute.
+label — Diagnostic label identifying the reentrant method under test.
+*)
+METHOD PRIVATE assertReentrantFailure
+VAR_INPUT
+	assertions : REFERENCE TO TOF_Testing.Assertions;
+	workflow : REFERENCE TO StaticConfigurationTestWorkflow;
+	mode : STATIC_WORKFLOW_TEST_MODE;
+	triggerViaStart : BOOL;
+	label : WSTRING;
+END_VAR
+VAR
+	escaped : BOOL;
+	started : BOOL;
+	actualRoot : TOF_Workflow.IActivity;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[workflow.mode := mode;
+
+IF triggerViaStart THEN
+	__TRY
+		started := workflow.RequestStart();
+	__CATCH
+		escaped := TRUE;
+	__ENDTRY
+
+	assertions.ThatBool(
+		actual := escaped,
+		message := TOF_Core.WideStrings.Concat255(label, ": RequestStart must contain reentrancy failure")
+	).IsFalse();
+	assertions.ThatBool(
+		actual := started,
+		message := TOF_Core.WideStrings.Concat255(label, ": RequestStart must return FALSE on reentrancy failure")
+	).IsFalse();
+ELSE
+	__TRY
+		workflow.Execute();
+	__CATCH
+		escaped := TRUE;
+	__ENDTRY
+
+	assertions.ThatBool(
+		actual := escaped,
+		message := TOF_Core.WideStrings.Concat255(label, ": Execute must contain reentrancy failure")
+	).IsFalse();
+END_IF
+
+actualRoot := workflow.RootActivity;
+assertions.ThatBool(
+	actual := actualRoot = 0,
+	message := TOF_Core.WideStrings.Concat255(label, ": failed OnConfigure must clear RootActivity")
+).IsTrue();
+assertions.ThatBool(
+	actual := workflow.State = TOF_Workflow.WORKFLOW_ELEMENT_STATE.PASSIVE_FAILED,
+	message := TOF_Core.WideStrings.Concat255(label, ": reentrant failure must latch PASSIVE_FAILED")
+).IsTrue();
+assertions.ThatBool(
+	actual := workflow.FailError.HasError,
+	message := TOF_Core.WideStrings.Concat255(label, ": FailError must capture reentrant failure")
+).IsTrue();
+assertions.ThatBool(
+	actual := workflow.reentrantConfigExceptionCaught,
+	message := TOF_Core.WideStrings.Concat255(label, ": reentrancy guard must throw WorkflowConfigurationException")
+).IsTrue();
+assertions.ThatBool(
+	actual := workflow.StartingAllowed,
+	message := TOF_Core.WideStrings.Concat255(label, ": StartingAllowed must be FALSE after failure")
+).IsFalse();
+assertions.ThatBool(
+	actual := workflow.ResettingAllowed,
+	message := TOF_Core.WideStrings.Concat255(label, ": ResettingAllowed must be FALSE after failure")
+).IsFalse();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="testStaticSelfConfigurationViaExecute" Id="{df74ad8d-4db5-46ce-8cc7-c966d535cc6f}">
+      <Declaration><![CDATA[(*
+Checks one-shot OnConfigure from Execute, variable initialization, completion, reset and repeat execution.
+
+assertions — Valid assertion context borrowed from the active case.
+*)
+METHOD PRIVATE testStaticSelfConfigurationViaExecute
+VAR_INPUT
+	assertions : REFERENCE TO TOF_Testing.Assertions;
+END_VAR
+VAR
+	actualRoot : TOF_Workflow.IActivity;
+	delayWorkflow : TOF_Workflow.IWorkflow;
+	counterValue : TOF_Core.GENERIC_VALUE;
+	plcSignalValue : TOF_Core.GENERIC_VALUE;
+	found : BOOL;
+	started : BOOL;
+	resetAccepted : BOOL;
+	i : DINT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[actualRoot := _StaticExecuteWorkflow.RootActivity;
+assertions.ThatBool(
+	actual := actualRoot = 0,
+	message := "Unconfigured workflow must have RootActivity = 0 before first Execute"
+).IsTrue();
+assertions.ThatBool(
+	actual := _StaticExecuteWorkflow.StartingAllowed,
+	message := "StartingAllowed must be FALSE before configuration"
+).IsFalse();
+assertions.ThatBool(
+	actual := _StaticExecuteWorkflow.State = TOF_Workflow.WORKFLOW_ELEMENT_STATE.PASSIVE_READY,
+	message := "Unconfigured workflow must report PASSIVE_READY"
+).IsTrue();
+assertions.ThatDInt(
+	actual := _StaticExecuteWorkflow.configureCount,
+	message := "OnConfigure must not run during FB_init"
+).ToBe(expected := 0);
+
+_StaticExecuteWorkflow.Execute();
+assertions.ThatDInt(
+	actual := _StaticExecuteWorkflow.configureCount,
+	message := "First Execute must invoke OnConfigure once"
+).ToBe(expected := 1);
+assertions.ThatDInt(
+	actual := _StaticExecuteWorkflow.configureCountAtFirstBefore,
+	message := "OnConfigure must run before OnBeforeRootActivityExecute"
+).ToBe(expected := 1);
+assertions.ThatBool(
+	actual := _StaticExecuteWorkflow.rootAssignedAtFirstBefore,
+	message := "RootActivity must already be set when OnBeforeRootActivityExecute runs"
+).IsTrue();
+assertions.ThatDInt(
+	actual := _StaticExecuteWorkflow.initializationCount,
+	message := "SetRootActivity inside OnConfigure must invoke InitializeVariables once"
+).ToBe(expected := 1);
+
+actualRoot := _StaticExecuteWorkflow.RootActivity;
+assertions.ThatBool(
+	actual := actualRoot <> 0,
+	message := "First Execute must install RootActivity via OnConfigure"
+).IsTrue();
+assertions.ThatBool(
+	actual := _StaticExecuteWorkflow.StartingAllowed,
+	message := "StartingAllowed must become TRUE after OnConfigure sets the root"
+).IsTrue();
+
+delayWorkflow := _StaticExecuteWorkflow.DelayWorkflow;
+assertions.ThatBool(
+	actual := delayWorkflow <> 0 AND_THEN delayWorkflow.SelfAddress = _StaticExecuteWorkflow.SelfAddress,
+	message := "Static child initialized with workflow := 0 must inherit workflow on attachment"
+).IsTrue();
+
+counterValue := _StaticExecuteWorkflow.GetDeclaredElement(name := 'StepCounter', index := 0);
+assertions.ThatDInt(
+	actual := counterValue.AsDInt(),
+	message := "Declared variable must keep its initial value before execution"
+).ToBe(expected := 10);
+
+found := _StaticExecuteWorkflow.TryGetVariable(name := 'PlcSignal', variable => plcSignalValue);
+assertions.ThatBool(actual := found, message := "InitializeVariables binding must be resolvable").IsTrue();
+assertions.ThatDInt(
+	actual := plcSignalValue.AsDInt(),
+	message := "Bound PLC signal must match fixture initial value"
+).ToBe(expected := 7);
+
+started := _StaticExecuteWorkflow.RequestStart();
+assertions.ThatBool(actual := started, message := "RequestStart must succeed after Execute configuration").IsTrue();
+
+FOR i := 1 TO 4 DO
+	IF _StaticExecuteWorkflow.Busy THEN
+		_StaticExecuteWorkflow.Execute();
+	END_IF
+END_FOR
+
+assertions.ThatBool(
+	actual := _StaticExecuteWorkflow.State = TOF_Workflow.WORKFLOW_ELEMENT_STATE.PASSIVE_COMPLETED,
+	message := "Self-configured workflow must complete execution"
+).IsTrue();
+assertions.ThatDInt(
+	actual := counterValue.AsDInt(),
+	message := "Assign step must update declared variable"
+).ToBe(expected := 42);
+assertions.ThatDInt(
+	actual := _StaticExecuteWorkflow.configureCount,
+	message := "Execution scans must not re-invoke OnConfigure"
+).ToBe(expected := 1);
+
+resetAccepted := _StaticExecuteWorkflow.RequestReset();
+assertions.ThatBool(actual := resetAccepted, message := "RequestReset must succeed after completion").IsTrue();
+assertions.ThatBool(
+	actual := _StaticExecuteWorkflow.State = TOF_Workflow.WORKFLOW_ELEMENT_STATE.PASSIVE_READY,
+	message := "Reset must return static workflow to PASSIVE_READY"
+).IsTrue();
+assertions.ThatDInt(
+	actual := counterValue.AsDInt(),
+	message := "Reset must restore declared variable to its initial value"
+).ToBe(expected := 10);
+
+started := _StaticExecuteWorkflow.RequestStart();
+assertions.ThatBool(actual := started, message := "Second run must start after RequestReset").IsTrue();
+
+FOR i := 1 TO 4 DO
+	IF _StaticExecuteWorkflow.Busy THEN
+		_StaticExecuteWorkflow.Execute();
+	END_IF
+END_FOR
+
+assertions.ThatBool(
+	actual := _StaticExecuteWorkflow.State = TOF_Workflow.WORKFLOW_ELEMENT_STATE.PASSIVE_COMPLETED,
+	message := "Second run must complete without DisposeDynamicChildren"
+).IsTrue();
+assertions.ThatDInt(
+	actual := counterValue.AsDInt(),
+	message := "Second run must execute assignment step again"
+).ToBe(expected := 42);
+assertions.ThatDInt(
+	actual := _StaticExecuteWorkflow.configureCount,
+	message := "Repeat run via RequestReset must keep configureCount at 1"
+).ToBe(expected := 1);]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="testStaticSelfConfigurationViaRequestStart" Id="{5e97b4c6-0c6d-468e-86e6-06a23998d0f9}">
+      <Declaration><![CDATA[(*
+Checks direct RequestStart configuration on a fresh subclass and preserved base Workflow rejection.
+
+assertions — Valid assertion context borrowed from the active case.
+*)
+METHOD PRIVATE testStaticSelfConfigurationViaRequestStart
+VAR_INPUT
+	assertions : REFERENCE TO TOF_Testing.Assertions;
+END_VAR
+VAR
+	actualRoot : TOF_Workflow.IActivity;
+	counterValue : TOF_Core.GENERIC_VALUE;
+	started : BOOL;
+	i : DINT;
+	caught : BOOL;
+	exceptionCode : __SYSTEM.ExceptionCode;
+	exception : TOF_Core.IException;
+	notSpecifiedException : TOF_Core.IDataMemberNotSpecifiedException;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[actualRoot := _StaticStartWorkflow.RootActivity;
+assertions.ThatBool(
+	actual := actualRoot = 0,
+	message := "Fresh workflow must have RootActivity = 0 before RequestStart"
+).IsTrue();
+
+started := _StaticStartWorkflow.RequestStart();
+assertions.ThatBool(
+	actual := started,
+	message := "RequestStart must invoke OnConfigure and return TRUE"
+).IsTrue();
+assertions.ThatDInt(
+	actual := _StaticStartWorkflow.configureCount,
+	message := "Direct RequestStart must invoke OnConfigure once"
+).ToBe(expected := 1);
+assertions.ThatDInt(
+	actual := _StaticStartWorkflow.initializationCount,
+	message := "Direct RequestStart must initialize variables once"
+).ToBe(expected := 1);
+
+actualRoot := _StaticStartWorkflow.RootActivity;
+assertions.ThatBool(
+	actual := actualRoot <> 0,
+	message := "Direct RequestStart must install RootActivity"
+).IsTrue();
+
+FOR i := 1 TO 4 DO
+	IF _StaticStartWorkflow.Busy THEN
+		_StaticStartWorkflow.Execute();
+	END_IF
+END_FOR
+
+assertions.ThatBool(
+	actual := _StaticStartWorkflow.State = TOF_Workflow.WORKFLOW_ELEMENT_STATE.PASSIVE_COMPLETED,
+	message := "Directly started static workflow must complete execution"
+).IsTrue();
+counterValue := _StaticStartWorkflow.GetDeclaredElement(name := 'StepCounter', index := 0);
+assertions.ThatDInt(
+	actual := counterValue.AsDInt(),
+	message := "Directly started static workflow must update declared variable"
+).ToBe(expected := 42);
+
+caught := FALSE;
+
+__TRY
+	_StaticBaseWorkflow.RequestStart();
+__CATCH(exceptionCode)
+	exception := TOF_Core.ExceptionManager.GetLastException(
+		exceptionCode := exceptionCode,
+		catchPointNamespaceName := NamespaceName,
+		catchPointPOUName := __POUNAME(),
+		catchPointPosition := __POSITION()
+	);
+	caught := exception <> 0 AND_THEN __QUERYINTERFACE(exception, notSpecifiedException);
+__ENDTRY
+
+assertions.ThatBool(
+	actual := caught,
+	message := "Base Workflow with empty OnConfigure must still throw DataMemberNotSpecifiedException on RequestStart"
+).IsTrue();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="testExternalRootSkipsOnConfigure" Id="{d200129e-0c8e-4d20-8c4f-351881160382}">
+      <Declaration><![CDATA[(*
+Verifies that assigning a nonzero RootActivity externally skips OnConfigure on Execute and RequestStart.
+
+assertions — Valid assertion context borrowed from the active case.
+*)
+METHOD PRIVATE testExternalRootSkipsOnConfigure
+VAR_INPUT
+	assertions : REFERENCE TO TOF_Testing.Assertions;
+END_VAR
+VAR
+	started : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_StaticExternalRoot.completeRunning := TRUE;
+_StaticExternalWorkflow.SetRootActivity(rootActivity := _StaticExternalRoot);
+
+_StaticExternalWorkflow.Execute();
+assertions.ThatDInt(
+	actual := _StaticExternalWorkflow.configureCount,
+	message := "External SetRootActivity must skip OnConfigure on Execute"
+).ToBe(expected := 0);
+assertions.ThatDInt(
+	actual := _StaticExternalWorkflow.beforeCount,
+	message := "Before hook must still run when external root is configured"
+).ToBe(expected := 1);
+
+started := _StaticExternalWorkflow.RequestStart();
+assertions.ThatBool(actual := started, message := "RequestStart must start external root").IsTrue();
+assertions.ThatDInt(
+	actual := _StaticExternalWorkflow.configureCount,
+	message := "External SetRootActivity must skip OnConfigure on RequestStart"
+).ToBe(expected := 0);
+assertions.ThatBool(
+	actual := _StaticExternalWorkflow.State = TOF_Workflow.WORKFLOW_ELEMENT_STATE.PASSIVE_COMPLETED,
+	message := "External root must complete execution"
+).IsTrue();
+assertions.ThatDInt(
+	actual := _StaticExternalRoot.startCount,
+	message := "External root must execute once"
+).ToBe(expected := 1);]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="testOnConfigureFailureIsNonRecoverable" Id="{35ad03a8-996c-4ca9-9e07-8ade64ad75bc}">
+      <Declaration><![CDATA[(*
+Checks non-recoverable latching when OnConfigure throws before or after SetRootActivity.
+
+assertions — Valid assertion context borrowed from the active case.
+*)
+METHOD PRIVATE testOnConfigureFailureIsNonRecoverable
+VAR_INPUT
+	assertions : REFERENCE TO TOF_Testing.Assertions;
+END_VAR
+VAR
+	actualRoot : TOF_Workflow.IActivity;
+	originalMessage : TOF_Core.ERROR_MESSAGE;
+	actualMessage : TOF_Core.ERROR_MESSAGE;
+	escaped : BOOL;
+	started : BOOL;
+	suspended : BOOL;
+	cancelled : BOOL;
+	resetAccepted : BOOL;
+	caughtConfig : BOOL;
+	exceptionCode : __SYSTEM.ExceptionCode;
+	exception : TOF_Core.IException;
+	configException : TOF_Workflow.IWorkflowConfigurationException;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_StaticFailBeforeWorkflow.mode := STATIC_WORKFLOW_TEST_MODE.THROW_BEFORE_SET_ROOT;
+
+__TRY
+	_StaticFailBeforeWorkflow.Execute();
+__CATCH
+	escaped := TRUE;
+__ENDTRY
+
+assertions.ThatBool(
+	actual := escaped,
+	message := "OnConfigure exception must be contained by Execute"
+).IsFalse();
+assertions.ThatDInt(
+	actual := _StaticFailBeforeWorkflow.configureCount,
+	message := "OnConfigure must be called once before failing"
+).ToBe(expected := 1);
+assertions.ThatDInt(
+	actual := _StaticFailBeforeWorkflow.afterCount,
+	message := "OnAfterRootActivityExecute must still run after OnConfigure failure"
+).ToBe(expected := 1);
+actualRoot := _StaticFailBeforeWorkflow.RootActivity;
+assertions.ThatBool(
+	actual := actualRoot = 0,
+	message := "Failed OnConfigure must leave RootActivity = 0"
+).IsTrue();
+assertions.ThatBool(
+	actual := _StaticFailBeforeWorkflow.State = TOF_Workflow.WORKFLOW_ELEMENT_STATE.PASSIVE_FAILED,
+	message := "Failed OnConfigure must report PASSIVE_FAILED"
+).IsTrue();
+assertions.ThatBool(
+	actual := _StaticFailBeforeWorkflow.FailError.HasError,
+	message := "Failed OnConfigure must populate FailError"
+).IsTrue();
+originalMessage := _StaticFailBeforeWorkflow.FailError.TopMessage;
+assertions.ThatWideString(
+	actual := originalMessage,
+	message := "FailError must retain original OnConfigure exception message"
+).ToBe(expected := "Controlled OnConfigure failure before SetRootActivity");
+assertions.ThatBool(
+	actual := _StaticFailBeforeWorkflow.StartingAllowed,
+	message := "StartingAllowed must be FALSE after OnConfigure failure"
+).IsFalse();
+assertions.ThatBool(
+	actual := _StaticFailBeforeWorkflow.SuspendingAllowed,
+	message := "SuspendingAllowed must be FALSE after OnConfigure failure"
+).IsFalse();
+assertions.ThatBool(
+	actual := _StaticFailBeforeWorkflow.CancellingAllowed,
+	message := "CancellingAllowed must be FALSE after OnConfigure failure"
+).IsFalse();
+assertions.ThatBool(
+	actual := _StaticFailBeforeWorkflow.ResettingAllowed,
+	message := "ResettingAllowed must be FALSE after OnConfigure failure"
+).IsFalse();
+assertions.ThatBool(
+	actual := _StaticFailBeforeWorkflow.Busy,
+	message := "Busy must be FALSE after OnConfigure failure"
+).IsFalse();
+
+_StaticFailBeforeWorkflow.Execute();
+assertions.ThatDInt(
+	actual := _StaticFailBeforeWorkflow.configureCount,
+	message := "Subsequent Execute cycles must not re-invoke failed OnConfigure"
+).ToBe(expected := 1);
+assertions.ThatDInt(
+	actual := _StaticFailBeforeWorkflow.beforeCount,
+	message := "Before hook must keep running on subsequent Execute scans"
+).ToBe(expected := 1);
+assertions.ThatDInt(
+	actual := _StaticFailBeforeWorkflow.afterCount,
+	message := "After hook must keep running on subsequent Execute scans"
+).ToBe(expected := 2);
+actualMessage := _StaticFailBeforeWorkflow.FailError.TopMessage;
+assertions.ThatWideString(
+	actual := actualMessage,
+	message := "Subsequent Execute scans must preserve FailError"
+).ToBe(expected := originalMessage);
+
+__TRY
+	started := _StaticFailBeforeWorkflow.RequestStart();
+	suspended := _StaticFailBeforeWorkflow.RequestSuspend();
+	cancelled := _StaticFailBeforeWorkflow.RequestCancel(reason := "Ignored after configure failure");
+	resetAccepted := _StaticFailBeforeWorkflow.RequestReset();
+__CATCH
+	escaped := TRUE;
+__ENDTRY
+
+assertions.ThatBool(
+	actual := escaped,
+	message := "Lifecycle requests after OnConfigure failure must not throw DataMemberNotSpecifiedException"
+).IsFalse();
+assertions.ThatBool(actual := started, message := "RequestStart must return FALSE when FAILED").IsFalse();
+assertions.ThatBool(actual := suspended, message := "RequestSuspend must return FALSE when FAILED").IsFalse();
+assertions.ThatBool(actual := cancelled, message := "RequestCancel must return FALSE when FAILED").IsFalse();
+assertions.ThatBool(actual := resetAccepted, message := "RequestReset must return FALSE when FAILED").IsFalse();
+actualMessage := _StaticFailBeforeWorkflow.FailError.TopMessage;
+assertions.ThatWideString(
+	actual := actualMessage,
+	message := "Lifecycle requests in FAILED state must not overwrite FailError"
+).ToBe(expected := originalMessage);
+
+caughtConfig := FALSE;
+
+__TRY
+	_StaticFailBeforeWorkflow.SetRootActivity(rootActivity := _StaticFailedExternalRoot);
+__CATCH(exceptionCode)
+	exception := TOF_Core.ExceptionManager.GetLastException(
+		exceptionCode := exceptionCode,
+		catchPointNamespaceName := NamespaceName,
+		catchPointPOUName := __POUNAME(),
+		catchPointPosition := __POSITION()
+	);
+	caughtConfig := exception <> 0 AND_THEN __QUERYINTERFACE(exception, configException);
+__ENDTRY
+
+assertions.ThatBool(
+	actual := caughtConfig,
+	message := "External SetRootActivity must be rejected with WorkflowConfigurationException when FAILED"
+).IsTrue();
+
+_StaticFailAfterWorkflow.mode := STATIC_WORKFLOW_TEST_MODE.THROW_AFTER_SET_ROOT;
+escaped := FALSE;
+
+__TRY
+	started := _StaticFailAfterWorkflow.RequestStart();
+__CATCH
+	escaped := TRUE;
+__ENDTRY
+
+assertions.ThatBool(
+	actual := escaped,
+	message := "RequestStart must contain OnConfigure exception"
+).IsFalse();
+assertions.ThatBool(
+	actual := started,
+	message := "RequestStart must return FALSE when OnConfigure fails"
+).IsFalse();
+assertions.ThatDInt(
+	actual := _StaticFailAfterWorkflow.configureCount,
+	message := "RequestStart must invoke OnConfigure once"
+).ToBe(expected := 1);
+actualRoot := _StaticFailAfterWorkflow.RootActivity;
+assertions.ThatBool(
+	actual := actualRoot = 0,
+	message := "OnConfigure failure after SetRootActivity must clear RootActivity back to 0"
+).IsTrue();
+assertions.ThatBool(
+	actual := _StaticFailAfterWorkflow.State = TOF_Workflow.WORKFLOW_ELEMENT_STATE.PASSIVE_FAILED,
+	message := "OnConfigure failure after SetRootActivity must latch PASSIVE_FAILED"
+).IsTrue();
+actualMessage := _StaticFailAfterWorkflow.FailError.TopMessage;
+assertions.ThatWideString(
+	actual := actualMessage,
+	message := "FailError must retain exception message when failure occurred after SetRootActivity"
+).ToBe(expected := "Controlled OnConfigure failure after SetRootActivity");
+assertions.ThatBool(
+	actual := _StaticFailAfterWorkflow.ResettingAllowed,
+	message := "ResettingAllowed must remain FALSE after OnConfigure failure"
+).IsFalse();
+
+started := _StaticFailAfterWorkflow.RequestStart();
+assertions.ThatBool(
+	actual := started,
+	message := "Repeated RequestStart in FAILED state must return FALSE"
+).IsFalse();
+actualMessage := _StaticFailAfterWorkflow.FailError.TopMessage;
+assertions.ThatWideString(
+	actual := actualMessage,
+	message := "Repeated RequestStart in FAILED state must preserve FailError"
+).ToBe(expected := "Controlled OnConfigure failure after SetRootActivity");]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="testOnConfigureReentrancyRejection" Id="{559fa8e5-9686-4aff-a00e-8c35753f1ab9}">
+      <Declaration><![CDATA[(*
+Checks that reentering lifecycle or disposal APIs during OnConfigure latches PASSIVE_FAILED.
+
+assertions — Valid assertion context borrowed from the active case.
+*)
+METHOD PRIVATE testOnConfigureReentrancyRejection
+VAR_INPUT
+	assertions : REFERENCE TO TOF_Testing.Assertions;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[assertReentrantFailure(
+	assertions := assertions,
+	workflow := _StaticReenterStartWorkflow,
+	mode := STATIC_WORKFLOW_TEST_MODE.REENTER_REQUEST_START,
+	triggerViaStart := FALSE,
+	label := "RequestStart inside OnConfigure"
+);
+assertReentrantFailure(
+	assertions := assertions,
+	workflow := _StaticReenterExecuteWorkflow,
+	mode := STATIC_WORKFLOW_TEST_MODE.REENTER_EXECUTE,
+	triggerViaStart := TRUE,
+	label := "Execute inside OnConfigure"
+);
+assertReentrantFailure(
+	assertions := assertions,
+	workflow := _StaticReenterDisposeWorkflow,
+	mode := STATIC_WORKFLOW_TEST_MODE.REENTER_DISPOSE_DYNAMIC_CHILDREN,
+	triggerViaStart := FALSE,
+	label := "DisposeDynamicChildren inside OnConfigure"
+);
+assertReentrantFailure(
+	assertions := assertions,
+	workflow := _StaticReenterSuspendWorkflow,
+	mode := STATIC_WORKFLOW_TEST_MODE.REENTER_REQUEST_SUSPEND,
+	triggerViaStart := FALSE,
+	label := "RequestSuspend inside OnConfigure"
+);
+assertReentrantFailure(
+	assertions := assertions,
+	workflow := _StaticReenterCancelWorkflow,
+	mode := STATIC_WORKFLOW_TEST_MODE.REENTER_REQUEST_CANCEL,
+	triggerViaStart := FALSE,
+	label := "RequestCancel inside OnConfigure"
+);
+assertReentrantFailure(
+	assertions := assertions,
+	workflow := _StaticReenterResetWorkflow,
+	mode := STATIC_WORKFLOW_TEST_MODE.REENTER_REQUEST_RESET,
+	triggerViaStart := FALSE,
+	label := "RequestReset inside OnConfigure"
+);]]></ST>
       </Implementation>
     </Method>
     <Method Name="FB_exit" Id="{b63d2f44-d576-41b8-abef-9c96db90411b}">

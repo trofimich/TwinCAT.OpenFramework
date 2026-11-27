@@ -1,4 +1,4 @@
-<?xml version="1.0" encoding="utf-8"?>
+﻿<?xml version="1.0" encoding="utf-8"?>
 <TcPlcObject Version="1.1.0.1">
   <POU Name="ParallelActivity" Id="{6c5ddb07-2877-413c-a1a1-f1e269fb6def}" SpecialFunc="None">
     <Declaration><![CDATA[(*
@@ -26,19 +26,14 @@ VAR_STAT
 	_ClassName : STRING := __POUNAME();
 END_VAR
 VAR
-	{attribute 'OPC.UA.DA' := '0'}
 	_Children : TOF_Collections.List<0>(valueValidator := 0);
 
-	{attribute 'OPC.UA.DA' := '0'}
 	_Mode : PARALLEL_JOIN_MODE := PARALLEL_JOIN_MODE.WAIT_ALL;
 
-	{attribute 'OPC.UA.DA' := '0'}
 	_AnyBranchHalted : BOOL;
 
-	{attribute 'OPC.UA.DA' := '0'}
 	_BranchHaltReason : WSTRING(255);
 
-	{attribute 'OPC.UA.DA' := '0'}
 	_AnyBranchCompleted : BOOL;
 END_VAR]]></Declaration>
     <Implementation>
@@ -124,6 +119,66 @@ PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
         </Implementation>
       </Get>
     </Property>
+    <Method Name="Deserialize" Id="{d8b67d7f-18d1-45ab-87bf-7bb9b2b8df03}">
+      <Declaration><![CDATA[(*!
+<summary>Restores this fresh instance from its configuration object.</summary>
+<description>
+The reader, document node and deserialization context are borrowed for this call.
+On failure discard the partial instance.
+</description>
+<param name="reader">Active configuration reader.</param>
+<param name="node">Object node to read fields from.</param>
+<param name="context">Active configuration deserialization context providing workflow reconstruction services.</param>
+*)
+METHOD Deserialize
+VAR_INPUT
+	reader : TOF_Core.IConfigurationReader;
+	node : TOF_Core.CONFIGURATION_NODE;
+	context : TOF_Core.IConfigurationDeserializationContext;
+END_VAR
+VAR
+	loader : IWorkflowLoader;
+	items : TOF_Core.CONFIGURATION_NODE;
+	count : DINT;
+	i : DINT;
+	code : DINT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[loader := WorkflowConfigurationSerializer.ResolveWorkflowLoader(context := context);
+Workflows.ReadConfigurationHeader(reader := reader, node := node, target := THIS^, scope := THIS^);
+
+reader.ReadValue(
+	node := reader.GetField(node := node, name := 'mode'),
+	valueType := TOF_Core.CONFIGURATION_VALUE_TYPE.TYPE_DINT,
+	data := ADR(code),
+	size := SIZEOF(code)
+);
+
+CASE code OF
+	0:
+		Mode := PARALLEL_JOIN_MODE.WAIT_ALL;
+	1:
+		Mode := PARALLEL_JOIN_MODE.WAIT_ANY;
+ELSE
+	WorkflowExceptions.ThrowWorkflowConfiguration(
+		sourceNamespaceName := NamespaceName,
+		sourceClassName := ClassName,
+		sourcePOUName := __POUNAME(),
+		sourcePosition := __POSITION(),
+		message := "Unknown mode value"
+	);
+END_CASE
+
+items := reader.GetField(node := node, name := 'children');
+count := TO_DINT(reader.GetArraySize(node := items));
+
+FOR i := 0 TO count - 1 DO
+	AddChildActivity(
+		activity := Workflows.ReadActivity(loader := loader, node := reader.GetItem(node := items, index := TO_UDINT(i)))
+	);
+END_FOR]]></ST>
+      </Implementation>
+    </Method>
     <Method Name="GetChildActivity" Id="{2954fc95-78c9-4fde-a38b-2c20fa1f2471}">
       <Declaration><![CDATA[(*!
 <summary>Returns the child activity at the specified zero-based index, or 0 if the index is out of bounds.</summary>
@@ -534,35 +589,6 @@ PROPERTY SelfSize : ULINT]]></Declaration>
         </Implementation>
       </Get>
     </Property>
-    <Method Name="ValidateChildActivityAttachment" Id="{d9ebf347-b252-46ff-91b8-1ef334536ad6}" FolderPath="Service methods\">
-      <Declaration><![CDATA[(*!
-<summary>
-Verifies that a candidate child activity can be attached to this parallel composite without cycles or
-conflicts.
-</summary>
-<description>
-Delegates to Workflows.ValidateElementAttachment for readiness, cycles, existing parent, root exclusion and
-fixed workflow association. Reusing the same link during Configure is allowed; append methods must reject
-occupied slots separately. No topology or ownership mutation is performed.
-</description>
-<param name="childActivity">Candidate child activity to validate.</param>
-<param name="argumentName">Parameter name for diagnostic reporting.</param>
-*)
-METHOD PROTECTED ValidateChildActivityAttachment
-VAR_INPUT
-	childActivity : IActivity;
-	argumentName : STRING(255);
-END_VAR]]></Declaration>
-      <Implementation>
-        <ST><![CDATA[WorkflowElementHelper.ValidateChildActivityAttachment(
-	parent := THIS^,
-	childActivity := childActivity,
-	argumentName := argumentName,
-	sourceClassName := ClassName,
-	sourcePOUName := __POUNAME()
-);]]></ST>
-      </Implementation>
-    </Method>
     <Method Name="Serialize" Id="{b69ec900-bb90-4c4d-a34f-f88bc5fefb2f}">
       <Declaration><![CDATA[(*!
 <summary>Writes the configuration fields for this object.</summary>
@@ -594,64 +620,33 @@ END_FOR
 writer.EndArray();]]></ST>
       </Implementation>
     </Method>
-    <Method Name="Deserialize" Id="{d8b67d7f-18d1-45ab-87bf-7bb9b2b8df03}">
+    <Method Name="ValidateChildActivityAttachment" Id="{d9ebf347-b252-46ff-91b8-1ef334536ad6}" FolderPath="Service methods\">
       <Declaration><![CDATA[(*!
-<summary>Restores this fresh instance from its configuration object.</summary>
+<summary>
+Verifies that a candidate child activity can be attached to this parallel composite without cycles or
+conflicts.
+</summary>
 <description>
-The reader, document node and deserialization context are borrowed for this call.
-On failure discard the partial instance.
+Delegates to Workflows.ValidateElementAttachment for readiness, cycles, existing parent, root exclusion and
+fixed workflow association. Reusing the same link during Configure is allowed; append methods must reject
+occupied slots separately. No topology or ownership mutation is performed.
 </description>
-<param name="reader">Active configuration reader.</param>
-<param name="node">Object node to read fields from.</param>
-<param name="context">Active configuration deserialization context providing workflow reconstruction services.</param>
+<param name="childActivity">Candidate child activity to validate.</param>
+<param name="argumentName">Parameter name for diagnostic reporting.</param>
 *)
-METHOD Deserialize
+METHOD PROTECTED ValidateChildActivityAttachment
 VAR_INPUT
-	reader : TOF_Core.IConfigurationReader;
-	node : TOF_Core.CONFIGURATION_NODE;
-	context : TOF_Core.IConfigurationDeserializationContext;
-END_VAR
-VAR
-	loader : IWorkflowLoader;
-	items : TOF_Core.CONFIGURATION_NODE;
-	count : DINT;
-	i : DINT;
-	code : DINT;
+	childActivity : IActivity;
+	argumentName : STRING(255);
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[loader := WorkflowConfigurationSerializer.ResolveWorkflowLoader(context := context);
-Workflows.ReadConfigurationHeader(reader := reader, node := node, target := THIS^, scope := THIS^);
-
-reader.ReadValue(
-	node := reader.GetField(node := node, name := 'mode'),
-	valueType := TOF_Core.CONFIGURATION_VALUE_TYPE.TYPE_DINT,
-	data := ADR(code),
-	size := SIZEOF(code)
-);
-
-CASE code OF
-	0:
-		Mode := PARALLEL_JOIN_MODE.WAIT_ALL;
-	1:
-		Mode := PARALLEL_JOIN_MODE.WAIT_ANY;
-ELSE
-	WorkflowExceptions.ThrowWorkflowConfiguration(
-		sourceNamespaceName := NamespaceName,
-		sourceClassName := ClassName,
-		sourcePOUName := __POUNAME(),
-		sourcePosition := __POSITION(),
-		message := "Unknown mode value"
-	);
-END_CASE
-
-items := reader.GetField(node := node, name := 'children');
-count := TO_DINT(reader.GetArraySize(node := items));
-
-FOR i := 0 TO count - 1 DO
-	AddChildActivity(
-		activity := Workflows.ReadActivity(loader := loader, node := reader.GetItem(node := items, index := TO_UDINT(i)))
-	);
-END_FOR]]></ST>
+        <ST><![CDATA[WorkflowElementHelper.ValidateChildActivityAttachment(
+	parent := THIS^,
+	childActivity := childActivity,
+	argumentName := argumentName,
+	sourceClassName := ClassName,
+	sourcePOUName := __POUNAME()
+);]]></ST>
       </Implementation>
     </Method>
   </POU>

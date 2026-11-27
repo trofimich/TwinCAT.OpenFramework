@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <TcPlcObject Version="1.1.0.1">
   <POU Name="Task" Id="{4f3cf4ac-1772-4e42-a725-ba88b4bb1e14}" SpecialFunc="None">
     <Declaration><![CDATA[(*
@@ -297,12 +297,14 @@ Advances work and permits immediate stopping after a normal terminal result.
 
 Every terminal work result and acquire/process exception enters STOPPING. Normal results call OnStopping once
 immediately; exceptions leave its first call for the next Execute to avoid advancing a failed child twice in
-one call. OnStopping must complete before release or STOPPED; its exceptions keep STOPPING without replacing
-the original reason. The first stopping exception is submitted to the log; later ones retry without another
-log attempt. Release exceptions terminate the attempt with final FAILURE and no retry. A caught exception uses
-named, phase-specific fallback text if its message is empty or formatting fails; fixed phase text remains if
-fallback formatting also fails. Terminal allocation failure remains latched for the owner's fatal boundary.
-Callbacks must not recursively drive this task; OnAfterStop may Reset after finalization.
+one call. When OnRunning returns ERROR, its failure message (or a default task-failure message when empty) is
+submitted to the diagnostic log before entering STOPPING. OnStopping must complete before release or STOPPED;
+its exceptions keep STOPPING without replacing the original reason. The first stopping exception is submitted
+to the log; later ones retry without another log attempt. Release exceptions terminate the attempt with final
+FAILURE and no retry. A caught exception uses named, phase-specific fallback text if its message is empty or
+formatting fails; fixed phase text remains if fallback formatting also fails. Terminal allocation failure
+remains latched for the owner's fatal boundary. Callbacks must not recursively drive this task; OnAfterStop may
+Reset after finalization.
 *)
 METHOD PRIVATE handleRunning
 VAR
@@ -335,6 +337,22 @@ END_VAR]]></Declaration>
 
 			IF taskProcessingState <> TASK_PROCESSING_STATE.BUSY THEN
 				_OriginalStopReason := GetStopReasonByProcessingState(taskpPocessingState := taskProcessingState);
+
+				IF _OriginalStopReason = TASK_STOP_REASON.FAILURE THEN
+					IF _OriginalStopReasonMessage <> TOF_Core.WideStrings.Empty THEN
+						_TemporaryErrorMessage := _OriginalStopReasonMessage;
+					ELSE
+						_TemporaryErrorMessage := TOF_Core.WideStrings.Concat255("Task '", Name, "' processing failed");
+					END_IF
+
+					TryLogDiagnosticMessage(
+						message := _TemporaryErrorMessage,
+						category := TOF_Core.LOG_CATEGORY.ERROR,
+						topic1 := "Task",
+						topic2 := "Execute"
+					);
+				END_IF
+
 				setRunningSubstate(runningSubState := TASK_RUNNING_SUBSTATE.STOPPING);
 			END_IF
 

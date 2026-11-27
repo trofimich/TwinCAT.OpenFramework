@@ -699,7 +699,12 @@ VAR
 	
 	exceptionCode : __SYSTEM.ExceptionCode;
 	exception : TOF_Core.IException;
-	
+
+	dataMemberNotSpecifiedException : TOF_Core.DataMemberNotSpecifiedException;
+	classInitializationException : TOF_Core.ClassInitializationException;
+	standardException : TOF_Core.StandardException;
+	timeoutException : TOF_Core.TimeoutException;
+	missingErrorChildMessage : TOF_Core.ERROR_MESSAGE;
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[IF _OperationalState <> OPERATIONAL_STATE.INITIALIZING THEN
@@ -716,13 +721,21 @@ __TRY
 		child := TryGetChildByIndex(index := i);
 
 		IF child = 0 THEN
-			TOF_Core.Exceptions.ThrowDataMemberNotSpecified(
+			dataMemberNotSpecifiedException.Configure(
 				sourceNamespaceName := NamespaceName,
 				sourceClassName := ClassName,
 				sourcePOUName := __POUNAME(),
 				sourcePosition := __POSITION(),
 				dataMemberName := TOF_Core.Strings.Concat255('Child[', TO_STRING(i), ']')
-			);			
+			);
+
+			ProcessException(
+				exception := dataMemberNotSpecifiedException,
+				exceptionReaction := TOF_Core.EXCEPTION_REACTION.SET_ERROR_AND_CONTINUE,
+				exceptionSourceHint := "Initialization error"
+			);
+
+			RETURN;
 		END_IF
 
 		IF _ChildHierarchyValidated THEN
@@ -762,13 +775,21 @@ __TRY
 		END_IF
 
 		IF hierarchyError <> "" THEN
-			TOF_Core.Exceptions.ThrowClassInitialization(
+			classInitializationException.Configure(
 				sourceNamespaceName := NamespaceName,
 				sourceClassName := ClassName,
 				sourcePOUName := __POUNAME(),
 				sourcePosition := __POSITION(),
 				errorMessage := hierarchyError
 			);
+
+			ProcessException(
+				exception := classInitializationException,
+				exceptionReaction := TOF_Core.EXCEPTION_REACTION.SET_ERROR_AND_CONTINUE,
+				exceptionSourceHint := hierarchyError
+			);
+
+			RETURN;
 		END_IF
 	END_FOR
 
@@ -785,13 +806,23 @@ __TRY
 		child := TryGetChildByIndex(index := i);
 
 		IF child = 0 THEN
-			TOF_Core.Exceptions.ThrowDataMemberNotSpecified(
+			Initialize := FALSE;
+
+			dataMemberNotSpecifiedException.Configure(
 				sourceNamespaceName := NamespaceName,
 				sourceClassName := ClassName,
 				sourcePOUName := __POUNAME(),
 				sourcePosition := __POSITION(),
 				dataMemberName := TOF_Core.Strings.Concat255('Child[', TO_STRING(i), ']')
 			);
+
+			ProcessException(
+				exception := dataMemberNotSpecifiedException,
+				exceptionReaction := TOF_Core.EXCEPTION_REACTION.SET_ERROR_AND_CONTINUE,
+				exceptionSourceHint := "Initialization error"
+			);
+
+			RETURN;
 		END_IF
 
 		childInitialized := child.Initialize();
@@ -810,13 +841,22 @@ __TRY
 				RETURN;
 			END_IF
 
-			TOF_Core.Exceptions.ThrowStandard(
+			missingErrorChildMessage := "A child entered INVALID during initialization without an error diagnostic.";
+			standardException.Configure(
 				sourceNamespaceName := NamespaceName,
 				sourceClassName := ClassName,
 				sourcePOUName := __POUNAME(),
 				sourcePosition := __POSITION(),
-				message := "A child entered INVALID during initialization without an error diagnostic."
+				message := missingErrorChildMessage
 			);
+
+			ProcessException(
+				exception := standardException,
+				exceptionReaction := TOF_Core.EXCEPTION_REACTION.SET_ERROR_AND_CONTINUE,
+				exceptionSourceHint := "Initialization error"
+			);
+
+			RETURN;
 		END_IF
 
 		IF child.InitializationTimeout > _InitializationTimer.PT THEN
@@ -834,13 +874,19 @@ __TRY
 		_InitializationTimer(IN := TRUE);
 		
 		IF _InitializationTimer.Q THEN		
-			TOF_Core.Exceptions.ThrowTimeout(
+			timeoutException.Configure(
 				sourceNamespaceName := NamespaceName,
 				sourceClassName := ClassName,
 				sourcePOUName := __POUNAME(),
 				sourcePosition := __POSITION(),
 				timeoutValue := _InitializationTimer.PT,
 				operationName := "Initialization"
+			);
+
+			ProcessException(
+				exception := timeoutException,
+				exceptionReaction := TOF_Core.EXCEPTION_REACTION.SET_ERROR_AND_CONTINUE,
+				exceptionSourceHint := "Initialization error"
 			);
 		END_IF		
 	END_IF	

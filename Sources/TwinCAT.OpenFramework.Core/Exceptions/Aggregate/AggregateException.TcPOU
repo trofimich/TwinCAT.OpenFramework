@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <TcPlcObject Version="1.1.0.1">
   <POU Name="AggregateException" Id="{8695c106-e7fb-42e2-9023-16f2aac84192}" SpecialFunc="None">
     <Declaration><![CDATA[(*
@@ -30,11 +30,16 @@ VAR_STAT
 END_VAR
 VAR
 	_InnerExceptions : POINTER TO IReadOnlyException;
-	{attribute 'hide'} 
+	{attribute 'hide'}
 	_InnerExceptionCount : UINT;
+	{attribute 'hide'}
+	_InnerExceptionCapacity : UINT;
 END_VAR
 VAR CONSTANT
 	MAX_INNER_EXCEPTION_COUNT : UINT := 255;
+	// Initial entry capacity allocated when the first inner exception is added.
+	{attribute 'hide'}
+	INITIAL_INNER_EXCEPTION_CAPACITY : UINT := 4;
 END_VAR]]></Declaration>
     <Implementation>
       <ST><![CDATA[]]></ST>
@@ -63,7 +68,6 @@ VAR
 	aggregateException : IAggregateException;
 	i : DINT;
 	
-	newInnerExceptionArray : POINTER TO IReadOnlyException;
 	preparedInnerException : IReadOnlyException;
 
 END_VAR]]></Declaration>
@@ -97,25 +101,9 @@ ELSE
 		__QUERYINTERFACE(innerException.Clone(), preparedInnerException);
 	END_IF
 
-	newInnerExceptionArray := __NEW(POINTER TO IReadOnlyException, (_InnerExceptionCount + 1));
+	ensureInnerExceptionCapacity(requiredCapacity := _InnerExceptionCount + 1);
 
-	IF newInnerExceptionArray = 0 THEN
-		DynamicMemoryManager.RaiseAllocationFailure();
-	END_IF
-		
-	IF _InnerExceptionCount > 0 THEN
-		Tc2_System.MEMCPY(
-			destAddr := newInnerExceptionArray,
-			srcAddr := _InnerExceptions,
-			n := TO_UDINT(XSIZEOF(POINTER TO IReadOnlyException) * _InnerExceptionCount)
-		);	
-	
-		__DELETE(_InnerExceptions);
-	END_IF
-		
-	newInnerExceptionArray[_InnerExceptionCount] := preparedInnerException;
-	
-	_InnerExceptions := newInnerExceptionArray; 
+	_InnerExceptions[_InnerExceptionCount] := preparedInnerException;
 	_InnerExceptionCount := _InnerExceptionCount + 1;
 END_IF]]></ST>
       </Implementation>
@@ -147,6 +135,7 @@ METHOD Clear]]></Declaration>
 END_IF
 
 _InnerExceptionCount := 0;
+_InnerExceptionCapacity := 0;
 
 SUPER^.Clear();]]></ST>
       </Implementation>
@@ -205,17 +194,91 @@ VAR_IN_OUT CONSTANT
 END_VAR
 VAR
 	i : DINT;
+	sourceInnerCount : UINT;
+	requiredCapacity : UDINT;
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[_SourceFullPOUName := sourceException.SourceFullPOUName;
 _SourcePosition := sourceException.SourcePosition;
-_LocalTimestamp := sourceException.LocalTimestamp;	
-_UtcTimestamp := sourceException.UtcTimestamp;	
+_LocalTimestamp := sourceException.LocalTimestamp;
+_UtcTimestamp := sourceException.UtcTimestamp;
 
-FOR i := 0 TO TO_DINT(sourceException.InnerExceptionCount) - 1 DO
+sourceInnerCount := sourceException.InnerExceptionCount;
+
+IF sourceInnerCount > 0 THEN
+	requiredCapacity := TO_UDINT(_InnerExceptionCount) + TO_UDINT(sourceInnerCount);
+
+	IF requiredCapacity > MAX_INNER_EXCEPTION_COUNT THEN
+		requiredCapacity := MAX_INNER_EXCEPTION_COUNT;
+	END_IF
+
+	ensureInnerExceptionCapacity(requiredCapacity := TO_UINT(requiredCapacity));
+END_IF
+
+FOR i := 0 TO TO_DINT(sourceInnerCount) - 1 DO
 	AddInnerException(innerException := sourceException.GetInnerException(index := i));
-END_FOR
-]]></ST>
+END_FOR]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="ensureInnerExceptionCapacity" Id="{5970371c-ae64-4e38-a894-2f31710798e8}" FolderPath="Service members\">
+      <Declaration><![CDATA[(*
+Ensures the internal exception reference array can hold at least requiredCapacity entries.
+
+Starts at INITIAL_INNER_EXCEPTION_CAPACITY and doubles capacity up to MAX_INNER_EXCEPTION_COUNT.
+Leaves existing storage intact and raises terminal allocation failure on overflow or allocation failure.
+*)
+
+METHOD PRIVATE ensureInnerExceptionCapacity
+VAR_INPUT
+	requiredCapacity : UINT;
+END_VAR
+VAR
+	newCapacity : UINT;
+	newInnerExceptionArray : POINTER TO IReadOnlyException;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF requiredCapacity > MAX_INNER_EXCEPTION_COUNT THEN
+	DynamicMemoryManager.RaiseAllocationFailure();
+END_IF
+
+IF requiredCapacity <= _InnerExceptionCapacity THEN
+	RETURN;
+END_IF
+
+IF _InnerExceptionCapacity = 0 THEN
+	newCapacity := INITIAL_INNER_EXCEPTION_CAPACITY;
+ELSE
+	newCapacity := _InnerExceptionCapacity;
+END_IF
+
+WHILE newCapacity < requiredCapacity AND_THEN newCapacity < MAX_INNER_EXCEPTION_COUNT DO
+	IF newCapacity <= MAX_INNER_EXCEPTION_COUNT / 2 THEN
+		newCapacity := newCapacity * 2;
+	ELSE
+		newCapacity := MAX_INNER_EXCEPTION_COUNT;
+	END_IF
+END_WHILE
+
+newInnerExceptionArray := __NEW(POINTER TO IReadOnlyException, newCapacity);
+
+IF newInnerExceptionArray = 0 THEN
+	DynamicMemoryManager.RaiseAllocationFailure();
+END_IF
+
+IF _InnerExceptionCount > 0 THEN
+	Tc2_System.MEMCPY(
+		destAddr := newInnerExceptionArray,
+		srcAddr := _InnerExceptions,
+		n := TO_UDINT(TO_ULINT(XSIZEOF(POINTER TO IReadOnlyException)) * TO_ULINT(_InnerExceptionCount))
+	);
+END_IF
+
+IF _InnerExceptions <> 0 THEN
+	__DELETE(_InnerExceptions);
+END_IF
+
+_InnerExceptions := newInnerExceptionArray;
+_InnerExceptionCapacity := newCapacity;]]></ST>
       </Implementation>
     </Method>
     <Property Name="Empty" Id="{d2ade75f-e0d1-434c-8840-7186cc0e6f7a}">

@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <TcPlcObject Version="1.1.0.1">
   <POU Name="ReadBytesFromFile" Id="{8d176d9d-3c32-47fa-be9c-aa34c97798bd}" SpecialFunc="None">
     <Declaration><![CDATA[(*
@@ -198,11 +198,11 @@ _ReadBytes(bExecute := FALSE);]]></ST>
 <description>
 Requires a live bound resource whose owner keeps the handle acquired until stopping completes. Before
 submitting I/O, a null buffer or zero count raises DataMemberNotSpecifiedException for the missing property.
-This rejects invalid configuration through the base Task failure and cleanup path. Native errors also raise an
-exception without dynamic string-builder allocations; completed I/O effects are not rolled back.
+This rejects invalid configuration through the base Task failure and cleanup path. Native errors populate
+stopReasonMessage and return ERROR without dynamic allocations; completed I/O effects are not rolled back.
 </description>
-<param name="processingState">BUSY while pending; DONE after native completion without an error.</param>
-<param name="stopReasonMessage">Not changed; native failures use exceptions.</param>
+<param name="processingState">BUSY while pending; DONE on success; ERROR on a native operation error.</param>
+<param name="stopReasonMessage">Receives native error diagnostics when processingState is ERROR.</param>
 *)
 METHOD PROTECTED OnRunning
 VAR_OUTPUT
@@ -210,9 +210,6 @@ VAR_OUTPUT
 END_VAR
 VAR_IN_OUT
 	stopReasonMessage : TOF_Core.ERROR_MESSAGE;
-END_VAR
-VAR
-	errorMessage : TOF_Core.ERROR_MESSAGE;
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[IF NOT _ReadBytes.bExecute THEN 
@@ -253,23 +250,15 @@ END_IF
 _ReadBytes(bExecute := TRUE);
 
 IF _ReadBytes.bError THEN
-	TOF_Core.WideStrings.Append255(
-		errorMessage,
+	stopReasonMessage := TOF_Core.WideStrings.Concat255(
 		"An error occurred while reading bytes from file ",
 		TO_WSTRING(FilePath),
-		"'");
-
-	FileSystemExceptions.ThrowFileSystem(
-		sourceNamespaceName := NamespaceName,
-		sourceClassName := ClassName,
-		sourcePOUName := __POUNAME(),
-		sourcePosition := __POSITION(),
-		message := errorMessage,
-		errorCode := _ReadBytes.nErrId
+		"'",
+		TOF_Core.Exceptions.ERROR_CODE_PREFIX,
+		TO_WSTRING(_ReadBytes.nErrId)
 	);
-END_IF
-
-IF NOT _ReadBytes.bBusy THEN
+	processingState := TOF_Tasks.TASK_PROCESSING_STATE.ERROR;
+ELSIF NOT _ReadBytes.bBusy THEN
 	processingState := TOF_Tasks.TASK_PROCESSING_STATE.DONE;
 END_IF]]></ST>
       </Implementation>

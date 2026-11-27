@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <TcPlcObject Version="1.1.0.1">
   <POU Name="CheckDirectoryExists" Id="{e725df2c-ff5d-4b1a-879a-c0e9431a08b3}" SpecialFunc="None">
     <Declaration><![CDATA[(*
@@ -155,8 +155,10 @@ leaves DirectoryExists=FALSE and completes successfully. Early completion leaves
 OnStopping. Computed diagnostics are held in local buffers for the duration of the receiving call without
 dynamic string-builder allocations.
 </description>
-<param name="processingState">DONE after a completed search; BUSY while the command is pending.</param>
-<param name="stopReasonMessage">Not changed; exceptions provide search failure diagnostics.</param>
+<param name="processingState">
+DONE after a completed search; ERROR on a native search error; BUSY while the command is pending.
+</param>
+<param name="stopReasonMessage">Receives native error diagnostics when processingState is ERROR.</param>
 *)
 METHOD PROTECTED OnRunning
 VAR_OUTPUT
@@ -167,7 +169,6 @@ VAR_IN_OUT
 END_VAR
 VAR	
 	pathErrorMessage : WSTRING(255);
-	formattedExceptionMessage : TOF_Core.ERROR_MESSAGE;
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[IF NOT _EnumFindFile.bExecute THEN 
@@ -199,20 +200,14 @@ _EnumerationStarted := TRUE;
 _EnumFindFile(bExecute := TRUE);
 
 IF _EnumFindFile.bError THEN
-	TOF_Core.WideStrings.Append255(
-		formattedExceptionMessage,
+	stopReasonMessage := TOF_Core.WideStrings.Concat255(
 		"Error while checking directory '",
 		TO_WSTRING(_EnumFindFile.sPathName),
-		"'");
-
-	FileSystemExceptions.ThrowFileSystem(
-		sourceNamespaceName := NamespaceName,
-		sourceClassName := ClassName,
-		sourcePOUName := __POUNAME(),
-		sourcePosition := __POSITION(),
-		message := formattedExceptionMessage,
-		errorCode := _EnumFindFile.nErrId
+		"'",
+		TOF_Core.Exceptions.ERROR_CODE_PREFIX,
+		TO_WSTRING(_EnumFindFile.nErrId)
 	);
+	processingState := TOF_Tasks.TASK_PROCESSING_STATE.ERROR;
 ELSIF NOT _EnumFindFile.bBusy THEN	
 	IF NOT _EnumFindFile.bEOE THEN
 		_DirectoryExists := _EnumFindFile.stFindFile.fileAttributes.bDirectory;		

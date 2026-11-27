@@ -76,6 +76,46 @@ and `RaiseIfAllocationFailed()` at the end of the cycle will stop the task safel
 For a larger example with a custom activity and named variables, see
 [DemoWorkflowController](../Sources/TwinCAT.OpenFramework.Samples/Workflow/Classes/DemoWorkflowController.TcPOU).
 
+## Self-configuring a static or mixed workflow (`OnConfigure`)
+
+When the procedure structure is known at compile time, you can avoid dynamic allocation and
+external setup code by deriving a function block from `TOF_Workflow.Workflow`, declaring the
+steps and conditions as instance fields (initialized with `workflow := THIS^` or `0`), and
+wiring the graph inside `METHOD PROTECTED OnConfigure`:
+
+```iecst
+FUNCTION_BLOCK StaticSequenceWorkflow EXTENDS TOF_Workflow.Workflow
+VAR
+	_Sequence : TOF_Workflow.SequenceActivity(workflow := THIS^);
+	_Step : TOF_Workflow.AssignVariableActivity(workflow := THIS^);
+	_Wait : TOF_Workflow.DelayActivity(workflow := 0);
+	_InitialCount : DINT := 0;
+	_TargetCount : DINT := 1;
+END_VAR
+```
+
+```iecst
+METHOD PROTECTED OnConfigure
+DeclareVariable(name := 'Count', initialValue := _InitialCount);
+_Step.Configure(targetVariableName := 'Count', value := _TargetCount);
+_Wait.Interval := T#1S;
+_Sequence.AddChildActivity(activity := _Step);
+_Sequence.AddChildActivity(activity := _Wait);
+SetRootActivity(rootActivity := _Sequence);
+```
+
+`Workflow` invokes `OnConfigure` automatically once on the first `Execute()` or
+`RequestStart()` while unconfigured, and skips it if a nonzero `RootActivity` was already
+assigned externally or via `Deserialize`. Static field activities remain owned by your workflow
+subclass (no `RegisterChild` needed); repeat completed runs using `RequestReset()` rather than
+`DisposeDynamicChildren()`. If you mix in dynamic nodes inside `OnConfigure`, register each
+dynamic node with `RegisterChild` as usual.
+
+Do not call `Execute()`, `RequestStart()`, `RequestSuspend()`, `RequestCancel()`,
+`RequestReset()`, or `DisposeDynamicChildren()` from inside `OnConfigure()`. Any non-terminal
+exception raised during `OnConfigure()` clears `RootActivity` and latches the workflow in
+`PASSIVE_FAILED` with the snapshot in `FailError` (not recoverable via `RequestReset()`).
+
 ## Declaring a local variable in a workflow
 
 `Workflow`, `Activity`, and `Condition` all implement `IDeclaredVariableContainer`.
@@ -151,7 +191,7 @@ variable by name without an index returns the whole array block, so use indexed 
 for reading or writing single elements.
 
 To inspect all declared variables on a step or condition, set `position := 0` and keep
-calling `NextDeclaration` until it returns `FALSE` (this skips bound external PLC
+calling `ReadNextDeclaration` until it returns `FALSE` (this skips bound external PLC
 signals). `ElementType` gives the exact TwinCAT type (for example `BYTE` vs `USINT`),
 `ElementSize` gives its byte size, and `IsArray` distinguishes a single value from a
 1-item array. To read each starting element from `0` to `ElementCount - 1`, pass a

@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <TcPlcObject Version="1.1.0.1">
   <POU Name="RemoveEmptyDirectoryIfExists" Id="{ebe631a7-668b-4d2d-a500-a5c7dd2a20ad}" SpecialFunc="None">
     <Declaration><![CDATA[(*
@@ -214,10 +214,10 @@ cleanup to OnStopping; no remove request starts.
 </description>
 <param name="processingState">
 BUSY while searching, closing the search or removing; DONE after completion; ERROR when the path refers to a
-file.
+file or a native operation fails.
 </param>
 <param name="stopReasonMessage">
-Receives diagnostics when the path refers to a file; native failures use exceptions.
+Receives diagnostics when the path refers to a file or a native operation reports an error.
 </param>
 *)
 METHOD PROTECTED OnRunning
@@ -228,7 +228,6 @@ VAR_IN_OUT
 	stopReasonMessage : TOF_Core.ERROR_MESSAGE;
 END_VAR
 VAR
-	formattedExceptionMessage : TOF_Core.ERROR_MESSAGE;
 	pathErrorMessage : WSTRING(255);
 END_VAR]]></Declaration>
       <Implementation>
@@ -266,20 +265,14 @@ IF _DirectoryChecking THEN
 	_EnumFindFile(bExecute := TRUE);
 	
 	IF _EnumFindFile.bError THEN
-		TOF_Core.WideStrings.Append255(
-			formattedExceptionMessage,
+		stopReasonMessage := TOF_Core.WideStrings.Concat255(
 			"Error while checking directory '",
 			TO_WSTRING(_EnumFindFile.sPathName),
-			"'");
-
-		FileSystemExceptions.ThrowFileSystem(
-			sourceNamespaceName := NamespaceName,
-			sourceClassName := ClassName,
-			sourcePOUName := __POUNAME(),
-			sourcePosition := __POSITION(),
-			message := formattedExceptionMessage,
-			errorCode := _EnumFindFile.nErrId
+			"'",
+			TOF_Core.Exceptions.ERROR_CODE_PREFIX,
+			TO_WSTRING(_EnumFindFile.nErrId)
 		);
+		processingState := TOF_Tasks.TASK_PROCESSING_STATE.ERROR;
 	ELSIF NOT _EnumFindFile.bBusy THEN	
 		_DirectoryChecking := FALSE;
 		
@@ -302,23 +295,15 @@ ELSE
 	_RemoveDirectory(bExecute := TRUE);
 	
 	IF _RemoveDirectory.bError THEN
-		TOF_Core.WideStrings.Append255(
-			formattedExceptionMessage,
+		stopReasonMessage := TOF_Core.WideStrings.Concat255(
 			"Error while removing directory '",
 			TO_WSTRING(_RemoveDirectory.sPathName),
-			"'");
-
-		FileSystemExceptions.ThrowFileSystem(
-			sourceNamespaceName := NamespaceName,
-			sourceClassName := ClassName,
-			sourcePOUName := __POUNAME(),
-			sourcePosition := __POSITION(),
-			message := formattedExceptionMessage,
-			errorCode := _RemoveDirectory.nErrId
+			"'",
+			TOF_Core.Exceptions.ERROR_CODE_PREFIX,
+			TO_WSTRING(_RemoveDirectory.nErrId)
 		);
-	END_IF
-	
-	IF NOT _RemoveDirectory.bBusy THEN
+		processingState := TOF_Tasks.TASK_PROCESSING_STATE.ERROR;
+	ELSIF NOT _RemoveDirectory.bBusy THEN
 		processingState := TOF_Tasks.TASK_PROCESSING_STATE.DONE;
 	END_IF	
 END_IF]]></ST>

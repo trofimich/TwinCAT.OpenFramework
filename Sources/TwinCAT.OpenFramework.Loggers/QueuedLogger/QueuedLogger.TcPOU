@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <TcPlcObject Version="1.1.0.1">
   <POU Name="QueuedLogger" Id="{b2c6c979-01fa-442b-855a-08f1c69ad0aa}" SpecialFunc="None">
     <Declaration><![CDATA[(*
@@ -48,6 +48,7 @@ VAR
 
 	_CurrentMessage : QUEUED_LOG_MESSAGE;
 	_FailedDeliveryCount : ULINT;
+	_MaxMessagesPerExecute : UINT := Parameters.QUEUED_LOGGER_MAX_MESSAGES_PER_EXECUTE;
 END_VAR]]></Declaration>
     <Implementation>
       <ST><![CDATA[]]></ST>
@@ -118,20 +119,22 @@ _QueueLock.Leave();]]></ST>
 <summary>Services the backend and forwards a bounded batch from the owner task.</summary>
 <description>
 Other tasks and unconfigured instances do no work. Snapshots the initial queue length and processes at most
-that many records, bounded by queue capacity. Calls backend Execute once before forwarding, allowing it to
-advance prior work. Each record is removed under the lock and copied into owner-only storage, then forwarded
-without the lock. Backend FALSE or exception increments FailedDeliveryCount once without retrying the record
-or logging another error. Backend Execute failures and enqueue rejections are excluded. Backend must borrow
-the record only for the call and must not reenter this wrapper. Concurrent producers may refill released
-slots. Does not guarantee durable output or a fixed execution time; backend and lock latency still apply.
-Backend Execute still advances cleanup. Observed fatal allocation state stops further dequeue/delivery,
-including after a contained backend failure; the task boundary remains responsible for the fatal raise.
+that many records, bounded by MaxMessagesPerExecute (or queue capacity when MaxMessagesPerExecute is zero).
+Calls backend Execute once before forwarding, allowing it to advance prior work. Each record is removed under
+the lock and copied into owner-only storage, then forwarded without the lock. Backend FALSE or exception
+increments FailedDeliveryCount once without retrying the record or logging another error. Backend Execute
+failures and enqueue rejections are excluded. Backend must borrow the record only for the call and must not
+reenter this wrapper. Concurrent producers may refill released slots. Does not guarantee durable output or a
+fixed execution time; backend and lock latency still apply. Backend Execute still advances cleanup. Observed
+fatal allocation state stops further dequeue/delivery, including after a contained backend failure; the task
+boundary remains responsible for the fatal raise.
 </description>
 *)
 METHOD Execute
 VAR
 	taskIndex : DINT;
 	messagesToProcess : UDINT;
+	batchLimit : UDINT;
 	i : UDINT;
 	lockHeld : BOOL;
 	delivered : BOOL;
@@ -153,7 +156,10 @@ __TRY
 		RETURN;
 	END_IF
 
-	messagesToProcess := _Count;
+	batchLimit := TO_UDINT(
+		SEL(_MaxMessagesPerExecute = 0, _MaxMessagesPerExecute, Parameters.QUEUED_LOGGER_CAPACITY)
+	);
+	messagesToProcess := MIN(_Count, batchLimit);
 	_QueueLock.Leave();
 	lockHeld := FALSE;
 
@@ -246,6 +252,30 @@ PROPERTY FailedDeliveryCount : ULINT]]></Declaration>
           <ST><![CDATA[FailedDeliveryCount := _FailedDeliveryCount;]]></ST>
         </Implementation>
       </Get>
+    </Property>
+    <Property Name="MaxMessagesPerExecute" Id="{c4786415-8b2f-4e33-9f1a-84e6f710d8a2}">
+      <Declaration><![CDATA[(*!
+<summary>Gets or sets the maximum number of queued records forwarded by one Execute call.</summary>
+<description>
+Initialized to Parameters.QUEUED_LOGGER_MAX_MESSAGES_PER_EXECUTE. Zero allows Execute to drain up to
+Parameters.QUEUED_LOGGER_CAPACITY records in one call. Read or update from the owner task, or before publishing
+the logger to other tasks.
+</description>
+*)
+{attribute 'monitoring' := 'call'}
+PROPERTY MaxMessagesPerExecute : UINT]]></Declaration>
+      <Get Name="Get" Id="{2f5a9183-6d41-4a7e-b922-1c83e490a5b1}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[MaxMessagesPerExecute := _MaxMessagesPerExecute;]]></ST>
+        </Implementation>
+      </Get>
+      <Set Name="Set" Id="{71e84029-5c14-4d88-8a39-6b20d174f9c3}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[_MaxMessagesPerExecute := MaxMessagesPerExecute;]]></ST>
+        </Implementation>
+      </Set>
     </Property>
     <Property Name="NamespaceName" Id="{e4c570a2-4e96-49f0-a27c-676afc330870}">
       <Declaration><![CDATA[(*!

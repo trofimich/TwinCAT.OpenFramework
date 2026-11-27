@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <TcPlcObject Version="1.1.0.1">
   <POU Name="WriteString255ToFile" Id="{23227cf9-4814-43fa-8811-d02015e181a4}" SpecialFunc="None">
     <Declaration><![CDATA[(*
@@ -122,12 +122,12 @@ _PutString(bExecute := FALSE);]]></ST>
       <Declaration><![CDATA[(*!
 <summary>Submits the configured text using the acquired resource and advances the write.</summary>
 <description>
-Missing binding raises a required-property exception before native submission. Native write errors raise an
-operation exception without dynamic string-builder allocations for Task to record as FAILURE and finish
+Missing binding raises a required-property exception before native submission. Native write errors populate
+stopReasonMessage and return ERROR without dynamic allocations for Task to record as FAILURE and finish
 stopping; an unsuccessful write does not guarantee that the file is unchanged.
 </description>
-<param name="processingState">DONE on native completion without an error; otherwise retains the pending state.</param>
-<param name="stopReasonMessage">Not changed; failures are passed through exceptions.</param>
+<param name="processingState">BUSY while pending; DONE on success; ERROR on a native operation error.</param>
+<param name="stopReasonMessage">Receives native error diagnostics when processingState is ERROR.</param>
 *)
 METHOD PROTECTED OnRunning
 VAR_OUTPUT
@@ -135,9 +135,6 @@ VAR_OUTPUT
 END_VAR
 VAR_IN_OUT
 	stopReasonMessage : TOF_Core.ERROR_MESSAGE;
-END_VAR
-VAR
-	errorMessage : TOF_Core.ERROR_MESSAGE;
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[IF NOT _PutString.bExecute THEN 
@@ -158,23 +155,15 @@ END_IF
 _PutString(bExecute := TRUE);
 
 IF _PutString.bError THEN
-	TOF_Core.WideStrings.Append255(
-		errorMessage,
+	stopReasonMessage := TOF_Core.WideStrings.Concat255(
 		"An error occurred whole writing string to file ",
 		TO_WSTRING(FilePath),
-		"'");
-
-	FileSystemExceptions.ThrowFileSystem(
-		sourceNamespaceName := NamespaceName,
-		sourceClassName := ClassName,
-		sourcePOUName := __POUNAME(),
-		sourcePosition := __POSITION(),
-		message := errorMessage,
-		errorCode := _PutString.nErrId
+		"'",
+		TOF_Core.Exceptions.ERROR_CODE_PREFIX,
+		TO_WSTRING(_PutString.nErrId)
 	);
-END_IF
-
-IF NOT _PutString.bBusy THEN
+	processingState := TOF_Tasks.TASK_PROCESSING_STATE.ERROR;
+ELSIF NOT _PutString.bBusy THEN
 	processingState := TOF_Tasks.TASK_PROCESSING_STATE.DONE;
 END_IF]]></ST>
       </Implementation>

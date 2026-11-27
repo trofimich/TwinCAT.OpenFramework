@@ -1,0 +1,254 @@
+<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="AggregateExceptionGrowthTest" Id="{8c468cc8-10c6-4ec5-9a45-5a57d9555810}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+SPDX-FileCopyrightText: © 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+SPDX-License-Identifier: MIT
+License: https://opensource.org/license/mit
+*)
+
+(*
+Checks aggregate buffer growth across multiple capacity thresholds, flattening, cloning, clear and reuse.
+
+Uses one task and stays at a stable address while assertions are bound to this instance.
+*)
+
+{attribute 'no_assign'}
+{attribute 'no_explicit_call' := 'do not call this function block directly'}
+FUNCTION_BLOCK AggregateExceptionGrowthTest EXTENDS TOF_Testing.SingleCycleTest
+VAR_STAT
+	{attribute 'hide'}
+	_ClassName : STRING := __POUNAME();
+END_VAR
+VAR
+	_Aggregate : TOF_Core.AggregateException;
+	_NestedAggregate : TOF_Core.AggregateException;
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[]]></ST>
+    </Implementation>
+    <Method Name="ExecuteTest" Id="{0b2cb4f6-103e-4f05-9bb8-1c3b33d2b250}">
+      <Declaration><![CDATA[(*
+Populates an aggregate across 4, 8, 16 and 32 capacity boundaries into 64 slots, verifies order,
+cloning with pre-reserved capacity, repeated Clear and subsequent growth after Clear.
+*)
+METHOD PROTECTED ExecuteTest
+VAR CONSTANT
+	DIRECT_ENTRY_COUNT : DINT := 20;
+	FLATTENED_ENTRY_COUNT : DINT := 15;
+	TOTAL_ENTRY_COUNT : DINT := 35;
+	REUSE_ENTRY_COUNT : DINT := 6;
+END_VAR
+VAR
+	exceptionCode : __SYSTEM.ExceptionCode;
+	caught : TOF_Core.IException;
+	cause : TOF_Core.IStandardException;
+	expectedCauses : ARRAY [0..TOTAL_ENTRY_COUNT - 1] OF TOF_Core.IReadOnlyException;
+	observedCause : TOF_Core.IReadOnlyException;
+	firstCloneCause : TOF_Core.IReadOnlyException;
+	lastCloneCause : TOF_Core.IReadOnlyException;
+	clonedObject : TOF_Core.IObject;
+	clonedAggregate : TOF_Core.IAggregateException;
+	causeMessage : TOF_Core.ERROR_MESSAGE;
+	i : DINT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_Aggregate.Clear();
+_NestedAggregate.Clear();
+
+FOR i := 0 TO TOTAL_ENTRY_COUNT - 1 DO
+	causeMessage := TOF_Core.WideStrings.Concat255("Cause ", TO_WSTRING(i));
+	caught := 0;
+
+	__TRY
+		TOF_Core.Exceptions.ThrowStandard(
+			sourceNamespaceName := NamespaceName,
+			sourceClassName := ClassName,
+			sourcePOUName := 'RaiseCause',
+			sourcePosition := __POSITION(),
+			message := causeMessage
+		);
+	__CATCH(exceptionCode)
+		caught := TOF_Core.ExceptionManager.GetLastException(
+			exceptionCode := exceptionCode,
+			catchPointNamespaceName := NamespaceName,
+			catchPointPOUName := __POUNAME(),
+			catchPointPosition := __POSITION()
+		);
+	__ENDTRY
+
+	IF NOT __QUERYINTERFACE(caught, cause) THEN
+		RecordFailure(message := "Aggregate growth setup must capture a dynamic StandardException");
+		RETURN;
+	END_IF
+
+	expectedCauses[i] := cause;
+
+	IF i < DIRECT_ENTRY_COUNT THEN
+		_Aggregate.AddInnerException(innerException := cause);
+	ELSE
+		_NestedAggregate.AddInnerException(innerException := cause);
+	END_IF
+END_FOR
+
+_Aggregate.AddInnerException(innerException := _NestedAggregate);
+_NestedAggregate.Clear();
+
+Assert.ThatBool(
+	actual := _NestedAggregate.Empty AND_THEN _NestedAggregate.InnerExceptionCount = 0,
+	message := "Clearing the nested source aggregate must reset its count"
+).IsTrue();
+
+Assert.ThatUInt(
+	actual := _Aggregate.InnerExceptionCount,
+	message := "The aggregate must retain all direct and flattened entries across capacity doublings"
+).ToBe(expected := TO_UINT(TOTAL_ENTRY_COUNT));
+
+FOR i := 0 TO TOTAL_ENTRY_COUNT - 1 DO
+	observedCause := _Aggregate.GetInnerException(index := i);
+	Assert.ThatBool(
+		actual := observedCause = expectedCauses[i],
+		message := "Aggregate growth and flattening must preserve entry order across capacity doublings"
+	).IsTrue();
+END_FOR
+
+observedCause := _Aggregate.GetInnerException(index := -1);
+Assert.ThatBool(
+	actual := observedCause = 0,
+	message := "Negative index lookup must return null"
+).IsTrue();
+
+observedCause := _Aggregate.GetInnerException(index := TOTAL_ENTRY_COUNT);
+Assert.ThatBool(
+	actual := observedCause = 0,
+	message := "Index lookup at or above InnerExceptionCount must not expose spare capacity slots"
+).IsTrue();
+
+observedCause := _Aggregate.GetRootException();
+Assert.ThatBool(
+	actual := observedCause = expectedCauses[0],
+	message := "Root exception must remain the first entry after buffer growth"
+).IsTrue();
+
+clonedObject := _Aggregate.Clone();
+
+IF NOT __QUERYINTERFACE(clonedObject, clonedAggregate) THEN
+	RecordFailure(message := "Aggregate clone must expose IAggregateException");
+	RETURN;
+END_IF
+
+Assert.ThatBool(
+	actual := clonedAggregate.IsDynamicInstance AND_THEN clonedAggregate.SelfAddress <> _Aggregate.SelfAddress,
+	message := "Aggregate clone must be a distinct dynamic instance"
+).IsTrue();
+
+Assert.ThatUInt(
+	actual := clonedAggregate.InnerExceptionCount,
+	message := "Aggregate clone must copy all entries through CopyFields pre-reservation"
+).ToBe(expected := TO_UINT(TOTAL_ENTRY_COUNT));
+
+FOR i := 0 TO TOTAL_ENTRY_COUNT - 1 DO
+	observedCause := clonedAggregate.GetInnerException(index := i);
+	Assert.ThatBool(
+		actual := observedCause = expectedCauses[i],
+		message := "Cloned aggregate must preserve all entries in exact order"
+	).IsTrue();
+END_FOR
+
+observedCause := clonedAggregate.GetInnerException(index := TOTAL_ENTRY_COUNT);
+Assert.ThatBool(
+	actual := observedCause = 0,
+	message := "Cloned aggregate must not expose unused pre-reserved capacity slots"
+).IsTrue();
+
+_Aggregate.Clear();
+_Aggregate.Clear();
+observedCause := _Aggregate.GetInnerException(index := 0);
+Assert.ThatBool(
+	actual := _Aggregate.Empty AND_THEN _Aggregate.InnerExceptionCount = 0 AND_THEN observedCause = 0,
+	message := "Repeated Clear must release storage and leave the source aggregate empty"
+).IsTrue();
+
+firstCloneCause := clonedAggregate.GetInnerException(index := 0);
+lastCloneCause := clonedAggregate.GetInnerException(index := TOTAL_ENTRY_COUNT - 1);
+Assert.ThatBool(
+	actual := clonedAggregate.InnerExceptionCount = TO_UINT(TOTAL_ENTRY_COUNT)
+		AND_THEN firstCloneCause = expectedCauses[0]
+		AND_THEN lastCloneCause = expectedCauses[TOTAL_ENTRY_COUNT - 1],
+	message := "Clearing the source aggregate must leave the clone's entries intact"
+).IsTrue();
+
+// Reuse the cleared aggregate across the 4 -> 8 growth boundary to verify _InnerExceptionCapacity reset.
+FOR i := 0 TO REUSE_ENTRY_COUNT - 1 DO
+	_Aggregate.AddInnerException(innerException := expectedCauses[TOTAL_ENTRY_COUNT - 1 - i]);
+END_FOR
+
+Assert.ThatUInt(
+	actual := _Aggregate.InnerExceptionCount,
+	message := "A cleared aggregate must accept new entries across initial growth"
+).ToBe(expected := TO_UINT(REUSE_ENTRY_COUNT));
+
+FOR i := 0 TO REUSE_ENTRY_COUNT - 1 DO
+	observedCause := _Aggregate.GetInnerException(index := i);
+	Assert.ThatBool(
+		actual := observedCause = expectedCauses[TOTAL_ENTRY_COUNT - 1 - i],
+		message := "Reusing a cleared aggregate must reallocate storage and preserve the new entry order"
+	).IsTrue();
+END_FOR
+
+observedCause := _Aggregate.GetInnerException(index := REUSE_ENTRY_COUNT);
+Assert.ThatBool(
+	actual := observedCause = 0,
+	message := "Reused aggregate must not expose slots past the new count"
+).IsTrue();
+
+_Aggregate.Clear();
+Assert.ThatBool(
+	actual := _Aggregate.Empty AND_THEN _Aggregate.InnerExceptionCount = 0,
+	message := "Final Clear must leave the reused aggregate empty"
+).IsTrue();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="AfterTest" Id="{3ee4ca4f-b96c-4e59-83da-e82d03a54d9f}">
+      <Declaration><![CDATA[(* Releases caller-owned aggregate reference arrays after the scenario completes or fails. *)
+METHOD PROTECTED AfterTest]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_NestedAggregate.Clear();
+_Aggregate.Clear();]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="ClassName" Id="{c45388ef-3d68-4852-b2e0-c8e054d402ab}">
+      <Declaration><![CDATA[// Borrows the concrete class name. Callers must not modify it.
+{attribute 'monitoring' := 'call'}
+PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{d463e13e-108e-4839-b188-be1b030c2b40}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ClassName REF= _ClassName;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="NamespaceName" Id="{7fd8076a-549b-4266-8d01-f2c0b4ad377e}">
+      <Declaration><![CDATA[// Borrows the compiler-initialized namespace name. Callers must not modify it.
+{attribute 'monitoring' := 'call'}
+PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{185baf39-89f5-4e0e-a16e-e1f5eee40265}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[NamespaceName REF= CurrentNamespace.Name;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="SelfSize" Id="{55886a5c-cf01-4cee-9099-d9ff2a6c77a0}">
+      <Declaration><![CDATA[// Reports the concrete instance size in bytes.
+{attribute 'monitoring' := 'call'}
+PROPERTY SelfSize : ULINT]]></Declaration>
+      <Get Name="Get" Id="{ba6d352d-6afb-4dcc-ba37-3eb670a0f779}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[SelfSize := XSIZEOF(THIS^);]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+  </POU>
+</TcPlcObject>

@@ -1,0 +1,253 @@
+<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="DynamicMemoryRegistryGrowthTest" Id="{fa454514-f854-46a7-b4e9-b103bbcec4dd}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+SPDX-FileCopyrightText: © 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+SPDX-License-Identifier: MIT
+License: https://opensource.org/license/mit
+*)
+
+(*
+Checks auto-disposed object registration across multiple buffer capacity doublings, duplicate suppression,
+single-call FB_exit disposal at the task boundary and subsequent cycle reuse of the expanded registry buffer.
+
+Uses one cyclic PLC task and keeps its exit counters at a stable instance address across task-boundary cleanups.
+*)
+
+{attribute 'no_assign'}
+{attribute 'no_explicit_call' := 'do not call this function block directly'}
+FUNCTION_BLOCK DynamicMemoryRegistryGrowthTest EXTENDS TOF_Testing.MultiCycleTest
+VAR_STAT
+	{attribute 'hide'}
+	_ClassName : STRING := __POUNAME();
+END_VAR
+VAR CONSTANT
+	// Crosses initial capacity 16 and the first doubled capacity 32 into a 64-slot registry buffer.
+	FIRST_BATCH_COUNT : DINT := 35;
+	// Exercises a second cycle on the retained expanded buffer above the 16-slot initial threshold.
+	SECOND_BATCH_COUNT : DINT := 20;
+END_VAR
+VAR
+	_Phase : DYNAMIC_MEMORY_REGISTRY_GROWTH_PHASE;
+	_LastStepTaskCycle : UDINT;
+	_InitialMissedCleanupCount : UDINT;
+	_FirstBatchExitCounts : ARRAY [0..FIRST_BATCH_COUNT - 1] OF UDINT;
+	_SecondBatchExitCounts : ARRAY [0..SECOND_BATCH_COUNT - 1] OF UDINT;
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[]]></ST>
+    </Implementation>
+    <Method Name="BeforeTest" Id="{66c0693f-2fcb-4d27-aa01-5c8d6ea5b8cc}">
+      <Declaration><![CDATA[(* Resets phase state and per-probe exit counters before each test run. *)
+METHOD PROTECTED BeforeTest
+VAR
+	i : DINT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_Phase := DYNAMIC_MEMORY_REGISTRY_GROWTH_PHASE.REGISTER_GROWING_BATCH;
+_LastStepTaskCycle := 0;
+_InitialMissedCleanupCount := 0;
+
+FOR i := 0 TO FIRST_BATCH_COUNT - 1 DO
+	_FirstBatchExitCounts[i] := 0;
+END_FOR
+
+FOR i := 0 TO SECOND_BATCH_COUNT - 1 DO
+	_SecondBatchExitCounts[i] := 0;
+END_FOR]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="ExecuteTest" Id="{979d30ea-51d7-42ab-a675-ef5e38bfdc07}">
+      <Declaration><![CDATA[(*
+Drives registry growth on the first cycle, verifies task-boundary destruction and registers a second batch
+on the second cycle, and verifies the reused buffer cleanup on the third cycle.
+*)
+METHOD PROTECTED ExecuteTest : TOF_Testing.TEST_CYCLE_RESULT
+VAR
+	taskInfo : Global.PlcTaskSystemInfo;
+	probeObject : TOF_Core.IObject;
+	firstProbe : TOF_Core.IObject;
+	sixteenthProbe : TOF_Core.IObject;
+	thirtySecondProbe : TOF_Core.IObject;
+	i : DINT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[taskInfo := Tc2_System.F_GetTaskInfo();
+ExecuteTest := TOF_Testing.TEST_CYCLE_RESULT.BUSY;
+
+CASE _Phase OF
+	DYNAMIC_MEMORY_REGISTRY_GROWTH_PHASE.REGISTER_GROWING_BATCH:
+		_LastStepTaskCycle := taskInfo.CycleCount;
+
+		// Release any buffer retained from earlier tests so growth starts from zero capacity.
+		TOF_Core.DynamicMemoryManager.CleanupMemory(releaseBuffer := TRUE);
+		_InitialMissedCleanupCount := TOF_Core.DynamicMemoryManager.MissedCleanupCount;
+
+		FOR i := 0 TO FIRST_BATCH_COUNT - 1 DO
+			probeObject := registerProbe(
+				exitCounter := _FirstBatchExitCounts[i],
+				registerDuplicate := i = 0 OR_ELSE i = 15 OR_ELSE i = 16 OR_ELSE i = 31 OR_ELSE i = FIRST_BATCH_COUNT - 1
+			);
+
+			IF i = 0 THEN
+				firstProbe := probeObject;
+			ELSIF i = 15 THEN
+				sixteenthProbe := probeObject;
+			ELSIF i = 31 THEN
+				thirtySecondProbe := probeObject;
+			END_IF
+
+			probeObject := 0;
+		END_FOR
+
+		// Re-register earlier instances after buffer reallocations across 16 and 32 slots.
+		TOF_Core.DynamicMemoryManager.RegisterAutoDisposedObject(autoDisposedObject := firstProbe);
+		TOF_Core.DynamicMemoryManager.RegisterAutoDisposedObject(autoDisposedObject := sixteenthProbe);
+		TOF_Core.DynamicMemoryManager.RegisterAutoDisposedObject(autoDisposedObject := thirtySecondProbe);
+
+		firstProbe := 0;
+		sixteenthProbe := 0;
+		thirtySecondProbe := 0;
+
+		FOR i := 0 TO FIRST_BATCH_COUNT - 1 DO
+			Assert.ThatUDInt(
+				actual := _FirstBatchExitCounts[i],
+				message := "Registered probes must remain live before task-boundary cleanup"
+			).ToBe(expected := 0);
+		END_FOR
+
+		Assert.ThatUDInt(
+			actual := TOF_Core.DynamicMemoryManager.MissedCleanupCount,
+			message := "Same-cycle registration and buffer growth must not increment MissedCleanupCount"
+		).ToBe(expected := _InitialMissedCleanupCount);
+
+		_Phase := DYNAMIC_MEMORY_REGISTRY_GROWTH_PHASE.VERIFY_GROWING_BATCH_AND_REUSE;
+
+	DYNAMIC_MEMORY_REGISTRY_GROWTH_PHASE.VERIFY_GROWING_BATCH_AND_REUSE:
+		IF taskInfo.CycleCount = _LastStepTaskCycle THEN
+			RETURN;
+		END_IF
+
+		FOR i := 0 TO FIRST_BATCH_COUNT - 1 DO
+			Assert.ThatUDInt(
+				actual := _FirstBatchExitCounts[i],
+				message := "Each probe in the growing batch must be destroyed once at the task boundary"
+			).ToBe(expected := 1);
+		END_FOR
+
+		Assert.ThatUDInt(
+			actual := TOF_Core.DynamicMemoryManager.MissedCleanupCount,
+			message := "Explicit task-boundary cleanup must not increment MissedCleanupCount"
+		).ToBe(expected := _InitialMissedCleanupCount);
+
+		_LastStepTaskCycle := taskInfo.CycleCount;
+
+		FOR i := 0 TO SECOND_BATCH_COUNT - 1 DO
+			probeObject := registerProbe(
+				exitCounter := _SecondBatchExitCounts[i],
+				registerDuplicate := i = 0 OR_ELSE i = 15 OR_ELSE i = SECOND_BATCH_COUNT - 1
+			);
+			probeObject := 0;
+		END_FOR
+
+		FOR i := 0 TO SECOND_BATCH_COUNT - 1 DO
+			Assert.ThatUDInt(
+				actual := _SecondBatchExitCounts[i],
+				message := "Second-cycle probes on the retained buffer must remain live before cleanup"
+			).ToBe(expected := 0);
+		END_FOR
+
+		_Phase := DYNAMIC_MEMORY_REGISTRY_GROWTH_PHASE.VERIFY_REUSED_BATCH;
+
+	DYNAMIC_MEMORY_REGISTRY_GROWTH_PHASE.VERIFY_REUSED_BATCH:
+		IF taskInfo.CycleCount = _LastStepTaskCycle THEN
+			RETURN;
+		END_IF
+
+		FOR i := 0 TO SECOND_BATCH_COUNT - 1 DO
+			Assert.ThatUDInt(
+				actual := _SecondBatchExitCounts[i],
+				message := "Each probe registered on the retained expanded buffer must be destroyed once"
+			).ToBe(expected := 1);
+		END_FOR
+
+		Assert.ThatUDInt(
+			actual := TOF_Core.DynamicMemoryManager.MissedCleanupCount,
+			message := "Reusing the expanded registry buffer across cycles must not increment MissedCleanupCount"
+		).ToBe(expected := _InitialMissedCleanupCount);
+
+		ExecuteTest := TOF_Testing.TEST_CYCLE_RESULT.DONE;
+END_CASE]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="registerProbe" Id="{4f18f7cf-578b-4974-a23e-30de8193944d}">
+      <Declaration><![CDATA[(*
+Allocates one dynamic ObjectExitProbe, binds its exit counter and transfers ownership to DynamicMemoryManager.
+*)
+METHOD PRIVATE registerProbe : TOF_Core.IObject
+VAR_IN_OUT
+	exitCounter : UDINT;
+END_VAR
+VAR_INPUT
+	registerDuplicate : BOOL;
+END_VAR
+VAR
+	probe : POINTER TO ObjectExitProbe;
+	probeObject : TOF_Core.IObject;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[probe := __NEW(ObjectExitProbe);
+
+IF probe = 0 THEN
+	TOF_Core.DynamicMemoryManager.RaiseAllocationFailure();
+	RETURN;
+END_IF
+
+probe^.ObserveExit(counter := exitCounter);
+probeObject := probe^;
+probe := 0;
+
+TOF_Core.DynamicMemoryManager.RegisterAutoDisposedObject(autoDisposedObject := probeObject);
+
+IF registerDuplicate THEN
+	TOF_Core.DynamicMemoryManager.RegisterAutoDisposedObject(autoDisposedObject := probeObject);
+END_IF
+
+registerProbe := probeObject;]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="ClassName" Id="{0e634ba1-e1cf-4e5c-93ae-4c19f0b362d4}">
+      <Declaration><![CDATA[// Borrows the concrete class name. Callers must not modify it.
+{attribute 'monitoring' := 'call'}
+PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{127c7adc-a468-4b21-aa10-f7349e137f4d}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ClassName REF= _ClassName;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="NamespaceName" Id="{6e293ceb-4fff-4562-a4df-9609f4082931}">
+      <Declaration><![CDATA[// Borrows the compiler-initialized namespace name. Callers must not modify it.
+{attribute 'monitoring' := 'call'}
+PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{cbae2acd-2dfa-424b-9b7f-73ec374b32b1}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[NamespaceName REF= CurrentNamespace.Name;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="SelfSize" Id="{985df201-3531-4c0d-8ace-49253f9db6ca}">
+      <Declaration><![CDATA[// Reports the concrete instance size in bytes.
+{attribute 'monitoring' := 'call'}
+PROPERTY SelfSize : ULINT]]></Declaration>
+      <Get Name="Get" Id="{8c2ffbd9-dd03-40b7-9b00-ae381c5436ca}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[SelfSize := XSIZEOF(THIS^);]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+  </POU>
+</TcPlcObject>

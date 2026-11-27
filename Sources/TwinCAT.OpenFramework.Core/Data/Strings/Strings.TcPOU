@@ -14,6 +14,7 @@ Buffer ownership and size requirements are defined by each operation. ANY format
 through its type descriptor. Try methods contain exceptions; this does not validate buffer lifetime or undo
 partial modifications.
 Runtime type diagnostics use TYPE_ names for known classes and decimal codes for unknown values.
+Lengths and capacities are measured in bytes unless the method explicitly counts UTF-8 code points.
 </description>
 *)
 
@@ -25,7 +26,7 @@ VAR_INPUT CONSTANT
 	ASCII_SPACE : BYTE := BYTE#16#20;
 	NewLine : STRING(1) := '$R';
 	Empty : STRING(0) := '';
-	//! <summary>Standard three-dot ellipsis sequence for single-byte text truncation.</summary>
+	//! <summary>Three ASCII dots used to mark truncated text.</summary>
 	ELLIPSIS : STRING(3) := '...';
 END_VAR
 VAR
@@ -42,7 +43,7 @@ END_VAR]]></Declaration>
     <Folder Name="Service members" Id="{6eebbe56-ba8f-4c4e-a22c-3fcf35f9aa27}" />
     <Folder Name="Split" Id="{abd107b6-e51f-460b-baa2-99a9483990d2}" />
     <Folder Name="Trim" Id="{f20b62c4-34de-4080-969d-424865288d4e}" />
-    <Method Name="AnyToString" Id="{b226cb15-ac0d-48f7-98b9-48ee0196d1ce}" FolderPath="Any\">
+    <Method Name="ConvertAnyToString" Id="{b226cb15-ac0d-48f7-98b9-48ee0196d1ce}" FolderPath="Any\">
       <Declaration><![CDATA[(*!
 <summary>Formats a supported ANY value as text of at most 255 characters.</summary>
 <description>
@@ -50,15 +51,15 @@ Reads the borrowed live payload of supported types. Unsupported type classes pro
 containing the type and size instead of interpreting the payload. The result is an independent bounded value.
 </description>
 *)
-METHOD AnyToString : STRING(255)
+METHOD ConvertAnyToString : STRING(255)
 VAR_INPUT
 	value : ANY;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[AnyToString := InternalAnyToString255(value := value);]]></ST>
+        <ST><![CDATA[ConvertAnyToString := InternalConvertAnyToString255(value := value);]]></ST>
       </Implementation>
     </Method>
-    <Method Name="AnyToString255" Id="{6ec6dde0-5575-44dd-bea2-d21349d12524}">
+    <Method Name="ConvertAnyToString255" Id="{6ec6dde0-5575-44dd-bea2-d21349d12524}">
       <Declaration><![CDATA[(*!
 <summary>Formats a supported ANY value as text of at most 255 characters.</summary>
 <description>
@@ -66,15 +67,15 @@ Reads the borrowed live payload of supported types. Unsupported type classes pro
 containing the type and size instead of interpreting the payload. The result is an independent bounded value.
 </description>
 *)
-METHOD AnyToString255 : STRING(255)
+METHOD ConvertAnyToString255 : STRING(255)
 VAR_INPUT
 	value : ANY;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[AnyToString255 := InternalAnyToString255(value := value);]]></ST>
+        <ST><![CDATA[ConvertAnyToString255 := InternalConvertAnyToString255(value := value);]]></ST>
       </Implementation>
     </Method>
-    <Method Name="AnyToStringFit255" Id="{64a20004-3f77-4b1a-908f-282a178d2bc7}" FolderPath="Any\">
+    <Method Name="ConvertAnyToStringFit255" Id="{64a20004-3f77-4b1a-908f-282a178d2bc7}" FolderPath="Any\">
       <Declaration><![CDATA[(*!
 <summary>
 Formats a supported ANY value as text of at most 255 characters, fitting longer strings with an ellipsis
@@ -83,11 +84,11 @@ Formats a supported ANY value as text of at most 255 characters, fitting longer 
 <description>
 Reads the borrowed live payload of supported types. String values longer than 255 characters are truncated to
 252 characters and end with '...'. Non-string types and strings fitting in 255 characters are formatted
-identically to AnyToString255.
+identically to ConvertAnyToString255.
 </description>
 <param name="value">Borrowed live value to format.</param>
 *)
-METHOD AnyToStringFit255 : STRING(255)
+METHOD ConvertAnyToStringFit255 : STRING(255)
 VAR_INPUT
 	value : ANY;
 END_VAR
@@ -95,19 +96,25 @@ VAR
 	valueLength : UDINT;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[AnyToStringFit255 := InternalAnyToString255(value := value);
+        <ST><![CDATA[ConvertAnyToStringFit255 := InternalConvertAnyToString255(value := value);
 
 IF value.TypeClass = __SYSTEM.TYPE_CLASS.TYPE_STRING THEN
 	valueLength := InternalGetLength(value := value.pValue);
 
 	IF valueLength > 255 THEN
-		AnyToStringFit255 := Tc2_Standard.CONCAT(STR1 := Tc2_Standard.LEFT(STR := AnyToStringFit255, SIZE := 252), STR2 := '...');
+		ConvertAnyToStringFit255 := Tc2_Standard.CONCAT(
+			STR1 := Tc2_Standard.LEFT(STR := ConvertAnyToStringFit255, SIZE := 252),
+			STR2 := '...'
+		);
 	END_IF
 ELSIF value.TypeClass = __SYSTEM.TYPE_CLASS.TYPE_WSTRING THEN
 	valueLength := WideStrings.InternalGetLength(value := value.pValue);
 
 	IF valueLength > 255 THEN
-		AnyToStringFit255 := Tc2_Standard.CONCAT(STR1 := Tc2_Standard.LEFT(STR := AnyToStringFit255, SIZE := 252), STR2 := '...');
+		ConvertAnyToStringFit255 := Tc2_Standard.CONCAT(
+			STR1 := Tc2_Standard.LEFT(STR := ConvertAnyToStringFit255, SIZE := 252),
+			STR2 := '...'
+		);
 	END_IF
 END_IF]]></ST>
       </Implementation>
@@ -257,9 +264,11 @@ Appends one STRING to a caller-owned STRING buffer, fitting available capacity w
 exceeded.
 </summary>
 <description>
-Requires a writable STRING target with valid capacity metadata. If the appended text exceeds target capacity,
-it is truncated so the final characters are '...' followed by a null-terminator. Raises NotSupportedException
-for a non-STRING target. Source storage is borrowed only for this call.
+Requires a writable STRING target with valid capacity metadata and terminated text of the same encoding.
+On overflow, the marker is '...' for capacities of at least three bytes and '.' for one or two bytes.
+The existing target may be shortened to fit the marker. A cut inside a valid UTF-8 sequence moves to its start.
+A terminator-only buffer stays empty. Raises NotSupportedException for a non-STRING target.
+Source storage is borrowed only for this call.
 Known runtime type classes appear by their TYPE_ names; unknown values retain their decimal codes.
 </description>
 <param name="targetString">Writable STRING buffer to append to.</param>
@@ -301,10 +310,9 @@ Appends up to ten STRING fragments in argument order, fitting available capacity
 exceeded.
 </summary>
 <description>
-Requires a writable STRING target with valid capacity metadata. Fragments are appended in order, skipping
-empty fragments. If the combined text exceeds target capacity, it is truncated so the final characters are
-'...' followed by a null-terminator. Raises NotSupportedException for a non-STRING target. Source storage is
-borrowed only for this call.
+Requires a writable STRING target with valid capacity metadata. Pass whole, terminated fragments of up to
+255 bytes in the target encoding. Uses the AppendFit truncation rules and stops after a cut moves to a UTF-8 boundary.
+Raises NotSupportedException for a non-STRING target.
 Known runtime type classes appear by their TYPE_ names; unknown values retain their decimal codes.
 </description>
 <param name="targetString">Writable STRING buffer to append to.</param>
@@ -335,6 +343,7 @@ VAR_INPUT
 END_VAR
 VAR
 	formattedExceptionMessage : WSTRING(255);
+	utf8CutAdjusted : BOOL;
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[IF targetString.TypeClass <> __SYSTEM.TYPE_CLASS.TYPE_STRING THEN
@@ -352,42 +361,82 @@ END_VAR]]></Declaration>
 	);
 END_IF
 
-InternalAppendFit(targetString := targetString, sourceString := ADR(sourceString1));
+InternalAppendFit(
+	targetString := targetString,
+	sourceString := ADR(sourceString1),
+	utf8CutAdjusted => utf8CutAdjusted
+);
 
-IF sourceString2 <> '' THEN
-	InternalAppendFit(targetString := targetString, sourceString := ADR(sourceString2));
+IF NOT utf8CutAdjusted AND_THEN sourceString2 <> '' THEN
+	InternalAppendFit(
+		targetString := targetString,
+		sourceString := ADR(sourceString2),
+		utf8CutAdjusted => utf8CutAdjusted
+	);
 END_IF
 
-IF sourceString3 <> '' THEN
-	InternalAppendFit(targetString := targetString, sourceString := ADR(sourceString3));
+IF NOT utf8CutAdjusted AND_THEN sourceString3 <> '' THEN
+	InternalAppendFit(
+		targetString := targetString,
+		sourceString := ADR(sourceString3),
+		utf8CutAdjusted => utf8CutAdjusted
+	);
 END_IF
 
-IF sourceString4 <> '' THEN
-	InternalAppendFit(targetString := targetString, sourceString := ADR(sourceString4));
+IF NOT utf8CutAdjusted AND_THEN sourceString4 <> '' THEN
+	InternalAppendFit(
+		targetString := targetString,
+		sourceString := ADR(sourceString4),
+		utf8CutAdjusted => utf8CutAdjusted
+	);
 END_IF
 
-IF sourceString5 <> '' THEN
-	InternalAppendFit(targetString := targetString, sourceString := ADR(sourceString5));
+IF NOT utf8CutAdjusted AND_THEN sourceString5 <> '' THEN
+	InternalAppendFit(
+		targetString := targetString,
+		sourceString := ADR(sourceString5),
+		utf8CutAdjusted => utf8CutAdjusted
+	);
 END_IF
 
-IF sourceString6 <> '' THEN
-	InternalAppendFit(targetString := targetString, sourceString := ADR(sourceString6));
+IF NOT utf8CutAdjusted AND_THEN sourceString6 <> '' THEN
+	InternalAppendFit(
+		targetString := targetString,
+		sourceString := ADR(sourceString6),
+		utf8CutAdjusted => utf8CutAdjusted
+	);
 END_IF
 
-IF sourceString7 <> '' THEN
-	InternalAppendFit(targetString := targetString, sourceString := ADR(sourceString7));
+IF NOT utf8CutAdjusted AND_THEN sourceString7 <> '' THEN
+	InternalAppendFit(
+		targetString := targetString,
+		sourceString := ADR(sourceString7),
+		utf8CutAdjusted => utf8CutAdjusted
+	);
 END_IF
 
-IF sourceString8 <> '' THEN
-	InternalAppendFit(targetString := targetString, sourceString := ADR(sourceString8));
+IF NOT utf8CutAdjusted AND_THEN sourceString8 <> '' THEN
+	InternalAppendFit(
+		targetString := targetString,
+		sourceString := ADR(sourceString8),
+		utf8CutAdjusted => utf8CutAdjusted
+	);
 END_IF
 
-IF sourceString9 <> '' THEN
-	InternalAppendFit(targetString := targetString, sourceString := ADR(sourceString9));
+IF NOT utf8CutAdjusted AND_THEN sourceString9 <> '' THEN
+	InternalAppendFit(
+		targetString := targetString,
+		sourceString := ADR(sourceString9),
+		utf8CutAdjusted => utf8CutAdjusted
+	);
 END_IF
 
-IF sourceString10 <> '' THEN
-	InternalAppendFit(targetString := targetString, sourceString := ADR(sourceString10));
+IF NOT utf8CutAdjusted AND_THEN sourceString10 <> '' THEN
+	InternalAppendFit(
+		targetString := targetString,
+		sourceString := ADR(sourceString10),
+		utf8CutAdjusted => utf8CutAdjusted
+	);
 END_IF]]></ST>
       </Implementation>
     </Method>
@@ -492,13 +541,12 @@ END_IF]]></ST>
     <Method Name="ConcatFit255" Id="{64a20003-3f77-4b1a-908f-282a178d2bc7}">
       <Declaration><![CDATA[(*!
 <summary>
-Concatenates up to sixteen text fragments, fitting within 255 characters with an ellipsis ('...') if total
-length is exceeded.
+Concatenates up to sixteen text fragments into a 255-byte result, marking truncation with '...'.
 </summary>
 <description>
-Fragments are appended in argument order. Empty fragments are skipped. If the combined text exceeds 255
-characters, the result is truncated to 252 characters and marked with a final '...'. No dynamic memory is
-allocated.
+Pass whole, terminated fragments of up to 255 bytes in a common encoding. Each nonempty fragment is appended
+in order with the AppendFit truncation rules. On overflow, each cut retains at most 252 bytes before '...'.
+Stops after a cut moves to a UTF-8 boundary. No dynamic memory is allocated.
 </description>
 <param name="string1">First text fragment.</param>
 <param name="string2">Second text fragment.</param>
@@ -539,72 +587,137 @@ END_VAR
 VAR
 	result : STRING(255);
 	targetAny : __SYSTEM.AnyType;
+	utf8CutAdjusted : BOOL;
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[targetAny.TypeClass := __SYSTEM.TYPE_CLASS.TYPE_STRING;
 targetAny.pValue := ADR(result);
 targetAny.diSize := SIZEOF(result);
 
-InternalAppendFit(targetString := targetAny, sourceString := ADR(string1));
+InternalAppendFit(
+	targetString := targetAny,
+	sourceString := ADR(string1),
+	utf8CutAdjusted => utf8CutAdjusted
+);
 
-IF string2 <> '' THEN
-	InternalAppendFit(targetString := targetAny, sourceString := ADR(string2));
+IF NOT utf8CutAdjusted AND_THEN string2 <> '' THEN
+	InternalAppendFit(
+		targetString := targetAny,
+		sourceString := ADR(string2),
+		utf8CutAdjusted => utf8CutAdjusted
+	);
 END_IF
 
-IF string3 <> '' THEN
-	InternalAppendFit(targetString := targetAny, sourceString := ADR(string3));
+IF NOT utf8CutAdjusted AND_THEN string3 <> '' THEN
+	InternalAppendFit(
+		targetString := targetAny,
+		sourceString := ADR(string3),
+		utf8CutAdjusted => utf8CutAdjusted
+	);
 END_IF
 
-IF string4 <> '' THEN
-	InternalAppendFit(targetString := targetAny, sourceString := ADR(string4));
+IF NOT utf8CutAdjusted AND_THEN string4 <> '' THEN
+	InternalAppendFit(
+		targetString := targetAny,
+		sourceString := ADR(string4),
+		utf8CutAdjusted => utf8CutAdjusted
+	);
 END_IF
 
-IF string5 <> '' THEN
-	InternalAppendFit(targetString := targetAny, sourceString := ADR(string5));
+IF NOT utf8CutAdjusted AND_THEN string5 <> '' THEN
+	InternalAppendFit(
+		targetString := targetAny,
+		sourceString := ADR(string5),
+		utf8CutAdjusted => utf8CutAdjusted
+	);
 END_IF
 
-IF string6 <> '' THEN
-	InternalAppendFit(targetString := targetAny, sourceString := ADR(string6));
+IF NOT utf8CutAdjusted AND_THEN string6 <> '' THEN
+	InternalAppendFit(
+		targetString := targetAny,
+		sourceString := ADR(string6),
+		utf8CutAdjusted => utf8CutAdjusted
+	);
 END_IF
 
-IF string7 <> '' THEN
-	InternalAppendFit(targetString := targetAny, sourceString := ADR(string7));
+IF NOT utf8CutAdjusted AND_THEN string7 <> '' THEN
+	InternalAppendFit(
+		targetString := targetAny,
+		sourceString := ADR(string7),
+		utf8CutAdjusted => utf8CutAdjusted
+	);
 END_IF
 
-IF string8 <> '' THEN
-	InternalAppendFit(targetString := targetAny, sourceString := ADR(string8));
+IF NOT utf8CutAdjusted AND_THEN string8 <> '' THEN
+	InternalAppendFit(
+		targetString := targetAny,
+		sourceString := ADR(string8),
+		utf8CutAdjusted => utf8CutAdjusted
+	);
 END_IF
 
-IF string9 <> '' THEN
-	InternalAppendFit(targetString := targetAny, sourceString := ADR(string9));
+IF NOT utf8CutAdjusted AND_THEN string9 <> '' THEN
+	InternalAppendFit(
+		targetString := targetAny,
+		sourceString := ADR(string9),
+		utf8CutAdjusted => utf8CutAdjusted
+	);
 END_IF
 
-IF string10 <> '' THEN
-	InternalAppendFit(targetString := targetAny, sourceString := ADR(string10));
+IF NOT utf8CutAdjusted AND_THEN string10 <> '' THEN
+	InternalAppendFit(
+		targetString := targetAny,
+		sourceString := ADR(string10),
+		utf8CutAdjusted => utf8CutAdjusted
+	);
 END_IF
 
-IF string11 <> '' THEN
-	InternalAppendFit(targetString := targetAny, sourceString := ADR(string11));
+IF NOT utf8CutAdjusted AND_THEN string11 <> '' THEN
+	InternalAppendFit(
+		targetString := targetAny,
+		sourceString := ADR(string11),
+		utf8CutAdjusted => utf8CutAdjusted
+	);
 END_IF
 
-IF string12 <> '' THEN
-	InternalAppendFit(targetString := targetAny, sourceString := ADR(string12));
+IF NOT utf8CutAdjusted AND_THEN string12 <> '' THEN
+	InternalAppendFit(
+		targetString := targetAny,
+		sourceString := ADR(string12),
+		utf8CutAdjusted => utf8CutAdjusted
+	);
 END_IF
 
-IF string13 <> '' THEN
-	InternalAppendFit(targetString := targetAny, sourceString := ADR(string13));
+IF NOT utf8CutAdjusted AND_THEN string13 <> '' THEN
+	InternalAppendFit(
+		targetString := targetAny,
+		sourceString := ADR(string13),
+		utf8CutAdjusted => utf8CutAdjusted
+	);
 END_IF
 
-IF string14 <> '' THEN
-	InternalAppendFit(targetString := targetAny, sourceString := ADR(string14));
+IF NOT utf8CutAdjusted AND_THEN string14 <> '' THEN
+	InternalAppendFit(
+		targetString := targetAny,
+		sourceString := ADR(string14),
+		utf8CutAdjusted => utf8CutAdjusted
+	);
 END_IF
 
-IF string15 <> '' THEN
-	InternalAppendFit(targetString := targetAny, sourceString := ADR(string15));
+IF NOT utf8CutAdjusted AND_THEN string15 <> '' THEN
+	InternalAppendFit(
+		targetString := targetAny,
+		sourceString := ADR(string15),
+		utf8CutAdjusted => utf8CutAdjusted
+	);
 END_IF
 
-IF string16 <> '' THEN
-	InternalAppendFit(targetString := targetAny, sourceString := ADR(string16));
+IF NOT utf8CutAdjusted AND_THEN string16 <> '' THEN
+	InternalAppendFit(
+		targetString := targetAny,
+		sourceString := ADR(string16),
+		utf8CutAdjusted => utf8CutAdjusted
+	);
 END_IF
 
 ConcatFit255 := result;]]></ST>
@@ -759,9 +872,10 @@ END_VAR
     </Method>
     <Method Name="GetLength" Id="{a3dc2c45-cc1a-482d-b619-dbbdf1878690}">
       <Declaration><![CDATA[(*!
-<summary>Returns the number of characters before the terminating zero.</summary>
+<summary>Returns the number of bytes before the terminating zero.</summary>
 <description>
-Requires valid terminated text and excludes the terminator. Does not copy or modify the input.
+Requires valid terminated storage. The result excludes the terminator and is independent of the text encoding.
+Does not copy or modify the input.
 </description>
 *)
 METHOD GetLength : UDINT
@@ -773,7 +887,24 @@ END_VAR
         <ST><![CDATA[GetLength := InternalGetLength(value := ADR(value));]]></ST>
       </Implementation>
     </Method>
-    <Method Name="InternalAnyToString255" Id="{dbd6569e-fd5b-4765-a843-fc6bef815e68}" FolderPath="Service members\">
+    <Method Name="GetUtf8CodePointCount" Id="{7fbe427c-e378-4557-9e04-3113332e24b0}">
+      <Declaration><![CDATA[(*!
+<summary>Counts Unicode code points in a null-terminated UTF-8 string.</summary>
+<description>
+Pass live, readable, null-terminated storage. Returns zero for empty input or UTF-8 rejected by UTF8Len.
+The result excludes the terminator. Each combining mark counts separately from its base character.
+The scan is subject to Tc2_Utilities.Parameterlist.cMaxCharacters.
+</description>
+*)
+METHOD GetUtf8CodePointCount : UDINT
+VAR_IN_OUT CONSTANT
+	value : STRING;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[GetUtf8CodePointCount := Tc2_Utilities.UTF8Len(pUTF8 := ADR(value));]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="InternalConvertAnyToString255" Id="{dbd6569e-fd5b-4765-a843-fc6bef815e68}" FolderPath="Service members\">
       <Declaration><![CDATA[(*
 Formats a supported ANY value into a STRING of at most 255 characters.
 
@@ -785,7 +916,7 @@ Known runtime type classes appear by their TYPE_ names; unknown values retain th
 
 value — Type descriptor and address of the value to format.
 *)
-METHOD INTERNAL InternalAnyToString255 : STRING(255)
+METHOD INTERNAL InternalConvertAnyToString255 : STRING(255)
 VAR_IN_OUT CONSTANT
 	value : __SYSTEM.AnyType;
 END_VAR
@@ -825,96 +956,96 @@ END_VAR]]></Declaration>
         <ST><![CDATA[CASE value.TypeClass OF
 	__SYSTEM.TYPE_CLASS.TYPE_BOOL:
 		anyBool := value.pValue;
-		InternalAnyToString255 := TO_STRING(anyBool^);		
+		InternalConvertAnyToString255 := TO_STRING(anyBool^);		
 	
 	__SYSTEM.TYPE_CLASS.TYPE_BIT:
 		anyByte := value.pValue;
 
 		IF anyByte^ > 0 THEN
-			InternalAnyToString255 := '1';		
+			InternalConvertAnyToString255 := '1';		
 		ELSE
-			InternalAnyToString255 := '0';		
+			InternalConvertAnyToString255 := '0';		
 		END_IF
 	
 	__SYSTEM.TYPE_CLASS.TYPE_BYTE:
 		anyByte := value.pValue;
-		InternalAnyToString255 := TO_STRING(anyByte^);		
+		InternalConvertAnyToString255 := TO_STRING(anyByte^);		
 	__SYSTEM.TYPE_CLASS.TYPE_WORD:
 		anyWord := value.pValue;
-		InternalAnyToString255 := TO_STRING(anyWord^);
+		InternalConvertAnyToString255 := TO_STRING(anyWord^);
 	__SYSTEM.TYPE_CLASS.TYPE_DWORD:
 		anyDWord := value.pValue;
-		InternalAnyToString255 := TO_STRING(anyDWord^);
+		InternalConvertAnyToString255 := TO_STRING(anyDWord^);
 	__SYSTEM.TYPE_CLASS.TYPE_LWORD:
 		anyLWord := value.pValue;
-		InternalAnyToString255 := TO_STRING(anyLWord^);
+		InternalConvertAnyToString255 := TO_STRING(anyLWord^);
 		
 	__SYSTEM.TYPE_CLASS.TYPE_SINT:
 		anySInt := value.pValue;
-		InternalAnyToString255 := TO_STRING(anySInt^);
+		InternalConvertAnyToString255 := TO_STRING(anySInt^);
 	__SYSTEM.TYPE_CLASS.TYPE_INT:
 		anyInt := value.pValue;
-		InternalAnyToString255 := TO_STRING(anyInt^);		
+		InternalConvertAnyToString255 := TO_STRING(anyInt^);		
 	__SYSTEM.TYPE_CLASS.TYPE_DINT:
 		anyDInt := value.pValue;
-		InternalAnyToString255 := TO_STRING(anyDInt^);
+		InternalConvertAnyToString255 := TO_STRING(anyDInt^);
 	__SYSTEM.TYPE_CLASS.TYPE_LINT:
 		anyLInt := value.pValue;
-		InternalAnyToString255 := TO_STRING(anyLInt^);
+		InternalConvertAnyToString255 := TO_STRING(anyLInt^);
 		
 	__SYSTEM.TYPE_CLASS.TYPE_USINT:
 		anyUSInt := value.pValue;
-		InternalAnyToString255 := TO_STRING(anyUSInt^);
+		InternalConvertAnyToString255 := TO_STRING(anyUSInt^);
 	__SYSTEM.TYPE_CLASS.TYPE_UINT:
 		anyUInt := value.pValue;
-		InternalAnyToString255 := TO_STRING(anyUInt^);		
+		InternalConvertAnyToString255 := TO_STRING(anyUInt^);		
 	__SYSTEM.TYPE_CLASS.TYPE_UDINT:
 		anyUDInt := value.pValue;
-		InternalAnyToString255 := TO_STRING(anyUDInt^);
+		InternalConvertAnyToString255 := TO_STRING(anyUDInt^);
 	__SYSTEM.TYPE_CLASS.TYPE_ULINT:
 		anyULInt := value.pValue;
-		InternalAnyToString255 := TO_STRING(anyULInt^);
+		InternalConvertAnyToString255 := TO_STRING(anyULInt^);
 
 	__SYSTEM.TYPE_CLASS.TYPE_REAL:
 		anyReal := value.pValue;
-		InternalAnyToString255 := TO_STRING(anyReal^);
+		InternalConvertAnyToString255 := TO_STRING(anyReal^);
 	__SYSTEM.TYPE_CLASS.TYPE_LREAL:
 		anyLReal := value.pValue;
-		InternalAnyToString255 := TO_STRING(anyLReal^);
+		InternalConvertAnyToString255 := TO_STRING(anyLReal^);
 	
 	__SYSTEM.TYPE_CLASS.TYPE_STRING:
 		anyString := value.pValue;
-		InternalAnyToString255 := anyString^;
+		InternalConvertAnyToString255 := anyString^;
 	__SYSTEM.TYPE_CLASS.TYPE_WSTRING:
 		anyWString := value.pValue;
-		InternalAnyToString255 := TO_STRING(anyWString^);
+		InternalConvertAnyToString255 := TO_STRING(anyWString^);
 	
 	__SYSTEM.TYPE_CLASS.TYPE_TIME:
 		anyTime := value.pValue;
-		InternalAnyToString255 := TO_STRING(anyTime^);
+		InternalConvertAnyToString255 := TO_STRING(anyTime^);
 	__SYSTEM.TYPE_CLASS.TYPE_LTIME:
 		anyLTime := value.pValue;
-		InternalAnyToString255 := TO_STRING(anyLTime^);
+		InternalConvertAnyToString255 := TO_STRING(anyLTime^);
 	__SYSTEM.TYPE_CLASS.TYPE_DATE:
 		anyDate := value.pValue;
-		InternalAnyToString255 := TO_STRING(anyDate^);
+		InternalConvertAnyToString255 := TO_STRING(anyDate^);
 	__SYSTEM.TYPE_CLASS.TYPE_DATEANDTIME:
 		anyDateAndTime := value.pValue;
-		InternalAnyToString255 := TO_STRING(anyDateAndTime^);  
+		InternalConvertAnyToString255 := TO_STRING(anyDateAndTime^);  
 	__SYSTEM.TYPE_CLASS.TYPE_TIMEOFDAY:
 		anyTimeOfDay := value.pValue;
-		InternalAnyToString255 := TO_STRING(anyTimeOfDay^);
+		InternalConvertAnyToString255 := TO_STRING(anyTimeOfDay^);
 	
 	__SYSTEM.TYPE_CLASS.TYPE_POINTER, __SYSTEM.TYPE_CLASS.TYPE_REFERENCE:
 		anyPVoid := value.pValue;
-		InternalAnyToString255 := Tc2_Utilities.PVOID_TO_HEXSTR(
+		InternalConvertAnyToString255 := Tc2_Utilities.PVOID_TO_HEXSTR(
 			in := anyPVoid^,
 			iPrecision := TO_INT(SIZEOF(PVOID) * 2),
 			bLoCase := FALSE
 		);		
 	
 	ELSE
-		InternalAnyToString255 := Concat255(
+		InternalConvertAnyToString255 := Concat255(
 			'<value unavailable; type class: ',
 			SystemTypeClassConvertor.ToString(typeClass := value.TypeClass),
 			'; size: ',
@@ -1069,28 +1200,37 @@ InternalAppend := TRUE;]]></ST>
       </Implementation>
     </Method>
     <Method Name="InternalAppendFit" Id="{64a20005-3f77-4b1a-908f-282a178d2bc7}" FolderPath="Service members\">
-      <Declaration><![CDATA[(*
-Appends text to a STRING buffer, marking truncation when capacity permits.
-
+      <Declaration><![CDATA[(*!
+<summary>Appends text to a STRING buffer, marking truncation when capacity permits.</summary>
+<description>
 Requires live, terminated input and writable target storage of the matching encoding.
-On overflow, capacities of at least three characters use three dots. Capacities of one or two use one dot.
+On overflow, capacities of at least three bytes use three dots. Capacities of one or two use one dot.
+A cut in the source or existing target moves back only if it splits a valid UTF-8 sequence.
+When the cut moves, utf8CutAdjusted is TRUE so a multi-fragment caller can stop at the marker.
 A buffer with room only for its terminator stays empty and succeeds. Missing terminator space or an invalid
-target returns FALSE. The caller handles native exceptions.
+target descriptor returns FALSE. The caller handles native exceptions.
+</description>
 *)
 METHOD INTERNAL InternalAppendFit : BOOL
 VAR_INPUT
 	targetString : __SYSTEM.AnyType;
 	sourceString : POINTER TO STRING;
 END_VAR
+VAR_OUTPUT
+	utf8CutAdjusted : BOOL;
+END_VAR
 VAR
 	maxCapacity : UDINT;
 	currentLength : UDINT;
 	sourceLength : UDINT;
-	availableChars : UDINT;
+	prefixCapacity : UDINT;
+	sourcePrefixLength : UDINT;
+	sourceBytes : POINTER TO BYTE;
 	targetBytes : POINTER TO BYTE;
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[InternalAppendFit := FALSE;
+utf8CutAdjusted := FALSE;
 
 IF targetString.TypeClass <> __SYSTEM.TYPE_CLASS.TYPE_STRING
 	OR_ELSE targetString.pValue = 0
@@ -1129,33 +1269,145 @@ IF currentLength + sourceLength <= maxCapacity THEN
 	);
 
 	RETURN;
-ELSE
-	IF maxCapacity >= 3 THEN
-		IF currentLength >= maxCapacity - 3 THEN
-			currentLength := maxCapacity - 3;
-			availableChars := 0;
-		ELSE
-			availableChars := maxCapacity - 3 - currentLength;
-			Tc2_System.MEMCPY(destAddr := targetString.pValue + currentLength, srcAddr := sourceString, n := availableChars);
+END_IF
+
+IF maxCapacity >= 3 THEN
+	prefixCapacity := maxCapacity - 3;
+
+	IF currentLength >= prefixCapacity THEN
+		currentLength := getUtf8SafePrefixLength(
+			data := targetBytes,
+			byteLength := currentLength,
+			prefixLength := prefixCapacity
+		);
+		utf8CutAdjusted := currentLength < prefixCapacity;
+	ELSE
+		sourceBytes := ADR(sourceString^);
+		sourcePrefixLength := getUtf8SafePrefixLength(
+			data := sourceBytes,
+			byteLength := sourceLength,
+			prefixLength := prefixCapacity - currentLength
+		);
+		utf8CutAdjusted := sourcePrefixLength < prefixCapacity - currentLength;
+
+		IF sourcePrefixLength > 0 THEN
+			Tc2_System.MEMCPY(
+				destAddr := targetString.pValue + currentLength,
+				srcAddr := sourceString,
+				n := sourcePrefixLength
+			);
 		END_IF
 
-		targetBytes[currentLength + availableChars] := 16#2E; // '.'
-		targetBytes[currentLength + availableChars + 1] := 16#2E; // '.'
-		targetBytes[currentLength + availableChars + 2] := 16#2E; // '.'
-		targetBytes[currentLength + availableChars + 3] := 0;
-	ELSIF maxCapacity > 0 THEN
-		IF currentLength >= maxCapacity - 1 THEN
-			currentLength := maxCapacity - 1;
-		END_IF
-		
-		targetBytes[currentLength] := 16#2E;
-		targetBytes[currentLength + 1] := 0;
-	ELSE
-		targetBytes[0] := 0;
+		currentLength := currentLength + sourcePrefixLength;
 	END_IF
+
+	targetBytes[currentLength] := 16#2E; // '.'
+	targetBytes[currentLength + 1] := 16#2E;
+	targetBytes[currentLength + 2] := 16#2E;
+	targetBytes[currentLength + 3] := 0;
+ELSIF maxCapacity > 0 THEN
+	prefixCapacity := MIN(currentLength, maxCapacity - 1);
+	currentLength := getUtf8SafePrefixLength(
+		data := targetBytes,
+		byteLength := currentLength,
+		prefixLength := prefixCapacity
+	);
+	utf8CutAdjusted := currentLength < prefixCapacity;
+	targetBytes[currentLength] := 16#2E; // '.'
+	targetBytes[currentLength + 1] := 0;
+ELSE
+	targetBytes[0] := 0;
 END_IF
 
 InternalAppendFit := TRUE;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="getUtf8SafePrefixLength" Id="{f778cdbf-5acc-4396-ba3d-a002f2458934}" FolderPath="Service members\">
+      <Declaration><![CDATA[(*!
+<summary>Moves a byte cut to the start of a valid UTF-8 sequence if the cut splits that sequence.</summary>
+<description>
+The caller supplies readable data of byteLength bytes and a prefixLength within that data.
+Inspects only the bytes near the cut. For any other cut, returns prefixLength.
+</description>
+*)
+METHOD PRIVATE getUtf8SafePrefixLength : UDINT
+VAR_INPUT
+	data : POINTER TO BYTE;
+	byteLength : UDINT;
+	prefixLength : UDINT;
+END_VAR
+VAR CONSTANT
+	//! <summary>UTF-8 continuation bytes occupy the inclusive range 16#80 through 16#BF.</summary>
+	CONTINUATION_FIRST : BYTE := BYTE#16#80;
+	CONTINUATION_LAST : BYTE := BYTE#16#BF;
+	//! <summary>A four-byte code point has at most three continuation bytes after its leading byte.</summary>
+	MAX_CONTINUATION_COUNT : UDINT := 3;
+END_VAR
+VAR
+	sequenceStart : UDINT;
+	sequenceLength : UDINT;
+	leadingByte : BYTE;
+	secondByte : BYTE;
+	i : UDINT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[getUtf8SafePrefixLength := prefixLength;
+
+IF prefixLength = 0 OR_ELSE prefixLength >= byteLength THEN
+	RETURN;
+END_IF
+
+sequenceStart := prefixLength;
+
+WHILE sequenceStart > 0
+	AND_THEN prefixLength - sequenceStart < MAX_CONTINUATION_COUNT
+	AND_THEN data[sequenceStart] >= CONTINUATION_FIRST
+	AND_THEN data[sequenceStart] <= CONTINUATION_LAST
+DO
+	sequenceStart := sequenceStart - 1;
+END_WHILE
+
+IF sequenceStart = prefixLength THEN
+	RETURN;
+END_IF
+
+// Leading-byte ranges for two-, three-, and four-byte UTF-8 sequences.
+leadingByte := data[sequenceStart];
+CASE leadingByte OF
+	BYTE#16#C2..BYTE#16#DF:
+		sequenceLength := 2;
+	BYTE#16#E0..BYTE#16#EF:
+		sequenceLength := 3;
+	BYTE#16#F0..BYTE#16#F4:
+		sequenceLength := 4;
+ELSE
+	RETURN;
+END_CASE
+
+IF prefixLength - sequenceStart >= sequenceLength
+	OR_ELSE byteLength - sequenceStart < sequenceLength
+THEN
+	RETURN;
+END_IF
+
+FOR i := sequenceStart + 1 TO sequenceStart + sequenceLength - 1 DO
+	IF data[i] < CONTINUATION_FIRST OR_ELSE data[i] > CONTINUATION_LAST THEN
+		RETURN;
+	END_IF
+END_FOR
+
+// The second byte excludes overlong encodings, surrogates, and code points beyond U+10FFFF.
+secondByte := data[sequenceStart + 1];
+
+IF (leadingByte = BYTE#16#E0 AND_THEN secondByte < BYTE#16#A0)
+	OR_ELSE (leadingByte = BYTE#16#ED AND_THEN secondByte > BYTE#16#9F)
+	OR_ELSE (leadingByte = BYTE#16#F0 AND_THEN secondByte < BYTE#16#90)
+	OR_ELSE (leadingByte = BYTE#16#F4 AND_THEN secondByte > BYTE#16#8F)
+THEN
+	RETURN;
+END_IF
+
+getUtf8SafePrefixLength := sequenceStart;]]></ST>
       </Implementation>
     </Method>
     <Method Name="InternalFind" Id="{5b6aff61-016c-4db4-94ed-cfbbb336515e}" FolderPath="Service members\">
@@ -1926,7 +2178,7 @@ IF NOT InternalReplaceInSource(
 END_IF]]></ST>
       </Implementation>
     </Method>
-    <Method Name="StringPointerToAnyType" Id="{a10ef46f-9469-4b72-b2c7-fdc82174f321}">
+    <Method Name="ConvertStringPointerToAnyType" Id="{a10ef46f-9469-4b72-b2c7-fdc82174f321}">
       <Declaration><![CDATA[(*!
 <summary>Builds a borrowed ANY descriptor for text at an address.</summary>
 <description>
@@ -1935,18 +2187,18 @@ buffer capacity; size must fit DINT. Does not copy, allocate or acquire ownershi
 using the descriptor.
 </description>
 *)
-METHOD StringPointerToAnyType : __System.AnyType
+METHOD ConvertStringPointerToAnyType : __System.AnyType
 VAR_INPUT
 	value : POINTER TO STRING;
 END_VAR
 ]]></Declaration>
       <Implementation>
-        <ST><![CDATA[StringPointerToAnyType.TypeClass := __SYSTEM.TYPE_CLASS.TYPE_STRING;
-StringPointerToAnyType.pValue := value;
-StringPointerToAnyType.diSize := TO_DINT(GetActualSize(value^));]]></ST>
+        <ST><![CDATA[ConvertStringPointerToAnyType.TypeClass := __SYSTEM.TYPE_CLASS.TYPE_STRING;
+ConvertStringPointerToAnyType.pValue := value;
+ConvertStringPointerToAnyType.diSize := TO_DINT(GetActualSize(value^));]]></ST>
       </Implementation>
     </Method>
-    <Method Name="StringReferenceToAnyType" Id="{06b7793c-cb19-41ed-b05e-889daf02c80f}">
+    <Method Name="ConvertStringReferenceToAnyType" Id="{06b7793c-cb19-41ed-b05e-889daf02c80f}">
       <Declaration><![CDATA[(*!
 <summary>Builds a borrowed ANY descriptor for a string reference.</summary>
 <description>
@@ -1954,18 +2206,18 @@ Requires a valid reference to terminated text. Records occupied bytes including 
 capacity; size must fit DINT. Keep the source alive while using the descriptor; no ownership is transferred.
 </description>
 *)
-METHOD StringReferenceToAnyType : __System.AnyType
+METHOD ConvertStringReferenceToAnyType : __System.AnyType
 VAR_INPUT
 	value : REFERENCE TO STRING;
 END_VAR
 ]]></Declaration>
       <Implementation>
-        <ST><![CDATA[StringReferenceToAnyType.TypeClass := __SYSTEM.TYPE_CLASS.TYPE_STRING;
-StringReferenceToAnyType.pValue := ADR(value);
-StringReferenceToAnyType.diSize := TO_DINT(GetActualSize(value));]]></ST>
+        <ST><![CDATA[ConvertStringReferenceToAnyType.TypeClass := __SYSTEM.TYPE_CLASS.TYPE_STRING;
+ConvertStringReferenceToAnyType.pValue := ADR(value);
+ConvertStringReferenceToAnyType.diSize := TO_DINT(GetActualSize(value));]]></ST>
       </Implementation>
     </Method>
-    <Method Name="StringToAnyType" Id="{ad63b85b-ddb5-45f3-baef-6d6cd1517473}" FolderPath="Any\">
+    <Method Name="ConvertStringToAnyType" Id="{ad63b85b-ddb5-45f3-baef-6d6cd1517473}" FolderPath="Any\">
       <Declaration><![CDATA[(*!
 <summary>Builds a borrowed ANY descriptor for the supplied string.</summary>
 <description>
@@ -1973,14 +2225,14 @@ Records occupied bytes including the terminator, not buffer capacity; size must 
 acquire ownership. Do not retain the descriptor beyond the source lifetime.
 </description>
 *)
-METHOD StringToAnyType : __SYSTEM.AnyType
+METHOD ConvertStringToAnyType : __SYSTEM.AnyType
 VAR_IN_OUT CONSTANT
 	value : STRING;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[StringToAnyType.TypeClass := __SYSTEM.TYPE_CLASS.TYPE_STRING;
-StringToAnyType.pValue := ADR(value);
-StringToAnyType.diSize := TO_DINT(GetActualSize(value));]]></ST>
+        <ST><![CDATA[ConvertStringToAnyType.TypeClass := __SYSTEM.TYPE_CLASS.TYPE_STRING;
+ConvertStringToAnyType.pValue := ADR(value);
+ConvertStringToAnyType.diSize := TO_DINT(GetActualSize(value));]]></ST>
       </Implementation>
     </Method>
     <Method Name="TrimChar" Id="{62b24a6d-bbc4-486f-b32e-31180d926835}" FolderPath="Trim\">
@@ -2194,7 +2446,7 @@ __ENDTRY]]></ST>
 <summary>Appends text to a STRING buffer, marking truncation when capacity permits.</summary>
 <description>
 Requires live, terminated input and writable target storage of the matching encoding.
-On overflow, capacities of at least three characters use three dots. Capacities of one or two use one dot.
+On overflow, uses the AppendFit marker and UTF-8 truncation rules, including shortening the existing target.
 A buffer with room only for its terminator stays empty and succeeds. Missing terminator space or an invalid
 target returns FALSE. Exceptions are contained.
 </description>
@@ -2222,7 +2474,8 @@ __ENDTRY]]></ST>
 <description>
 Requires live, terminated input and writable target storage of the matching encoding.
 Processes fragments in order. Completed appends remain visible on failure.
-On overflow, capacities of at least three characters use three dots. Capacities of one or two use one dot.
+Pass whole fragments of up to 255 bytes. Uses the AppendFit truncation rules and stops after a cut moves
+to a UTF-8 boundary.
 A buffer with room only for its terminator stays empty and succeeds. Missing terminator space or an invalid
 target returns FALSE. Exceptions are contained.
 </description>
@@ -2251,6 +2504,9 @@ VAR_INPUT
 	sourceString8 : STRING(255) := '';
 	sourceString9 : STRING(255) := '';
 	sourceString10 : STRING(255) := '';
+END_VAR
+VAR
+	utf8CutAdjusted : BOOL;
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[__TRY
@@ -2260,43 +2516,111 @@ END_VAR]]></Declaration>
 		RETURN;
 	END_IF
 
-	IF NOT InternalAppendFit(targetString := targetString, sourceString := ADR(sourceString1)) THEN
+	IF NOT InternalAppendFit(
+		targetString := targetString,
+		sourceString := ADR(sourceString1),
+		utf8CutAdjusted => utf8CutAdjusted
+	)
+	THEN
 		RETURN;
 	END_IF
 
-	IF sourceString2 <> '' AND_THEN NOT InternalAppendFit(targetString := targetString, sourceString := ADR(sourceString2)) THEN
+	IF NOT utf8CutAdjusted
+		AND_THEN sourceString2 <> ''
+		AND_THEN NOT InternalAppendFit(
+			targetString := targetString,
+			sourceString := ADR(sourceString2),
+			utf8CutAdjusted => utf8CutAdjusted
+		)
+	THEN
 		RETURN;
 	END_IF
 
-	IF sourceString3 <> '' AND_THEN NOT InternalAppendFit(targetString := targetString, sourceString := ADR(sourceString3)) THEN
+	IF NOT utf8CutAdjusted
+		AND_THEN sourceString3 <> ''
+		AND_THEN NOT InternalAppendFit(
+			targetString := targetString,
+			sourceString := ADR(sourceString3),
+			utf8CutAdjusted => utf8CutAdjusted
+		)
+	THEN
 		RETURN;
 	END_IF
 
-	IF sourceString4 <> '' AND_THEN NOT InternalAppendFit(targetString := targetString, sourceString := ADR(sourceString4)) THEN
+	IF NOT utf8CutAdjusted
+		AND_THEN sourceString4 <> ''
+		AND_THEN NOT InternalAppendFit(
+			targetString := targetString,
+			sourceString := ADR(sourceString4),
+			utf8CutAdjusted => utf8CutAdjusted
+		)
+	THEN
 		RETURN;
 	END_IF
 
-	IF sourceString5 <> '' AND_THEN NOT InternalAppendFit(targetString := targetString, sourceString := ADR(sourceString5)) THEN
+	IF NOT utf8CutAdjusted
+		AND_THEN sourceString5 <> ''
+		AND_THEN NOT InternalAppendFit(
+			targetString := targetString,
+			sourceString := ADR(sourceString5),
+			utf8CutAdjusted => utf8CutAdjusted
+		)
+	THEN
 		RETURN;
 	END_IF
 
-	IF sourceString6 <> '' AND_THEN NOT InternalAppendFit(targetString := targetString, sourceString := ADR(sourceString6)) THEN
+	IF NOT utf8CutAdjusted
+		AND_THEN sourceString6 <> ''
+		AND_THEN NOT InternalAppendFit(
+			targetString := targetString,
+			sourceString := ADR(sourceString6),
+			utf8CutAdjusted => utf8CutAdjusted
+		)
+	THEN
 		RETURN;
 	END_IF
 
-	IF sourceString7 <> '' AND_THEN NOT InternalAppendFit(targetString := targetString, sourceString := ADR(sourceString7)) THEN
+	IF NOT utf8CutAdjusted
+		AND_THEN sourceString7 <> ''
+		AND_THEN NOT InternalAppendFit(
+			targetString := targetString,
+			sourceString := ADR(sourceString7),
+			utf8CutAdjusted => utf8CutAdjusted
+		)
+	THEN
 		RETURN;
 	END_IF
 
-	IF sourceString8 <> '' AND_THEN NOT InternalAppendFit(targetString := targetString, sourceString := ADR(sourceString8)) THEN
+	IF NOT utf8CutAdjusted
+		AND_THEN sourceString8 <> ''
+		AND_THEN NOT InternalAppendFit(
+			targetString := targetString,
+			sourceString := ADR(sourceString8),
+			utf8CutAdjusted => utf8CutAdjusted
+		)
+	THEN
 		RETURN;
 	END_IF
 
-	IF sourceString9 <> '' AND_THEN NOT InternalAppendFit(targetString := targetString, sourceString := ADR(sourceString9)) THEN
+	IF NOT utf8CutAdjusted
+		AND_THEN sourceString9 <> ''
+		AND_THEN NOT InternalAppendFit(
+			targetString := targetString,
+			sourceString := ADR(sourceString9),
+			utf8CutAdjusted => utf8CutAdjusted
+		)
+	THEN
 		RETURN;
 	END_IF
 
-	IF sourceString10 <> '' AND_THEN NOT InternalAppendFit(targetString := targetString, sourceString := ADR(sourceString10)) THEN
+	IF NOT utf8CutAdjusted
+		AND_THEN sourceString10 <> ''
+		AND_THEN NOT InternalAppendFit(
+			targetString := targetString,
+			sourceString := ADR(sourceString10),
+			utf8CutAdjusted => utf8CutAdjusted
+		)
+	THEN
 		RETURN;
 	END_IF
 

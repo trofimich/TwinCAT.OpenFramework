@@ -1,0 +1,221 @@
+<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="StaticConfigurationTestWorkflow" Id="{caffe38d-6ad5-45e5-9865-5b885458baad}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+SPDX-FileCopyrightText: © 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+SPDX-License-Identifier: MIT
+License: https://opensource.org/license/mit
+*)
+
+(*
+Static-field self-configuring workflow fixture for testing Workflow.OnConfigure contracts.
+
+Composes static SequenceActivity, AssignVariableActivity and DelayActivity fields inside OnConfigure,
+records hook order and call counts, and supports controlled failure and reentrancy injection.
+*)
+
+{attribute 'no_explicit_call' := 'do not call this function block directly'}
+{attribute 'no_assign'}
+FUNCTION_BLOCK StaticConfigurationTestWorkflow EXTENDS TOF_Workflow.Workflow
+VAR_INPUT
+	mode : STATIC_WORKFLOW_TEST_MODE := STATIC_WORKFLOW_TEST_MODE.NORMAL;
+END_VAR
+VAR_OUTPUT
+	configureCount : DINT;
+	beforeCount : DINT;
+	afterCount : DINT;
+	initializationCount : DINT;
+	configureCountAtFirstBefore : DINT;
+	rootAssignedAtFirstBefore : BOOL;
+	reentrantConfigExceptionCaught : BOOL;
+END_VAR
+VAR_STAT
+	// Distinct static field to avoid redeclaring inherited Workflow metadata.
+	{attribute 'hide'}
+	_StaticConfigClassName : STRING := __POUNAME();
+END_VAR
+VAR
+	_Sequence : TOF_Workflow.SequenceActivity(workflow := THIS^);
+	_AssignStep : TOF_Workflow.AssignVariableActivity(workflow := THIS^);
+	_DelayStep : TOF_Workflow.DelayActivity(workflow := 0);
+	_InitialCounter : DINT := 10;
+	_TargetCounter : DINT := 42;
+	_PlcSignal : DINT := 7;
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[]]></ST>
+    </Implementation>
+    <Property Name="ClassName" Id="{17aa90e2-d2e1-46d2-9474-117c1111170a}">
+      <Declaration><![CDATA[(* Returns the initialized static class name of this concrete fixture. *)
+{attribute 'monitoring' := 'call'}
+PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{577443d8-7f80-4d19-ab8a-3169af9e400e}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ClassName REF= _StaticConfigClassName;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="configureNormalGraph" Id="{b7a01b5c-04a4-4a5b-bb0e-0301a3f2a7b2}">
+      <Declaration><![CDATA[(* Declares the test counter, configures static steps and installs the root sequence. *)
+METHOD PRIVATE configureNormalGraph]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[DeclareVariable(name := 'StepCounter', initialValue := _InitialCounter);
+_AssignStep.Configure(targetVariableName := 'StepCounter', value := _TargetCounter);
+_DelayStep.Interval := TOF_Core.Times.MIN_VALUE;
+_Sequence.AddChildActivity(activity := _AssignStep);
+_Sequence.AddChildActivity(activity := _DelayStep);
+SetRootActivity(rootActivity := _Sequence);]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="DelayWorkflow" Id="{ccdcb203-948b-439f-863f-2e1fb3d1a8bd}">
+      <Declaration><![CDATA[(* Exposes the inherited workflow association of the unassociated DelayActivity field. *)
+{attribute 'monitoring' := 'call'}
+PROPERTY DelayWorkflow : TOF_Workflow.IWorkflow]]></Declaration>
+      <Get Name="Get" Id="{143c718a-6b00-43c3-aac0-d866214c837d}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[DelayWorkflow := _DelayStep.Workflow;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="InitializeVariables" Id="{5b24c0e2-5f2c-4f25-9183-c8b44305af50}">
+      <Declaration><![CDATA[(* Counts variable initialization and binds a persistent PLC signal. *)
+METHOD PROTECTED InitializeVariables]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[initializationCount := initializationCount + 1;
+BindPlcVariable(name := 'PlcSignal', plcVariable := _PlcSignal);]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="NamespaceName" Id="{9a7c854f-a55e-4a72-aeeb-5df342d52367}">
+      <Declaration><![CDATA[(* Borrows the test project namespace without changing it. *)
+{attribute 'monitoring' := 'call'}
+PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{abb4cd4d-605c-4ede-8c5a-b6e6f59578f9}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[NamespaceName REF= CurrentNamespace.Name;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="OnAfterRootActivityExecute" Id="{b2878c5e-e7e8-4cbc-a5e1-ecbdce87493c}">
+      <Declaration><![CDATA[(* Counts execution-boundary completions. *)
+METHOD PROTECTED OnAfterRootActivityExecute]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[afterCount := afterCount + 1;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="OnBeforeRootActivityExecute" Id="{e927637e-740b-4afe-8e10-74f1de35b021}">
+      <Declaration><![CDATA[(* Counts before-execute hooks and observes OnConfigure completion on the first scan. *)
+METHOD PROTECTED OnBeforeRootActivityExecute]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[beforeCount := beforeCount + 1;
+
+IF beforeCount = 1 THEN
+	configureCountAtFirstBefore := configureCount;
+	rootAssignedAtFirstBefore := RootActivity <> 0;
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="OnConfigure" Id="{733500ec-74ec-4123-8063-5576a7920079}">
+      <Declaration><![CDATA[(* Configures the static workflow graph or runs the selected failure or reentrancy scenario. *)
+METHOD PROTECTED OnConfigure]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[configureCount := configureCount + 1;
+
+CASE mode OF
+	STATIC_WORKFLOW_TEST_MODE.NORMAL:
+		configureNormalGraph();
+
+	STATIC_WORKFLOW_TEST_MODE.THROW_BEFORE_SET_ROOT:
+		TOF_Core.Exceptions.ThrowStandard(
+			sourceNamespaceName := NamespaceName,
+			sourceClassName := ClassName,
+			sourcePOUName := __POUNAME(),
+			sourcePosition := __POSITION(),
+			message := "Controlled OnConfigure failure before SetRootActivity"
+		);
+
+	STATIC_WORKFLOW_TEST_MODE.THROW_AFTER_SET_ROOT:
+		configureNormalGraph();
+
+		TOF_Core.Exceptions.ThrowStandard(
+			sourceNamespaceName := NamespaceName,
+			sourceClassName := ClassName,
+			sourcePOUName := __POUNAME(),
+			sourcePosition := __POSITION(),
+			message := "Controlled OnConfigure failure after SetRootActivity"
+		);
+
+	STATIC_WORKFLOW_TEST_MODE.REENTER_REQUEST_START,
+	STATIC_WORKFLOW_TEST_MODE.REENTER_EXECUTE,
+	STATIC_WORKFLOW_TEST_MODE.REENTER_DISPOSE_DYNAMIC_CHILDREN,
+	STATIC_WORKFLOW_TEST_MODE.REENTER_REQUEST_SUSPEND,
+	STATIC_WORKFLOW_TEST_MODE.REENTER_REQUEST_CANCEL,
+	STATIC_WORKFLOW_TEST_MODE.REENTER_REQUEST_RESET:
+		triggerReentrantCall();
+END_CASE]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="SelfSize" Id="{f143b978-bb77-4dad-b1f5-40c490ccfae8}">
+      <Declaration><![CDATA[(* Reports the size of this concrete fixture in bytes. *)
+{attribute 'monitoring' := 'call'}
+PROPERTY SelfSize : ULINT]]></Declaration>
+      <Get Name="Get" Id="{da80ef34-268b-49a1-a254-966b5117f302}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[SelfSize := XSIZEOF(THIS^);]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="triggerReentrantCall" Id="{0195f6fb-4f1f-45b0-820f-bf0ac22ff27c}">
+      <Declaration><![CDATA[(* Invokes the forbidden reentrant workflow method, verifies the exception type and rethrows it. *)
+// Breaks the intentional OnConfigure reentrancy cycle in TwinCAT static stack analysis.
+{attribute 'estimated-stack-usage' := '4096'}
+METHOD PRIVATE triggerReentrantCall
+VAR
+	exceptionCode : __SYSTEM.ExceptionCode;
+	exception : TOF_Core.IException;
+	configException : TOF_Workflow.IWorkflowConfigurationException;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[__TRY
+	CASE mode OF
+		STATIC_WORKFLOW_TEST_MODE.REENTER_REQUEST_START:
+			RequestStart();
+
+		STATIC_WORKFLOW_TEST_MODE.REENTER_EXECUTE:
+			Execute();
+
+		STATIC_WORKFLOW_TEST_MODE.REENTER_DISPOSE_DYNAMIC_CHILDREN:
+			DisposeDynamicChildren();
+
+		STATIC_WORKFLOW_TEST_MODE.REENTER_REQUEST_SUSPEND:
+			RequestSuspend();
+
+		STATIC_WORKFLOW_TEST_MODE.REENTER_REQUEST_CANCEL:
+			RequestCancel(reason := "Reentrant cancel");
+
+		STATIC_WORKFLOW_TEST_MODE.REENTER_REQUEST_RESET:
+			RequestReset();
+	END_CASE
+__CATCH(exceptionCode)
+	exception := TOF_Core.ExceptionManager.GetLastException(
+		exceptionCode := exceptionCode,
+		catchPointNamespaceName := NamespaceName,
+		catchPointPOUName := __POUNAME(),
+		catchPointPosition := __POSITION()
+	);
+	reentrantConfigExceptionCaught := exception <> 0 AND_THEN __QUERYINTERFACE(exception, configException);
+
+	TOF_Core.ExceptionManager.ReThrowLastException(
+		exceptionCode := exceptionCode,
+		catchPointNamespaceName := NamespaceName,
+		catchPointPOUName := __POUNAME(),
+		catchPointPosition := __POSITION()
+	);
+__ENDTRY]]></ST>
+      </Implementation>
+    </Method>
+  </POU>
+</TcPlcObject>

@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <TcPlcObject Version="1.1.0.1">
   <POU Name="CreateDirectoryIfNotExists" Id="{be9203ef-f9d0-4c3b-8928-df0e799df263}" SpecialFunc="None">
     <Declaration><![CDATA[(*
@@ -149,10 +149,10 @@ OnStopping; no create request starts.
 </description>
 <param name="processingState">
 BUSY while searching or creating; DONE when no create is needed or creation ends; ERROR when the path refers
-to a file.
+to a file or a native operation fails.
 </param>
 <param name="stopReasonMessage">
-Receives diagnostics when the path refers to a file; native failures use exceptions.
+Receives diagnostics when the path refers to a file or a native operation reports an error.
 </param>
 *)
 METHOD PROTECTED OnRunning
@@ -163,7 +163,6 @@ VAR_IN_OUT
 	stopReasonMessage : TOF_Core.ERROR_MESSAGE;
 END_VAR
 VAR
-	formattedExceptionMessage : TOF_Core.ERROR_MESSAGE;
 	pathErrorMessage : WSTRING(255);
 END_VAR]]></Declaration>
       <Implementation>
@@ -199,20 +198,14 @@ IF _DirectoryChecking THEN
 	_EnumFindFile(bExecute := TRUE);
 	
 	IF _EnumFindFile.bError THEN
-		TOF_Core.WideStrings.Append255(
-			formattedExceptionMessage,
+		stopReasonMessage := TOF_Core.WideStrings.Concat255(
 			"Error while checking directory '",
 			TO_WSTRING(_EnumFindFile.sPathName),
-			"'");
-
-		FileSystemExceptions.ThrowFileSystem(
-			sourceNamespaceName := NamespaceName,
-			sourceClassName := ClassName,
-			sourcePOUName := __POUNAME(),
-			sourcePosition := __POSITION(),
-			message := formattedExceptionMessage,
-			errorCode := _EnumFindFile.nErrId
+			"'",
+			TOF_Core.Exceptions.ERROR_CODE_PREFIX,
+			TO_WSTRING(_EnumFindFile.nErrId)
 		);
+		processingState := TOF_Tasks.TASK_PROCESSING_STATE.ERROR;
 	ELSIF NOT _EnumFindFile.bBusy THEN	
 		_DirectoryChecking := FALSE;
 		
@@ -229,23 +222,15 @@ ELSE
 	_CreateDirectory(bExecute := TRUE);
 	
 	IF _CreateDirectory.bError THEN
-		TOF_Core.WideStrings.Append255(
-			formattedExceptionMessage,
+		stopReasonMessage := TOF_Core.WideStrings.Concat255(
 			"Error while creating directory '",
 			TO_WSTRING(_CreateDirectory.sPathName),
-			"'");
-
-		FileSystemExceptions.ThrowFileSystem(
-			sourceNamespaceName := NamespaceName,
-			sourceClassName := ClassName,
-			sourcePOUName := __POUNAME(),
-			sourcePosition := __POSITION(),
-			message := formattedExceptionMessage,
-			errorCode := _CreateDirectory.nErrId
+			"'",
+			TOF_Core.Exceptions.ERROR_CODE_PREFIX,
+			TO_WSTRING(_CreateDirectory.nErrId)
 		);
-	END_IF
-	
-	IF NOT _CreateDirectory.bBusy THEN
+		processingState := TOF_Tasks.TASK_PROCESSING_STATE.ERROR;
+	ELSIF NOT _CreateDirectory.bBusy THEN
 		processingState := TOF_Tasks.TASK_PROCESSING_STATE.DONE;
 	END_IF	
 END_IF]]></ST>

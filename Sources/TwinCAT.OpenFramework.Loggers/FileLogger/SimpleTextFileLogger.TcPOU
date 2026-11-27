@@ -268,9 +268,6 @@ METHOD Execute
 VAR	
 	exceptionCode : __SYSTEM.ExceptionCode;
 	exception : TOF_Core.IException;
-END_VAR
-VAR
-	formattedExceptionMessage : TOF_Core.ERROR_MESSAGE;
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[__TRY
@@ -354,13 +351,10 @@ END_VAR]]></Declaration>
 				IF _CreateDirectoryIfNotExists.FinalStopReason.WorkDone THEN
 					_State := SIMPLE_TEXT_FILE_LOGGER_STATE.LOGGING;
 				ELSE
-					TOF_Core.Exceptions.ThrowStandard(
-						sourceNamespaceName := NamespaceName,
-						sourceClassName := ClassName,
-						sourcePOUName := __POUNAME(),
-						sourcePosition := __POSITION(),
-						message := "Log directory not created"
-					);
+					_ErrorMessage := "Log directory not created";
+					_State := SIMPLE_TEXT_FILE_LOGGER_STATE.FAILED;
+					_CleanupPending := TRUE;
+					RETURN;
 				END_IF
 
 			END_IF
@@ -373,20 +367,15 @@ END_VAR]]></Declaration>
 			END_IF
 
 			IF _FileContentManager.State.Stopped AND_THEN _FileContentManager.FinalStopReason.Failure THEN
-				formattedExceptionMessage := _FileContentManager.FinalStopReason.Message;
-
-				TOF_Core.Exceptions.ThrowStandard(
-					sourceNamespaceName := NamespaceName,
-					sourceClassName := ClassName,
-					sourcePOUName := __POUNAME(),
-					sourcePosition := __POSITION(),
-					message := formattedExceptionMessage
-				);
+				_ErrorMessage := _FileContentManager.FinalStopReason.Message;
+				_State := SIMPLE_TEXT_FILE_LOGGER_STATE.FAILED;
+				_CleanupPending := TRUE;
+				RETURN;
 			END_IF
 
 			processPendingMessages();
 
-			IF stopAfterAllocationFailure() THEN
+			IF stopAfterAllocationFailure() OR_ELSE _State = SIMPLE_TEXT_FILE_LOGGER_STATE.FAILED THEN
 				RETURN;
 			END_IF
 
@@ -567,49 +556,36 @@ Transfers queued messages into a batch and schedules its asynchronous file write
 
 Called by Execute. Leaves messages queued while a previous file task or file rotation is pending. Removes
 messages from the queue as they are copied into the send buffer, up to the per-file record limit. The send
-buffer must remain alive until the write operation finishes. Invalid write-task state and failures from nested
-operations propagate to Execute for its failure handling and cleanup. Returning does not mean that the
-messages have been written to the file.
+buffer must remain alive until the write operation finishes. Invalid write-task state enters FAILED directly;
+exceptions from nested operations propagate to Execute for its failure handling and cleanup. Returning does not
+mean that the messages have been written to the file.
 *)
-METHOD PRIVATE processPendingMessages
-VAR
-	formattedExceptionMessage : TOF_Core.ERROR_MESSAGE;
-END_VAR]]></Declaration>
+METHOD PRIVATE processPendingMessages]]></Declaration>
       <Implementation>
         <ST><![CDATA[IF _QueueCount = 0 OR_ELSE _FileContentManager.PendingTaskCount > 0 THEN
 	RETURN;
 END_IF
 
 IF NOT _WriteBytesTask.State.Ready AND_THEN NOT _WriteBytesTask.State.Stopped THEN
-	formattedExceptionMessage := TOF_Core.WideStrings.Concat255(
+	_ErrorMessage := TOF_Core.WideStrings.Concat255(
 		"WriteBytesTask has invalid state '",
 		TO_WSTRING(_WriteBytesTask.State.Value),
 		"'"
 	);
-
-	TOF_Core.Exceptions.ThrowStandard(
-		sourceNamespaceName := NamespaceName,
-		sourceClassName := ClassName,
-		sourcePOUName := __POUNAME(),
-		sourcePosition := __POSITION(),
-		message := formattedExceptionMessage
-	);
+	_State := SIMPLE_TEXT_FILE_LOGGER_STATE.FAILED;
+	_CleanupPending := TRUE;
+	RETURN;
 END_IF
 
 IF _WriteBytesTask.State.Stopped AND_THEN NOT _WriteBytesTask.FinalStopReason.WorkDone THEN
-	formattedExceptionMessage := TOF_Core.WideStrings.Concat255(
+	_ErrorMessage := TOF_Core.WideStrings.Concat255(
 		"WriteBytesTask has invalid stop reason '",
 		TO_WSTRING(_WriteBytesTask.FinalStopReason.Value),
 		"'"
 	);
-
-	TOF_Core.Exceptions.ThrowStandard(
-		sourceNamespaceName := NamespaceName,
-		sourceClassName := ClassName,
-		sourcePOUName := __POUNAME(),
-		sourcePosition := __POSITION(),
-		message := formattedExceptionMessage
-	);
+	_State := SIMPLE_TEXT_FILE_LOGGER_STATE.FAILED;
+	_CleanupPending := TRUE;
+	RETURN;
 END_IF
 
 IF _RecordsPerFile >= _MaxRecordsPerFile AND_THEN _FileContentManager.State.Running THEN
