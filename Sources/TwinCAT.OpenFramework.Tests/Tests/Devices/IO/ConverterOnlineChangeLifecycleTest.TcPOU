@@ -1,0 +1,143 @@
+<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="ConverterOnlineChangeLifecycleTest" Id="{5d2554b8-6d83-4347-8980-d85ec37133ec}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+SPDX-FileCopyrightText: © 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+SPDX-License-Identifier: MIT
+License: https://opensource.org/license/mit
+*)
+
+(*
+Checks that FB_reinit preserves scaling limits and fallback references in range converters.
+
+Exercises FB_reinit in place on StaticRangeAnalogValueConverter and DynamicRangeAnalogValueConverter;
+copy-code relocation requires a TwinCAT runtime online-change check.
+*)
+
+{attribute 'no_assign'}
+{attribute 'no_explicit_call' := 'do not call this function block directly'}
+FUNCTION_BLOCK ConverterOnlineChangeLifecycleTest EXTENDS TOF_Testing.SingleCycleTest
+VAR_STAT
+	{attribute 'hide'}
+	_ClassName : STRING := __POUNAME();
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[]]></ST>
+    </Implementation>
+    <Method Name="ExecuteTest" Id="{879f1745-04fd-45e1-9e71-c564ebcc5281}">
+      <Declaration><![CDATA[(* Verifies static limits, live dynamic references, and zero fallback references across FB_reinit. *)
+METHOD PROTECTED ExecuteTest
+VAR
+	minAnalog : LREAL := 0.0;
+	maxAnalog : LREAL := 100.0;
+	minRaw : TOF_Devices_IO.RAW_ANALOG_VALUE := TOF_Devices_IO.RawAnalogValues.FromInt16(value := 0);
+	maxRaw : TOF_Devices_IO.RAW_ANALOG_VALUE := TOF_Devices_IO.RawAnalogValues.FromInt16(value := 1000);
+	invalidMaxRaw : REFERENCE TO TOF_Devices_IO.RAW_ANALOG_VALUE;
+	staticConverter : TOF_Devices_IO.StaticRangeAnalogValueConverter(
+		minAnalogValue := 0.0,
+		maxAnalogValue := 100.0,
+		minRawValue := minRaw,
+		maxRawValue := maxRaw
+	);
+	dynamicConverter : TOF_Devices_IO.DynamicRangeAnalogValueConverter(
+		minAnalogValue := minAnalog,
+		maxAnalogValue := maxAnalog,
+		minRawValue := minRaw,
+		maxRawValue := maxRaw
+	);
+	fallbackConverter : TOF_Devices_IO.DynamicRangeAnalogValueConverter(
+		minAnalogValue := minAnalog,
+		maxAnalogValue := maxAnalog,
+		minRawValue := minRaw,
+		maxRawValue := invalidMaxRaw
+	);
+	rawResult : TOF_Devices_IO.RAW_ANALOG_VALUE;
+	reinitialized : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[reinitialized := staticConverter.FB_reinit()
+	AND_THEN dynamicConverter.FB_reinit()
+	AND_THEN fallbackConverter.FB_reinit();
+Assert.ThatBool(
+	actual := reinitialized,
+	message := "Converter FB_reinit calls must return TRUE"
+).IsTrue();
+
+Assert.ThatLongReal(
+	actual := staticConverter.MaxAnalogValue,
+	message := "Static converter must retain configured analog maximum after FB_reinit"
+).ToBe(expected := 100.0, tolerance := 0.001);
+
+rawResult := staticConverter.ConvertAnalogValueToRawValue(
+	analogValue := 50.0,
+	rawValueType := TOF_Devices_IO.RAW_ANALOG_VALUE_TYPE.INT16
+);
+Assert.ThatInt(
+	actual := rawResult.Int16,
+	message := "Static converter must scale accurately after FB_reinit"
+).ToBe(expected := 500);
+
+rawResult := staticConverter.ConvertAnalogValueToRawValue(
+	analogValue := 150.0,
+	rawValueType := TOF_Devices_IO.RAW_ANALOG_VALUE_TYPE.INT16
+);
+Assert.ThatInt(
+	actual := rawResult.Int16,
+	message := "Static converter must keep upper raw clamping after FB_reinit"
+).ToBe(expected := 1000);
+
+maxAnalog := 200.0;
+rawResult := dynamicConverter.ConvertAnalogValueToRawValue(
+	analogValue := 50.0,
+	rawValueType := TOF_Devices_IO.RAW_ANALOG_VALUE_TYPE.INT16
+);
+Assert.ThatInt(
+	actual := rawResult.Int16,
+	message := "Dynamic converter must continue tracking referenced limits after FB_reinit"
+).ToBe(expected := 250);
+
+rawResult := fallbackConverter.ConvertAnalogValueToRawValue(
+	analogValue := 50.0,
+	rawValueType := TOF_Devices_IO.RAW_ANALOG_VALUE_TYPE.INT16
+);
+Assert.ThatInt(
+	actual := rawResult.Int16,
+	message := "Dynamic converter must preserve zero fallback limits after FB_reinit"
+).ToBe(expected := 0);]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="ClassName" Id="{c8e7f6b1-40de-4fee-9bea-8b612decafc9}">
+      <Declaration><![CDATA[// Borrows the concrete class name. Callers must not modify it.
+{attribute 'monitoring' := 'call'}
+PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{88129ece-9a7c-4479-9698-e16332ed4b63}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ClassName REF= _ClassName;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="NamespaceName" Id="{ccb1e945-d8cb-4b8e-b31e-ca8d82ec8d92}">
+      <Declaration><![CDATA[// Borrows the compiler-initialized namespace name. Callers must not modify it.
+{attribute 'monitoring' := 'call'}
+PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{8234a1fc-9e2c-488b-b8c7-b2bf429b39a3}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[NamespaceName REF= CurrentNamespace.Name;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="SelfSize" Id="{c9e04095-6d74-4849-8af4-5b9b6f11ac4e}">
+      <Declaration><![CDATA[// Reports the concrete instance size in bytes.
+{attribute 'monitoring' := 'call'}
+PROPERTY SelfSize : ULINT]]></Declaration>
+      <Get Name="Get" Id="{7284b187-2c6e-4f02-9313-715c484d2052}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[SelfSize := XSIZEOF(THIS^);]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+  </POU>
+</TcPlcObject>

@@ -8,16 +8,14 @@ Beckhoff documentation; do not override it based on documentation or assumptions
 
 ## Terms
 
-- **Owner**: the project author who issues instructions, approves plans and contracts, and runs verifications.
+- **Owner**: the project author who issues instructions, approves plans and contracts, and runs all verifications.
 - **Agreed plan / agreed contract**: a work plan or behavior guarantee approved by the owner in chat or recorded as a
   decision in `docs/audit/`. A contract alone does not authorize implementation.
 - **Try method**: any method whose name starts with `Try`, regardless of casing or visibility.
-- **Terminal OOM**: a failed dynamic allocation after which normal execution must not continue.
+- **Terminal OOM**: a failed dynamic allocation after which normal execution cycles must not continue.
 - **Fatal allocation latch**: the application-wide flag set by `DynamicMemoryManager.RaiseAllocationFailure` on
-  terminal OOM before raising; `RaiseIfAllocationFailed` throws while it is set, and only application reinitialization
-  clears it.
-- **`ERROR`**: the Core function block (`Data/Errors/ERROR`) that stores copied error state independently of transient
-  exception objects.
+  terminal OOM before raising (`RaiseIfAllocationFailed` throws while it is set; cleared only by application
+  reinitialization, never manually).
 
 ## Language & Communication
 
@@ -29,8 +27,8 @@ Beckhoff documentation; do not override it based on documentation or assumptions
 
 - Follow [Choosing APIs](Guides/ChoosingAPIs.md) for application code and usage examples, updating it when supported
   tasks or recommended APIs change. Keep signatures and detailed contracts beside declarations, not in the guide.
-- Add or update DocGen beside new or modified public library APIs and protected members available to descendants.
-  Update the enclosing type's DocGen when its contract changes. Leave unrelated members untouched.
+- Add or update DocGen only beside new or modified public library APIs, protected members available to descendants, and
+  enclosing types whose contract changes.
 - Use standard ST comments (not DocGen) for private/internal declarations, implementation variables and explanations,
   license notices (MIT per `LICENSE.txt`; preserve authorship), and the `Tests`, `Samples`, and `HowTo` projects.
   Document relevant contracts or behavior where a reader needs them.
@@ -53,8 +51,7 @@ Beckhoff documentation; do not override it based on documentation or assumptions
   `bInitRetains: BOOL; // TRUE: the retain variables are initialized (reset warm / reset cold)`
   `bInCopyCode: BOOL; // TRUE: the instance will be copied to the copy code afterward (online change)`
 - Order top-level object headers (`FUNCTION_BLOCK`, `PROGRAM`, `FUNCTION`, `INTERFACE`, `TYPE`, `GVL`) as: license
-  block, blank line, declaration comment, blank line, any attributes, then immediately the declaration (when no
-  attributes apply, the declaration follows the blank line directly).
+  block, blank line, declaration comment, blank line, optional attributes (no trailing blank line), declaration.
 - Align wrapped continuation lines in DocGen and comments with the surrounding block.
 
 ## Architecture & Design
@@ -69,10 +66,10 @@ Beckhoff documentation; do not override it based on documentation or assumptions
 - Expose externally needed values (including for ADS clients) through the public API. Use properties when an FB
   implements any interface (even if used only with `__QUERYINTERFACE`), and `VAR_OUTPUT` only for direct outputs on FBs
   without interfaces.
-- Choose a property for a parameterless, cheap, side-effect-free value (attribute, state, metadata); choose a
-  verb-named method when an operation takes parameters, computes or allocates non-trivially, mutates state, or may fail.
-  Mark getters exposing state (including on `INTERFACE` properties) with `{attribute 'monitoring' := 'call'}` and FB
-  backing fields with `{attribute 'hide'}`; keep monitored getters cheap and side-effect-free.
+- Use a property only for a parameterless, cheap, side-effect-free value (attribute, state, metadata), and a method if
+  an operation takes parameters, computes or allocates non-trivially, mutates state, or may fail. Mark state getters
+  (including on `INTERFACE` properties) with `{attribute 'monitoring' := 'call'}` and FB backing fields with
+  `{attribute 'hide'}`.
 - Use the simplest testable design satisfying the agreed contract. Add abstractions, helpers, flags, or fallbacks only
   for a concrete need, explaining their cost and compatibility impact.
 - Treat objects as single-task unless cross-task guarantees are documented beside the API; call-local storage alone
@@ -85,15 +82,14 @@ Beckhoff documentation; do not override it based on documentation or assumptions
   numeric variables with constant sets.
 - One statement per line. Format `IF/ELSIF/ELSE/END_IF`, loops, `CASE`, and `TRY/CATCH` multiline, even for a single
   `RETURN` or call.
-- Separate control flow blocks from adjacent statements in the same body or branch with a blank line.
+- Use blank lines to separate control flow blocks from adjacent statements in the same body/branch, and independent
+  groups of declarations or algorithm steps (not every variable or statement).
 - In multiline `IF` and `ELSIF` conditions, break before the logical operator, indent continuations by one tab, and put
   `THEN` on its own line aligned with `IF`/`ELSIF`.
 - Compare boundaries and special values against constants of the corresponding framework type (adding documented
   constants where missing); literal `0` is allowed in ordinary size, count, and index comparisons when exact type is
   immaterial.
-- Separate independent groups of declarations and algorithm steps with blank lines, not every variable or statement.
-- Indent new and modified ST code with tabs. Follow project-wide conventions for uncovered cases; if usage conflicts or
-  no convention exists, ask the owner and record the agreed rule here.
+- Indent new and modified ST code with tabs, and follow project-wide conventions for uncovered cases.
 - In property getters and `FUNCTION` bodies, an unassigned early `RETURN` yields the return type's default value; do
   not add redundant `defaultValue` locals or assignments (assign `FunctionName := ...` for non-default results).
 - Format simple `TYPE` aliases and subranges on a single line (`TYPE NAME : TargetType; END_TYPE`), using named
@@ -135,7 +131,7 @@ Beckhoff documentation; do not override it based on documentation or assumptions
   meaning:
   - `Get`: returns an existing value or deterministic mapping; invalid input may raise.
   - `Find`: searches; absence is an expected outcome reported via the return value.
-  - `Try<Verb>`: obeys the Try contract; a member that may raise is never named `Try*`.
+  - `Try<Verb>`: obeys the Try contract (never raises).
   - `Create` allocates/constructs; `Parse`/`Format` convert between text and values; `Read`/`Write` consume or produce
     stream/document/cursor data; `Validate`/`Check` verify; `Request<Action>` asks for a refusable lifecycle transition.
   - Side-effect-free `BOOL` predicates start with `Is`, `Has`, `Can`, `Are`, `Should`, or use third-person verbs
@@ -181,8 +177,7 @@ Beckhoff documentation; do not override it based on documentation or assumptions
   and post-failure state against this contract.
 - On terminal OOM, a Try method returns failure with the fatal allocation latch left set.
 - Call `DynamicMemoryManager.RaiseIfAllocationFailed` at every task boundary outside Try methods and recoverable
-  handlers (`AutomationRunner` does this for tasks it runs; other tasks must call it explicitly). Never clear the latch
-  or continue subsequent execution cycles after terminal OOM.
+  handlers (`AutomationRunner` does this for tasks it runs; other tasks must call it explicitly).
 
 ### Lifecycle Methods
 
@@ -198,6 +193,20 @@ Beckhoff documentation; do not override it based on documentation or assumptions
   dependencies.
 - The runtime does not invoke `FB_init` or `FB_exit` automatically on `PROGRAM` start or unload; manage program
   resources via a nested FB instance or explicit calls.
+- Online Change relocation runs `FB_exit(bInCopyCode := TRUE)` (old instance) -> `FB_init(..., bInCopyCode := TRUE)`
+  (new instance, before copy) -> bitwise field copy -> `FB_reinit()`. Design FBs assuming relocation unless
+  documented as non-relocatable:
+  - In `FB_exit`, guard heap buffers, dynamic children, and retained state behind `IF NOT bInCopyCode`; if a native
+    resource cannot survive bitwise copy (`FB_TcMessage`), release it and reset its tracking flag (`_Created := FALSE`)
+    so execution lazily recreates it.
+  - In `FB_init`, guard initial configuration, side effects, and internal self-address/sub-object bindings behind
+    `IF NOT bInCopyCode` (writes to ordinary fields are overwritten by copy anyway).
+  - Use `{attribute 'no_copy'}` on borrowed dependencies assigned solely from `FB_init` inputs (validators,
+    comparers, `parent`, fixed strategy references) that must reflect relocated targets; assign them unconditionally
+    in `FB_init`, and never apply `{attribute 'no_copy'}` to heap pointers or runtime-mutated fields.
+  - When an FB stores internal addresses (`ADR(_Static*)`, `REF=` to own/fallback fields, interfaces to embedded
+    sub-objects, or raw pointers to own nodes), implement `FB_reinit()` to rebind them after copy, and call
+    `SUPER^.FB_reinit()` in derived `FB_reinit()` overrides.
 
 ### Memory and Ownership
 
@@ -216,10 +225,10 @@ Beckhoff documentation; do not override it based on documentation or assumptions
   interfaces. Avoid copying unless documented as supported, and document any non-copyable contract at the declaration
   (it applies even without attributes).
 - Apply `{attribute 'no_assign'}` when copying breaks ownership, address bindings, or internal relationships (a
-  borrowed dependency alone is insufficient), assessing impact on descendants and callers while preserving valid APIs.
-  If a hard error blocks required usage, Build 4026 provides `{attribute 'no_assign_warning'}` — review warnings,
-  uphold the non-copyable contract, and have the owner verify the scenario. Obtain owner approval before adding,
-  removing, or switching `no_assign` / `no_assign_warning` on existing types; never change them in bulk.
+  borrowed dependency alone is insufficient), assessing impact on descendants and callers while preserving valid APIs;
+  if a hard error blocks required usage, Build 4026 provides `{attribute 'no_assign_warning'}` (review resulting
+  warnings). Obtain owner approval before adding, removing, or switching `no_assign` / `no_assign_warning` on existing
+  types; never change them in bulk.
 
 ### Exception Objects
 
@@ -229,8 +238,8 @@ Beckhoff documentation; do not override it based on documentation or assumptions
   dynamic exceptions until task cleanup; static instances remain caller-owned.
 - When adding an exception type or payload, verify that `Clone` preserves the concrete type and all payload rather than
   assuming an inherited `Clone` suffices.
-- Never retain exception references past task cleanup or pass them across tasks; copy state into `ERROR` for long-term
-  diagnostics.
+- Never retain exception references past task cleanup or pass them across tasks; copy error state into the Core `ERROR`
+  FB (`Data/Errors/ERROR`) for independent long-term diagnostics.
 
 ## TwinCAT
 
@@ -240,7 +249,8 @@ Beckhoff documentation; do not override it based on documentation or assumptions
   `{attribute 'no_explicit_call' := 'do not call this function block directly'}`.
 - Provide `ClassName` and `NamespaceName` properties on every new `PROGRAM`.
 - Declare `_ClassName : STRING := __POUNAME();` in `VAR_STAT` for FBs (never instance `VAR`), and in `VAR` for
-  `PROGRAM` (where `VAR_STAT` is invalid); `FUNCTION` declarations do not use `_ClassName`.
+  `PROGRAM` (where `VAR_STAT` is invalid); `FUNCTION` declarations do not use `_ClassName`. Check reused templates
+  against all metadata and inheritance rules.
 - Extend `IObject` (or `__SYSTEM.IQueryInterface` when `IObject` is intentionally outside the contract) on every new
   root `INTERFACE` so `__QUERYINTERFACE` works, mark internal-only interfaces with `{attribute 'hide'}`, and keep
   interface property `<Get>`/`<Set>` nodes bodyless (empty `<Declaration>` only).
@@ -249,8 +259,6 @@ Beckhoff documentation; do not override it based on documentation or assumptions
 - Add no attributes by default to `STRUCT`, `UNION`, or `TYPE` aliases; add `{attribute 'enable_dynamic_creation'}`
   or `{attribute 'pack_mode' := ...}` only when required by heap allocation or binary layout.
 - Mark new GVLs with `{attribute 'qualified_only'}`.
-- When adding or modifying object metadata, inspect storage section, initialization, getter dependencies, and inherited
-  field names across all affected declarations, checking reused templates against these rules.
 
 ### Compiler and Typing Rules
 
@@ -317,65 +325,63 @@ Beckhoff documentation; do not override it based on documentation or assumptions
   application reinitialization or a dedicated task is required.
 - Derive expected values from the contract and explicit inputs; observe timing, serialization, and external effects
   independently when reusing implementation logic could reproduce the same defect.
-- Fail when required observations are skipped. Bound cyclic waits, verify completion before reading final results,
-  verify failure paths, invariants, and cleanup, and report the scenario and failed condition in diagnostics. Add
-  positive controls for fault injection when an unexecuted operation would otherwise let the test pass.
+- Fail if required observations are skipped, and add positive controls for fault injection when an unexecuted operation
+  could otherwise pass. Bound cyclic waits, verify completion before reading final results, check failure paths and
+  invariants, and report the scenario and failed condition in diagnostics.
 - Finish cleanup before reporting test completion (or use an independent cleanup driver), report cleanup failures
-  without masking the original test failure, and verify physical native release independently when contracted.
+  without masking the original failure, and verify physical native release independently when contracted.
 - Cover new behavior and fixed defects with tests in the same change (include them in the plan; plan approval
   authorizes them). If the framework cannot cover a case, note the limitation in the plan and propose a manual check
   for `docs/audit/validation.md`. Record notable coverage decisions and authorized isolated mutation-check results in
   the thematic journal.
+- Never call `FB_init` or `FB_exit` explicitly in ST tests (`FB_init` re-runs implicit compiler zero-initialization,
+  and explicit `FB_exit` calls are unsupported); exercise `FB_reinit()` and explicit `Rebind`/`OnReinit*` paths in
+  unit tests, and record `bInCopyCode = TRUE` copy-relocation checks in `docs/audit/validation.md`.
 - Place usage examples in `TwinCAT.OpenFramework.Samples` and `TwinCAT.OpenFramework.HowTo` per the split in
   `docs/audit/tests-and-examples-review.md`.
 
 ## What "Perform an Audit..." Means
 
-- Define scope boundaries and examine every object in scope (FBs, programs, functions, interfaces, types, methods,
-  properties, global data, constants, internal helpers, tests, samples). Trace dependencies, inheritance, callbacks,
-  and call sites as deeply as needed to verify contracts and behavior — never limit review to public APIs or spot
+- Define scope boundaries and inspect every in-scope declaration, internal helper, test, and sample. Trace
+  dependencies, inheritance, callbacks, and call sites as deeply as needed — never limit review to public APIs or spot
   checks.
-- Verify contract existence, completeness, consistency, and code compliance against "Documentation and Contracts"
-  (recording missing or ambiguous contracts separately), and assess design/API/algorithm fitness against "Architecture
-  & Design" (justifying remarks with concrete consequences).
-- Check normal, edge, and error paths for invalid state transitions, broken invariants, resource/memory leaks, improper
-  failure handling, object-interaction bugs, and applicable cross-task concurrency/timing issues. Evaluate test and
-  sample quality and critical coverage gaps.
-- Report scope, limitations, overall design/implementation assessment, and findings ordered by criticality (location,
-  core issue, scenario/proof, consequences, and backward-compatible recommendation), separating confirmed defects from
-  risks, open questions, and optional improvements. Conclude with prioritized next actions, required owner decisions,
-  recommended verifications, and explicit uninspected/unverified areas — never label a partial audit complete or equate
-  reading code with running tests or runtime verification.
+- Check contract existence, completeness, consistency, and code compliance per "Documentation and Contracts" (noting
+  missing or ambiguous contracts separately), and evaluate design, APIs, and algorithms per "Architecture & Design"
+  with concrete consequences.
+- Inspect normal, edge, and error paths for invalid state transitions, broken invariants, resource/memory leaks,
+  mishandled failures, object-interaction bugs, and cross-task concurrency/timing issues; assess test/sample quality
+  and critical coverage gaps.
+- Report scope, uninspected/unverified areas, overall assessment, and findings by criticality (location, issue,
+  scenario/proof, impact, backward-compatible recommendation), separating confirmed defects from risks, open questions,
+  and optional improvements. End with prioritized next actions, required owner decisions, and recommended
+  verifications — never call a partial audit complete or equate static review with test/runtime execution.
 
 ## Execution Workflow & Verification
 
 - An audit request authorizes analysis and reporting only; code and contract changes require separate authorization.
-- Work in small, completed steps: no bulk contract edits, scope creep, or unrelated reformatting.
-- Continue unfinished steps of the active owner-approved plan across chats without re-asking or duplicating journal
-  history. A prior plan or journal entry never authorizes reapplying a completed or reverted change without a new owner
-  instruction.
-- Coordinate new behavioral changes separately. When intent, contract, behavior, or style is ambiguous, ask a concrete
-  question before dependent edits while continuing independent agreed work; do not invent requirements/standards or
-  re-ask settled decisions.
-- Preserve owner changes, cross-check older file/line and contract references against current code, and revisit agreed
-  decisions only upon new facts or explicit instructions with stated rationale.
-- Read required materials and follow dependencies as far as the agreed scope demands.
-- The owner performs all verifications. Without explicit authorization, do not run compilation/builds, test suites, the
-  PLC runtime, target/hardware activation, XML validation, check scripts, or DocGen generation. Reading and searching
-  are permitted; prior verification results apply only to the verified revision.
+- Work in small, completed steps: leave unrelated code/formatting untouched, avoid bulk contract edits or scope creep,
+  and coordinate new behavioral changes separately.
+- Continue unfinished steps of the active agreed plan across chats without duplicating journal history; never reapply
+  completed or reverted changes without a new owner instruction.
+- Preserve owner changes and cross-check older file/line or contract references against current code. Do not invent
+  requirements/standards or reopen settled decisions without new facts or explicit instructions (with stated
+  rationale); when intent, contract, behavior, or style is ambiguous or conflicts, ask a concrete question before
+  dependent edits while continuing independent agreed work.
+- Without explicit owner authorization, do not run compilation/builds, test suites, the PLC runtime, target/hardware
+  activation, XML validation, check scripts, or DocGen generation (reading and searching are permitted; prior
+  verification results apply only to the verified revision).
 - Git: read-only commands (`status`, `diff`, `log`, `show`) are allowed; without direct owner instruction, never stage,
   commit (including amend), push, or discard/rewrite changes (`reset`, `checkout`, `restore`, `stash`).
 - In chat, summarize results, compatibility, pending verifications, and required decisions, showing code only for a
-  specific problem or design choice. For audit reports, follow the audit and local documentation rules.
+  specific problem or design choice.
 
 ## Local Documentation
 
 `docs/` is local and excluded from Git. `AGENTS.md` remains binding even when `docs/` is absent; clarify missing
 context when dependent work relies on absent local files.
 
-- Record confirmed general rules in `AGENTS.md`, specific contracts beside declarations and in the thematic journal,
-  and the full audit report in that journal (with current decisions, changes, open questions, verification status, and
-  next action).
+- Record confirmed general rules in `AGENTS.md`; in the thematic journal, record agreed contracts, full audit reports,
+  applied changes, current decisions, and verification status.
 - Read `docs/audit/architecture.md` before architectural changes.
 - For audit continuation, consult `docs/audit/README.md` (topic/journal index), `docs/audit/current-state.md`,
   `docs/audit/findings.md`, `docs/audit/validation.md`, and thematic summaries: Core — `docs/audit/core-contracts.md`,

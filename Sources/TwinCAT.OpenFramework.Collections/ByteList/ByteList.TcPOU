@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <TcPlcObject Version="1.1.0.1">
   <POU Name="ByteList" Id="{44085af7-7241-03f1-3e6d-aeb87f0c58dd}" SpecialFunc="None">
     <Declaration><![CDATA[(*
@@ -277,10 +277,11 @@ PROPERTY FINAL Empty : BOOL]]></Declaration>
     </Property>
     <Method Name="FB_exit" Id="{58cee31c-ede5-0b41-17b5-f6dfb8c1dea7}">
       <Declaration><![CDATA[(*!
-<summary>Releases dynamic byte storage during destruction.</summary>
+<summary>Releases dynamic byte storage during non-relocating destruction.</summary>
 <description>
-Calls Clear(releaseDynamicMemory := TRUE); inline storage is not separately deleted. Lifecycle methods must complete without
-exceptions. No separate copy-code ownership handoff is implemented.
+Calls Clear(releaseDynamicMemory := TRUE) when bInCopyCode is FALSE; inline storage is not separately
+deleted. During online-change copy exit (bInCopyCode = TRUE), preserves all stored bytes and heap capacity for
+the copied instance. Lifecycle methods must complete without exceptions.
 </description>
 *)
 
@@ -290,15 +291,19 @@ VAR_INPUT
 END_VAR
 ]]></Declaration>
       <Implementation>
-        <ST><![CDATA[Clear(releaseDynamicMemory := TRUE);]]></ST>
+        <ST><![CDATA[IF bInCopyCode THEN
+	RETURN;
+END_IF
+
+Clear(releaseDynamicMemory := TRUE);]]></ST>
       </Implementation>
     </Method>
     <Method Name="FB_init" Id="{9b89d2ed-7216-4482-ba21-51df798725b2}">
       <Declaration><![CDATA[(*!
 <summary>Binds inline byte storage for a static instance.</summary>
 <description>
-No allocation or callbacks are performed. Dynamic instances start without a backing buffer. No explicit
-online-change relocation repair is implemented.
+No allocation or callbacks are performed. Dynamic instances start without a backing buffer. Skipped during
+online-change copy initialization (bInCopyCode = TRUE); FB_reinit restores the static buffer address after copy.
 </description>
 *)
 METHOD FB_init : BOOL
@@ -308,9 +313,26 @@ VAR_INPUT
 END_VAR
 ]]></Declaration>
       <Implementation>
-        <ST><![CDATA[IF NOT Dynamic THEN
+        <ST><![CDATA[IF NOT bInCopyCode AND_THEN NOT Dynamic THEN
 	DataAddress := ADR(_StaticArray); 
 END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="FB_reinit" Id="{a22f2dad-c546-44f7-ac81-54815ba87c97}">
+      <Declaration><![CDATA[(*!
+<summary>Restores the inline byte-array binding after online-change relocation.</summary>
+<description>
+Called implicitly after copy code completes. Rebinds DataAddress to the relocated instance's _StaticArray for
+static instances while preserving stored bytes and dynamic heap buffers.
+</description>
+*)
+METHOD FB_reinit : BOOL]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF NOT Dynamic THEN
+	DataAddress := ADR(_StaticArray);
+END_IF
+
+FB_reinit := TRUE;]]></ST>
       </Implementation>
     </Method>
     <Method Name="Find" Id="{f870e801-4961-0438-0486-eeff60dc3fea}">

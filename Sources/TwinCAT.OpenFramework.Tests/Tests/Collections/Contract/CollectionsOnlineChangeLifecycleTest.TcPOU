@@ -1,0 +1,287 @@
+<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="CollectionsOnlineChangeLifecycleTest" Id="{0ff8424e-2328-473b-99f7-e7cc90d8e00b}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+SPDX-FileCopyrightText: © 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+SPDX-License-Identifier: MIT
+License: https://opensource.org/license/mit
+*)
+
+(*
+Checks that FB_reinit preserves stored entries and mutability in static and dynamic collections.
+
+Exercises FB_reinit in place across all six collection types; copy-code exit (bInCopyCode = TRUE)
+and physical memory relocation require a TwinCAT runtime online-change verification.
+*)
+
+{attribute 'no_assign'}
+{attribute 'no_explicit_call' := 'do not call this function block directly'}
+FUNCTION_BLOCK CollectionsOnlineChangeLifecycleTest EXTENDS TOF_Testing.SingleCycleTest
+VAR_STAT
+	{attribute 'hide'}
+	_ClassName : STRING := __POUNAME();
+END_VAR
+VAR
+	_StaticByteList : TOF_Collections.ByteList<4>;
+	_DynamicByteList : TOF_Collections.ByteList<0>;
+	_StaticList : TOF_Collections.List<4>(valueValidator := 0);
+	_DynamicList : TOF_Collections.List<0>(valueValidator := 0);
+	_StaticQueue : TOF_Collections.Queue<4>(valueValidator := 0);
+	_DynamicQueue : TOF_Collections.Queue<0>(valueValidator := 0);
+	_StaticStack : TOF_Collections.Stack<4>(valueValidator := 0);
+	_DynamicStack : TOF_Collections.Stack<0>(valueValidator := 0);
+	_StaticDictionary : TOF_Collections.Dictionary<4>(
+		keyValidator := 0,
+		valueValidator := 0,
+		keyEqualityComparer := 0
+	);
+	_DynamicDictionary : TOF_Collections.Dictionary<0>(
+		keyValidator := 0,
+		valueValidator := 0,
+		keyEqualityComparer := 0
+	);
+	_StaticUniqueSet : TOF_Collections.UniqueDataSet<4>(
+		valueValidator := 0,
+		valueEqualityComparer := 0
+	);
+	_DynamicUniqueSet : TOF_Collections.UniqueDataSet<0>(
+		valueValidator := 0,
+		valueEqualityComparer := 0
+	);
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[]]></ST>
+    </Implementation>
+    <Method Name="ExecuteTest" Id="{80d7d099-372c-479a-b559-4afafeea4a5f}">
+      <Declaration><![CDATA[(* Populates static and dynamic collections, runs FB_reinit, and checks reads and writes. *)
+METHOD PROTECTED ExecuteTest
+VAR
+	firstValue : DINT := 10;
+	secondValue : DINT := 20;
+	firstKey : DINT := 1;
+	secondKey : DINT := 2;
+	firstMapped : DINT := 100;
+	secondMapped : DINT := 200;
+	lookupValue : TOF_Core.GENERIC_VALUE;
+	found : BOOL;
+	reinitialized : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_StaticByteList.AppendByte(value := BYTE#16#2A);
+_DynamicByteList.AppendByte(value := BYTE#16#11);
+_StaticList.AppendCopy(value := firstValue, isObject := FALSE);
+_DynamicList.AppendCopy(value := firstValue, isObject := FALSE);
+_StaticQueue.EnqueueCopy(value := firstValue, isObject := FALSE);
+_DynamicQueue.EnqueueCopy(value := firstValue, isObject := FALSE);
+_StaticStack.PushCopy(value := firstValue, isObject := FALSE);
+_DynamicStack.PushCopy(value := firstValue, isObject := FALSE);
+_StaticDictionary.SetCopy(
+	key := firstKey,
+	value := firstMapped,
+	keyIsObject := FALSE,
+	valueIsObject := FALSE
+);
+_DynamicDictionary.SetCopy(
+	key := firstKey,
+	value := firstMapped,
+	keyIsObject := FALSE,
+	valueIsObject := FALSE
+);
+_StaticUniqueSet.SetCopy(value := firstValue, isObject := FALSE);
+_DynamicUniqueSet.SetCopy(value := firstValue, isObject := FALSE);
+
+reinitialized := _StaticByteList.FB_reinit()
+	AND_THEN _DynamicByteList.FB_reinit()
+	AND_THEN _StaticList.FB_reinit()
+	AND_THEN _DynamicList.FB_reinit()
+	AND_THEN _StaticQueue.FB_reinit()
+	AND_THEN _DynamicQueue.FB_reinit()
+	AND_THEN _StaticStack.FB_reinit()
+	AND_THEN _DynamicStack.FB_reinit()
+	AND_THEN _StaticDictionary.FB_reinit()
+	AND_THEN _DynamicDictionary.FB_reinit()
+	AND_THEN _StaticUniqueSet.FB_reinit()
+	AND_THEN _DynamicUniqueSet.FB_reinit();
+Assert.ThatBool(
+	actual := reinitialized,
+	message := "Collection FB_reinit calls must return TRUE"
+).IsTrue();
+
+_StaticByteList.AppendByte(value := BYTE#16#55);
+_DynamicByteList.AppendByte(value := BYTE#16#22);
+Assert.ThatBool(
+	actual := _StaticByteList.Length = 2
+		AND_THEN _StaticByteList.Get(index := 0) = BYTE#16#2A
+		AND_THEN _StaticByteList.Get(index := 1) = BYTE#16#55,
+	message := "Static ByteList must retain and append bytes after FB_reinit"
+).IsTrue();
+Assert.ThatBool(
+	actual := _DynamicByteList.Length = 2
+		AND_THEN _DynamicByteList.Get(index := 0) = BYTE#16#11
+		AND_THEN _DynamicByteList.Get(index := 1) = BYTE#16#22,
+	message := "Dynamic ByteList must retain and append bytes after FB_reinit"
+).IsTrue();
+
+_StaticList.AppendCopy(value := secondValue, isObject := FALSE);
+_DynamicList.AppendCopy(value := secondValue, isObject := FALSE);
+Assert.ThatBool(
+	actual := _StaticList.Length = 2
+		AND_THEN _StaticList.Get(index := 0).AsDInt() = 10
+		AND_THEN _StaticList.Get(index := 1).AsDInt() = 20,
+	message := "Static List must retain and append items after FB_reinit"
+).IsTrue();
+Assert.ThatBool(
+	actual := _DynamicList.Length = 2
+		AND_THEN _DynamicList.Get(index := 0).AsDInt() = 10
+		AND_THEN _DynamicList.Get(index := 1).AsDInt() = 20,
+	message := "Dynamic List must retain and append items after FB_reinit"
+).IsTrue();
+
+_StaticQueue.EnqueueCopy(value := secondValue, isObject := FALSE);
+_DynamicQueue.EnqueueCopy(value := secondValue, isObject := FALSE);
+Assert.ThatBool(
+	actual := _StaticQueue.Length = 2
+		AND_THEN _StaticQueue.Peek().AsDInt() = 10
+		AND_THEN _StaticQueue.GetByIndex(index := 1).AsDInt() = 20,
+	message := "Static Queue must retain FIFO order and enqueue after FB_reinit"
+).IsTrue();
+Assert.ThatBool(
+	actual := _DynamicQueue.Length = 2
+		AND_THEN _DynamicQueue.Peek().AsDInt() = 10
+		AND_THEN _DynamicQueue.GetByIndex(index := 1).AsDInt() = 20,
+	message := "Dynamic Queue must retain FIFO order and enqueue after FB_reinit"
+).IsTrue();
+
+_StaticStack.PushCopy(value := secondValue, isObject := FALSE);
+_DynamicStack.PushCopy(value := secondValue, isObject := FALSE);
+Assert.ThatBool(
+	actual := _StaticStack.Length = 2
+		AND_THEN _StaticStack.Peek().AsDInt() = 20
+		AND_THEN _StaticStack.GetByIndex(index := 1).AsDInt() = 10,
+	message := "Static Stack must retain LIFO order and push after FB_reinit"
+).IsTrue();
+Assert.ThatBool(
+	actual := _DynamicStack.Length = 2
+		AND_THEN _DynamicStack.Peek().AsDInt() = 20
+		AND_THEN _DynamicStack.GetByIndex(index := 1).AsDInt() = 10,
+	message := "Dynamic Stack must retain LIFO order and push after FB_reinit"
+).IsTrue();
+
+_StaticDictionary.SetCopy(
+	key := secondKey,
+	value := secondMapped,
+	keyIsObject := FALSE,
+	valueIsObject := FALSE
+);
+_DynamicDictionary.SetCopy(
+	key := secondKey,
+	value := secondMapped,
+	keyIsObject := FALSE,
+	valueIsObject := FALSE
+);
+found := _StaticDictionary.TryGetValueByKey(
+	key := firstKey,
+	keyIsObject := FALSE,
+	value => lookupValue
+);
+Assert.ThatBool(
+	actual := found AND_THEN lookupValue.AsDInt() = 100,
+	message := "Static Dictionary must preserve first key lookup after FB_reinit"
+).IsTrue();
+found := _StaticDictionary.TryGetValueByKey(
+	key := secondKey,
+	keyIsObject := FALSE,
+	value => lookupValue
+);
+Assert.ThatBool(
+	actual := _StaticDictionary.Length = 2 AND_THEN found AND_THEN lookupValue.AsDInt() = 200,
+	message := "Static Dictionary must insert new keys after FB_reinit"
+).IsTrue();
+found := _DynamicDictionary.TryGetValueByKey(
+	key := firstKey,
+	keyIsObject := FALSE,
+	value => lookupValue
+);
+Assert.ThatBool(
+	actual := found AND_THEN lookupValue.AsDInt() = 100,
+	message := "Dynamic Dictionary must preserve first key lookup after FB_reinit"
+).IsTrue();
+found := _DynamicDictionary.TryGetValueByKey(
+	key := secondKey,
+	keyIsObject := FALSE,
+	value => lookupValue
+);
+Assert.ThatBool(
+	actual := _DynamicDictionary.Length = 2 AND_THEN found AND_THEN lookupValue.AsDInt() = 200,
+	message := "Dynamic Dictionary must insert new keys after FB_reinit"
+).IsTrue();
+
+_StaticUniqueSet.SetCopy(value := secondValue, isObject := FALSE);
+_DynamicUniqueSet.SetCopy(value := secondValue, isObject := FALSE);
+Assert.ThatBool(
+	actual := _StaticUniqueSet.Length = 2
+		AND_THEN _StaticUniqueSet.Contains(value := firstValue, isObject := FALSE)
+		AND_THEN _StaticUniqueSet.Contains(value := secondValue, isObject := FALSE),
+	message := "Static UniqueDataSet must retain membership and insert after FB_reinit"
+).IsTrue();
+Assert.ThatBool(
+	actual := _DynamicUniqueSet.Length = 2
+		AND_THEN _DynamicUniqueSet.Contains(value := firstValue, isObject := FALSE)
+		AND_THEN _DynamicUniqueSet.Contains(value := secondValue, isObject := FALSE),
+	message := "Dynamic UniqueDataSet must retain membership and insert after FB_reinit"
+).IsTrue();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="OnAfterTest" Id="{e11a0aa8-440c-42d9-a83a-b5f39a14751e}">
+      <Declaration><![CDATA[(* Releases all collection entries and dynamic buffers after execution or assertion failure. *)
+METHOD PROTECTED OnAfterTest]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_StaticByteList.Clear(releaseDynamicMemory := TRUE);
+_DynamicByteList.Clear(releaseDynamicMemory := TRUE);
+_StaticList.Clear();
+_DynamicList.Clear();
+_StaticQueue.Clear();
+_DynamicQueue.Clear();
+_StaticStack.Clear();
+_DynamicStack.Clear();
+_StaticDictionary.Clear();
+_DynamicDictionary.Clear();
+_StaticUniqueSet.Clear();
+_DynamicUniqueSet.Clear();]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="ClassName" Id="{d6630d86-3a18-45fc-9281-5027fe87248e}">
+      <Declaration><![CDATA[// Borrows the concrete class name. Callers must not modify it.
+{attribute 'monitoring' := 'call'}
+PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{b9af6d2d-229b-4db6-82bf-dbe7a5806e9b}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ClassName REF= _ClassName;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="NamespaceName" Id="{fa066c52-e8f6-4301-85a0-a1a296ac4c64}">
+      <Declaration><![CDATA[// Borrows the compiler-initialized namespace name. Callers must not modify it.
+{attribute 'monitoring' := 'call'}
+PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{da23c0af-dbd9-4926-b266-fa65aee0d792}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[NamespaceName REF= CurrentNamespace.Name;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="SelfSize" Id="{5f94857d-78cf-4456-a448-c388b1041973}">
+      <Declaration><![CDATA[// Reports the concrete instance size in bytes.
+{attribute 'monitoring' := 'call'}
+PROPERTY SelfSize : ULINT]]></Declaration>
+      <Get Name="Get" Id="{8bf8e052-dcd9-4d85-b39c-2ee5a0dd9965}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[SelfSize := XSIZEOF(THIS^);]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+  </POU>
+</TcPlcObject>

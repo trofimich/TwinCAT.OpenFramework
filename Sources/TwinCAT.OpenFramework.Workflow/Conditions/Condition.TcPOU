@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <TcPlcObject Version="1.1.0.1">
   <POU Name="Condition" Id="{5ba1e305-1521-4876-bdb5-1f2abfdf8601}" SpecialFunc="None">
     <Declaration><![CDATA[(*
@@ -21,11 +21,12 @@ Condition declarations survive evaluation and reset with the owning activity.
 {attribute 'no_explicit_call' := 'do not call this function block directly'}
 FUNCTION_BLOCK ABSTRACT Condition EXTENDS TOF_Core.Object
 	IMPLEMENTS ICondition, ILocalVariableLookup, IDeclaredVariableContainer,
-		IVariableBinder, IVariableResetScopeProvider
+		IVariableBinder, IVariableResetScopeProvider, IWorkflowAssociationTarget
 VAR
 	{attribute 'hide'} 
 	_Name : WSTRING;
 
+	{attribute 'no_copy'}
 	_Workflow : IWorkflow;
 
 	_ParentActivity : IActivity;
@@ -91,7 +92,10 @@ END_IF]]></ST>
 <summary>Stores the borrowed workflow association and initializes the default condition name.</summary>
 <description>
 Does not allocate registry storage. The creator must call workflow.RegisterChild after __NEW succeeds, outside
-lifecycle methods, if the workflow is to own this dynamic instance.
+lifecycle methods, if the workflow is to own this dynamic instance. Default name initialization is skipped
+when bInCopyCode is TRUE so online-change copy code preserves the existing name. _Workflow is marked no_copy so
+static instances retain the relocated association supplied during online-change initialization, while
+Workflow.FB_reinit updates direct workflow links for registered dynamic children after copy code completes.
 </description>
 <param name="workflow">Workflow that hosts this condition, or 0 when attached later.</param>
 *)
@@ -103,9 +107,45 @@ VAR_INPUT
 END_VAR
 ]]></Declaration>
       <Implementation>
-        <ST><![CDATA[_Name := GetDefaultName();
+        <ST><![CDATA[IF NOT bInCopyCode THEN
+	_Name := GetDefaultName();
+END_IF
 
 _Workflow := workflow;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="FB_reinit" Id="{6b56da40-0bb3-46ed-bcb4-10aeb22b5edd}">
+      <Declaration><![CDATA[(*!
+<summary>Resynchronizes the embedded reset scope bindings after online-change relocation.</summary>
+<description>
+Rebinds _VariableResetScope to the relocated _VariableScope.Bindings when variables are registered.
+</description>
+*)
+METHOD FB_reinit : BOOL]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF _VariableScope.Bindings.Length > 0 THEN
+	_VariableResetScope.SetBindings(bindings := _VariableScope.Bindings);
+END_IF
+
+FB_reinit := TRUE;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="RebindWorkflow" Id="{683d3b3d-0671-47dc-b12e-02135b9b5e13}">
+      <Declaration><![CDATA[(*!
+<summary>Updates a direct workflow association after the owning workflow relocated during online change.</summary>
+<description>
+Updates _Workflow only when a direct association was previously assigned; parent-inherited zero associations
+remain unchanged.
+</description>
+*)
+METHOD FINAL RebindWorkflow
+VAR_INPUT
+	workflow : IWorkflow;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF _Workflow <> 0 THEN
+	_Workflow := workflow;
+END_IF]]></ST>
       </Implementation>
     </Method>
     <Property Name="Name" Id="{71961bbf-f4ff-4ba9-a45a-cd1279b7b5ac}">

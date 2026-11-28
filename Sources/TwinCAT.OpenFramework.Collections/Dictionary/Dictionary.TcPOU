@@ -66,10 +66,13 @@ VAR_STAT
 END_VAR
 VAR
 	{attribute 'hide'}
+	{attribute 'no_copy'}
 	_KeyValidator : TOF_Core.IGenericValueValidator;
 	{attribute 'hide'}
+	{attribute 'no_copy'}
 	_ValueValidator : TOF_Core.IGenericValueValidator;
 	{attribute 'hide'}
+	{attribute 'no_copy'}
 	_KeyEqualityComparer : TOF_Core.IEqualityComparer;
 
 	{attribute 'hide'}
@@ -408,10 +411,12 @@ PROPERTY FINAL Empty : BOOL]]></Declaration>
     </Property>
     <Method Name="FB_exit" Id="{bab70cb4-1255-41fe-9739-25af7a0667fe}">
       <Declaration><![CDATA[(*!
-<summary>Releases collection payload and dynamic entry/index storage during destruction.</summary>
+<summary>Releases collection payload and dynamic entry/index storage during non-relocating destruction.</summary>
 <description>
-Calls the non-allocating Clear path without invoking equality/hash callbacks. Owned payload release is best
-effort and cannot guarantee successful deallocation; cleanup callbacks must not throw or reenter mutation.
+Calls the non-allocating Clear path without invoking equality/hash callbacks when bInCopyCode is FALSE. During
+online-change copy exit (bInCopyCode = TRUE), preserves stored entries and dynamic heap storage for the copied
+instance. Owned payload release is best effort and cannot guarantee successful deallocation; cleanup callbacks
+must not throw or reenter mutation.
 </description>
 *)
 
@@ -420,7 +425,11 @@ VAR_INPUT
 	bInCopyCode : BOOL;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[Clear();]]></ST>
+        <ST><![CDATA[IF bInCopyCode THEN
+	RETURN;
+END_IF
+
+Clear();]]></ST>
       </Implementation>
     </Method>
     <Method Name="FB_init" Id="{ac120052-60c8-4ef6-b53b-c0cb0524ef2e}">
@@ -429,8 +438,10 @@ END_VAR]]></Declaration>
 <description>
 The key comparer is borrowed for the entire collection lifetime. Supply it explicitly; zero selects
 GENERIC_VALUE default equality and hashing. Keep it alive and its equality-relevant configuration stable.
-There is no subsequent comparer replacement. Initialization binds existing storage without allocating or
-calling validators, comparers or other throwing paths.
+There is no subsequent comparer replacement. Validator and comparer references are marked no_copy so
+online-change initialization updates relocated dependencies. Static storage is bound without allocation when
+bInCopyCode is FALSE; FB_reinit restores static pointers after copy code. Initialization does not allocate or
+call validators, comparers or other throwing paths.
 </description>
 *)
 
@@ -452,12 +463,33 @@ END_VAR]]></Declaration>
 _ValueValidator := valueValidator;
 _KeyEqualityComparer := keyEqualityComparer;
 
-IF NOT Dynamic THEN
+IF NOT bInCopyCode AND_THEN NOT Dynamic THEN
 	_Array := ADR(_StaticArray);
 	_Hashes := ADR(_StaticHashes);
 	_Buckets := ADR(_StaticBuckets);
 	_NextIndices := ADR(_StaticNextIndices);
 END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="FB_reinit" Id="{eeb5e37b-73f4-4084-bc44-d2e3b3029385}">
+      <Declaration><![CDATA[(*!
+<summary>Restores inline entry and index array pointers after online-change relocation.</summary>
+<description>
+Called implicitly after copy code completes. Rebinds _Array, _Hashes, _Buckets and _NextIndices to the
+relocated instance's static arrays while preserving stored entries and dynamic heap storage. Does not invoke
+comparers or rebuild address-identity hashes for relocated external OBJECT keys.
+</description>
+*)
+METHOD FB_reinit : BOOL]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF NOT Dynamic THEN
+	_Array := ADR(_StaticArray);
+	_Hashes := ADR(_StaticHashes);
+	_Buckets := ADR(_StaticBuckets);
+	_NextIndices := ADR(_StaticNextIndices);
+END_IF
+
+FB_reinit := TRUE;]]></ST>
       </Implementation>
     </Method>
     <Method Name="FindKeyIndex" Id="{0002c577-30ed-4f40-b96a-46bdc85d8d43}" FolderPath="Service members\">

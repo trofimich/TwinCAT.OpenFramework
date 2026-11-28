@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <TcPlcObject Version="1.1.0.1">
   <POU Name="List" Id="{423efb90-4c6a-41e3-8889-647ff943b33e}" SpecialFunc="None">
     <Declaration><![CDATA[(*
@@ -45,7 +45,8 @@ VAR_STAT
 	_ClassName : STRING := __POUNAME();
 END_VAR
 VAR
-	{attribute 'hide'} 
+	{attribute 'hide'}
+	{attribute 'no_copy'}
 	_ValueValidator : TOF_Core.IGenericValueValidator;
 
 	{attribute 'hide'} 
@@ -455,11 +456,12 @@ PROPERTY FINAL Empty : BOOL]]></Declaration>
     </Property>
     <Method Name="FB_exit" Id="{8d8b7b19-3218-490a-a08e-e708f6895db1}">
       <Declaration><![CDATA[(*!
-<summary>Releases owned payload and backing storage during destruction.</summary>
+<summary>Releases owned payload and backing storage during non-relocating destruction.</summary>
 <description>
-Calls Clear; lifecycle methods and payload cleanup callbacks must not raise exceptions or reenter mutation.
-Payload release is best effort, not proof of successful destruction. No separate copy-code ownership handoff
-is implemented.
+Calls Clear when bInCopyCode is FALSE; during online-change copy exit (bInCopyCode = TRUE), preserves stored
+elements and dynamic heap storage for the copied instance. Lifecycle methods and payload cleanup callbacks
+must not raise exceptions or reenter mutation. Payload release is best effort, not proof of successful
+destruction.
 </description>
 *)
 
@@ -469,16 +471,21 @@ VAR_INPUT
 END_VAR
 ]]></Declaration>
       <Implementation>
-        <ST><![CDATA[Clear();]]></ST>
+        <ST><![CDATA[IF bInCopyCode THEN
+	RETURN;
+END_IF
+
+Clear();]]></ST>
       </Implementation>
     </Method>
     <Method Name="FB_init" Id="{7bc30a89-0227-48d6-bfc1-e831cfff4350}">
       <Declaration><![CDATA[(*!
 <summary>Binds the optional validator and inline storage during initialization.</summary>
 <description>
-The validator is borrowed and must remain alive while used; it is not invoked here. Static storage is bound
-without allocation. Lifecycle methods must not raise exceptions. No explicit online-change relocation repair
-is implemented.
+The validator is borrowed and must remain alive while used; it is not invoked here. Its reference is marked
+no_copy so online-change initialization preserves an updated validator reference. Static storage is bound
+without allocation when bInCopyCode is FALSE; FB_reinit restores _Array after copy code. Lifecycle methods
+must not raise exceptions.
 </description>
 *)
 METHOD FB_init : BOOL
@@ -491,9 +498,26 @@ END_VAR
       <Implementation>
         <ST><![CDATA[_ValueValidator := valueValidator;
 
-IF NOT Dynamic THEN
+IF NOT bInCopyCode AND_THEN NOT Dynamic THEN
 	_Array := ADR(_StaticArray); 
 END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="FB_reinit" Id="{4f8a58dd-3053-419d-802b-9008ff52caf8}">
+      <Declaration><![CDATA[(*!
+<summary>Restores the inline backing-array pointer after online-change relocation.</summary>
+<description>
+Called implicitly after copy code completes. Rebinds _Array to the relocated instance's _StaticArray for
+static instances while preserving stored entries and dynamic heap storage.
+</description>
+*)
+METHOD FB_reinit : BOOL]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF NOT Dynamic THEN
+	_Array := ADR(_StaticArray);
+END_IF
+
+FB_reinit := TRUE;]]></ST>
       </Implementation>
     </Method>
     <Method Name="FindSingle" Id="{5bd8df97-f8f3-46ed-97e0-2baa71205501}">

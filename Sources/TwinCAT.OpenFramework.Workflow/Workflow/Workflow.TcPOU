@@ -447,21 +447,67 @@ END_IF]]></ST>
     </Property>
     <Method Name="FB_exit" Id="{8a118ccc-cf33-4895-aaa4-ec240e9f2ff6}">
       <Declaration><![CDATA[(*!
-<summary>Detaches the workflow and disposes its registered dynamic children during destruction.</summary>
+<summary>Detaches the workflow and disposes its registered dynamic children during non-relocating destruction.</summary>
 <description>
-Uses <c>disposeDynamicChildrenInternal</c> under the no-throw lifecycle contract. Does not perform cooperative
-stopping or establish physical resource-release or online-change preservation guarantees. Old borrowed tree
-aliases must not be used after destruction. The bInCopyCode flag does not implement a separate relocation
-protocol.
+Uses <c>disposeDynamicChildrenInternal</c> under the no-throw lifecycle contract when bInCopyCode is FALSE.
+During online-change copy exit (bInCopyCode = TRUE), preserves registered dynamic children, scopes and active
+workflow state for the copied instance; FB_reinit updates direct child workflow links and variable bindings
+after copy code completes. Old borrowed tree aliases must not be used after non-relocating destruction.
 </description>
-<param name="bInCopyCode">TwinCAT copy-code exit marker; this member does not implement relocation.</param>
+<param name="bInCopyCode">TwinCAT copy-code exit marker; TRUE preserves dynamic children across online-change relocation.</param>
 *)
 METHOD FB_exit : BOOL
 VAR_INPUT
 	bInCopyCode : BOOL;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[disposeDynamicChildrenInternal();]]></ST>
+        <ST><![CDATA[IF bInCopyCode THEN
+	RETURN;
+END_IF
+
+disposeDynamicChildrenInternal();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="FB_reinit" Id="{6519a534-2c2d-41c2-a8e2-c61bba953552}">
+      <Declaration><![CDATA[(*!
+<summary>Updates dynamic child workflow references and rebound PLC variables after online-change relocation.</summary>
+<description>
+Calls SUPER^.FB_reinit(), updates direct _Workflow associations on registered dynamic activities and conditions
+to THIS^, and invokes OnReinitVariables when variables were already initialized. Completes without exceptions.
+</description>
+*)
+METHOD FB_reinit : BOOL
+VAR
+	i : DINT;
+	selfWorkflow : IWorkflow;
+	childEntry : TOF_Core.GENERIC_VALUE;
+	childObjectPointer : POINTER TO TOF_Core.Object;
+	childObject : TOF_Core.IObject;
+	associationTarget : IWorkflowAssociationTarget;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[SUPER^.FB_reinit();
+
+selfWorkflow := THIS^;
+
+FOR i := 0 TO _DynamicChildren.Length - 1 DO
+	childEntry := _DynamicChildren.Get(index := i);
+
+	IF childEntry.TypeClass = TOF_Core.GENERIC_TYPE_CLASS.OBJECT AND_THEN childEntry.Address <> 0 THEN
+		childObjectPointer := childEntry.Address;
+		childObject := childObjectPointer^;
+
+		IF __QUERYINTERFACE(childObject, associationTarget) THEN
+			associationTarget.RebindWorkflow(workflow := selfWorkflow);
+		END_IF
+	END_IF
+END_FOR
+
+IF _VariablesInitialized THEN
+	OnReinitVariables();
+END_IF
+
+FB_reinit := TRUE;]]></ST>
       </Implementation>
     </Method>
     <Property Name="HaltReason" Id="{d3195a13-7315-4fe3-bced-ed5c7b1dd8a3}">
@@ -559,6 +605,20 @@ Other subclass side effects are not transactional and must support retry.
 </description>
 *)
 METHOD PROTECTED InitializeVariables]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="OnReinitVariables" Id="{070256d8-7378-41d7-991d-3f9102aeff78}" FolderPath="Methods to override\">
+      <Declaration><![CDATA[(*!
+<summary>Hook invoked after online-change relocation to rebind PLC variable addresses without losing values.</summary>
+<description>
+Called by FB_reinit when variables were already initialized. Derived classes should call TryRebindPlcVariable
+for each borrowed PLC variable bound in InitializeVariables; implementations must not allocate or raise
+exceptions.
+</description>
+*)
+METHOD PROTECTED OnReinitVariables]]></Declaration>
       <Implementation>
         <ST><![CDATA[]]></ST>
       </Implementation>

@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <TcPlcObject Version="1.1.0.1">
   <POU Name="VariableScope" Id="{c84e29a1-7b3d-4f60-92e1-53a8d4c6b2f0}" SpecialFunc="None">
     <Declaration><![CDATA[(*
@@ -910,6 +910,74 @@ IF TOF_Core.DynamicMemoryManager.HasAllocationFailed THEN
 	variable.Reset();
 	TryGetLocalVariable := FALSE;
 END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="TryRebindPlcVariable" Id="{47409e21-28b4-448d-b158-759b7a3a6b8a}">
+      <Declaration><![CDATA[(*
+Rebinds an existing borrowed PLC variable entry to its relocated storage without modifying variable contents.
+
+Performs no allocations and raises no exceptions. Only non-owned borrowed bindings matching name, type
+category and byte size are updated.
+*)
+METHOD TryRebindPlcVariable : BOOL
+VAR_INPUT
+	name : STRING;
+	plcVariable : __SYSTEM.AnyType;
+	plcVariableIsObject : BOOL;
+END_VAR
+VAR
+	expectedTypeClass : TOF_Core.GENERIC_TYPE_CLASS;
+	nameLength : UDINT;
+	i : DINT;
+	entry : REFERENCE TO TOF_Core.GENERIC_KEY_VALUE_PAIR;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF name = '' OR_ELSE plcVariable.pValue = 0 OR_ELSE plcVariable.diSize <= 0 THEN
+	RETURN;
+END_IF
+
+IF TOF_Core.Memory.IsStackData(dataAddress := plcVariable.pValue, dataSize := TO_UDINT(plcVariable.diSize)) THEN
+	RETURN;
+END_IF
+
+IF NOT TOF_Core.GenericTypeClassConvertor.TryGetGenericTypeClassBySystemAnyType(
+	systemAnyType := plcVariable,
+	isObject := plcVariableIsObject,
+	genericTypeClass => expectedTypeClass
+) THEN
+	RETURN;
+END_IF
+
+nameLength := TO_UDINT(Tc2_Standard.LEN(STR := name));
+
+FOR i := 0 TO _Variables.Length - 1 DO
+	entry REF= _Variables.GetKeyValuePairByIndex(index := i);
+
+	IF entry.Key.TypeClass = TOF_Core.GENERIC_TYPE_CLASS.STRING_8
+		AND_THEN entry.Key.Address <> 0
+		AND_THEN entry.Key.Size = TO_ULINT(nameLength) + 1
+		AND_THEN Tc2_System.MEMCMP(
+			pBuf1 := entry.Key.Address,
+			pBuf2 := ADR(name),
+			n := TO_UDINT(entry.Key.Size)
+		) = 0
+	THEN
+		IF NOT entry.Value.IsMemoryOwner
+			AND_THEN entry.Value.TypeClass = expectedTypeClass
+			AND_THEN entry.Value.Size = TO_ULINT(plcVariable.diSize)
+		THEN
+			entry.Value := TOF_Core.GenericValueFactory.FromParts(
+				genericTypeClass := expectedTypeClass,
+				address := plcVariable.pValue,
+				size := TO_ULINT(plcVariable.diSize),
+				memoryManagementBehavior := TOF_Core.GENERIC_MEMORY_MANAGEMENT_BEHAVIOR.STORE_ORIGINAL_REFERENCE_AND_NOT_OWNS_MEMORY
+			);
+			TryRebindPlcVariable := TRUE;
+		END_IF
+
+		RETURN;
+	END_IF
+END_FOR]]></ST>
       </Implementation>
     </Method>
   </POU>

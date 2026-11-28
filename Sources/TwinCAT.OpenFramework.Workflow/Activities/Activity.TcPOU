@@ -28,8 +28,9 @@ Declared variables reset on successful activity reset, including a reset between
 
 {attribute 'no_explicit_call' := 'do not call this function block directly'}
 FUNCTION_BLOCK ABSTRACT Activity EXTENDS StatefulWorkflowObject
-IMPLEMENTS IActivity, ILocalVariableLookup, IVariableResetScopeProvider
+IMPLEMENTS IActivity, ILocalVariableLookup, IVariableResetScopeProvider, IWorkflowAssociationTarget
 VAR
+	{attribute 'no_copy'}
 	_Workflow : IWorkflow;
 
 	_ParentActivity : IActivity;
@@ -160,7 +161,9 @@ __ENDTRY]]></ST>
 ClassName must return initialized static storage without reading derived instance fields, raising or
 recursively reading Name during base initialization. Does not allocate registry storage. The creator must call
 workflow.RegisterChild after __NEW succeeds, outside
-lifecycle methods, if the workflow is to own this dynamic instance.
+lifecycle methods, if the workflow is to own this dynamic instance. _Workflow is marked no_copy so static
+instances retain the relocated association supplied during online-change initialization, while
+Workflow.FB_reinit updates direct workflow links for registered dynamic children after copy code completes.
 </description>
 <param name="workflow">Workflow that hosts this activity. A root requires an explicit association;
 0 is allowed for a child that inherits its association from its parent.</param>
@@ -173,6 +176,43 @@ VAR_INPUT
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[_Workflow := workflow;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="FB_reinit" Id="{cec51ced-9101-4ded-ae28-11b522a54613}">
+      <Declaration><![CDATA[(*!
+<summary>Resynchronizes the embedded reset scope bindings after online-change relocation.</summary>
+<description>
+Calls SUPER^.FB_reinit() and rebinds _VariableResetScope to the relocated _VariableScope.Bindings when
+variables are registered.
+</description>
+*)
+METHOD FB_reinit : BOOL]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[SUPER^.FB_reinit();
+
+IF _VariableScope.Bindings.Length > 0 THEN
+	_VariableResetScope.SetBindings(bindings := _VariableScope.Bindings);
+END_IF
+
+FB_reinit := TRUE;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="RebindWorkflow" Id="{a2f50225-31db-4861-be48-92a4478222be}">
+      <Declaration><![CDATA[(*!
+<summary>Updates a direct workflow association after the owning workflow relocated during online change.</summary>
+<description>
+Updates _Workflow only when a direct association was previously assigned; parent-inherited zero associations
+remain unchanged.
+</description>
+*)
+METHOD FINAL RebindWorkflow
+VAR_INPUT
+	workflow : IWorkflow;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF _Workflow <> 0 THEN
+	_Workflow := workflow;
+END_IF]]></ST>
       </Implementation>
     </Method>
     <Method Name="GetResetScope" Id="{f95f8a74-1574-438b-999e-7247a44ca556}">

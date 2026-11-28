@@ -1,0 +1,207 @@
+<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="WorkflowOnlineChangeLifecycleTest" Id="{c7eea652-d712-4381-9ed9-a22f915a753f}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+SPDX-FileCopyrightText: © 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+SPDX-License-Identifier: MIT
+License: https://opensource.org/license/mit
+*)
+
+(*
+Checks TryRebindPlcVariable, OnReinitVariables, and dynamic child execution across Workflow.FB_reinit.
+
+Verifies that FB_reinit skips OnReinitVariables prior to variable initialization, rejects incompatible
+rebind requests, rebinds Counter without overwriting its stored value, and executes dynamic elements
+against the rebound storage.
+*)
+
+{attribute 'no_assign'}
+{attribute 'no_explicit_call' := 'do not call this function block directly'}
+FUNCTION_BLOCK WorkflowOnlineChangeLifecycleTest EXTENDS TOF_Testing.SingleCycleTest
+VAR_STAT
+	{attribute 'hide'}
+	_ClassName : STRING := __POUNAME();
+END_VAR
+VAR
+	_Workflow : WorkflowOnlineChangeWorkflow;
+	_FirstCounter : DINT := 10;
+	_SecondCounter : DINT := 42;
+	_OwnedSource : DINT := 7;
+	_WrongTypeCounter : INT := 10;
+	_WrongSizeText : STRING(12) := 'counter';
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[]]></ST>
+    </Implementation>
+    <Method Name="ExecuteTest" Id="{64a6daee-5fa9-4201-82e0-a5cbaf59efbb}">
+      <Declaration><![CDATA[(* Exercises TryRebindPlcVariable guards, OnReinitVariables hook timing, and post-reinit execution. *)
+METHOD PROTECTED ExecuteTest
+VAR
+	assignElement : TOF_Workflow.IWorkflowElement;
+	compareElement : TOF_Workflow.IWorkflowElement;
+	assignActivity : TOF_Workflow.IAssignVariableActivity;
+	compareCondition : TOF_Workflow.ICompareVariableCondition;
+	assignedValue : DINT := 77;
+	resolvedValue : TOF_Core.GENERIC_VALUE;
+	stepCount : DINT;
+	elementsReady : BOOL;
+	reinitialized : BOOL;
+	found : BOOL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_FirstCounter := 10;
+_SecondCounter := 42;
+_Workflow.ConfigureCounterTargets(
+	initialTarget := ADR(_FirstCounter),
+	relocatedTarget := ADR(_SecondCounter)
+);
+
+reinitialized := _Workflow.FB_reinit();
+Assert.ThatBool(
+	actual := reinitialized
+		AND_THEN _Workflow.InitializeCount = 0
+		AND_THEN _Workflow.ReinitVariablesCount = 0,
+	message := "FB_reinit must not invoke OnReinitVariables before variables initialize"
+).IsTrue();
+Assert.ThatBool(
+	actual := NOT _Workflow.TryRebindPlcVariable(name := 'Counter', plcVariable := _SecondCounter),
+	message := "TryRebindPlcVariable must return FALSE for unbound names"
+).IsTrue();
+
+assignElement := TOF_Workflow.Workflows.CreateElement(
+	typeName := 'TOF_Workflow.AssignVariableActivity',
+	workflow := _Workflow
+);
+compareElement := TOF_Workflow.Workflows.CreateElement(
+	typeName := 'TOF_Workflow.CompareVariableCondition',
+	workflow := _Workflow
+);
+elementsReady := __QUERYINTERFACE(assignElement, assignActivity)
+	AND_THEN __QUERYINTERFACE(compareElement, compareCondition);
+Assert.ThatBool(
+	actual := elementsReady,
+	message := "Workflow factory must return AssignVariableActivity and CompareVariableCondition"
+).IsTrue();
+
+IF NOT elementsReady THEN
+	RETURN;
+END_IF
+
+assignActivity.Configure(targetVariableName := 'Counter', value := assignedValue);
+compareCondition.Configure(
+	firstVariableName := 'Counter',
+	comparisonOperator := TOF_Workflow.COMPARISON_OPERATOR.EQUAL,
+	referenceValue := assignedValue
+);
+
+_Workflow.SetRootActivity(rootActivity := assignActivity);
+Assert.ThatBool(
+	actual := _Workflow.InitializeCount = 1 AND_THEN _Workflow.ReinitVariablesCount = 0,
+	message := "SetRootActivity must run InitializeVariables once without triggering OnReinitVariables"
+).IsTrue();
+Assert.ThatBool(
+	actual := NOT compareCondition.Evaluate(activity := assignActivity),
+	message := "Initial Counter value 10 must differ from target 77 before execution"
+).IsTrue();
+
+Assert.ThatBool(
+	actual := NOT _Workflow.TryRebindPlcVariable(name := 'Missing', plcVariable := _SecondCounter),
+	message := "TryRebindPlcVariable must reject unknown variable names"
+).IsTrue();
+Assert.ThatBool(
+	actual := NOT _Workflow.TryRebindPlcVariable(name := 'Counter', plcVariable := _WrongTypeCounter),
+	message := "TryRebindPlcVariable must reject type mismatches"
+).IsTrue();
+Assert.ThatBool(
+	actual := NOT _Workflow.TryRebindPlcVariable(name := 'Counter', plcVariable := _WrongSizeText),
+	message := "TryRebindPlcVariable must reject byte-size mismatches"
+).IsTrue();
+
+_Workflow.DeclareVariable(name := 'OwnedVar', initialValue := _OwnedSource);
+Assert.ThatBool(
+	actual := NOT _Workflow.TryRebindPlcVariable(name := 'OwnedVar', plcVariable := _SecondCounter),
+	message := "TryRebindPlcVariable must reject workflow-owned declared variables"
+).IsTrue();
+
+_Workflow.EnableRelocatedRebind();
+reinitialized := _Workflow.FB_reinit();
+Assert.ThatBool(
+	actual := reinitialized
+		AND_THEN _Workflow.InitializeCount = 1
+		AND_THEN _Workflow.ReinitVariablesCount = 1,
+	message := "FB_reinit after variable initialization must invoke OnReinitVariables once"
+).IsTrue();
+
+found := _Workflow.TryGetVariable(name := 'Counter', variable => resolvedValue);
+Assert.ThatBool(
+	actual := found
+		AND_THEN resolvedValue.AsDInt() = 42
+		AND_THEN _SecondCounter = 42
+		AND_THEN _FirstCounter = 10,
+	message := "Rebinding Counter must expose relocated storage without altering stored values"
+).IsTrue();
+
+Assert.ThatBool(
+	actual := _Workflow.RequestStart(),
+	message := "Workflow must remain ready to start after FB_reinit"
+).IsTrue();
+
+WHILE _Workflow.Busy AND_THEN stepCount < 10 DO
+	stepCount := stepCount + 1;
+	_Workflow.Execute();
+END_WHILE
+
+Assert.ThatBool(
+	actual := _Workflow.State = TOF_Workflow.WORKFLOW_ELEMENT_STATE.PASSIVE_COMPLETED
+		AND_THEN _SecondCounter = 77
+		AND_THEN _FirstCounter = 10,
+	message := "AssignVariableActivity must write to the rebound PLC variable after FB_reinit"
+).IsTrue();
+Assert.ThatBool(
+	actual := compareCondition.Evaluate(activity := assignActivity),
+	message := "CompareVariableCondition must evaluate against the rebound variable after FB_reinit"
+).IsTrue();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="OnAfterTest" Id="{4d71f6c2-9fa7-44c5-92b0-73fdd4285cca}">
+      <Declaration><![CDATA[(* Releases dynamic workflow children created during the test. *)
+METHOD PROTECTED OnAfterTest]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_Workflow.DisposeDynamicChildren();]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="ClassName" Id="{e4d3659e-f913-44ea-9e4d-c12a4ce22fa1}">
+      <Declaration><![CDATA[// Borrows the concrete class name. Callers must not modify it.
+{attribute 'monitoring' := 'call'}
+PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{e5ab0c6d-cd87-4c65-bd16-c5210e809bcb}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ClassName REF= _ClassName;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="NamespaceName" Id="{f8309bd5-1d57-4a14-aaba-dd95bbb6ce43}">
+      <Declaration><![CDATA[// Borrows the compiler-initialized namespace name. Callers must not modify it.
+{attribute 'monitoring' := 'call'}
+PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{57dc6537-49ba-4922-9756-9dae41fcddb3}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[NamespaceName REF= CurrentNamespace.Name;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="SelfSize" Id="{3228b3a1-70c1-4a82-a214-4a073c83ba54}">
+      <Declaration><![CDATA[// Reports the concrete instance size in bytes.
+{attribute 'monitoring' := 'call'}
+PROPERTY SelfSize : ULINT]]></Declaration>
+      <Get Name="Get" Id="{ca572d6b-169c-4195-95d0-972b49e3fff8}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[SelfSize := XSIZEOF(THIS^);]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+  </POU>
+</TcPlcObject>

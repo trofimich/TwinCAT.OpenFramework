@@ -1,0 +1,138 @@
+<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="WorkflowOnlineChangeWorkflow" Id="{36b07a73-6955-44bd-87d6-9fb7b587aab2}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+SPDX-FileCopyrightText: © 2026 Oleksandr Tiutyk <trofimich@gmail.com>
+SPDX-License-Identifier: MIT
+License: https://opensource.org/license/mit
+*)
+
+(*
+Observes Workflow.InitializeVariables and Workflow.OnReinitVariables during FB_reinit checks.
+
+Binds borrowed counter storage in InitializeVariables and optionally rebinds relocated counter storage in
+OnReinitVariables without throwing or clearing previously assigned values.
+*)
+
+{attribute 'no_explicit_call' := 'do not call this function block directly'}
+{attribute 'no_assign'}
+FUNCTION_BLOCK WorkflowOnlineChangeWorkflow EXTENDS TOF_Workflow.Workflow
+VAR_STAT
+	// Distinct static field to avoid redeclaring inherited Workflow metadata.
+	{attribute 'hide'}
+	_ProbeClassName : STRING := __POUNAME();
+END_VAR
+VAR
+	_InitialCounter : POINTER TO DINT;
+	_RelocatedCounter : POINTER TO DINT;
+	_UseRelocatedTarget : BOOL;
+	_InitializeCount : DINT;
+	_ReinitVariablesCount : DINT;
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[]]></ST>
+    </Implementation>
+    <Method Name="ConfigureCounterTargets" Id="{39e2d875-6026-45c6-b932-2b928cf410b9}">
+      <Declaration><![CDATA[(* Configures the borrowed initial and relocated DINT variable storage addresses. *)
+METHOD ConfigureCounterTargets
+VAR_INPUT
+	initialTarget : POINTER TO DINT;
+	relocatedTarget : POINTER TO DINT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_InitialCounter := initialTarget;
+_RelocatedCounter := relocatedTarget;
+_UseRelocatedTarget := FALSE;
+_InitializeCount := 0;
+_ReinitVariablesCount := 0;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="EnableRelocatedRebind" Id="{c8658395-756d-4867-bf41-58f02419065e}">
+      <Declaration><![CDATA[(* Enables rebinding Counter to relocatedTarget on subsequent OnReinitVariables calls. *)
+METHOD EnableRelocatedRebind]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_UseRelocatedTarget := TRUE;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="InitializeVariables" Id="{8a48dadb-775a-4bd5-a2db-8e3d8f59db04}">
+      <Declaration><![CDATA[(* Binds Counter to the initial storage address when configured. *)
+METHOD PROTECTED InitializeVariables]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_InitializeCount := _InitializeCount + 1;
+
+IF _InitialCounter <> 0 THEN
+	BindPlcVariable(name := 'Counter', plcVariable := _InitialCounter^);
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="OnReinitVariables" Id="{3145991e-2e1f-47c7-9232-576c241f05ac}">
+      <Declaration><![CDATA[(* Counts OnReinitVariables invocations and rebinds Counter when relocated rebinding is active. *)
+METHOD PROTECTED OnReinitVariables]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_ReinitVariablesCount := _ReinitVariablesCount + 1;
+
+IF _UseRelocatedTarget AND_THEN _RelocatedCounter <> 0 THEN
+	TryRebindPlcVariable(name := 'Counter', plcVariable := _RelocatedCounter^);
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Property Name="InitializeCount" Id="{5c5c6d92-d86e-4451-9ddd-a2e995bdd19b}">
+      <Declaration><![CDATA[(* Reports the number of InitializeVariables invocations observed on this workflow. *)
+{attribute 'monitoring' := 'call'}
+PROPERTY InitializeCount : DINT]]></Declaration>
+      <Get Name="Get" Id="{9c217bb8-eab3-488b-aab3-91c2c32eb3a5}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[InitializeCount := _InitializeCount;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="ReinitVariablesCount" Id="{379275ec-5f17-4b81-b77e-a9730af43cb3}">
+      <Declaration><![CDATA[(* Reports the number of OnReinitVariables invocations observed on this workflow. *)
+{attribute 'monitoring' := 'call'}
+PROPERTY ReinitVariablesCount : DINT]]></Declaration>
+      <Get Name="Get" Id="{5a48df0a-9a71-4a94-93db-4653c5d0cb4d}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ReinitVariablesCount := _ReinitVariablesCount;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="ClassName" Id="{e6b1f38a-e0a8-4ff7-9472-eee5b2f5e3aa}">
+      <Declaration><![CDATA[// Borrows the concrete class name. Callers must not modify it.
+{attribute 'monitoring' := 'call'}
+PROPERTY ClassName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{52a05038-c0b0-42f8-b935-44565fa165b7}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[ClassName REF= _ProbeClassName;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="NamespaceName" Id="{0210bf12-7c9a-4c25-b3cb-ce44914e8e18}">
+      <Declaration><![CDATA[// Borrows the compiler-initialized namespace name. Callers must not modify it.
+{attribute 'monitoring' := 'call'}
+PROPERTY NamespaceName : REFERENCE TO STRING]]></Declaration>
+      <Get Name="Get" Id="{57a853f2-e42f-491d-97be-d09aab991eaf}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[// SA0006: Read-only namespace string borrowed across test tasks.
+{analysis -6}
+NamespaceName REF= CurrentNamespace.Name;
+{analysis +6}]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="SelfSize" Id="{cb3e169a-d8ad-4bb6-aeca-e5f44dcaa4fb}">
+      <Declaration><![CDATA[// Reports the concrete instance size in bytes.
+{attribute 'monitoring' := 'call'}
+PROPERTY SelfSize : ULINT]]></Declaration>
+      <Get Name="Get" Id="{837dc655-d15e-4837-99c6-d669ef7be49e}">
+        <Declaration><![CDATA[]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[SelfSize := XSIZEOF(THIS^);]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+  </POU>
+</TcPlcObject>
